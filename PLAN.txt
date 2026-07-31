@@ -1,0 +1,701 @@
+================================================================================
+LEAPPAD 2 EMULATOR — PROJECT PLAN
+================================================================================
+Created:  2026-07-27
+Revised:  2026-07-27 (rev 3 — RETARGETED from LeapPad1/LF1000 to LeapPad2)
+
+TARGET (corrected): LeapPad2 Explorer.
+    Platform:  LeapFrog NXP3200 Platform  (shared with Leapster GS)
+    SoC:       Nexell NXP3200, Cortex-A9 @ 550 MHz   <-- ARMv7, NOT ARMv5
+    Kernel:    Linux 2.6.37+svn (Angstrom)
+    Libc:      uClibc 0.9.32, EABI
+    Bootloader: U-Boot 2010.06                        <-- NOT Emerald Boot
+    GUI:       Flash Lite "for the Digital Home"
+    Codename:  "Valencia" (source drop name); board tag likely l2k [VERIFY]
+
+GOAL:      Boot the stock system UI on a PC. Then run cartridge dumps.
+SECONDARY: Document the cartridge format for preservation.
+
+Items marked [VERIFY] are working assumptions, not established fact.
+
+--------------------------------------------------------------------------------
+0. WHAT SURVIVED THE RETARGET  (most of it)
+--------------------------------------------------------------------------------
+The device changed; the approach did not. Still true:
+
+  * ARCH B (qemu-user + device shim) is still the primary path. §2.
+  * The shim design (shared mmap'd file + native SDL viewer) is unchanged. §7.
+  * Flash Lite is still the GUI, so the system UI is still "an easy title".
+  * strace/gdb are still available; capture ground truth on hardware. M2.
+  * ALSA, tslib, evdev, UBIFS-on-UBI, mdev hotplug — all the same.
+  * The power/hwmon driver still exists (hwmon-lf2000.c). §4.
+  * The framebuffer ABI is LITERALLY THE SAME FILE — see §3. Big win.
+
+What genuinely changed, and mostly for the better:
+
+  + Cortex-A9 instead of ARM926. QEMU's ARMv7/A9 support is mature and
+    well-trodden (vexpress-a9 etc.). Full-system emulation (M9) went from
+    "grim" to "plausible".
+  + U-Boot instead of Emerald Boot. Standard, documented, source in hand,
+    normal ATAG/machine-ID handoff, and a serial console you can drop into.
+  + A COMPLETE Nexell SoC HAL with per-block .c AND .h. §1. This is a real
+    datasheet substitute and it covers every peripheral, not just display.
+  + The display moved to the standard Linux framebuffer API. §3. Simpler.
+  - Hardware AES engine + per-chip ECID. §6. The DRM risk got real.
+  - ARMv7 soft-float uClibc is an unusual ABI combo; watch for surprises.
+
+--------------------------------------------------------------------------------
+1. WHAT WE HAVE  (./sources/nxp320/)
+--------------------------------------------------------------------------------
+  LF2-Linux-1575_201310.tar.gz        566 MB   kernel r1575 + full OE drop
+  LF2_Valencia_Source_201211.tar.gz   566 MB   kernel r1574 — NEAR DUPLICATE
+
+  >>> These two are the same drop one SVN revision apart. Diff is only:
+      linux r1575 vs r1574, linux-surgeon r1575 vs r1574, u-boot r1575 vs
+      r1574, mtd-utils r2 vs r3. Keep r1575 (newer) as primary; you can
+      archive the other. You are not missing anything by using one.
+
+  Extracted to reference/nxp3200/ :
+      linux-2.6.37+svn-r1575-patched.tar.gz    (97 MB, 38043 files)
+
+  Key packages in the drop:
+      linux-2.6.37+svn-r1575          the kernel
+      linux-surgeon-2.6.37+svn-r1575  the USB recovery kernel, SEPARATE
+      u-boot-v2010.06-r1575           the bootloader
+      uclibc-0.9.32-r4.3              libc
+      busybox-1.18.4, tslib-1.0, alsa-lib/utils-1.0.24, strace-4.5.20,
+      gdb-7.3a, mtd-utils-1.4.6, fuse-2.8.5, dbus-1.4.12, curl, gnutls
+      X11 STACK: libx11, libxcb, libxext/xrandr/xrender/xfixes/xdamage/
+      xcomposite/xcursor/xft, gtk+-2.22.1, cairo-1.10.2, pango-1.28.3,
+      gdk-pixbuf, librsvg, pixman, fontconfig, freetype-2.4.6
+
+  >>> NOTE THE X11 STACK. LeapPad1 had none of this. Either LeapFrog shipped
+      an X server on LeapPad2, or these were built and not deployed. Check
+      your rootfs for Xorg/X binaries. If X IS used, that changes the display
+      plan substantially — X on fbdev is far easier to shim than raw layers,
+      and there are off-the-shelf paths (Xvfb, Xephyr) for hosting it.
+      RESOLVE THIS EARLY — it's a fork in the road. [VERIFY]
+
+  NOT in the drop (proprietary, as expected): Brio, Lightning, Flash Lite.
+  Grep confirms zero hits for brio/lightning/flash/leapfrog. Same situation
+  as LeapPad1 — and per §5 there, it is survivable and probably fine.
+
+  ALSO SAVED: eLinux HTML pages (the site has bot protection, so local
+  copies are the way — keep doing this):
+      LeapPad2 Explorer
+      LeapFrog NXP3200 Platform: Technical Details
+      LeapFrog Pollux Platform: Console Access
+      LeapFrog Pollux Platform: Extract Archives
+
+--------------------------------------------------------------------------------
+1b. *** WE HAVE THE STOCK FIRMWARE AND THE EXTRACTED ROOTFS. M0 IS DONE. ***
+--------------------------------------------------------------------------------
+Obtained via LeapFrog Connect on a Win10 LTSC VM, 2026-07-27. Clean, official,
+unmodified stock firmware — no device dump required, and uncontaminated by the
+mods on the physical unit.
+
+  sources/nxp320/LFC_Downloads.zip              the LFConnect cache as downloaded
+  sources/nxp320/LFC_Downloads_x/               unpacked
+  rootfs/stock-4.6.0.784/1221351650/ubi_rfs/    THE EXTRACTED ROOTFS
+
+FIRMWARE IDENTITY (meta.inf):
+    Device LeapPad2Explorer | Version 4.6.0.784 | ProductID 0x00220004
+    PackageID PAD2-0x00220004-000000 | PartNumber 152-12352
+    BuildDate 08/14/2013 | Locale en-us    (Surgeon pkg: ProductID 0x00220003)
+  PackageID format matches LeapPad1 title IDs: <DEVICETAG>-<0xPRODUCTID>-<SEQ>.
+
+CACHE CONTENTS:
+  Firmware-Base      (.lfp/ZIP, 33 MB)
+      4,2268688,kernel.bin                 -> /dev/mtd4 (Kernel)
+      5,53477376,C4G-E1M-W4K-erootfs.ubi   -> /dev/mtd5 (RFS)
+  Firmware-BulkEmpty (.lfp/ZIP, 20 KB)
+      6,15728640,C4G-E1M-W4K-bulk.ubi      -> /dev/mtd6 (Bulk, empty)
+  Surgeon            (.lfp/ZIP, 6 MB)   surgeon.cbf, 8.8 MB USB recovery image
+  Content            (.lf2/bzip2 tars)  LanguagePack_en (27 MB), LanguagePack,
+      trailers: RolyPolyPicnic2, Cars2, DisneyANIM, TrailerOrder.json
+
+  >>> FIRMWARE FILE NAMING DECODED: "<mtd_partition>,<size>,<name>".
+      The leading number is the target MTD index and matches §8's partition
+      table exactly. "C4G-E1M-W4K" is the NAND geometry — Chip 4GB, Erase
+      block 1MB, Write/page 4KB — i.e. precisely the UBI parameters
+      (-e 1048576, -m 4096). The filename IS the flashing recipe.
+  >>> LFCONNECT CACHE LAYOUT: cache/<md5>_<sha1>.lfp|lf2 with sidecar
+      dat/<md5>.dat holding a UTF-16LE content ID. Four .dat files have no
+      payload — incomplete or superseded downloads.
+  >>> "Reinstalling content..." on your device = LanguagePacks and trailers,
+      not games. All plain PNG / OGG / MP3 / JSON.
+
+EXTRACTION RECIPE (reproducible):
+    python3 -m venv venv && venv/bin/pip install ubi_reader
+    venv/bin/ubireader_extract_files -o <out> "5,...,C4G-E1M-W4K-erootfs.ubi"
+  Do NOT pass -k — preserving modes creates read-only dirs it then can't
+  write into. Device nodes fail without root; irrelevant, we fake /dev.
+
+INTEGRITY VERIFIED: the rootfs ships /erootfs.md5, an 11331-entry manifest.
+  Every non-Bulk entry is present (1611 files, 73 MB). The other 9721 are all
+  LF/Bulk/* — a separate partition (mtd6), not in this image. Extraction is
+  complete and correct.
+
+--- KEY FINDINGS FROM THE ROOTFS -------------------------------------------
+
+X11 QUESTION: RESOLVED — NO X SERVER. The X11/GTK libs in the OE drop were
+  built but never deployed. Display is direct framebuffer. Only -fb tools
+  exist: imager-fb, drawtext-fb, flipbook-fb, mpvl-fb, mpvl-fb-split, fbctrl,
+  fb-info, fbtest. No layer-control/mlc-control/dpc-control. Independently
+  confirms §3: /dev/fb0 only, no /dev/layerN.
+
+*** THE UI ENTRY POINT ***
+  /etc/inittab     ::sysinit:/etc/init.d/rcS   (busybox init)
+  /etc/init.d/rcS  does everything inline, then launches
+  /usr/bin/app     a SHELL SCRIPT: `vnotify 6` (startup video), then loops
+                   relaunching AppManager on nonzero exit
+  /LF/Base/bin/AppManager    <-- THE UI BINARY (package: lightningcore)
+
+  >>> /etc/rc.d/S90lightning IS A DANGLING SYMLINK. Target
+      /etc/init.d/lightning does not exist and is not in the manifest. The
+      whole rc.d tree is vestigial; rcS never runs it. Earlier revisions of
+      this plan said to read S90lightning — that was wrong. rcS is the real
+      boot script.
+
+*** THE /flags CONTROL INTERFACE — EMPTY IN STOCK, ALL OPT-IN ***
+  The most useful discovery for development. rcS and /usr/bin/app check:
+    /flags/developer   starts networking, dbus, avahi, vbus, AND
+                       vsftpd + telnetd   <-- HOW TO GET SHELL/FTP ACCESS
+    /flags/dftp1       alternate usbether/networking path
+    /flags/main_app    contains a path to an executable — RUNS THAT INSTEAD
+                       OF AppManager. A built-in "run anything" hook; ideal
+                       for test payloads both under the shim and on hardware.
+    /flags/console_out AppManager stdout/stderr to console instead of
+                       /dev/null. Essential for debugging.
+    /flags/flip-screen rotate 180
+    /flags/volume      restore volume level
+
+*** PLATFORM IDENTITY VIA SYSFS — THE SHIM MUST PROVIDE THIS ***
+    /sys/devices/system/board/platform         -> "VALENCIA"
+    /sys/devices/system/board/platform_family  -> (LeapPad2 is NOT "LEX")
+  rcS branches on both. Known values: MADRID = LeapPad1, VALENCIA = LeapPad2,
+  LUCY = another board, family "LEX" = Leapster Explorer line. Get this wrong
+  and rcS takes the wrong path immediately.
+
+*** OTHER SYSFS PATHS CONFIRMED (lf2000-, not lf1000-) ***
+    /sys/devices/platform/lf2000-power/adc_constant
+    /sys/devices/platform/lf2000-power/adc_slope_256
+    /sys/devices/platform/lf2000-aclmtr/calibration
+    /sys/class/graphics/fb0/rotate
+  Confirms §4's expectation: the power platform device is lf2000-power.
+
+*** CARTRIDGE MECHANISM — DOCUMENTED VERBATIM BY LEAPFROG IN rcS ***
+  "Load the lfcart module, which detects changes in the state of the
+   'Cartridge Inserted' gpio line and calls device_add() or device_del()
+   accordingly. That action causes mdev to act. It runs the
+   /etc/mdev/cartridge.sh script. That script tells the NAND driver to look
+   for a NAND on the cartridge. It tries to mount the cartridge's file
+   system. It runs cnotify to notify the UI that a cartridge has been
+   inserted and mounted."
+  Faking an insert = do cartridge.sh's work, then invoke `cnotify`.
+  NOTE: CartManager does NOT exist on LeapPad2 — the code launching it is
+  commented out in /usr/bin/app. Cart handling moved into AppManager.
+
+*** MFGTEST TRIGGER ***
+  rcS polls `read_button a/b/volumeup/volumedown`; A+B or VolUp+VolDown at
+  boot launches /LF/Base/MfgTest/LaunchMfgTest.sh. There is a `read_button`
+  utility in /usr/bin — useful for the shim's input work.
+
+*** USERSPACE STACK — CARRIED OVER FROM LEAPPAD1 ALMOST INTACT ***
+  /LF/Base/Brio/lib/    libDisplayMPI libAudioMPI libButtonMPI libPowerMPI
+                        libEventMPI libKernelMPI libVideoMPI libFontMPI
+                        libCameraMPI libUSBDeviceMPI libAccelerometerMPI
+                        libCartridgeMPI libModuleMPI libDebugMPI
+                        libMicrophoneMPI (new) libImageIO (new)
+                        libUtility libustring + ffmpeg52 / theora / tremor /
+                        ogg / freetype / jpeg8 / sndfile / sigc / iconv / intl
+  /LF/Base/Brio/Module/ libDisplay libAudio libVideo libKernel libEvent
+                        libFont libModule libDebug libMicrophone (new)
+                        libCameraUSB + libCameraVIP (was one libCamera)
+  /LF/Base/lib/         libLightningBase/2D/UI/JSON, libGameViewFrame,
+                        libPlayerProfile (new), libGalleryIO (new)
+  /LF/Base/Flash/       FlashApp.so, libflashlite.so, libflashdidj.so,
+                        libsorenson, libon2, libsiimpl, libflashsnddec,
+                        bin/saplayer, plugins/LeapFrogPlugin.so
+  /LF/Base/bin/         AppManager, VideoDaemon, BadWords  (no CartManager)
+  /LF/Base/LPAD/        main.swf + the UI SWFs (package: lpad)
+
+*** PACKAGE MANAGER: opkg, full database at /var/lib/opkg/ ***
+  status + info/*.list + info/*.control = a complete file->package map.
+  Use it: `grep -l <path> /var/lib/opkg/info/*.list` names the owner of any
+  file. Notable packages: lightningcore, flashlite, brio, lpad, lpad-en, init,
+  opengl, externals, screens, music, mfgdata, dftp, fwupdate, lfd, aclmtr,
+  i2cio, unotify, dumpcore, overlay, fbutils, ts-utils, i2c-utils, strace,
+  gdb, gdbserver, evtest, kernel-2.6.37.4, kernel-module-lfcart,
+  kernel-module-lf2000-vip.
+  Architecture tags: "valencia" (board), "armv7a-vfp" (binaries).
+  Brio 4.6.0.10087 from svn://source.leapfrog.com/Software/Brio/Brio2.
+
+*** CONFIRMED ABI (readelf on AppManager) ***
+    ELF32 ARM, EABI v5, Tag_CPU_arch v7, profile Application,
+    Tag_FP_arch VFPv2, Tag_ABI_HardFP_use Deprecated,
+    Tag_ABI_VFP_args ABSENT  ==>  SOFT-FLOAT CALLING CONVENTION (softfp)
+  ARMv7-A with VFP instructions, but floats passed in core registers.
+  NOT Debian armhf (hard-float). Build the shim with roughly:
+      -march=armv7-a -mfpu=vfp -mfloat-abi=softfp
+
+--------------------------------------------------------------------------------
+2. HARDWARE
+--------------------------------------------------------------------------------
+  SoC        Nexell NXP3200, Cortex-A9, 550 MHz
+  RAM        128 MB DDR2 (Nanya NT5TU64M16GG-AC)
+  NOR        512 KB SST39VF040 — bootloader
+  NAND       4 GB Micron MT29F32G08CBACA   (LeapsterGS has 2 GB MT29F16G08)
+  Display    GiantPlus 480x272, 5", touchscreen
+             (LeapsterGS differs: 320x240 3.5")
+  Audio      LFP200 custom IC  (successor to LeapPad1's LFP100)
+  Input      3 buttons + D-pad, resistive touchscreen + stylus,
+             microphone, accelerometer, 2x camera (front + rear)
+  I/O        USB 2.0 device, UART, SD/MMC, external NAND
+  Cartridge  socket carries NAND, SDIO **and** UART
+  Power      4x AA or A/C adapter
+
+  >>> 480x272 is the same panel resolution as LeapPad1. Convenient.
+  >>> Only 3 buttons + D-pad (vs LeapPad1's 10). The button map must be
+      re-derived from the LF2000 keypad driver — do NOT reuse the LeapPad1
+      map in the old plan.
+
+--------------------------------------------------------------------------------
+3. THE DISPLAY PATH — SIMPLER THAN LEAPPAD1
+--------------------------------------------------------------------------------
+*** THE /dev/mlc + /dev/layer0..2 CHARACTER-DEVICE INTERFACE IS GONE. ***
+
+Evidence: include/linux/ in the LF2000 kernel contains only
+    linux/lf1000/lf1000fb.h      <-- the framebuffer ABI, PRESERVED VERBATIM
+    linux/lf1000/screen.h
+    linux/lf2000/gpio.h, gpio_ioctl.h, vr5_ioctl.h, lf2000vip.h
+There is NO mlc_ioctl.h and NO dpc_ioctl.h. The MLC/DPC ioctl surface that
+dominated the LeapPad1 plan is not exposed to userspace on this platform.
+
+What userspace gets instead: STANDARD LINUX FRAMEBUFFER DEVICES.
+    drivers/video/lf2000fb.c      the LF2000 fb driver
+    drivers/video/lf1000fb.c      kept alongside for compatibility
+    drivers/video/nexell/dpc/dpc_drv.c    display controller
+    drivers/video/nexell/lcd/nxp3200_lcd_vtk.c
+    drivers/video/nexell/rotator/, vip/, decoder/
+
+So the contract is /dev/fb0 (and probably /dev/fb1, /dev/fb2 for the
+additional layers — [VERIFY] against your device) plus the extensions
+already documented in lf1000fb.h:
+
+    LF1000FB_IOCSALPHA / IOCGALPHA        _IOW/_IOR('m', 1/2, ...)
+    LF1000FB_IOCSPOSTION / IOCGPOSTION    [sic — typo is in the header]
+    LF1000FB_IOCSVIDSCALE / IOCGVIDSCALE  hardware scaling
+    FBIO_WAITFORVSYNC                     _IOW('F', 0x20, __u32)
+  plus layer format / priority / planar packed into fb_var_screeninfo.nonstd:
+    LF1000_NONSTD_PLANAR   bit 23, mask 0x1
+    LF1000_NONSTD_PRIORITY bit 24, mask 0x3
+    LF1000_NONSTD_FORMAT   bit 20, mask 0x7
+    NONSTD_TO_PLANAR(x) / NONSTD_TO_PFOR(x) / NONSTD_TO_POS(x)
+
+WHY THIS IS GOOD NEWS:
+  ~90% of this is the ordinary Linux fb API — FBIOGET_VSCREENINFO,
+  FBIOGET_FSCREENINFO, FBIOPUT_VSCREENINFO, FBIOPAN_DISPLAY, mmap. All
+  standard, all trivially shimmable, all already understood. Only four
+  LeapFrog ioctls plus the nonstd bit-packing are custom, and we have the
+  header that defines them. The dirty-bit commit model that would have been
+  fiddly on LeapPad1 is gone.
+
+REGISTER-LEVEL REFERENCE (for M9, and for when the fb driver is ambiguous):
+  arch/arm/mach-nxp3200/prototype/module/ is Nexell's own SoC HAL, with
+  BOTH .c and .h for every block:
+      nx_mlc      nx_dpc      nx_vip      nx_csc      nx_rotator
+      nx_deinterlace          nx_idct     nx_audio    nx_dma
+      nx_intc (interrupt ctrl)            nx_timer    nx_uart
+      nx_gpio     nx_i2c      nx_adc      nx_pwm      nx_rtc
+      nx_sdhc     nx_sspspi   nx_ohci     nx_clkpwr   nx_alive
+      nx_ecid     nx_mcus/nx_mcud (memory ctrl)       nx_mpegtsif
+  This is a far more complete hardware reference than LF1000 ever had, and
+  it covers EVERY peripheral — which is exactly what a QEMU machine model
+  needs. nx_intc.c + nx_timer.c + nx_uart.c are the three that make M9 start.
+
+--------------------------------------------------------------------------------
+4. THE POWER BUTTON  (carried over — re-verify, don't assume)
+--------------------------------------------------------------------------------
+drivers/hwmon/hwmon-lf2000.c exists alongside hwmon-lf1000.c.
+
+On LeapPad1 that driver registered a SEPARATE input device named exactly
+"Power Button" (phys "lf1000/power_button"), used as a general power-event
+channel, and exported /sys/devices/platform/lf1000-power/. That was the
+cause of the "freaking out about a power button" failure.
+
+>>> ACTION: read hwmon-lf2000.c and confirm the device name, the phys
+    string, the sysfs platform name (lf2000-power?), and the keycode set.
+    Expect the same design; verify the strings, because the shim has to
+    match them exactly.
+LeapPad1 keycode meanings, as a starting hypothesis:
+    KEY_POWER power button   KEY_BATTERY critical   KEY_MINUS low
+    KEY_EQUAL normal         KEY_UP external power
+    KEY_KPEQUAL NiMH         KEY_PAGEUP NiMH charger
+Fix is the same and still cheap: a uinput device with the right name, emit
+"on external power" once at startup, and populate the sysfs directory with
+static healthy values. Never emit KEY_POWER unless you want a shutdown.
+
+--------------------------------------------------------------------------------
+5. WHY THE STOCK KERNEL STILL WON'T BOOT IN PLAIN QEMU  (but it got closer)
+--------------------------------------------------------------------------------
+Same conclusion as before — a machine model is required — but the reasons
+have shifted and the work is smaller:
+
+  STILL FATAL:
+    * No machine model for NXP3200. QEMU has no board for it, so peripheral
+      MMIO (interrupt controller, timers, UART, memory controller) is
+      unmapped and the kernel dies before console.
+    * The early UART address is board-specific; wrong address = zero serial
+      output, exactly as you saw on LeapPad1.
+
+  NOW MUCH EASIER:
+    * Cortex-A9 is a first-class QEMU CPU. No CPU work at all.
+    * U-Boot 2010.06 is standard and its source is in the drop, so the
+      handoff (machine ID, ATAGs, memory map) can be read rather than
+      reverse-engineered — and U-Boot itself can be run under QEMU as a
+      bring-up target before you attempt the kernel.
+    * The full Nexell HAL (§3) supplies the register maps for exactly the
+      blocks a machine model must implement.
+    * arch/arm/plat-nxp3200/{bid,e2k,l2k,m2k,vtk}/include/cfg_*.h give
+      per-board iomap, memory map, GPIO and NAND layout:
+          cfg_iomap.h cfg_mem.h cfg_sys.h cfg_gpio.h cfg_nand_map.h
+      That is a board file handed to you.
+
+  BOARD TAGS (defconfigs): nxp3200_{l2k,m2k,bid,vtk}_defconfig plus
+  _surgeon / _sd / _ubi / _nfs / _ramfs variants.
+  l2k is almost certainly LeapPad2 and m2k Leapster GS [VERIFY via
+  /proc/cpuinfo or dmesg on your device]. e2k and vtk are other boards
+  (vtk = Nexell's own validation kit).
+
+  START M9 FROM: nxp3200_l2k_surgeon_defconfig. Surgeon is the USB-loaded
+  recovery kernel — designed to be dropped into RAM and run, so it is a much
+  softer bring-up target than the NAND kernel. Its source is a separate
+  package (linux-surgeon-2.6.37+svn-r1575).
+
+--------------------------------------------------------------------------------
+6. DRM — *** LARGELY RETIRED. THE BASE FIRMWARE IS NOT ENCRYPTED. ***
+--------------------------------------------------------------------------------
+TESTED 2026-07-27 against the extracted stock rootfs:
+    LF/Base/LPAD/main.swf        -> "Macromedia Flash data, version 8"
+    LF/Base/LPAD/AboutMe.swf     -> "Macromedia Flash data, version 8"
+    Brio/lib/libDisplayMPI.so    -> plain ELF 32-bit ARM EABI5 shared object
+    Brio/Module/libDisplay.so    -> plain ELF 32-bit ARM EABI5 shared object
+    bin/AppManager               -> plain ELF 32-bit ARM EABI5 executable
+    LpadAssets_en/Data/*.json    -> plaintext JSON, readable
+  Nothing under /etc or /usr/bin references an AES/crypto device, and
+  `strings AppManager` shows no /dev/aes, /dev/crypto or ecid references.
+
+CONCLUSION: the entire base system — UI, Flash content, Brio libraries,
+assets — ships in the clear. The hardware AES engine and ECID exist, but the
+system firmware does not appear to use them for content protection. There is
+NO crypto obstacle anywhere on the path from M1 to M6. Content is SWF 8
+(Flash 8 / ActionScript 2 era), which Flash Lite 3.x handles.
+
+REMAINING UNKNOWN (honest caveat): this proves the BASE FIRMWARE is
+unencrypted. It does NOT prove cartridge content is. Carts could still carry
+protection, and that only shows up at M7. But the risk is now scoped to one
+milestone instead of threatening the whole project.
+
+For reference, the hardware that exists but appears unused for DRM:
+    drivers/crypto/nxp3200/  nx_aes.c, nx_aes_linux.c, nx_aes_regmap.h,
+                             nx_aes_ioctl.h, sysapi.c/h
+    mach-nxp3200/prototype/module/nx_ecid.c/.h   per-chip unique ID
+Original analysis follows, retained for the M7 cartridge question:
+
+LeapPad2 has hardware crypto that LeapPad1 did not:
+
+    drivers/crypto/nxp3200/
+        nx_aes.c, nx_aes_linux.c, nx_aes_regmap.h, nx_aes_ioctl.h
+        sysapi.c/h, nx_writeio.h
+    arch/arm/mach-nxp3200/prototype/module/nx_ecid.c/.h
+        ECID = Electronic Chip ID — a per-chip unique identifier
+
+A hardware AES engine plus a per-chip unique ID is the classic recipe for
+device-bound content encryption. If cartridge or title content is AES
+encrypted with a key derived from or wrapped by the ECID, then:
+  * dumping a cart gives you ciphertext,
+  * and the emulator needs the per-device key material to decrypt it.
+
+THIS IS THE ONE THING THAT COULD BLOCK THE WHOLE PROJECT, so resolve it
+early rather than at M8:
+  [ ] Read nx_aes_ioctl.h — what does userspace ask the AES engine to do?
+  [ ] Read nx_ecid.c — how is the chip ID read, and is it exposed to
+      userspace (sysfs? ioctl?)
+  [ ] On the device: dump the ECID (read-only) during the §8 capture.
+  [ ] strace the title-launch path and watch for opens on the crypto device.
+  [ ] Check whether Flash Lite .swf content is stored plaintext — if the
+      SWFs are readable as-is, encryption may only cover native titles, or
+      may not be used at all.
+  >>> The fastest single test: `file` and `binwalk` a few files pulled off
+      your own device's /LF tree. If SWFs are plain SWFs, breathe out.
+      Your device already has readable modified SWFs on it (you swapped one
+      for The Impossible Quiz), which is fairly strong evidence that at
+      least the Flash content layer is NOT encrypted. Good sign.
+
+--------------------------------------------------------------------------------
+7. THE SHIM ARCHITECTURE  (unchanged from rev 2 — restated here)
+--------------------------------------------------------------------------------
+No boot. No kernel. One process under qemu-arm, with faked devices.
+
+    ┌─ qemu-arm (one process) ───────────────────┐
+    │   Flash Lite / Brio / app     (ARM)        │
+    │                │                           │
+    │           libc: open/mmap/ioctl            │
+    │                │                           │
+    │     [ LD_PRELOAD shim.so — ARM ]           │
+    │          │                  │              │
+    └──────────┼──────────────────┼──────────────┘
+          mmap │            ioctl │ state
+               ▼                  ▼
+        fb0.bin (framebuffer)  state.bin    ← ordinary host files
+               ▲                  ▲
+    ┌──────────┼──────────────────┼──────────────┐
+    │   viewer (native x86-64, SDL2)             │
+    │   composites layers → window @60Hz         │
+    │   keyboard/mouse → evdev events ───────────┼──▶ back to guest
+    └────────────────────────────────────────────┘
+
+  DATA PATH (pixels): the guest mmap of a plain host file becomes a real
+    host mmap. A native process mmaps the same file. Shared memory, zero
+    copy, no protocol. Nobody intercepts pixel writes.
+  CONTROL PATH (ioctls): LD_PRELOAD in the guest, because qemu-user rejects
+    ioctls missing from its translation table with -ENOSYS. Catching them at
+    libc level sidesteps the table AND lets us implement the semantics.
+  VSYNC: fake it on a timer, or apps blocking on FBIO_WAITFORVSYNC stall.
+
+  Cross-compile the shim with the drop's toolchain (uClibc 0.9.32, ARMv7
+  EABI). Alternative worth remembering: a Raspberry Pi runs these binaries
+  natively, no QEMU at all — same shim, one less variable.
+
+--------------------------------------------------------------------------------
+8. FLASH LAYOUT, RECOVERY, AND GETTING A CLEAN ROM
+--------------------------------------------------------------------------------
+PARTITIONS (LeapPad2):
+  Name         Offset       Size         Device      Media
+  ---------------------------------------------------------
+  Boot Loader  0x00000000   0x0007E000   /dev/mtd0   NOR
+  MfgData0     0x0007E000   0x00001000   /dev/mtd1   NAND
+  MfgData1     0x0007F000   0x00001000   /dev/mtd2   NAND
+  Reserved     0x00080000   0x00400000   /dev/mtd3   NAND
+  Kernel       0x00480000   0x01000000   /dev/mtd4   NAND   (16 MB)
+  RFS          0x01480000   0x0A000000   /dev/mtd5   NAND   (160 MB)
+  Bulk         0x0B480000   0xF4C00000   /dev/mtd6   NAND   (~3.9 GB)
+  Cartridge    —            —            —           Cartridge NAND
+
+UBI (RFS): vol_name=ubi_rfs, vol_size=164380672
+           -m 4096 -e 1048576 -c 158 -s 4096 -O 4096
+  (page 4096, LEB 1 MB, 158 LEBs, subpage 4096, VID offset 4096)
+  NOTE these differ from LeapPad1's values — use these.
+  A dd of RFS is a UBI container, not a mountable fs. Attach UBI on-device
+  or extract offline with ubireader/ubidump.
+
+FIRMWARE FILE TYPES: Surgeon = CBF, Kernel = uImage, RFS = UBI.
+
+BOOT KEY COMBOS (from eLinux — these are your recovery lifeline):
+  U-Boot monitor   serial required. Hold shift+M on the HOST keyboard,
+                   power up the device, then *very quickly* type o then n.
+  USB Boot/Surgeon hold D-pad RIGHT + HOME while powering up.
+  Mfg Test         hold VOL-UP + VOL-DOWN while powering up, keep holding
+                   until the test screen appears.
+
+  >>> Mfg Test is worth running and photographing BEFORE you change
+      anything. It's LeapFrog's own per-subsystem hardware test and it tells
+      you what "correct" looks like for display, touch, audio and buttons.
+
+GETTING A CLEAN ROM (your firmware is modified — Impossible Quiz, etc.):
+  OpenLFConnect (jrspruitt) does NOT download from LeapFrog's servers — it
+  only uploads local firmware files to the device. Confirmed from its docs.
+  It supports LeapPad2 over USB Mass Storage (v2 firmware) and does
+  "formats and copies everything you need". Archived June 2023, read-only,
+  and the author stopped in 2014 citing breakage on newer distros — so
+  expect to run it in an old Python 2 environment or a VM.
+
+  So a stock image must come from:
+    1. LFConnect's local cache on a PC that ran it
+       (ProgramData\Leapfrog\LeapFrog Connect\, device-named subfolder)
+    2. LeapFrog's update servers, IF still alive — test in the Win7 VM
+    3. Community mirrors / archive.org
+  .lfp = ZIP, .lf2 = bzip2. Renamed extensions, nothing more.
+
+  >>> IMPORTANT: dump your CURRENT modified firmware anyway, before
+      reflashing. It is the only copy, it proves what you already changed,
+      and a known-modified image is genuinely useful for testing the
+      emulator (you know exactly what should appear). Don't overwrite it.
+
+--------------------------------------------------------------------------------
+9. MILESTONES
+--------------------------------------------------------------------------------
+M0 — INVENTORY  *** COMPLETE *** (see §1b)
+    Stock firmware 4.6.0.784 obtained, rootfs extracted and verified against
+    its own manifest. UI binary identified: /LF/Base/bin/AppManager, launched
+    by /usr/bin/app from /etc/init.d/rcS. X11 question resolved (no X).
+    ABI confirmed (ARMv7-A softfp uClibc). Board = VALENCIA.
+
+M1 — SOMETHING RUNS  *** COMPLETE 2026-07-27 ***
+    ARM busybox 1.18.4 and real LeapFrog binaries (read_button) execute under
+    qemu-arm against the stock rootfs. `uname -m` reports armv7l.
+    Runner: runtime/run.sh   (handles the lib-path trap, see docs)
+
+M2 — DEPENDENCY MANIFEST  *** COMPLETE 2026-07-27 ***  -> docs/device-deps.md
+    AppManager loads the ENTIRE Brio stack — all 33 NEEDED libraries resolve,
+    zero errors — and reaches main():
+        +++ AppManager: Entered main function
+        [0x6] Start ButtonPowerUSB Task ... !
+        [0x6] Start Cartridge task ...!
+        [0x5] InitModule: Screen = 480 x 272
+    Faked sysfs in runtime/sysroot already satisfies the board queries.
+    Everything still missing is device emulation, and the list is short:
+      * /dev/fb0, /dev/fb1, /dev/fb2   (three framebuffers, per libDisplay.so)
+      * five evdev nodes matched BY NAME via EVIOCGNAME:
+            gpio-keys | Power Button | USB | Accelerometer |
+            touchscreen interface
+        >>> "Power Button" was PREDICTED in §4 from the LeapPad1 driver
+            source and is now CONFIRMED empirically. It is the exact thing
+            that blocked the original attempt years ago.
+    Full detail, format strings, and four hard-won gotchas: docs/device-deps.md
+
+M2 — THE DEPENDENCY MANIFEST  (days)   <-- pivotal
+    strace-4.5.20 is in the drop, so it's almost certainly on the device.
+    Capture GROUND TRUTH on real hardware, don't guess under qemu:
+        strace -f -tt -o /tmp/ui.trace <the UI process>
+    Several traces: boot to UI, navigating, launching a title, cart insert.
+    Then decode every /dev, /sys, /proc access. Answers: how many /dev/fbN?
+    any /dev/mem? does anything open the crypto device (§6)?
+    DONE WHEN: docs/device-deps.md lists every node and ioctl, decoded.
+
+M4 — FIRST PIXELS  *** ACHIEVED 2026-07-27 ***  -> shots/
+    The stock LeapPad2 `imager-fb` and `drawtext-fb` binaries render through
+    the Tadpole shim into a shared framebuffer, and the SDL viewer displays
+    it live. Output verified PIXEL-EXACT against the source asset
+    (var/screens/Valencia-Boot-logoCW.png) — colour format, stride and
+    geometry all correct.
+      shots/01-boot-logo.png      LeapFrog boot logo
+      shots/02-connect-screen.png USB connect screen
+      shots/03-with-text.png      + text via the device's monotext8x16.rgb
+      shots/04-viewer-window.png  the live SDL window
+
+    *** THE INJECTION PROBLEM AND HOW TADPOLE SOLVES IT ***
+    LD_PRELOAD DOES NOT WORK. LeapFrog's uClibc 0.9.32 was built without
+    __LDSO_PRELOAD_ENV_SUPPORT__ — the guest loader never opens an
+    LD_PRELOAD path at all, confirmed with a known-good library so it is
+    not a fault in our object. ("LD_PRELOAD" appears in ld-uClibc only in
+    the list of variables it scrubs for setuid binaries.)
+
+    Instead Tadpole IMPERSONATES A LIBRARY the target already links:
+      * copy the real lib aside, patching its SONAME in place to a
+        same-length name (libdl.so.0 -> libdl.so.9, libz.so.1 -> libz.so.9)
+      * build the shim with SONAME set to the ORIGINAL name and DT_NEEDED
+        on the renamed real one
+      * put it first in LD_LIBRARY_PATH
+    Our open/ioctl then win symbol lookup, everything else resolves straight
+    through to the real library, and dlsym(RTLD_NEXT, ...) works normally.
+    Two variants are needed because the targets link different things:
+      libdl.so.0  -> AppManager (libdl is #22 in its DT_NEEDED, libc is #33)
+      libz.so.1   -> imager-fb / drawtext-fb / flipbook-fb / fbtest
+                     (these link no libdl at all)
+
+    OTHER THINGS THAT HAD TO BE RIGHT:
+      * smem_len must cover MULTIPLE screens. Brio allocates buffers inside
+        one framebuffer and flips with FBIOPAN_DISPLAY — observed live as
+        "AllocBuffer: new buf offset 000FF000, length 0007F800", i.e. two
+        screens in. Tadpole advertises yres_virtual = yres * 8.
+        The viewer honours yoffset when compositing.
+      * /dev/input/event0..24 must EXIST as directory entries or the guest
+        never enumerates past event1. Placeholder files in the sysroot fix
+        it; the shim intercepts open() on them regardless.
+        LeapFrog's own usr/bin/make_dev_nodes.sh independently confirms the
+        required set: /dev/input/event0..4 and /dev/fb0..2 — exactly ours.
+      * ubireader drops exec bits; chmod +x every ELF and script.
+
+M3 — SHIM PART 1: STAYING ALIVE  (weeks)
+    LD_PRELOAD + fake /dev, /sys. Plausible-success stubs for everything
+    in M2. Start with the power device (§4) — it may unblock a lot alone.
+    Test payloads, easiest first: evtest, tslib ts-* tools, aplay,
+    fbset/fb test tools, the Mfg Test components, then the UI.
+    DONE WHEN: the UI process reaches its main loop and stays alive.
+
+M4 — FIRST PIXELS  (weeks)
+    Implement the fb path: FBIOGET/PUT_VSCREENINFO, FBIOGET_FSCREENINFO,
+    mmap, FBIOPAN_DISPLAY, FBIO_WAITFORVSYNC, plus the four LF1000FB
+    ioctls and the nonstd bit-packing. Composite the fb devices in priority
+    order, blit to SDL2.
+    Because this is mostly standard fbdev, expect this to be EASIER than
+    the LeapPad1 plan assumed.
+    DONE WHEN: the system UI is on screen.
+
+M5 — INPUT  (days–weeks)
+    Re-derive the button map from the LF2000 keypad driver (3 buttons +
+    D-pad, not LeapPad1's 10). Touchscreen via lf2000_ts.c + tslib.
+    Accelerometer via lf2000_aclmtr.c. All evdev; uinput on the host works.
+    DONE WHEN: we can navigate the UI.
+
+M6 — AUDIO  (weeks)
+    ALSA (alsa-lib 1.0.24.1 in the drop). LFP200 codec. Route to SDL audio,
+    or possibly straight to host ALSA. Test with aplay first.
+    DONE WHEN: UI sounds play at correct pitch and speed.
+
+M7 — CARTRIDGES + FLASH TITLES  (weeks)
+    Cart socket carries NAND, SDIO and UART. Note the SD path: eLinux
+    documents mounting an SD card on a custom cartridge, ext3,
+    /dev/mmcblk0p1 — so cart emulation may be as simple as presenting a
+    block device. Fake cart-present, report the right title ID.
+    DONE WHEN: a Flash title boots from a dump and is playable.
+
+M8 — NATIVE TITLES
+    Plus whatever DRM (§6) turns out to require.
+
+M9 — FULL SYSTEM EMULATION  (stretch, but genuinely plausible now)
+    QEMU machine model for NXP3200: Cortex-A9 (free) + intc, timers, UART,
+    memory controller, NAND, fb. Register maps from the Nexell HAL, board
+    config from plat-nxp3200/l2k/include/cfg_*.h. Bring up U-Boot first,
+    then the Surgeon kernel, then the stock kernel.
+
+--------------------------------------------------------------------------------
+10. IMMEDIATE NEXT ACTIONS
+--------------------------------------------------------------------------------
+  DONE: board tag (VALENCIA), X11 question (no X), stock firmware obtained,
+        rootfs extracted + verified, UI binary identified, ABI confirmed.
+
+  [ ] M1: run ARM busybox under qemu-arm against the extracted rootfs.
+      Nothing blocks this — do it first, it is hours of work not days.
+  [ ] Check whether .swf/.so content is encrypted (§6): `file` and `binwalk`
+      /LF/Base/LPAD/main.swf and a Brio .so from the EXTRACTED rootfs.
+      No device needed. Fastest way to retire the biggest risk.
+  [ ] Read hwmon-lf2000.c for exact power-device name/phys/keycodes (§4).
+  [ ] Read /etc/mdev/cartridge.sh and find `cnotify` (§1b cart mechanism).
+  [ ] On hardware: create /flags/developer to get telnetd + vsftpd, and
+      /flags/console_out for AppManager logging. Then strace the UI (M2).
+  [ ] Run Mfg Test (A+B or VOL-UP+VOL-DOWN at power-on) and photograph it —
+      the reference for what "correct" looks like.
+  [ ] Consider reflashing to stock 4.6.0.784 now that we have it — but DUMP
+      YOUR CURRENT MODIFIED FIRMWARE FIRST. It's the only copy, and a
+      known-modified image is useful for testing.
+  [ ] Mirror anything else LFConnect will still serve while it works.
+
+--------------------------------------------------------------------------------
+11. LEGAL / PRESERVATION POSTURE  (unchanged)
+--------------------------------------------------------------------------------
+  * Writing the emulator is fine. The kernel/U-Boot are published GPL code.
+  * Do NOT redistribute: rootfs, firmware, cartridge images, LeapFrog
+    binaries. .gitignore rootfs/ and carts/ BEFORE the first commit.
+  * DO publish: the emulator, the shim, format documentation, tools.
+    Documenting a format is the durable preservation win.
+  * Honour the GPL on anything derived from the kernel or U-Boot.
+  * Dumping carts you own, on hardware you own, for your own use, is the
+    ordinary preservation case. Publishing dumps is a different question.
+
+--------------------------------------------------------------------------------
+12. NOTE ON RESEARCH.txt
+--------------------------------------------------------------------------------
+RESEARCH.txt was written for LeapPad1 / LF1000 / Pollux. Most of the
+community-tooling survey in it still applies (LFHacks, OpenLFConnect,
+retroleap, the eLinux page index, the .lfp/.lf2 formats, the "no emulator
+of this platform exists" finding). The hardware sections in it describe
+LeapPad1 and are superseded by §2 here.
+
+RETROLEAP IS NOW DIRECTLY RELEVANT, not tangential: it is a RetroArch-based
+custom firmware built specifically for Leapster GS and LeapPad2 — YOUR
+device. Its build system encodes real, working knowledge of this exact
+kernel, rootfs layout and boot path. Read it early.
+    https://github.com/mac2612/retroleap  (+ its wiki)

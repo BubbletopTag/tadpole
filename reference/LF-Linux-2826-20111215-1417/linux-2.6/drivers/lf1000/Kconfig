@@ -1,0 +1,100 @@
+#
+# LF1000 devices
+#
+
+if ARCH_LF1000
+
+menu "LF1000 devices"
+
+config LFCART
+	tristate "LeapFrog Cartridge bus support"
+	default n
+	depends on ARCH_LF1000
+	---help---
+	This option enables the LeapFrog cartridge bus.
+
+config LF1000_DPC
+	tristate "Device driver for LF1000 Display Controller"
+	depends on ARCH_LF1000
+	---help---
+	  This option enables device driver support for LF1000 Display 
+	  Controller.
+	  If unsure, say Y.
+
+config LF1000_DPC_OVERRIDE_VIEWANGLE
+	bool "LF1000 Display Controller Override Default View Angle"
+	depends on ARCH_LF1000 && LF1000_DPC
+	default n
+	---help---
+	This option enables adjusting the default LCD Viewing Angle
+	If unsure, say N.
+
+config LF1000_DPC_OVERRIDE_VIEWANGLE_VALUE
+	int "Viewing Angle Value"
+	depends on LF1000_DPC_OVERRIDE_VIEWANGLE
+	default 4
+	---help---
+	LCD Viewing Angle Value
+	
+config LF1000_DPC_DEBUG
+	bool "LF1000 Display Controller debugging"
+	depends on ARCH_LF1000 && LF1000_DPC
+	default n
+	---help---
+	This option enables some debugging features for the LF1000 Display
+	Controller.  
+	If unsure, say N.
+
+config LF1000_MLC
+	tristate "Device driver for LF1000 Multi Layer Controller"
+	depends on ARCH_LF1000
+	---help---
+	This option enables device driver support for LF1000 Multi Layer 
+	Controller.
+
+	If unsure, say Y.
+
+config LF1000_MLC_DEBUG
+	bool "LF1000 Multi Layer Controller Debugging"
+	depends on ARCH_LF1000 && LF1000_MLC
+	default n
+	---help---
+	This option enables additional debugging for the LF1000 Multi Layer
+	Controller driver.
+	If unsure, say N.
+
+config LF1000_MLC_RESERVE_MEMORY
+	int "LF1000 Multi Layer Controller Frame Buffer Reserve Memory"
+	depends on ARCH_LF1000 && LF1000_MLC
+	default 14
+	---help---
+	This option sets the amount of RAM in MB to reserve for the frame buffer.
+	This memory is not available to the kernel.  The total amount of RAM detected
+	at boot time minus this number is used to generate the "mem=XM" command line
+	argument.  If unsure, use the default.
+
+config LF1000_GA3D
+	tristate "Device driver for LF1000 Graphics Accelerator 3D"
+	depends on ARCH_LF1000
+	---help---
+	  This option enables device driver support for LF1000 Graphics Accelerator 3D.
+
+	  If unsure, say Y.
+
+config LF1000_IDCT
+	tristate "Device driver for LF1000 IDCT Macro Block Decoder"
+	depends on ARCH_LF1000
+	---help---
+	  This option enables device driver support for LF1000 IDCT Macro Block Decoder.
+
+	  If unsure, say Y.
+
+config LF1000_ATAP
+	bool "ATAP mode kernel and bootstrap"
+	default n
+	---help---
+	This option enables MFCART for all cartridges and always turns on ECC.
+
+endmenu
+
+endif

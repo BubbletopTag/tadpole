@@ -1,0 +1,1022 @@
+/* Tadpole — LeapPad2 (NXP3200 / VALENCIA) emulator
+ *
+ * tadpole_shim.c — guest-side device shim.
+ *
+ * Cross-compiled for ARMv7 softfp and LD_PRELOADed into the guest under
+ * qemu-user. It fakes the hardware AppManager expects:
+ *
+ *   /dev/fb0..2            three framebuffers (libDisplay.so opens all three)
+ *   /dev/input/event0..4   five evdev nodes, matched BY NAME via EVIOCGNAME
+ *
+ * The pixel data path deliberately involves no interception at all: open()
+ * hands back a descriptor onto a plain host file, so the guest's mmap() is a
+ * real shared mapping of that file. The native viewer mmaps the same file and
+ * both sides see the same pages. Only the control path (ioctl) is emulated.
+ *
+ * Input events arrive through FIFOs the viewer writes struct input_event into.
+ *
+ * We declare everything by hand rather than including kernel headers: this is
+ * cross-compiled with the host's clang and no ARM sysroot, and struct
+ * input_event in particular is NOT layout-compatible between 32-bit ARM
+ * (32-bit time_t) and the x86-64 host.
+ */
+
+#define _GNU_SOURCE
+#include <stdarg.h>
+
+typedef unsigned char      u8;
+typedef unsigned short     u16;
+typedef unsigned int       u32;
+typedef signed int         s32;
+typedef unsigned long      ulong;
+
+/* ---- libc, declared by hand (no ARM sysroot at build time) -------------
+ * Use the compiler's own __SIZE_TYPE__ so these match the builtin
+ * declarations exactly for the target ABI. */
+typedef __SIZE_TYPE__ size_t;
+
+extern void *dlsym(void *handle, const char *symbol);
+extern int   snprintf(char *s, size_t n, const char *fmt, ...);
+extern int   strncmp(const char *a, const char *b, size_t n);
+extern size_t strlen(const char *s);
+extern void *memcpy(void *d, const void *s, size_t n);
+extern void *memset(void *s, int c, size_t n);
+extern char *getenv(const char *name);
+extern int   mkdir(const char *path, u32 mode);
+extern int   mkfifo(const char *path, u32 mode);
+extern int   ftruncate(int fd, long length);
+extern long  write(int fd, const void *buf, size_t n);
+
+/* For the vsync timebase. Declared by hand like the rest — no ARM sysroot at
+ * build time. struct timespec on this 32-bit target is two longs. */
+struct tad_timespec { long tv_sec; long tv_nsec; };
+extern int clock_gettime(int clk, struct tad_timespec *tp);
+extern int nanosleep(const struct tad_timespec *req, struct tad_timespec *rem);
+#define CLOCK_MONOTONIC_ 1
+
+#define RTLD_NEXT ((void *)-1L)
+
+#define O_RDONLY 00
+#define O_RDWR   02
+#define O_CREAT  0100
+#define O_NONBLOCK 04000
+
+/* ---- fb ioctls --------------------------------------------------------- */
+#define FBIOGET_VSCREENINFO 0x4600
+#define FBIOPUT_VSCREENINFO 0x4601
+#define FBIOGET_FSCREENINFO 0x4602
+#define FBIOPAN_DISPLAY     0x4606
+#define FBIOBLANK           0x4611
+/* _IOW('F', 0x20, u32) */
+#define FBIO_WAITFORVSYNC   0x40044620
+
+/* LeapFrog extensions, from include/linux/lf1000/lf1000fb.h (magic 'm') */
+#define LF1000FB_IOCSALPHA    0x40046D01
+#define LF1000FB_IOCGALPHA    0x80046D02
+#define LF1000FB_IOCSPOSTION  0x40046D03   /* [sic] typo is in the header */
+#define LF1000FB_IOCGPOSTION  0x80046D04
+#define LF1000FB_IOCSVIDSCALE 0x40046D05
+#define LF1000FB_IOCGVIDSCALE 0x80046D06
+
+/* evdev: match on dir+type+nr, ignore the size field baked into the cmd */
+#define EV_MASK          0xC000FFFFu
+#define EVIOCGVERSION_ID 0x80004501u
+#define EVIOCGID_ID      0x80004502u
+#define EVIOCGNAME_ID    0x80004506u
+#define EVIOCGPHYS_ID    0x80004507u
+#define EVIOCGBIT_BASE   0x80004520u   /* +ev type */
+
+struct fb_bitfield { u32 offset, length, msb_right; };
+
+struct fb_var_screeninfo {
+	u32 xres, yres, xres_virtual, yres_virtual, xoffset, yoffset;
+	u32 bits_per_pixel, grayscale;
+	struct fb_bitfield red, green, blue, transp;
+	u32 nonstd, activate, height, width, accel_flags;
+	u32 pixclock, left_margin, right_margin, upper_margin, lower_margin;
+	u32 hsync_len, vsync_len, sync, vmode, rotate, colorspace;
+	u32 reserved[4];
+};
+
+struct fb_fix_screeninfo {
+	char  id[16];
+	ulong smem_start;
+	u32   smem_len;
+	u32   type, type_aux, visual;
+	u16   xpanstep, ypanstep, ywrapstep;
+	u32   line_length;
+	ulong mmio_start;
+	u32   mmio_len;
+	u32   accel;
+	u16   capabilities;
+	u16   reserved[2];
+};
+
+/* ---- shared state, mirrored to the viewer ------------------------------ */
+#define TADPOLE_MAGIC   0x54414450u   /* "TADP" */
+#define TADPOLE_VERSION 1
+#define NUM_FB          3
+#define NUM_EV          6
+
+struct layer_state {
+	u32 enabled, xres, yres, bpp, xoffset, yoffset;
+	u32 nonstd;      /* format/priority/planar bits, see lf1000fb.h */
+	u32 alpha, blank;
+	/* WHERE THIS LAYER LANDS ON THE PANEL.
+	 *
+	 * A Leapster title does not own the screen. AppManager draws a ViewFrame
+	 * (bamboo border, A/B/L/R buttons) on fb0 and gives the game a smaller
+	 * window on fb1. For SpongeBob: The Clam Prix, EmeraldTitles/<pkg>/
+	 * ViewFrame.json says x=15 y=17 w=320 h=240, and the guest pushes exactly
+	 * that down to the driver:
+	 *
+	 *     fb1 PUTVAR req 320x240 virt 480x2176
+	 *     fb1 posioctl 40046d03: f 11 <ptr> 14f 101
+	 *                            ^  ^        ^   ^-- bottom 257 = 17+240
+	 *                            |  |        `----- right  335 = 15+320
+	 *                            |  `-------------- top     17
+	 *                            `----------------- left    15
+	 *
+	 * The hardware MLC composites the layer at that rectangle. We have no MLC,
+	 * so the rect is published here for the GL rasteriser to render into and
+	 * for the viewer to composite with. Other titles differ (the reading games
+	 * use 250x250 at x=76), so this must never be hardcoded.
+	 *
+	 * Defaults to the full panel, which is what the Flash UI actually uses.
+	 */
+	u32 win_x, win_y, win_w, win_h;
+};
+
+struct tadpole_state {
+	u32 magic, version;
+	u32 width, height;
+	u32 vsync_count;
+	struct layer_state layer[NUM_FB];
+};
+
+/* ---- geometry ---------------------------------------------------------- */
+static u32 g_w   = 480;
+static u32 g_h   = 272;
+static u32 g_bpp = 32;
+
+/* Brio allocates several buffers INSIDE one framebuffer and flips between
+ * them with the pan ioctl — observed live:
+ *     AllocBuffer: new buf offset 000FF000, length 0007F800
+ * 0x7F800 is exactly one 480x272x4 screen and 0xFF000 is two screens in, so
+ * a single-screen smem_len makes it allocate off the end. Advertise a tall
+ * virtual display and size the backing file to match. */
+#define NBUF 8
+
+static int  g_ready;
+static int  g_debug;
+static char g_dir[256];
+
+/* qemu-user's -L only redirects paths that ALREADY EXIST in the sysroot.
+ * Creating a new file therefore falls through to the host path and fails
+ * with ENOENT even when the parent directory plainly exists:
+ *     stat64("/LF/Bulk/Data/Uploads/0")   = 0
+ *     open(".../profile.log", O_CREAT)    = -1 ENOENT
+ * The guest can read the sysroot but never write into it. Since we already
+ * intercept open(), we do the translation ourselves for creating opens. */
+static char g_sysroot[256];
+
+#define VSYNC_HZ_DEFAULT 60
+static long g_vsync_ns;          /* period; 0 = uncapped */
+static long g_vs_sec, g_vs_nsec; /* next deadline */
+
+static struct tadpole_state *g_state;
+
+/* fd -> device mapping. Small linear tables; opens are rare. */
+#define MAXFD 4096
+static signed char g_fb_of_fd[MAXFD];   /* -1 none, else layer index */
+static signed char g_ev_of_fd[MAXFD];
+
+/* Exact names, order and phys strings from a live LeapPad2's
+ * /proc/bus/input/devices — see reference/device-capture/. Do not "tidy"
+ * these: AppManager matches on them, and the real kernel names are
+ * "LF2000 USB" / "LF2000 Accelerometer", not the shorter forms that appear
+ * in AppManager's log messages. */
+static const char *const g_ev_names[NUM_EV] = {
+	"LF2000 USB",              /* event0  phys lf2000/usb            EV_SYN|SW  */
+	"gpio-keys",               /* event1  phys gpio-keys/input0      SYN|KEY|SW */
+	"touchscreen interface",   /* event2  phys lf2000/touchscreen    SYN|KEY|ABS*/
+	"touchscreen raw",         /* event3  phys lf2000/touchscreen-raw SYN|ABS   */
+	"LF2000 Accelerometer",    /* event4  phys lf2000/aclmtr         SYN|KEY|ABS*/
+	"Power Button",            /* event5  phys lf2000/power_button   SYN|KEY    */
+};
+
+static const char *const g_ev_phys[NUM_EV] = {
+	"lf2000/usb",
+	"gpio-keys/input0",
+	"lf2000/touchscreen",
+	"lf2000/touchscreen-raw",
+	"lf2000/aclmtr",
+	"lf2000/power_button",
+};
+
+/* Per-device EV_KEY and EV_ABS bitmaps, transcribed from the live device's
+ * /proc/bus/input/devices. tslib's input-raw module (usr/lib/ts/input.so)
+ * REQUIRES EVIOCGBIT(EV_ABS) to report ABS_X and ABS_Y, or it prints
+ * "selected device is not a touchscreen I understand" and fails — after which
+ * the caller dereferences the null handle and dies. Word 0 = bits 0..31.
+ *   touchscreen interface  ABS=1000003 -> ABS_X|ABS_Y|ABS_PRESSURE
+ *                          KEY=...400  -> BTN_TOUCH (330)
+ *   touchscreen raw        ABS=7ff     -> bits 0..10
+ *   accelerometer          ABS=100 107
+ */
+#define ABS_X_BIT        (1u << 0)
+#define ABS_Y_BIT        (1u << 1)
+#define ABS_PRESSURE_BIT (1u << 24)
+
+static const u32 g_abs_bits[NUM_EV] = {
+	0,                                        /* USB           */
+	0,                                        /* gpio-keys     */
+	ABS_X_BIT | ABS_Y_BIT | ABS_PRESSURE_BIT, /* touchscreen   */
+	0x7ff,                                    /* touchscreen raw */
+	0x107,                                    /* accelerometer */
+	0,                                        /* power button  */
+};
+
+/* EV capability bits each device advertises, straight from the device. */
+static const u32 g_ev_bits[NUM_EV] = {
+	0x21,  /* SYN | SW            */
+	0x23,  /* SYN | KEY | SW      */
+	0x0b,  /* SYN | KEY | ABS     */
+	0x09,  /* SYN | ABS           */
+	0x0b,  /* SYN | KEY | ABS     */
+	0x03,  /* SYN | KEY           */
+};
+
+/* real libc entry points */
+static int  (*real_open)(const char *, int, ...);
+static int  (*real_open64)(const char *, int, ...);
+static int  (*real_openat)(int, const char *, int, ...);
+static int  (*real_ioctl)(int, ulong, ...);
+static int  (*real_close)(int);
+static void *(*real_mmap)(void *, size_t, int, int, int, long);
+static int  (*real_mkstemp)(char *);
+static int  (*real_mkstemp64)(char *);
+static int  (*real_mkstemps)(char *, int);
+static int  (*real_rename)(const char *, const char *);
+static int  (*real_unlink)(const char *);
+static int  (*real_chdir)(const char *);
+static int  (*real_mkdir)(const char *, u32);
+static long (*real_read)(int, void *, size_t);
+static void *(*real_fopen)(const char *, const char *);
+static void *(*real_fopen64)(const char *, const char *);
+
+static void dbg(const char *msg)
+{
+	if (g_debug)
+		write(2, msg, strlen(msg));
+}
+
+static void init(void)
+{
+	const char *e;
+	char path[320];
+	int fd, i;
+
+	if (g_ready)
+		return;
+	g_ready = 1;
+
+	real_chdir  = dlsym(RTLD_NEXT, "chdir");
+	real_open   = dlsym(RTLD_NEXT, "open");
+	real_open64 = dlsym(RTLD_NEXT, "open64");
+	real_openat = dlsym(RTLD_NEXT, "openat");
+	real_ioctl  = dlsym(RTLD_NEXT, "ioctl");
+	real_close  = dlsym(RTLD_NEXT, "close");
+	real_mmap   = dlsym(RTLD_NEXT, "mmap");
+	real_read   = dlsym(RTLD_NEXT, "read");
+	real_rename = dlsym(RTLD_NEXT, "rename");
+	real_mkstemp   = dlsym(RTLD_NEXT, "mkstemp");
+	real_mkstemp64 = dlsym(RTLD_NEXT, "mkstemp64");
+	real_mkstemps = dlsym(RTLD_NEXT, "mkstemps");
+	real_unlink = dlsym(RTLD_NEXT, "unlink");
+	real_mkdir  = dlsym(RTLD_NEXT, "mkdir");
+	real_fopen  = dlsym(RTLD_NEXT, "fopen");
+	real_fopen64= dlsym(RTLD_NEXT, "fopen64");
+
+	for (i = 0; i < MAXFD; i++) {
+		g_fb_of_fd[i] = -1;
+		g_ev_of_fd[i] = -1;
+	}
+
+	g_debug = getenv("TADPOLE_DEBUG") != 0;
+	{
+		/* TADPOLE_HZ=0 restores the old uncapped behaviour, for measuring
+		 * how fast the guest COULD run. */
+		const char *hz = getenv("TADPOLE_HZ");
+		int v = hz ? 0 : VSYNC_HZ_DEFAULT;
+		if (hz) { while (*hz >= '0' && *hz <= '9') v = v * 10 + (*hz++ - '0'); }
+		g_vsync_ns = (v > 0 && v <= 1000) ? (1000000000L / v) : 0;
+	}
+
+	/* A NULL here is fatal in a subtle way: the fall-through paths below are
+	 * tail calls, so jumping through a null pointer lands at PC=0 with LR
+	 * still pointing at OUR caller — the backtrace then blames whichever
+	 * library called us, and the real cause is invisible. Always check. */
+	if (!real_open)  dbg("[tadpole] WARNING: dlsym(open) failed\n");
+	if (!real_ioctl) dbg("[tadpole] WARNING: dlsym(ioctl) failed\n");
+	if (!real_close) dbg("[tadpole] WARNING: dlsym(close) failed\n");
+	if (!real_mmap)  dbg("[tadpole] WARNING: dlsym(mmap) failed\n");
+	if (!real_read)  dbg("[tadpole] WARNING: dlsym(read) failed\n");
+
+	e = getenv("TADPOLE_SYSROOT");
+	snprintf(g_sysroot, sizeof(g_sysroot), "%s", e ? e : "");
+
+	e = getenv("TADPOLE_DIR");
+	snprintf(g_dir, sizeof(g_dir), "%s", e ? e : "/tmp/tadpole");
+	mkdir(g_dir, 0777);
+
+	if ((e = getenv("TADPOLE_W")) != 0) { u32 v = 0; while (*e >= '0' && *e <= '9') v = v*10 + (u32)(*e++ - '0'); if (v) g_w = v; }
+	if ((e = getenv("TADPOLE_H")) != 0) { u32 v = 0; while (*e >= '0' && *e <= '9') v = v*10 + (u32)(*e++ - '0'); if (v) g_h = v; }
+	if ((e = getenv("TADPOLE_BPP")) != 0) { u32 v = 0; while (*e >= '0' && *e <= '9') v = v*10 + (u32)(*e++ - '0'); if (v) g_bpp = v; }
+
+	/* ONE shared arena for all three framebuffers.
+	 * Brio treats /dev/fb0..2 as a single address space: it allocates every
+	 * layer inside fb0's smem (CreateHandle @ 0x820ff000 and @ 0x8217e800,
+	 * i.e. lines 544 and 816 of fb0) but pans a DIFFERENT fb device for
+	 * each layer (fb0 PAN 544, fb1 PAN 816). Backing each device with its
+	 * own file therefore loses every layer but the first. */
+	snprintf(path, sizeof(path), "%s/fb0.bin", g_dir);
+	fd = real_open(path, O_RDWR | O_CREAT, 0666);
+	if (fd >= 0) {
+		ftruncate(fd, (long)(g_w * g_h * (g_bpp / 8) * NBUF));
+		real_close(fd);
+	}
+
+	/* shared state, mmapped so the viewer sees updates live */
+	snprintf(path, sizeof(path), "%s/state.bin", g_dir);
+	fd = real_open(path, O_RDWR | O_CREAT, 0666);
+	if (fd >= 0) {
+		ftruncate(fd, (long)sizeof(struct tadpole_state));
+		g_state = real_mmap(0, sizeof(struct tadpole_state), 3 /*RW*/, 1 /*SHARED*/, fd, 0);
+		real_close(fd);
+		if (g_state == (void *)-1)
+			g_state = 0;
+	}
+	if (g_state) {
+		memset(g_state, 0, sizeof(*g_state));
+		g_state->magic   = TADPOLE_MAGIC;
+		g_state->version = TADPOLE_VERSION;
+		g_state->width   = g_w;
+		g_state->height  = g_h;
+		for (i = 0; i < NUM_FB; i++) {
+			g_state->layer[i].xres  = g_w;
+			g_state->layer[i].yres  = g_h;
+			g_state->layer[i].bpp   = g_bpp;
+			g_state->layer[i].alpha = 255;
+			g_state->layer[i].win_x = 0;
+			g_state->layer[i].win_y = 0;
+			g_state->layer[i].win_w = g_w;
+			g_state->layer[i].win_h = g_h;
+			/* fb0 is the primary; the overlays start disabled */
+			g_state->layer[i].enabled = (i == 0);
+		}
+	}
+
+	/* input FIFOs — viewer writes struct input_event, guest reads */
+	for (i = 0; i < NUM_EV; i++) {
+		snprintf(path, sizeof(path), "%s/ev%d", g_dir, i);
+		mkfifo(path, 0666);
+	}
+
+	dbg("[tadpole] shim initialised\n");
+}
+
+/* /dev/fbN -> N, else -1 */
+static int fb_index(const char *path)
+{
+	if (!path || strncmp(path, "/dev/fb", 7))
+		return -1;
+	if (path[7] >= '0' && path[7] < '0' + NUM_FB && path[8] == 0)
+		return path[7] - '0';
+	return -1;
+}
+
+/* /dev/input/eventN -> N, else -1. N >= NUM_EV is a real device we don't have. */
+static int ev_index(const char *path)
+{
+	const char *p;
+	int n = 0;
+
+	if (!path || strncmp(path, "/dev/input/event", 16))
+		return -1;
+	p = path + 16;
+	if (!*p)
+		return -1;
+	while (*p >= '0' && *p <= '9')
+		n = n * 10 + (*p++ - '0');
+	if (*p)
+		return -1;
+	return n;
+}
+
+/* ---- the guest's clock ---------------------------------------------------
+ *
+ * FBIO_WAITFORVSYNC used to return IMMEDIATELY. On real hardware it blocks
+ * until the panel's next refresh, and that is the only thing pacing a Brio
+ * title: the render loop runs flat out and waits here. Returning at once gives
+ * the guest an uncapped frame rate, which is not a cosmetic problem —
+ *
+ *   * titles run absurdly fast (Mr. Pencil, the SpongeBob menus),
+ *   * and audio is GENERATED faster than it can be played. The viewer then
+ *     trims the backlog to hold latency down, so the sound skips forward and
+ *     comes out fast and garbled, with phrases cut short ("Rinse your p-").
+ *
+ * Both symptoms are one bug. Pace the guest here and the audio paces itself.
+ *
+ * Deliberately NOT tied to the viewer's cadence: probes run headless with no
+ * viewer at all, and the guest still needs a clock.
+ *
+ * A guest that is ALREADY slower than the period never sleeps — the deadline is
+ * in the past — so this cannot make heavy 3D any slower. When we fall far
+ * behind we resync instead of accumulating debt, which would otherwise make the
+ * guest sprint to "catch up" later.
+ */
+static void vsync_wait(void)
+{
+	struct tad_timespec now, req;
+	long dsec, dnsec;
+
+	if (!g_vsync_ns)
+		return;
+	if (clock_gettime(CLOCK_MONOTONIC_, &now) != 0)
+		return;
+
+	if (!g_vs_sec) {                       /* first call: start the clock */
+		g_vs_sec = now.tv_sec; g_vs_nsec = now.tv_nsec;
+	}
+	g_vs_nsec += g_vsync_ns;
+	while (g_vs_nsec >= 1000000000L) { g_vs_nsec -= 1000000000L; g_vs_sec++; }
+
+	dsec  = g_vs_sec  - now.tv_sec;
+	dnsec = g_vs_nsec - now.tv_nsec;
+	if (dnsec < 0) { dnsec += 1000000000L; dsec--; }
+
+	/* More than a quarter second behind: the guest is not keeping up, so stop
+	 * pretending and restart the clock from now. */
+	if (dsec < 0 || (dsec == 0 && dnsec == 0)) {
+		if (dsec < -1) { g_vs_sec = now.tv_sec; g_vs_nsec = now.tv_nsec; }
+		return;
+	}
+	if (dsec > 1)                          /* clock jumped; do not sleep long */
+		return;
+	req.tv_sec = dsec; req.tv_nsec = dnsec;
+	nanosleep(&req, 0);
+}
+
+static int open_common(const char *path, int flags, int mode)
+{
+	char real[320];
+	int idx, fd;
+
+	init();
+
+	if ((idx = fb_index(path)) >= 0) {
+		/* all layers share one arena — see the note in init() */
+		snprintf(real, sizeof(real), "%s/fb0.bin", g_dir);
+		fd = real_open(real, O_RDWR, 0666);
+		if (fd >= 0 && fd < MAXFD)
+			g_fb_of_fd[fd] = (signed char)idx;
+		if (g_debug) { dbg("[tadpole] open "); dbg(path); dbg("\n"); }
+		return fd;
+	}
+
+	if ((idx = ev_index(path)) >= 0) {
+		if (idx >= NUM_EV)
+			return -1;                       /* no such device */
+		snprintf(real, sizeof(real), "%s/ev%d", g_dir, idx);
+		/* O_RDWR so the open doesn't block waiting for a writer */
+		fd = real_open(real, O_RDWR | O_NONBLOCK, 0666);
+		if (fd >= 0 && fd < MAXFD)
+			g_ev_of_fd[fd] = (signed char)idx;
+		if (g_debug) { dbg("[tadpole] open "); dbg(path); dbg(" -> "); dbg(g_ev_names[idx]); dbg("\n"); }
+		return fd;
+	}
+
+	/* See the note on g_sysroot: qemu will not create files inside -L. */
+	if ((flags & O_CREAT) && path && path[0] == '/' && g_sysroot[0]) {
+		char full[512];
+		int fd;
+		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
+		if (g_debug) { dbg("[tadpole] create-try "); dbg(full); dbg("\n"); }
+		fd = real_open(full, flags, mode);
+		if (fd < 0 && g_debug) dbg("[tadpole] create-FAILED\n");
+		if (fd >= 0) {
+			if (g_debug) { dbg("[tadpole] create "); dbg(full); dbg("\n"); }
+			return fd;
+		}
+	}
+	return real_open(path, flags, mode);
+}
+
+/* uClibc's stdio calls its own open through a hidden alias that never goes
+ * through the PLT, so interposing open() cannot see fopen(). Intercept fopen
+ * as well, or nothing that uses C stdio can create files in the sysroot. */
+static void *fopen_common(const char *path, const char *mode,
+                          void *(*real)(const char *, const char *))
+{
+	init();
+	if (real && path && path[0] == '/' && g_sysroot[0] && mode &&
+	    (mode[0] == 'w' || mode[0] == 'a')) {
+		char full[512];
+		void *f;
+		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
+		f = real(full, mode);
+		if (f) {
+			if (g_debug) { dbg("[tadpole] fcreate "); dbg(full); dbg("\n"); }
+			return f;
+		}
+	}
+	return real ? real(path, mode) : 0;
+}
+
+void *fopen(const char *path, const char *mode)
+{
+	return fopen_common(path, mode, real_fopen);
+}
+
+void *fopen64(const char *path, const char *mode)
+{
+	return fopen_common(path, mode, real_fopen64 ? real_fopen64 : real_fopen);
+}
+
+/* tslib's input.so is dlopen'd and its PLT entry for read() resolves to NULL
+ * in that scope — calling it jumps to PC=0 the moment a touch event arrives,
+ * which is what made every click crash. (Confirmed by mapping the faulting
+ * call target back to .rel.plt entry 4 = "read".) Defining read() here means
+ * the symbol resolves against us, early in the global scope, instead. */
+/* Same qemu-user trap as open(O_CREAT): -L only redirects paths that already
+ * exist, so a rename whose DESTINATION does not exist yet falls through to the
+ * host and fails. Brio's CAtomicFile writes "<name>.atomic" then renames it
+ * into place, so without this every atomic write is left stranded as a
+ * .atomic file — which is exactly how /tmp/ui_ready.atomic got stuck. */
+static void sysrootify(char *dst, unsigned dstsz, const char *path)
+{
+	if (path && path[0] == '/' && g_sysroot[0])
+		snprintf(dst, dstsz, "%s%s", g_sysroot, path);
+	else
+		snprintf(dst, dstsz, "%s", path ? path : "");
+}
+
+/* chdir() — qemu-user does NOT path-translate this one.
+ *
+ * `-L` rewrites paths for open/stat/etc, but qemu's TARGET_NR_chdir passes the
+ * guest string straight to the host chdir() with no translation at all. So a
+ * guest doing chdir("/LF/Bulk/ProgramFiles/<pkg>") lands on a host path that
+ * does not exist, the call fails, and the working directory silently stays
+ * wherever tadpole.sh left it.
+ *
+ * That matters because Leapster games chdir into their own package directory
+ * and then open assets RELATIVELY:
+ *
+ *     open ./res/Sound/Ben10.soundproject failed: No such file or directory
+ *     -> SoundProject::loadFromFile() gets no document
+ *     -> TiXmlNode::FirstChildElement() dereferences NULL -> SIGSEGV
+ *
+ * The file is present and correct; only the working directory was wrong. Try
+ * the sysroot-relative path first and fall back to the literal one, so guest
+ * absolute paths work while anything already host-valid keeps working.
+ */
+int chdir(const char *path)
+{
+	char buf[512];
+
+	init();
+	if (!real_chdir)
+		return -1;
+	if (path && path[0] == '/' && g_sysroot[0]) {
+		sysrootify(buf, sizeof(buf), path);
+		if (real_chdir(buf) == 0) {
+			dbg("[tadpole] chdir -> sysroot\n");
+			return 0;
+		}
+	}
+	return real_chdir(path);
+}
+
+/* mkstemp() creates a brand-new file, so it hits the same qemu-user trap as
+ * open(O_CREAT): -L only redirects paths that already exist. Brio's
+ * fopenAtomic() uses it for every atomic write, so without this you get
+ *   fopenAtomic(/LF/Bulk/settings.cfg): mkstemp failed us!
+ * and AppManager shuts down as soon as it needs to persist anything.
+ *
+ * The template is modified in place and the caller later renames it, so we
+ * must hand back the GUEST path with the resolved XXXXXX suffix, not the
+ * host path. Our rename() then translates it again. */
+static int mkstemp_common(char *tmpl, int suffixlen, int have_suffix)
+{
+	char full[512];
+	unsigned rootlen;
+	int fd;
+
+	init();
+	if (!tmpl)
+		return -1;
+
+	if (tmpl[0] == '/' && g_sysroot[0]) {
+		snprintf(full, sizeof(full), "%s%s", g_sysroot, tmpl);
+		if (have_suffix)
+			fd = real_mkstemps ? real_mkstemps(full, suffixlen) : -1;
+		else if (real_mkstemp)
+			fd = real_mkstemp(full);
+		else
+			fd = real_mkstemp64 ? real_mkstemp64(full) : -1;
+		if (fd >= 0) {
+			rootlen = strlen(g_sysroot);
+			memcpy(tmpl, full + rootlen, strlen(full) - rootlen + 1);
+			if (g_debug) { dbg("[tadpole] mkstemp "); dbg(tmpl); dbg("\n"); }
+			return fd;
+		}
+	}
+	if (have_suffix)
+		return real_mkstemps ? real_mkstemps(tmpl, suffixlen) : -1;
+	if (real_mkstemp)
+		return real_mkstemp(tmpl);
+	return real_mkstemp64 ? real_mkstemp64(tmpl) : -1;
+}
+
+/* libUtility.so imports mkstemp64, NOT mkstemp — exporting only the plain
+ * name means the interception is never reached. Provide both. */
+int mkstemp(char *tmpl)                { return mkstemp_common(tmpl, 0, 0); }
+int mkstemp64(char *tmpl)              { return mkstemp_common(tmpl, 0, 0); }
+int mkstemps(char *tmpl, int suffixlen){ return mkstemp_common(tmpl, suffixlen, 1); }
+
+int rename(const char *from, const char *to)
+{
+	char f[512], t[512];
+	init();
+	if (!real_rename)
+		return -1;
+	if (from && to && from[0] == '/' && to[0] == '/' && g_sysroot[0]) {
+		sysrootify(f, sizeof(f), from);
+		sysrootify(t, sizeof(t), to);
+		if (real_rename(f, t) == 0) {
+			if (g_debug) { dbg("[tadpole] rename "); dbg(to); dbg("\n"); }
+			return 0;
+		}
+	}
+	return real_rename(from, to);
+}
+
+int unlink(const char *path)
+{
+	char f[512];
+	init();
+	if (!real_unlink)
+		return -1;
+	if (path && path[0] == '/' && g_sysroot[0]) {
+		sysrootify(f, sizeof(f), path);
+		if (real_unlink(f) == 0)
+			return 0;
+	}
+	return real_unlink(path);
+}
+
+long read(int fd, void *buf, size_t n)
+{
+	init();
+	long r;
+
+	if (!real_read)
+		return -1;
+	r = real_read(fd, buf, n);
+
+	/* Log what the GUEST actually receives, so a single click can be traced
+	 * end to end: viewer window coords -> fb coords -> these events. */
+	if (g_debug && r >= 16 && fd >= 0 && fd < MAXFD && g_ev_of_fd[fd] >= 0) {
+		const u8 *e = buf;
+		long off;
+		for (off = 0; off + 16 <= r; off += 16) {
+			u16 type = (u16)(e[off+8]  | (e[off+9]  << 8));
+			u16 code = (u16)(e[off+10] | (e[off+11] << 8));
+			s32 val  = (s32)((u32)e[off+12] | ((u32)e[off+13] << 8) |
+			                 ((u32)e[off+14] << 16) | ((u32)e[off+15] << 24));
+			char b[96];
+			const char *tn = type == 0 ? "SYN" : type == 1 ? "KEY" :
+			                 type == 3 ? "ABS" : "?";
+			snprintf(b, sizeof(b), "[tadpole] ev%d GUEST-GOT %s code=%u val=%d\n",
+			         g_ev_of_fd[fd], tn, code, val);
+			dbg(b);
+		}
+	}
+	return r;
+}
+
+int open(const char *path, int flags, ...)
+{
+	va_list ap; int mode = 0;
+	va_start(ap, flags); mode = va_arg(ap, int); va_end(ap);
+	return open_common(path, flags, mode);
+}
+
+int open64(const char *path, int flags, ...)
+{
+	va_list ap; int mode = 0;
+	va_start(ap, flags); mode = va_arg(ap, int); va_end(ap);
+	return open_common(path, flags, mode);
+}
+
+int openat(int dirfd, const char *path, int flags, ...)
+{
+	va_list ap; int mode = 0;
+	va_start(ap, flags); mode = va_arg(ap, int); va_end(ap);
+	init();
+	if (path && path[0] == '/' && (fb_index(path) >= 0 || ev_index(path) >= 0))
+		return open_common(path, flags, mode);
+	if (!real_openat) return -1;
+	return real_openat(dirfd, path, flags, mode);
+}
+
+int close(int fd)
+{
+	init();
+	if (fd >= 0 && fd < MAXFD) {
+		g_fb_of_fd[fd] = -1;
+		g_ev_of_fd[fd] = -1;
+	}
+	if (!real_close) return -1;
+	return real_close(fd);
+}
+
+static void fill_var(struct fb_var_screeninfo *v, int idx)
+{
+	memset(v, 0, sizeof(*v));
+	v->xres = v->xres_virtual = g_w;
+	v->yres = g_h;
+	v->yres_virtual = g_h * NBUF;
+	v->bits_per_pixel = g_bpp;
+	v->height = 61;   /* ~5" diagonal at 480x272, in mm */
+	v->width  = 108;
+	v->activate = 0;  /* FB_ACTIVATE_NOW */
+	v->vmode  = 0;    /* FB_VMODE_NONINTERLACED */
+
+	if (g_bpp == 16) {                       /* RGB565 */
+		v->red.offset   = 11; v->red.length   = 5;
+		v->green.offset =  5; v->green.length = 6;
+		v->blue.offset  =  0; v->blue.length  = 5;
+	} else {                                 /* BGRA8888 (SDL ARGB8888 LE) */
+		v->blue.offset  =  0; v->blue.length  = 8;
+		v->green.offset =  8; v->green.length = 8;
+		v->red.offset   = 16; v->red.length   = 8;
+		v->transp.offset= 24; v->transp.length= 8;
+	}
+	if (g_state)
+		v->nonstd = g_state->layer[idx].nonstd;
+}
+
+static void fill_fix(struct fb_fix_screeninfo *f, int idx)
+{
+	memset(f, 0, sizeof(*f));
+	f->id[0] = 'l'; f->id[1] = 'f'; f->id[2] = '2'; f->id[3] = '0';
+	f->id[4] = '0'; f->id[5] = '0'; f->id[6] = 'f'; f->id[7] = 'b';
+	f->id[8] = (char)('0' + idx);
+	/* A non-zero smem_start keeps callers that sanity-check it happy; the
+	 * guest never dereferences it, it mmaps the fd instead. */
+	f->smem_start  = 0x82000000u + (ulong)idx * 0x400000u;
+	f->smem_len    = g_w * g_h * (g_bpp / 8) * NBUF;
+	f->type        = 0;   /* FB_TYPE_PACKED_PIXELS */
+	f->visual      = 2;   /* FB_VISUAL_TRUECOLOR */
+	f->line_length = g_w * (g_bpp / 8);
+	f->accel       = 0;
+	f->ypanstep    = 1;
+}
+
+int ioctl(int fd, ulong req, ...)
+{
+	va_list ap;
+	void *arg;
+	int idx;
+	u32 id;
+
+	init();
+
+	va_start(ap, req);
+	arg = va_arg(ap, void *);
+	va_end(ap);
+
+	/* ---------------- framebuffer ---------------- */
+	if (fd >= 0 && fd < MAXFD && (idx = g_fb_of_fd[fd]) >= 0) {
+		if (g_debug) {
+			char b[80]; const char *n = "fb-ioctl";
+			if (req == FBIOPAN_DISPLAY)        n = "PAN";
+			else if (req == FBIOPUT_VSCREENINFO) n = "PUT_VSCREEN";
+			else if (req == FBIOGET_VSCREENINFO) n = "GET_VSCREEN";
+			else if (req == FBIOGET_FSCREENINFO) n = "GET_FSCREEN";
+			else if (req == FBIO_WAITFORVSYNC)   n = "VSYNC";
+			else if (req == FBIOBLANK)           n = "BLANK";
+			if (req == FBIOBLANK) {
+				snprintf(b, sizeof(b), "[tadpole] fb%d BLANK arg=%u\n",
+				         idx, (u32)(ulong)arg);
+				dbg(b);
+			} else
+			if (req == FBIOPAN_DISPLAY || req == FBIOPUT_VSCREENINFO) {
+				struct fb_var_screeninfo *v = arg;
+				snprintf(b, sizeof(b),
+				         "[tadpole] fb%d %s yoff=%u nonstd=%08x prio=%u\n",
+				         idx, n, v ? v->yoffset : 0, v ? v->nonstd : 0,
+				         v ? ((v->nonstd >> 24) & 0x3) : 0);
+			} else {
+				snprintf(b, sizeof(b), "[tadpole] fb%d %s\n", idx, n);
+			}
+			dbg(b);
+		}
+		switch (req) {
+		case FBIOGET_VSCREENINFO:
+			fill_var(arg, idx);
+			return 0;
+		case FBIOPUT_VSCREENINFO: {
+			struct fb_var_screeninfo *v = arg;
+			if (g_debug && v) {
+				char b2[160];
+				snprintf(b2, sizeof(b2),
+				         "[tadpole] fb%d PUTVAR req %ux%u virt %ux%u off %u,%u\n",
+				         idx, v->xres, v->yres, v->xres_virtual,
+				         v->yres_virtual, v->xoffset, v->yoffset);
+				dbg(b2);
+			}
+			/* The requested xres/yres IS the layer's window size — read it
+			 * before fill_var() below replaces it with the panel size. */
+			if (g_state && v && v->xres && v->yres &&
+			    v->xres <= g_w && v->yres <= g_h) {
+				g_state->layer[idx].win_w = v->xres;
+				g_state->layer[idx].win_h = v->yres;
+			}
+			if (g_state && v) {
+				g_state->layer[idx].xoffset = v->xoffset;
+				g_state->layer[idx].yoffset = v->yoffset;
+				g_state->layer[idx].nonstd  = v->nonstd;
+				g_state->layer[idx].enabled = 1;
+			}
+			/* Report back what we actually support rather than failing;
+			 * refusing a mode here makes Brio give up on the layer. */
+			fill_var(v, idx);
+			return 0;
+		}
+		case FBIOGET_FSCREENINFO:
+			fill_fix(arg, idx);
+			return 0;
+		case FBIOPAN_DISPLAY: {
+			struct fb_var_screeninfo *v = arg;
+			if (g_state && v) {
+				g_state->layer[idx].xoffset = v->xoffset;
+				g_state->layer[idx].yoffset = v->yoffset;
+				/* Per-layer offset into the shared arena. (An earlier
+				 * version broadcast the pan to every layer, which collapsed
+				 * all layers onto one offset and hid the Flash content.) */
+				g_state->layer[idx].enabled = 1;
+				g_state->layer[idx].blank   = 0;
+				g_state->vsync_count++;
+			}
+			return 0;
+		}
+		case FBIOBLANK:
+			/* FB_BLANK_UNBLANK == 0 means "show me". */
+			if (g_state) {
+				g_state->layer[idx].blank = (u32)(ulong)arg;
+				if ((u32)(ulong)arg == 0)
+					g_state->layer[idx].enabled = 1;
+			}
+			return 0;
+		case FBIO_WAITFORVSYNC:
+			vsync_wait();
+			if (g_state)
+				g_state->vsync_count++;
+			return 0;
+		case LF1000FB_IOCSALPHA:
+			if (g_state && arg)
+				g_state->layer[idx].alpha = *(u32 *)arg;
+			return 0;
+		case LF1000FB_IOCGALPHA:
+			if (arg)
+				*(u32 *)arg = g_state ? g_state->layer[idx].alpha : 255;
+			return 0;
+		case LF1000FB_IOCSPOSTION:
+		case LF1000FB_IOCGPOSTION:
+		case LF1000FB_IOCSVIDSCALE:
+		case LF1000FB_IOCGVIDSCALE:
+			/* Payload words 0 and 1 are left and top — verified against
+			 * every ViewFrame.json we have. Word 2 holds a pointer, so the
+			 * struct is not the flat {l,t,r,b} the name suggests; words 3
+			 * and 4 do read as right/bottom but we take the size from
+			 * PUT_VSCREENINFO instead, whose meaning is unambiguous. */
+			if (req == LF1000FB_IOCSPOSTION && g_state && arg) {
+				const u32 *w = (const u32 *)arg;
+				if (w[0] < g_w && w[1] < g_h) {
+					g_state->layer[idx].win_x = w[0];
+					g_state->layer[idx].win_y = w[1];
+				}
+			}
+			if (g_debug && arg && req == LF1000FB_IOCSPOSTION) {
+				const u32 *w = (const u32 *)arg;
+				char b[96];
+				snprintf(b, sizeof(b), "[tadpole] fb%d window %u,%u\n",
+				         idx, w[0], w[1]);
+				dbg(b);
+			}
+			return 0;
+		default:
+			return 0;   /* unknown fb ioctl: succeed quietly */
+		}
+	}
+
+	/* ---------------- evdev ---------------- */
+	if (fd >= 0 && fd < MAXFD && (idx = g_ev_of_fd[fd]) >= 0) {
+		id = (u32)req & EV_MASK;
+
+		if (id == EVIOCGNAME_ID) {
+			u32 len = ((u32)req >> 16) & 0x3FFF;
+			const char *n = g_ev_names[idx];
+			u32 l = strlen(n) + 1;
+			if (l > len) l = len;
+			if (arg) memcpy(arg, n, l);
+			return (int)l;
+		}
+		if (id == EVIOCGPHYS_ID) {
+			u32 len = ((u32)req >> 16) & 0x3FFF;
+			const char *n = g_ev_phys[idx];
+			u32 l = strlen(n) + 1;
+			if (l > len) l = len;
+			if (arg) memcpy(arg, n, l);
+			return (int)l;
+		}
+		if (id == EVIOCGVERSION_ID) {
+			if (arg) *(u32 *)arg = 0x010001;   /* EV_VERSION */
+			return 0;
+		}
+		if (id == EVIOCGID_ID) {
+			if (arg) memset(arg, 0, 8);
+			return 0;
+		}
+		if ((id & 0xFFFFFFE0u) == EVIOCGBIT_BASE) {
+			u32 len = ((u32)req >> 16) & 0x3FFF;
+			u32 ev  = (u32)req & 0x1Fu;      /* which EV_* is being asked about */
+			if (arg) {
+				memset(arg, 0, len);
+				if (ev == 0 && len >= 4) {
+					/* EVIOCGBIT(0, ..) = which event types exist */
+					*(u32 *)arg = g_ev_bits[idx];
+				} else if (ev == 3 && len >= 4) {
+					/* EV_ABS — what tslib actually gates on */
+					*(u32 *)arg = g_abs_bits[idx];
+				} else if (ev == 1 && len >= 44) {
+					/* EV_KEY: BTN_TOUCH is 330 = word 10, bit 10 */
+					if (idx == 2)
+						((u32 *)arg)[10] = (1u << 10);
+				}
+			}
+			return (int)len;
+		}
+
+		/* EVIOCGABS(axis) = _IOR('E', 0x40+axis, struct input_absinfo).
+		 * With EV_MASK applied the id is 0x80004540..0x8000457F — note the
+		 * 0x45 ('E') in bits 8-15, which an earlier version of this check
+		 * got wrong, so the ioctl fell through and tslib read uninitialised
+		 * stack as the axis range and then jumped through a null pointer.
+		 * struct input_absinfo is 6 x s32 on this kernel:
+		 *   value, minimum, maximum, fuzz, flat, resolution
+		 *
+		 * REPORT WHAT THE HARDWARE REPORTS, which is not what it emits.
+		 * `evtest /dev/input/event2` on a real LeapPad2:
+		 *
+		 *   ABS_X         min 1  max 1023  fuzz 2   but emits   2..482
+		 *   ABS_Y         min 1  max 1023  fuzz 2   but emits   0..271
+		 *   ABS_PRESSURE  min 1  max 1023  fuzz 5   but emits  10..70
+		 *
+		 * The driver advertises a 10-bit range and then hands out panel
+		 * pixels. Nothing rescales in between: there is no /etc/pointercal,
+		 * so tslib's linear module is identity. We were reporting the panel
+		 * size as the maximum, which no real device ever does — so anything
+		 * that trusted this got a different answer here than on hardware.
+		 * Advertise the hardware numbers and keep sending pixels, exactly as
+		 * the device does. */
+		{
+			u32 nr = id & 0xFFu;
+			if ((id & 0xFFFFFF00u) == 0x80004500u && nr >= 0x40 && nr <= 0x7F) {
+				u32 axis = nr - 0x40;
+				s32 *ai = arg;
+				if (ai) {
+					memset(ai, 0, 24);
+					if (axis == 0 || axis == 1) {     /* ABS_X, ABS_Y */
+						ai[1] = 1; ai[2] = 1023; ai[3] = 2;
+					} else if (axis == 24) {          /* ABS_PRESSURE */
+						ai[1] = 1; ai[2] = 1023; ai[3] = 5;
+					} else {
+						ai[2] = 4095;
+					}
+				}
+				return 0;
+			}
+		}
+		return 0;
+	}
+
+	if (!real_ioctl) {
+		dbg("[tadpole] real_ioctl is NULL — refusing to jump to 0\n");
+		return -1;
+	}
+	return real_ioctl(fd, req, arg);
+}

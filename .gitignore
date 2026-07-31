@@ -1,0 +1,20 @@
+# Copyrighted LeapFrog content — NEVER commit.
+# Cartridge/app backups made with LFManager, and anything extracted from them.
+games/
+rootfs/
+sources/
+runtime/sysroot/
+runtime/libs/
+runtime/shimlibs/
+runtime/shimlibs-z/
+reference/device-capture/
+
+# Build products
+tadpole/viewer/tadpole-view
+runtime/tone
+*.o
+
+# Captures and scratch
+*.raw
+*.core
+shots/*.wav

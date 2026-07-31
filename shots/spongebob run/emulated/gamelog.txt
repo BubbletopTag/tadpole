@@ -1,0 +1,937 @@
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] ev2 GUEST-GOT ABS code=0 val=386
+[tadpole] ev2 GUEST-GOT ABS code=1 val=160
+[tadpole] ev2 GUEST-GOT ABS code=24 val=60
+[tadpole] ev2 GUEST-GOT KEY code=330 val=1
+[tadpole] ev2 GUEST-GOT SYN code=0 val=0
+[tadpole] fb1 GET_VSCREEN
+[tadpole] ev2 GUEST-GOT ABS code=0 val=386
+[tadpole] ev2 GUEST-GOT ABS code=1 val=160
+[tadpole] ev2 GUEST-GOT ABS code=24 val=0
+[tadpole] ev2 GUEST-GOT KEY code=330 val=0
+[tadpole] ev2 GUEST-GOT SYN code=0 val=0
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Load Texture UITexture/track_selection_mp.udi, 31536, total is 3598452
+[GLTextureManager] Load Texture UITexture/Around the Block _1.udi, 40768, total is 3639220
+[GLTextureManager] Load Texture UITexture/choose_direction_01.udi, 3128, total is 3642348
+[GLTextureManager] Load Texture UITexture/choose_direction_0101.udi, 3128, total is 3645476
+[GLTextureManager] Load Texture UITexture/choose_direction_02.udi, 3264, total is 3648740
+[GLTextureManager] Load Texture UITexture/choose_direction_0202.udi, 3264, total is 3652004
+[GLTextureManager] Load Texture UITexture/shell_lock.udi, 16128, total is 3668132
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] ev2 GUEST-GOT ABS code=0 val=368
+[tadpole] ev2 GUEST-GOT ABS code=1 val=143
+[tadpole] ev2 GUEST-GOT ABS code=24 val=60
+[tadpole] ev2 GUEST-GOT KEY code=330 val=1
+[tadpole] ev2 GUEST-GOT SYN code=0 val=0
+[tadpole] fb1 GET_VSCREEN
+		GameAreaStart id: 13
+[tadpole] ev2 GUEST-GOT ABS code=0 val=368
+[tadpole] ev2 GUEST-GOT ABS code=1 val=143
+[tadpole] ev2 GUEST-GOT ABS code=24 val=0
+[tadpole] ev2 GUEST-GOT KEY code=330 val=0
+[tadpole] ev2 GUEST-GOT SYN code=0 val=0
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Load Texture UITexture/pre_race_preview_best.udi, 7568, total is 3675700
+[GLTextureManager] Load Texture UITexture/pre_race_preview_sd1.udi, 45760, total is 3721460
+[GLTextureManager] Load Texture UITexture/bubble_squirrel.udi, 1352, total is 3722812
+[GLTextureManager] Load Texture UITexture/pre_race_preview_time.udi, 5504, total is 3728316
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] ev2 GUEST-GOT ABS code=0 val=370
+[tadpole] ev2 GUEST-GOT ABS code=1 val=146
+[tadpole] ev2 GUEST-GOT ABS code=24 val=60
+[tadpole] ev2 GUEST-GOT KEY code=330 val=1
+[tadpole] ev2 GUEST-GOT SYN code=0 val=0
+[tadpole] fb1 GET_VSCREEN
+		GameAreaExit
+		GameAreaStart id: 13
+[tadpole] ev2 GUEST-GOT ABS code=0 val=370
+[tadpole] ev2 GUEST-GOT ABS code=1 val=146
+[tadpole] ev2 GUEST-GOT ABS code=24 val=0
+[tadpole] ev2 GUEST-GOT KEY code=330 val=0
+[tadpole] ev2 GUEST-GOT SYN code=0 val=0
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Release Texture UITexture/pre_race_preview_best.udi, 7568, total is 3720748
+[GLTextureManager] Release Texture UITexture/pre_race_preview_sd1.udi, 45760, total is 3674988
+[GLTextureManager] Release Texture UITexture/bubble_squirrel.udi, 1352, total is 3673636
+[GLTextureManager] Release Texture UITexture/pre_race_preview_time.udi, 5504, total is 3668132
+[GLTextureManager] Release Texture UITexture/track_selection_mp.udi, 31536, total is 3636596
+[GLTextureManager] Release Texture UITexture/Around the Block _1.udi, 40768, total is 3595828
+[GLTextureManager] Release Texture UITexture/choose_direction_01.udi, 3128, total is 3592700
+[GLTextureManager] Release Texture UITexture/choose_direction_0101.udi, 3128, total is 3589572
+[GLTextureManager] Release Texture UITexture/choose_direction_02.udi, 3264, total is 3586308
+[GLTextureManager] Release Texture UITexture/choose_direction_0202.udi, 3264, total is 3583044
+[GLTextureManager] Release Texture UITexture/shell_lock.udi, 16128, total is 3566916
+[GLTextureManager] Release Texture UITexture/track_selection_bg.udi, 77312, total is 3489604
+[GLTextureManager] Release Texture UITexture/dJb.udi, 1920, total is 3487684
+[GLTextureManager] Release Texture UITexture/Under_Water_Heartbreaker.udi, 26012, total is 3461672
+[GLTextureManager] Release Texture UITexture/character_tahs.udi, 22032, total is 3439640
+[GLTextureManager] Release Texture UITexture/Value3.udi, 6272, total is 3433368
+[GLTextureManager] Release Texture UITexture/character_mp.udi, 20648, total is 3412720
+[GLTextureManager] Release Texture UITexture/character_direction_01.udi, 2280, total is 3410440
+[GLTextureManager] Release Texture UITexture/character_direction_0102.udi, 2280, total is 3408160
+[GLTextureManager] Release Texture UITexture/character_direction_02.udi, 2280, total is 3405880
+[GLTextureManager] Release Texture UITexture/character_direction_0202.udi, 2280, total is 3403600
+[GLTextureManager] Release Texture UITexture/character_lock_02.udi, 11352, total is 3392248
+[GLTextureManager] Release Texture UITexture/character_lock_00.udi, 5952, total is 3386296
+[GLTextureManager] Release Texture UITexture/character_lock_03.udi, 1152, total is 3385144
+[GLTextureManager] Release Texture UITexture/character_lock_200.udi, 1824, total is 3383320
+[GLTextureManager] Release Texture UITexture/character_lock_04.udi, 6000, total is 3377320
+[GLTextureManager] Release Texture UITexture/character_lock_01.udi, 2720, total is 3374600
+[GLTextureManager] Release Texture UITexture/playmodesbg.udi, 77312, total is 3297288
+[GLTextureManager] Release Texture UITexture/back.udi, 4080, total is 3293208
+[GLTextureManager] Release Texture UITexture/playmodesmb.udi, 39872, total is 3253336
+[GLTextureManager] Release Texture UITexture/tournament2.udi, 25584, total is 3227752
+[GLTextureManager] Release Texture UITexture/tournament1.udi, 25584, total is 3202168
+[GLTextureManager] Release Texture UITexture/tutorials2.udi, 24948, total is 3177220
+[GLTextureManager] Release Texture UITexture/tutorials1.udi, 24948, total is 3152272
+[GLTextureManager] Release Texture UITexture/quickrace2.udi, 25584, total is 3126688
+[GLTextureManager] Release Texture UITexture/quickrace1.udi, 25584, total is 3101104
+[GLTextureManager] Release Texture UITextureOutOfPage/play_modes_menu/play_modes_quickplay.udi, 12240, total is 3088864
+[GLTextureManager] Release Texture UIAnimation/BubbleAni/BubbleAni__page0.udi, 65536, total is 3023328
+[GLTextureManager] Release Texture UITexture/main_menu_bg.udi, 153600, total is 2869728
+[GLTextureManager] Release Texture UITexture/ok.udi, 3072, total is 2866656
+[GLTextureManager] Release Texture UITexture/main_menu_play_normal.udi, 13120, total is 2853536
+[GLTextureManager] Release Texture UITexture/main_menu_play_focus.udi, 13120, total is 2840416
+[GLTextureManager] Release Texture UITexture/settings_bb1a.udi, 26208, total is 2814208
+[GLTextureManager] Release Texture UITexture/settings_bb2a.udi, 26208, total is 2788000
+[GLTextureManager] Release Texture UITexture/main_menu_micromods_normal.udi, 13120, total is 2774880
+[GLTextureManager] Release Texture UITexture/main_menu_micromods_focus.udi, 13120, total is 2761760
+[GLTextureManager] Release Texture UITexture/main_menu_badges_normal.udi, 13120, total is 2748640
+[GLTextureManager] Release Texture UITexture/main_menu_badges_focus.udi, 13120, total is 2735520
+[GLTextureManager] Release Texture UITexture/main_menu_option_normal.udi, 13120, total is 2722400
+[GLTextureManager] Release Texture UITexture/main_menu_option_focus.udi, 13120, total is 2709280
+[GLTextureManager] Release Texture UITextureOutOfPage/main_menu/main_menu_expansion_pack_04.udi, 12792, total is 2696488
+[GLTextureManager] Release Texture UITextureOutOfPage/main_menu/main_menu_expansion_pack_03.udi, 12792, total is 2683696
+[GLTextureManager] Release Texture UITexture/main_menu_bob_hand.udi, 2304, total is 2681392
+[GLTextureManager] Release Texture UITexture/main_menu_bob.udi, 35880, total is 2645512
+[GLTextureManager] Release Texture UITexture/main_menu_bob_fist.udi, 1008, total is 2644504
+[GLTextureManager] Release Texture UITexture/main_menu_bob_eyelid.udi, 2128, total is 2642376
+[GLTextureManager] Release Texture UITexture/main_menu_bob_eye.udi, 2128, total is 2640248
+[GLTextureManager] Release Texture UITextureOutOfPage/main_menu/main_menu_font_play.udi, 16120, total is 2624128
+[GLTextureManager] Release Texture UITexture/sm_01.udi, 12992, total is 2611136
+RacingEngine/Race/SR_Scene.cpp(447): Scene::Initialize() start.
+
+RacingEngine/Race/SR_Scene.cpp(477): Scene::Initialize() end.
+
+[GLTextureManager] Load Texture Aroundtheblock.udi, 153600, total is 2764736
+[GLTextureManager] Load Texture atb_15.udi, 38432, total is 2803168
+[LOADING] Render accepted (0.000000)
+[tadpole] fb1 GET_VSCREEN
+RacingEngine/Race/SR_Scene.cpp(107): Scene:load()!
+
+[GLTextureManager] Load Texture Textures\SpongebobUI\HUD\WordBuilder.udi, 153600, total is 2956768
+[GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0001.udi, 9632, total is 2966400
+[GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0002.udi, 9632, total is 2976032
+[GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0003.udi, 9632, total is 2985664
+[GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0004.udi, 9632, total is 2995296
+[GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0008.udi, 9632, total is 3004928
+[GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0010.udi, 9632, total is 3014560
+[GLTextureManager] Load Texture UIAnimation/ButtonTutorial/ButtonTutorial__page0.udi, 262144, total is 3276704
+[GLTextureManager] Load Texture Textures\SpongebobUI\HUD\race.udi, 393216, total is 3669920
+[GLTextureManager] Load Texture Textures\SpongebobUI\HUD\powerup.udi, 10620, total is 3680540
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\sky_01.udi, 262144, total is 3942684
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_gate_02.udi, 33280, total is 3975964
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_gate_01.udi, 131072, total is 4107036
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_05.udi, 66048, total is 4173084
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_lighthouse.udi, 66048, total is 4239132
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_poster.udi, 524288, total is 4763420
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_02.udi, 66048, total is 4829468
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_patrickstar.udi, 33280, total is 4862748
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_squidward.udi, 66048, total is 4928796
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_spongebob.udi, 66048, total is 4994844
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_07.udi, 66048, total is 5060892
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_shop.udi, 66048, total is 5126940
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_slow.udi, 4096, total is 5131036
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_06.udi, 16896, total is 5147932
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_path.udi, 131072, total is 5279004
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_interspace_02.udi, 33280, total is 5312284
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_grass.udi, 131072, total is 5443356
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_foliage.udi, 131072, total is 5574428
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\prp_kart.udi, 131072, total is 5705500
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\brr_net.udi, 131072, total is 5836572
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\track_01.udi, 131072, total is 5967644
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_sand.udi, 131072, total is 6098716
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_grass_01.udi, 65536, total is 6164252
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_grasshouse.udi, 66048, total is 6230300
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_03.udi, 66048, total is 6296348
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_01.udi, 66048, total is 6362396
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\prp_flake.udi, 131072, total is 6493468
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\prp_guide_04.udi, 65536, total is 6559004
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_interspace_01.udi, 131072, total is 6690076
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_roadblock.udi, 16896, total is 6706972
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_alley_01.udi, 131072, total is 6838044
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_alley_02.udi, 131072, total is 6969116
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\prp_start_01.udi, 66048, total is 7035164
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\plt_benthos.udi, 262144, total is 7297308
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\sky.udi, 262144, total is 7559452
+[GLTextureManager] Load Texture models\tracks\AroundTheBlock\textures\con_bottle.udi, 65536, total is 7624988
+RacingEngine/Common/SR_Resources.cpp(515): Warning: getResource(skybox) does not exist
+
+RacingEngine/GamePlay/PMR_Race.cpp(172): Race::loadCars--begin!
+
+[GLTextureManager] Load Texture Models\DriverAnimations\SpongeBob\Texture\SpongeBob_hi.udi, 131072, total is 7756060
+[GLTextureManager] Load Texture models\cars\PlayerCars\SpongeBobCar\Textures\SpongeBob_kart_hi.udi, 66048, total is 7822108
+[GLTextureManager] Load Texture models\TrackObject\Hook\Textures\hook.tga, 65536, total is 7887644
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0000.udi, 32768, total is 7920412
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0001.udi, 32768, total is 7953180
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0002.udi, 32768, total is 7985948
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0003.udi, 32768, total is 8018716
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0004.udi, 32768, total is 8051484
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0005.udi, 32768, total is 8084252
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0006.udi, 32768, total is 8117020
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0007.udi, 32768, total is 8149788
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0008.udi, 32768, total is 8182556
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0009.udi, 32768, total is 8215324
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0010.udi, 32768, total is 8248092
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0011.udi, 32768, total is 8280860
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0012.udi, 32768, total is 8313628
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0013.udi, 32768, total is 8346396
+[GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0014.udi, 32768, total is 8379164
+[GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0001.udi, 32768, total is 8411932
+[GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0002.udi, 32768, total is 8444700
+[GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0003.udi, 32768, total is 8477468
+[GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0004.udi, 32768, total is 8510236
+[GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0005.udi, 32768, total is 8543004
+[GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0006.udi, 32768, total is 8575772
+[GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0007.udi, 32768, total is 8608540
+[GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0008.udi, 32768, total is 8641308
+[GLTextureManager] Load Texture Models\WeaponAnimation\AnchorDrag\Textures\con_bus.udi, 131072, total is 8772380
+[GLTextureManager] Load Texture Textures\Particle\speedline.udi, 512, total is 8772892
+Catchup Boost = 10
+[GLTextureManager] Load Texture Models\DriverAnimations\Patrick\Texture\mk_patrick_char_mod_player_0.tga, 262144, total is 9035036
+[GLTextureManager] Load Texture Models\DriverAnimations\Patrick\Texture\Can.tga, 16384, total is 9051420
+[GLTextureManager] Load Texture models\cars\AICars\Patrick\Textures\Patrick_hi.udi, 66048, total is 9117468
+[GLTextureManager] Load Texture models\cars\AICars\Patrick\Textures\Patrick_kart_hi.udi, 66048, total is 9183516
+Catchup Boost = 8
+[GLTextureManager] Load Texture Models\DriverAnimations\Gary\Texture\mk_gary_char_mod_player_0.tga, 262144, total is 9445660
+[GLTextureManager] Load Texture Models\DriverAnimations\Gary\Texture\Note.tga, 8192, total is 9453852
+[GLTextureManager] Load Texture models\cars\AICars\Gary\Textures\Gary_hi.udi, 66048, total is 9519900
+[GLTextureManager] Load Texture models\cars\AICars\Gary\Textures\Gary_kart_hi.udi, 66048, total is 9585948
+Catchup Boost = 10
+[GLTextureManager] Load Texture Models\DriverAnimations\Squidward\Texture\Squidward_hi.udi, 66048, total is 9651996
+[GLTextureManager] Load Texture Models\DriverAnimations\Squidward\Texture\flute.tga, 32768, total is 9684764
+[GLTextureManager] Load Texture models\cars\AICars\Squidward\Textures\Squidward_kart_hi.udi, 66048, total is 9750812
+Catchup Boost = 10
+[GLTextureManager] Load Texture Models\DriverAnimations\Sandy\Texture\mk_sandy_char_mod_player_0.tga, 262144, total is 10012956
+[GLTextureManager] Load Texture models\cars\AICars\Sandy\Textures\Sandy_hi.udi, 131072, total is 10144028
+[GLTextureManager] Load Texture models\cars\AICars\Sandy\Textures\Sandy_kart_hi.udi, 66048, total is 10210076
+Catchup Boost = 8
+[GLTextureManager] Load Texture Models\DriverAnimations\Plankton\Texture\mk_plankton_char_mod_player_0.tga, 262144, total is 10472220
+[GLTextureManager] Load Texture Models\DriverAnimations\Plankton\Texture\plankton_Recipe.tga, 16384, total is 10488604
+[GLTextureManager] Load Texture models\cars\AICars\Plankton\Textures\Plankton_hi.udi, 66048, total is 10554652
+[GLTextureManager] Load Texture models\cars\AICars\Plankton\Textures\Plankton_kart_hi.udi, 66048, total is 10620700
+Catchup Boost = 10
+RacingEngine/GamePlay/PMR_Race.cpp(283): Race::loadCars()--end!
+
+[GLTextureManager] Load Texture Models\WeaponAnimation\LifeRing\Textures\lifering.tga, 65536, total is 10686236
+[GLTextureManager] Load Texture Models\WeaponAnimation\OilSlick\Textures\oilslick.udi, 8192, total is 10694428
+[GLTextureManager] Load Texture Textures\SFX\Spatula\trident.udi, 4096, total is 10698524
+[GLTextureManager] Load Texture Textures\SFX\Spatula\progress.udi, 1056, total is 10699580
+[GLTextureManager] Load Texture Textures\SFX\Spatula\sfx0001.udi, 4096, total is 10703676
+[GLTextureManager] Load Texture Textures\SFX\Spatula\sfx0002.udi, 4096, total is 10707772
+[LOADING] Render accepted (0.500000)
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0000.udi, 8704, total is 10716476
+[GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0001.udi, 8704, total is 10725180
+[GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0002.udi, 8704, total is 10733884
+[GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0003.udi, 8704, total is 10742588
+[GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0004.udi, 8704, total is 10751292
+[GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0005.udi, 8704, total is 10759996
+[GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0006.udi, 8704, total is 10768700
+[GLTextureManager] Load Texture models\pickup\textures\ic_coin.5tx, 4096, total is 10772796
+[GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0001.udi, 8224, total is 10781020
+[GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0002.udi, 8224, total is 10789244
+[GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0003.udi, 8224, total is 10797468
+[GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0004.udi, 8224, total is 10805692
+[GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0005.udi, 8224, total is 10813916
+[GLTextureManager] Load Texture models\pickup\textures\Coinchest_0000.udi, 8224, total is 10822140
+[GLTextureManager] Load Texture models\pickup\textures\Coinchest_0001.udi, 8224, total is 10830364
+[GLTextureManager] Load Texture models\pickup\textures\Coinchest_0002.udi, 8224, total is 10838588
+[GLTextureManager] Load Texture models\pickup\textures\Coinchest_0003.udi, 8224, total is 10846812
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+
+[GLTextureManager] Load Texture models\scalingfx\boostarea\Textures\BoostArea.5tx, 16384, total is 10863196
+[GLTextureManager] Load Texture textures\gadget\ic_letterbubble_lower.udi, 65536, total is 10928732
+[GLTextureManager] Load Texture textures\gadget\ic_letterbubble.udi, 65536, total is 10994268
+[GLTextureManager] Load Texture textures\gadget\ic_letterbubble_double.udi, 33280, total is 11027548
+[GLTextureManager] Load Texture textures\gadget\pop0001.udi, 4608, total is 11032156
+[GLTextureManager] Load Texture textures\gadget\pop0002.udi, 8192, total is 11040348
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.500000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[LOADING] Render accepted (0.250000)
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Release Texture Aroundtheblock.udi, 153600, total is 10886748
+[GLTextureManager] Release Texture atb_15.udi, 38432, total is 10848316
+[GLTextureManager] Load Texture Textures\Particle\dustLX.udi, 2048, total is 10850364
+[GLTextureManager] Load Texture Textures\Particle\splash.udi, 2048, total is 10852412
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Load Texture UITexture/staging_light_launch_time2.udi, 44384, total is 10896796
+[GLTextureManager] Load Texture UITexture/staging_light_launch_color5.udi, 3136, total is 10899932
+[GLTextureManager] Load Texture UITexture/staging_light_launch_color2.udi, 5776, total is 10905708
+[GLTextureManager] Load Texture UITexture/time_board_02.udi, 18032, total is 10923740
+[GLTextureManager] Load Texture UITexture/time_board_cursor.udi, 2592, total is 10926332
+[GLTextureManager] Load Texture UITexture/time_board_06.udi, 784, total is 10927116
+[GLTextureManager] Load Texture UITexture/time_board.udi, 14592, total is 10941708
+[GLTextureManager] Load Texture UITexture/staging_3.udi, 131072, total is 11072780
+[GLTextureManager] Load Texture UITexture/staging_2.udi, 131072, total is 11203852
+[GLTextureManager] Load Texture UITexture/staging_1.udi, 65536, total is 11269388
+[GLTextureManager] Load Texture UITexture/staging_go.udi, 262144, total is 11531532
+[GLTextureManager] Load Texture UITextureOutOfPage/staging_light/forbid.udi, 2888, total is 11534420
+[GLTextureManager] Load Texture UITextureOutOfPage/staging_light/staging_light_launch_color1.udi, 2888, total is 11537308
+[GLTextureManager] Load Texture UITextureOutOfPage/staging_light/staging_light_launch_06.udi, 9200, total is 11546508
+			ActivityStart activity: SLL mode:  level: 1.1
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[GLTextureManager] Load Texture UITextureOutOfPage/staging_light/staging_light_launch_color3.udi, 1568, total is 11548076
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(836): current ca in a row num: 0
+src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(837): most ca in a row num: 0
+[GLTextureManager] Load Texture UITextureOutOfPage/staging_light/staging_light_lighten.udi, 1568, total is 11549644
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+[tadpole] fb1 GET_VSCREEN
+^C[0x5] AppManager caught signal 2 !
+[tadpole] fcreate /home/bubbles/Documents/Projects/leappad-emu/runtime/sysroot/tmp/play_trans
+[bubbles@acpc leappad-emu]$ 
+

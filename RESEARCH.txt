@@ -1,0 +1,344 @@
+================================================================================
+LEAPPAD / POLLUX PLATFORM — RESEARCH FINDINGS
+================================================================================
+Compiled: 2026-07-27
+Companion to PLAN.txt. Everything here is from public sources; URLs at the end.
+[VERIFY] marks something to confirm against your actual device.
+
+*** SCOPE NOTE (added rev 3) ***
+This document was written for LeapPad1 / LF1000 / Pollux, before the target
+was corrected to LeapPad2 / NXP3200. See PLAN.txt §12.
+
+  STILL VALID: §0 (no emulator of this platform exists), §5 (.lfp = ZIP,
+  .lf2 = bzip2), §7 (community tools — LFHacks, OpenLFConnect, retroleap),
+  §8 (spiffyhacks recovery), §9 (eLinux page index and mirror tricks).
+
+  SUPERSEDED: §1-§4, §6 describe LeapPad1 hardware, partitions, kernel
+  command line and rootfs. For LeapPad2 use PLAN.txt §2, §3 and §8.
+
+  PROMOTED: retroleap (§7) is no longer tangential — it targets Leapster GS
+  and LeapPad2 specifically, i.e. the actual device. Read it early.
+
+--------------------------------------------------------------------------------
+0. HEADLINE FINDING
+--------------------------------------------------------------------------------
+NO EMULATOR OF THIS PLATFORM EXISTS.
+
+Worth being precise, because search results are actively misleading here. The
+eLinux page "LeapFrog Pollux Platform: Emulators And Games" and the Emulation
+General Wiki "Didj emulators" page are about emulators that RUN ON the Didj
+(gpSP for GBA, RetroArch cores, etc.) — not emulators OF the Didj. Same for
+retroleap: it's a RetroArch firmware that replaces the LeapFrog software on
+real hardware.
+
+Nobody has built what you're describing. The homebrew scene went in the
+opposite direction — running other systems' software on LeapFrog hardware —
+which means the entire "make LeapFrog software run elsewhere" problem is
+unexplored. It also means the scene produced exactly the artifacts we need
+(kernel sources, toolchains, boot methods, flash layouts) as a side effect.
+
+--------------------------------------------------------------------------------
+1. HARDWARE — CONFIRMED SPECS
+--------------------------------------------------------------------------------
+SoC:        LeapFrog "LF1000" = MagicEyes Pollux VF3520F
+            ARM926EJ-S @ 393 MHz
+            Same silicon family as the GP2X Wiz and Caanoo.
+
+Clocks:     27 MHz main crystal
+            12 MHz USB
+            32.768 kHz RTC
+
+RAM:        32 MB or 64 MB SDRAM/DDR (Nanya, Qimonda) depending on model.
+            Kernel is told mem=46M on the Explorer.
+
+Flash:      NAND Micron MT29F2G08AAC (256 MB) on smaller models;
+            512 MB and 2 GB variants exist (2 GB models add an SM2683LT
+            SD controller).
+            NOR SST39VF040 (512 KB) holds the bootloader.
+
+DISPLAY — NOTE THE DIFFERENCE BETWEEN MODELS:
+    Leapster Explorer   320x240 TFT 3.2"  (touch and non-touch variants)
+    LeapPad Explorer    480x272 LCD 5.0"  touchscreen     <-- YOUR TARGET
+    Panel controller on the Leapster is ILI9322 (screen_module=ILI9322 in the
+    boot args). [VERIFY] the LeapPad's panel module — 480x272 is a different
+    part, and the kernel takes screen_module= as a boot parameter, so read it
+    off your device's /proc/cmdline.
+
+Graphics:   RGBA/RGB 565, hardware multi-layer compositing (3 layers),
+            OpenGL ES 1.1, Theora video decode.
+            The 3D core explains MLC_IOCT3DENB in mlc_ioctl.h.
+
+Audio:      Cirrus Logic CS43L22 codec, or LeapFrog's own LFP100 chip.
+            (The kernel tree has mach/lfp100.h — LFP100 is a combined
+            power/audio part.)
+
+Input:      10 buttons + D-pad, resistive touchscreen + stylus,
+            Bosch BMA220 accelerometer, camera on some models.
+
+I/O:        USB 2.0 device (USB 1.1 host on some models), UART, SD/MMC,
+            cartridge socket.
+
+Power:      4x AA or 9V 700mA adapter.
+
+--------------------------------------------------------------------------------
+2. THE KERNEL COMMAND LINE  (Leapster Explorer — read yours to compare)
+--------------------------------------------------------------------------------
+    init=/sbin/init console=ttyS0,115200 mem=46M
+    mlc_fb=0x82E00000,0x01200000
+    ram=0x80000000-0x83FFFFFF
+    screen_module=ILI9322
+    ebs=0x20000,0x0
+    root=ubi0_0 rw rootfstype=ubifs ubi.mtd=RFS
+
+Decoded, this is most of the machine model for free:
+
+  mem=46M                      46 MB given to Linux
+  ram=0x80000000-0x83FFFFFF    64 MB physical RAM window
+  mlc_fb=0x82E00000,0x01200000 18 MB carved out at 0x82E00000 for the MLC
+                               framebuffers — i.e. the layer buffers live in
+                               a reserved physical region, NOT in normal
+                               kernel memory. The shim should mirror this:
+                               one contiguous arena that layer addresses
+                               index into.
+  console=ttyS0,115200         serial console, for real-hardware debugging
+  root=ubi0_0 rootfstype=ubifs UBIFS on UBI, on the MTD partition named RFS
+  ebs=0x20000,0x0              Emerald Boot parameters
+
+>>> The rootfs is UBIFS on UBI. This matters for your dump: a plain dd of the
+    MTD partition gives you a UBI container, not a mountable filesystem. You
+    need to attach UBI and mount the volume, or use ubireader/ubidump to
+    extract offline. If you already have a working rootfs dump, ignore this;
+    if the dump looks like garbage, this is why.
+
+--------------------------------------------------------------------------------
+3. FLASH / PARTITION LAYOUT  (Leapster Explorer; LeapPad should be similar)
+--------------------------------------------------------------------------------
+  Partition      Offset       Size     Device       Media
+  ------------------------------------------------------------
+  Emerald_Boot   0x00000000   1 MB     /dev/mtd0    NOR
+  I18n_Screens   0x00100000   1 MB     /dev/mtd1    NAND
+  Kernel         0x00200000   8 MB     /dev/mtd2    NAND
+  RFS            0x00A00000   86 MB    /dev/mtd3    NAND
+  Bulk           0x06000000   416 MB   /dev/mtd4    NAND
+  NOR_Boot       —            126 KB   /dev/mtd5
+  MfgData0       —            4 KB     /dev/mtd6
+  MfgData1       —            4 KB     /dev/mtd7
+  ubi_rfs        —            83.5 MB  /dev/mtd8
+  ubi_bulk       —            405 MB   /dev/mtd9
+  Cartridge      0x00000000   256 MB   —            Cartridge NAND
+
+  UBI geometry for RFS: -m 2048 -e 129024 -c 677 -s 512 -O 512
+      (page 2048, LEB 129024, max 677 LEBs, subpage 512, VID offset 512)
+      vol_name=ubi_rfs, vol_size=87349248
+
+Notes:
+  * MfgData0/1 are 4 KB each and almost certainly hold per-unit manufacturing
+    data — serial number, board ID, possibly keys. Dump these. They are tiny
+    and they are the most likely home of anything device-binding.
+  * I18n_Screens is the localised boot/error splash images.
+  * Bulk is user storage (downloaded content, save data, photos).
+
+--------------------------------------------------------------------------------
+4. CARTRIDGES
+--------------------------------------------------------------------------------
+  * 256 MB NAND, mapped at cartridge offset 0x00000000.
+  * The cartridge CONNECTOR also exposes a TTL-level UART and SD card
+    connections. That's a hardware-hacking gift: serial console via the cart
+    slot, no case opening. It also means some carts may be SD-backed rather
+    than NAND.
+  * eLinux has "Leapster Explorer: How To Make a NAND Cartridge" — the
+    community already built custom carts, so the format is at least partly
+    understood. Read this page; it is the closest thing to a cartridge format
+    spec that exists.
+  * See "LeapFrog Pollux Platform: Cartridge Settings" for the software side.
+
+--------------------------------------------------------------------------------
+5. FIRMWARE / PACKAGE FORMATS — EASIER THAN EXPECTED
+--------------------------------------------------------------------------------
+LeapFrog distributes content through LFConnect as two archive types, and both
+are ordinary formats with a renamed extension:
+
+    .lfp   =  ZIP archive         ->  7z x -tzip  file.lfp
+    .lf2   =  bzip2 archive       ->  7z x -tbzip2 file.lf2
+
+On a PC that had LFConnect installed, these cache under:
+    WinXP:      C:\Documents and Settings\All Users\Application Data\Leapfrog\LeapFrog Connect\
+    Vista/7+:   C:\ProgramData\Leapfrog\LeapFrog Connect\
+...in a device-named subfolder.
+
+>>> This is a significant shortcut. Downloadable titles and firmware images
+    can be obtained and unpacked without touching hardware at all, which gives
+    us test content for the emulator before any cartridge is dumped. It also
+    means firmware archaeology across versions is cheap.
+
+Firmware versions documented for the Explorer:
+    1.0.8.6905, 1.1.46.8291, 1.3.4.2044, 1.4.11.2128
+
+DFTP is the firmware-update transport. The Explorer uses filename conventions
+plus an on-device filesystem map file to drive updates.
+
+--------------------------------------------------------------------------------
+6. WHAT'S IN THE ROOTFS — USERSPACE STACK
+--------------------------------------------------------------------------------
+Confirmed present on these devices:
+    SDL, SDL_ttf, SDL_image, SDL_mixer
+    tslib                       (touchscreen calibration/filtering)
+    Linux framebuffer drivers
+    Adobe Flash Lite            (recipes/adobe-flash in the OE tree)
+    Theora video decode
+
+Implications:
+  * SDL + framebuffer + tslib is the homebrew path, and it's also evidence
+    that the /dev/fb0 route (lf1000fb.h) is live and used, not vestigial.
+  * If parts of the LeapFrog stack use SDL, some of it may be far easier to
+    shim than expected — SDL sits on fb0 + evdev + ALSA, all standard.
+  * tslib means touchscreen input goes through a normal evdev device with
+    userspace calibration, so we don't need to emulate ADC behaviour, just
+    produce plausible evdev events.
+
+--------------------------------------------------------------------------------
+7. COMMUNITY TOOLS AND PROJECTS
+--------------------------------------------------------------------------------
+LFHacks org (github.com/lfhacks) — the currently active group:
+    Leapster-Tools                  Successor to LeapFrog-Tools; aims for
+                                    accuracy + readability. Python, GPL-3.
+    LFExtractors                    Extractors for common LeapFrog file
+                                    formats. Python, MIT.       <-- read this
+    Virtuos-LeapFrog-game-tools     Tools for games made by Virtuos for the
+                                    Leapster Explorer, LeapPad Explorer and
+                                    LeapTV.                      <-- our exact
+                                                                     platform
+    General-LeapFrog-game-research  Docs/code for converting, extracting and
+                                    viewing game data. Organised by studio:
+                                    1st Playable, InLight, LeapFrog, Other
+                                    Ocean, Sunplus, Torus Games, WayForward.
+    LFTools                         Mount/lock/eject Leapster2 or Didj.
+    Pre-Leapster-Tools              Older pre-Leapster toys.
+    Leapster-Dumper                 Arduino Mega shield (PCB + code) for
+                                    dumping Leapster carts.
+    Disney-Zippity-Tools            Related Sunplus-era device.
+
+Other:
+    BLiNXthetimesweeperGOD/LeapFrog-Tools   Original tool set — LeapPad
+                                            (1999), Leapster, L-MAX,
+                                            Leapster 2.
+    jrspruitt/OpenLFConnect                 Python replacement for LFConnect:
+                                            file navigation, upload/download,
+                                            firmware update, dev tools.
+                                            Read its source for the on-device
+                                            protocol and layout.
+    mac2612/retroleap                       RetroArch firmware for Leapster GS
+                                            and LeapPad2 (LF2000). Alpha2
+                                            improved LF1000 support.
+    mac2612/lf1000_kernel                   LF1000 kernel, browsable.
+    nirvous/gpsp_lf1000                     GBA emulator for LF1000 — useful
+                                            as a worked example of a real
+                                            program driving the MLC/DPC and
+                                            audio directly.
+    Spyder-0/sshflash-leapfrog               Contains a prebuilt lf1000_zImage.
+
+>>> The single most useful of these for us is probably gpsp_lf1000: it is
+    open source, it runs on the exact hardware, and it exercises the display
+    and audio paths hard. It makes an excellent early test payload for the
+    shim — much simpler than the system menu, and if it renders correctly the
+    compositor is probably right.
+
+>>> Virtuos-LeapFrog-game-tools and LFExtractors are the head start on
+    cartridge CONTENT formats, which is the preservation half of the goal.
+
+--------------------------------------------------------------------------------
+8. SPIFFYHACKS
+--------------------------------------------------------------------------------
+spiffyhacks.com was the main LeapFrog modding forum and does appear to be
+down. Threads are still referenced by URL from elsewhere (e.g. a retroleap
+thread at spiffyhacks.com/thread-1187.html with LeapPad2 board-variant button
+mapping fixes), which is exactly the kind of hard-won detail worth recovering.
+
+Recovery approach:
+  * web.archive.org/web/*/spiffyhacks.com/*  to enumerate captured URLs
+  * thread IDs appear sequential (thread-NNNN.html), so once you know the
+    range you can walk it
+  * a successor forum exists at genie.epizy.com ("Spiffy Hacks - LeapPad Game
+    Genie+"), which may host migrated content [VERIFY]
+  * Archive Team / archive.org full-site grabs may exist under the domain
+
+Worth an evening with wget against the Wayback CDX API rather than manual
+clicking. Low priority relative to §7, but the forum is where the undocumented
+per-board quirks live.
+
+--------------------------------------------------------------------------------
+9. THE eLINUX WIKI — PAGE INDEX
+--------------------------------------------------------------------------------
+elinux.org is behind Anubis bot protection, so I can't fetch it directly.
+Two workarounds that DO work: the tinyclub/elinux GitHub markdown mirror
+(raw.githubusercontent.com/tinyclub/elinux/master/en/dev_portals/
+Hardware_Hacking/...) and the gitbooks mirrors (bigzz, lzz5235, hurricanecui).
+Mirrors may be older than the live wiki — prefer live for anything critical.
+
+Pages worth pulling locally, roughly in priority order:
+
+  CORE
+    LeapFrog_Pollux_Platform
+    LeapFrog_Pollux_Platform:_Technical_Details
+    Leapster_Explorer_Memory_Map
+    LeapFrog_Pollux_Platform:_Source_Code
+
+  CARTRIDGE  (highest value for the preservation goal)
+    LeapFrog_Pollux_Platform:_Cartridge
+    LeapFrog_Pollux_Platform:_Cartridge_Settings
+    Leapster_Explorer:_How_To_Make_a_NAND_Cartridge
+    LeapFrog_Pollux_Platform:_Extract_Archives
+
+  BOOT / ACCESS
+    LeapFrog_Pollux_Platform:_Console_Access
+    Leapster_Explorer:_Emerald_Boot
+    Leapster_Explorer:_USB_Boot
+    Leapster_Explorer:_GPIO_subsystem
+    LeapFrog_Pollux_Platform:_JTAG_Kernel_Boot
+    LeapFrog_Pollux_Platform:_JTAG_Pinouts
+    Leapster_Explorer:_Common_Commands
+
+  BUILD
+    LeapFrog_Pollux_Platform:_Build_Environment
+    LeapFrog_Pollux_Platform:_Kernel_Configuration
+
+  USERSPACE / MEDIA
+    Leapster_Explorer:_SDL_resources
+    Leapster_Explorer:_Play_Your_Own_Flash_Games
+    Leapster_Explorer:_Play_Theora_Videos
+    LeapFrog_Pollux_Platform:_TV_Out
+    Leapster_Explorer_Camera
+    LeapFrog_Pollux_Platform:_DFTPdevice
+
+--------------------------------------------------------------------------------
+10. STILL OPEN
+--------------------------------------------------------------------------------
+  * Brio source — not in the GPL drop we have. See PLAN.txt §5. Nothing found
+    online yet suggesting it was ever published. Assume binary-only until
+    proven otherwise, and rely on ARCH B intercepting below it.
+  * LeapPad Explorer panel module name / exact timings (read /proc/cmdline).
+  * Whether the LeapPad Explorer partition table matches the Leapster's.
+  * Cartridge content structure: filesystem type, manifest, signature.
+  * Where content validation runs: Emerald Boot, Brio loader, or the title.
+  * Whether MfgData0/1 participate in any device binding.
+
+--------------------------------------------------------------------------------
+SOURCES
+--------------------------------------------------------------------------------
+  https://elinux.org/LeapFrog_Pollux_Platform
+  https://elinux.org/LeapFrog_Pollux_Platform:_Source_Code
+  https://elinux.org/LeapFrog_Pollux_Platform:_Cartridge
+  https://elinux.org/LeapFrog_Pollux_Platform:_Extract_Archives
+  https://elinux.org/LeapFrog_Pollux_Platform:_Emulators_And_Games
+  https://github.com/tinyclub/elinux  (markdown mirror of the above)
+  https://bigzz.gitbooks.io/elinux/content/en/dev_portals/Hardware_Hacking/Leapster_Explorer/Leapster_Explorer.html
+  https://github.com/lfhacks
+  https://github.com/BLiNXthetimesweeperGOD/LeapFrog-Tools
+  https://github.com/jrspruitt/OpenLFConnect
+  https://github.com/mac2612/retroleap
+  https://github.com/mac2612/lf1000_kernel
+  https://github.com/nirvous/gpsp_lf1000
+  https://github.com/Spyder-0/sshflash-leapfrog
+  https://emulation.gametechwiki.com/index.php/LeapFrog_Didj
+  https://en.wikipedia.org/wiki/Leapster_Explorer
+  https://en.wikipedia.org/wiki/LeapFrog_Didj
