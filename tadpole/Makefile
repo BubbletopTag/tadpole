@@ -35,7 +35,7 @@ SHIMLIBS  := ../runtime/shimlibs
 SHIM_SONAME := libdl.so.0
 REAL_DL     := libdl.so.9
 
-SHIM_SRC := shim/tadpole_shim.c
+SHIM_SRC := shim/tadpole_shim.c shim/tadpole_crash.c
 SHIM_OUT := $(SHIMLIBS)/libdl.so.0
 # Second variant: the display tools (imager-fb, drawtext-fb, flipbook-fb,
 # fbtest) link no libdl at all — libz.so.1 is their first NEEDED entry.
@@ -88,7 +88,7 @@ asound: $(ASOUND_OUT)
 
 # GL: replace the stock EGL/GLES1 front-ends at the standard API boundary.
 # Freestanding — these call nothing but each other.
-gl: $(GLES_OUT) $(EGL_OUT)
+gl: gl-links
 
 $(EGL_OUT): $(EGL_SRC) $(GLES_OUT)
 	@mkdir -p $(SHIMLIBS_GL)
@@ -105,11 +105,33 @@ $(GLES_OUT): $(GLES_SRC) shim/tadpole_glcmd.h
 		-fno-stack-protector -fno-builtin \
 		-fuse-ld=lld -Wl,-soname,libGLESv1_CM.so.1 -o $@ $(GLES_SRC) \
 		$(GUESTLIBS)/libc.so.0
+	@echo "built $@"
+
+# THE ALIAS NAMES ARE A SEPARATE, ALWAYS-CHECKED TARGET.
+#
+# These used to be side effects of the recipe above, which only runs when the
+# .so is out of date — so a link that was missing (or never created, as
+# libopengles_lite.so never was) could not be restored by any number of
+# rebuilds. `make gl` would print nothing and fix nothing.
+gl-links: $(GLES_OUT) $(EGL_OUT)
 	@# The loader resolves DT_NEEDED by SONAME as a FILENAME, so libEGL's
 	@# dependency on libGLESv1_CM.so.1 needs that exact name on disk.
-	ln -sf libGLESv1_CM.so $(SHIMLIBS_GL)/libGLESv1_CM.so.1
-	ln -sf libEGL.so $(SHIMLIBS_GL)/libEGL.so.1
-	@echo "built $@"
+	@ln -sf libGLESv1_CM.so $(SHIMLIBS_GL)/libGLESv1_CM.so.1
+	@ln -sf libEGL.so $(SHIMLIBS_GL)/libEGL.so.1
+	@# libopengles_lite.so IS libGLESv1_CM.so — a symlink, on the real device.
+	@# Native titles link THAT name (Clam Prix's DT_NEEDED says
+	@# libopengles_lite.so, not libGLESv1_CM.so.1), and because the loader
+	@# searches by filename, its absence here meant the search fell through
+	@# shimlibs-gl to runtime/libs and loaded the STOCK VR5 driver instead of
+	@# ours. That driver then cannot resolve its own EGL::* C++ internals,
+	@# because our libEGL replaced the stock one:
+	@#     symbol '_ZN3EGL6Object9OnReleaseEi': can't resolve symbol
+	@# So those games ran on a half-linked dead driver and rendered nothing.
+	@# Verified with a test binary linked exactly as Clam Prix is: without this
+	@# link it fails as above, with it glGetString(GL_VENDOR) returns "Tadpole".
+	@ln -sf libGLESv1_CM.so $(SHIMLIBS_GL)/libopengles_lite.so
+	@echo "gl aliases: libGLESv1_CM.so.1 libEGL.so.1 libopengles_lite.so"
+.PHONY: gl-links
 
 
 tone: $(TONE_OUT)
@@ -135,7 +157,7 @@ $(ASOUND_OUT): $(ASOUND_SRC)
 $(SHIM_OUT): $(SHIM_SRC) $(SHIMLIBS)/$(REAL_DL)
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
-		-fuse-ld=lld -Wl,-soname,$(SHIM_SONAME) -o $@ $< \
+		-fuse-ld=lld -Wl,-soname,$(SHIM_SONAME) -o $@ $(SHIM_SRC) \
 		$(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0
 	@echo "built $@"
 	@echo -n "  SONAME: "; readelf -d $@ | grep SONAME | sed 's/.*\[\(.*\)\]/\1/'
@@ -159,7 +181,7 @@ shimz: $(SHIM_OUT_Z)
 $(SHIM_OUT_Z): $(SHIM_SRC) $(SHIMLIBS_Z)/$(REAL_Z)
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
-		-fuse-ld=lld -Wl,-soname,libz.so.1 -o $@ $< \
+		-fuse-ld=lld -Wl,-soname,libz.so.1 -o $@ $(SHIM_SRC) \
 		$(SHIMLIBS_Z)/$(REAL_Z) $(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0
 	@echo "built $@"
 

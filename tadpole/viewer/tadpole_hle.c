@@ -41,8 +41,16 @@
 /* GLES1 enums that differ from, or are absent on, the desktop. */
 #define GLES_FIXED  0x140C
 
-#define MAX_TEX  256
-#define MAX_BUF  128
+/* Indexed by GUEST texture name, so this MUST stay larger than the guest's
+ * MAX_TEXS in tadpole_gles_core.c (512). A name at or above this is dropped,
+ * and a dropped texture draws black while raising no GL error — silent, and
+ * indistinguishable from a texture that simply never arrived. */
+#define MAX_TEX  576
+/* Indexed by GUEST buffer name, so it must exceed both the guest's MAX_BUFS
+ * (256) and the reserved client-array names HLE_CLIENT_* (1000..1003). A name
+ * at or above this is dropped, and a dropped ELEMENT buffer makes the host skip
+ * the draw entirely — silently, and the frame comes back black. */
+#define MAX_BUF  1024
 
 struct hbuf { unsigned char *data; unsigned int size; };
 struct harr { unsigned int buf, type, on; int size, stride; unsigned int off; };
@@ -124,6 +132,32 @@ static unsigned long     g_err_count;
  * nothing and every later call still "works", so the frame comes back empty with
  * no other symptom. Sample once per frame — glGetError is a pipeline flush point
  * and calling it per command would dominate the cost. */
+/* Opcode names, in enum order, so a GL error can name the call that caused it
+ * instead of just the frame. The compile-time check below is the point: add an
+ * opcode to tadgl_op and forget this table, and every name after the insertion
+ * point silently shifts by one — a diagnostic that lies is worse than none. */
+static const char *const g_opnames[] = {
+	"NOP", "PRESENT", "CLEAR", "VIEWPORT",
+	"ENABLE", "DISABLE", "BLENDFUNC", "DEPTHFUNC", "DEPTHMASK", "ALPHAFUNC",
+	"TEXENV", "COLOR", "CULLFACE", "FRONTFACE", "SHADEMODEL",
+	"MATRIXMODE", "LOADIDENTITY", "LOADMATRIX", "MULTMATRIX",
+	"PUSHMATRIX", "POPMATRIX", "ORTHO", "FRUSTUM",
+	"TRANSLATE", "ROTATE", "SCALE",
+	"BINDTEXTURE", "ACTIVETEXTURE", "TEXIMAGE2D", "TEXSUBIMAGE2D",
+	"TEXPARAM", "DELETETEXTURE",
+	"BUFFERDATA", "BUFFERSUBDATA", "DELETEBUFFER",
+	"ARRAYPOINTER", "CLIENTSTATE",
+	"DRAWARRAYS", "DRAWELEMENTS",
+	"RESET",
+};
+typedef char tadgl_opnames_match[
+	(sizeof(g_opnames) / sizeof(g_opnames[0]) == TADGL_OP_COUNT) ? 1 : -1];
+
+static const char *tadgl_opname(unsigned int op)
+{
+	return op < TADGL_OP_COUNT ? g_opnames[op] : "?";
+}
+
 static void check_gl(const char *where)
 {
 	GLenum e = glGetError();
@@ -636,10 +670,18 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		                          glActiveTexture(GL_TEXTURE0 + u); break; }
 		case TADGL_TEXPARAM:    { unsigned int v[2]; ring_get(v,8);
 		                          glTexParameteri(GL_TEXTURE_2D, v[0], (GLint)v[1]); break; }
-		case TADGL_DELETETEXTURE:{ unsigned int n; ring_get(&n,4);
-		                          if (n < MAX_TEX && g_tex[n]) {
-		                              glDeleteTextures(1, &g_tex[n]); g_tex[n] = 0; }
-		                          break; }
+		case TADGL_DELETETEXTURE:{
+			unsigned int n; ring_get(&n,4);
+			if (n < MAX_TEX) {
+				if (g_tex[n]) { glDeleteTextures(1, &g_tex[n]); g_tex[n] = 0; }
+				/* CLEAR have[] TOO. Leaving it set tells
+				 * want_tex_if_missing() we still hold an image for a texture
+				 * that no longer exists, so the next draw on that name
+				 * silently samples nothing instead of asking for the new
+				 * upload — and never reports why. */
+				g_tex_have[n] = 0;
+			}
+			break; }
 		case TADGL_TEXIMAGE2D: {
 			unsigned int hd[3];
 			const unsigned char *px;
@@ -721,6 +763,37 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			break;
 		}
 
+		case TADGL_RESET: {
+			/* The guest tore its context down. Drop EVERY mirror.
+			 *
+			 * Not doing so is worse than a leak: the next title's
+			 * glGenTextures reuses low names, and a stale g_tex_have[] entry
+			 * says we already hold an image for one — so the draw silently
+			 * samples the PREVIOUS game's texture instead of asking for the
+			 * new one. Clearing g_tex_have is therefore the important half;
+			 * deleting the GL objects merely reclaims memory. */
+			unsigned int k;
+			for (k = 0; k < MAX_TEX; k++) {
+				if (g_tex[k]) glDeleteTextures(1, &g_tex[k]);
+				g_tex[k] = 0;
+				g_tex_have[k] = 0;
+			}
+			for (k = 0; k < MAX_BUF; k++) {
+				free(g_buf[k].data);
+				g_buf[k].data = NULL;
+				g_buf[k].size = 0;
+			}
+			for (k = 0; k < TADGL_ARR_COUNT; k++) {
+				g_arr[k].on = 0;
+				g_arr[k].buf = 0;
+			}
+			g_bound_name = 0;
+			g_tex_enabled = 0;
+			if (g_verbose)
+				fprintf(stderr, "hle: context reset — mirrors dropped\n");
+			break;
+		}
+
 		case TADGL_ARRAYPOINTER: {
 			unsigned int v[6]; ring_get(v,24);
 			if (v[0] < TADGL_ARR_COUNT) {
@@ -798,6 +871,28 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			padded = 0;
 			break;
 		}
+
+		/* WHICH CALL WAS REJECTED. check_gl() samples once per frame because
+		 * glGetError is a pipeline flush point, which is right for the steady
+		 * state but useless for diagnosis: "GL error 0x0500 at frame" says an
+		 * enum was rejected somewhere among thousands of commands. Under
+		 * TADPOLE_HLE_DEBUG, check after every opcode and name it — once per
+		 * distinct (opcode, error) pair, so a call that fails on every draw
+		 * reports once rather than flooding. */
+		if (g_verbose) {
+			GLenum e = glGetError();
+			if (e != GL_NO_ERROR) {
+				static unsigned char seen[TADGL_OP_COUNT];
+				unsigned int op = p.op < TADGL_OP_COUNT ? p.op : 0;
+				if (!seen[op]) {
+					seen[op] = 1;
+					fprintf(stderr, "hle: GL error 0x%04X from %s (op %u, len %u)"
+					        " at frame %lu\n",
+					        e, tadgl_opname(p.op), p.op, p.len, g_frames);
+				}
+			}
+		}
+
 		/* Consume any tail padding the encoder added for alignment. */
 		if (padded > p.len) g_ring->tail += padded - p.len;
 		if (g_hist_n) g_hist[(g_hist_n - 1) % HIST].tail_after = g_ring->tail;

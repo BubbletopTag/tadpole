@@ -89,19 +89,67 @@ static int  g_hot_item  = -1;
 
 /* modal */
 enum modal_kind { M_NONE = 0, M_ABOUT, M_GFX, M_AUDIO, M_PAD, M_FILES, M_MSG,
-                  M_WIZARD };
+                  M_WIZARD, M_PROGRESS };
 static enum modal_kind g_modal;
 static char  g_msg_title[64], g_msg_body[512];
+/* Non-zero when M_MSG is a yes/no rather than an acknowledgement. */
+static int   g_confirm;
+static int   g_sys_ready = -1;   /* -1 = not yet checked */
 
 /* file browser */
 static char  g_fb_dir[PATHMAX];
 static char  g_fb_filter[16];         /* extension, "" = any */
 static enum ui_action g_fb_action;    /* what to emit on choose */
+/* Where to go when the browser closes. Without this, choosing a file left NO
+ * modal at all and the wizard appeared to vanish mid-setup. */
+static enum modal_kind g_fb_return;
 static char  g_fb_title[64];
 struct fentry { char name[256]; int isdir; };
 static struct fentry *g_fb_list;
 static int   g_fb_n, g_fb_sel, g_fb_top;
 #define FB_ROWS 11
+
+/* ---- progress ------------------------------------------------------------ */
+
+#define PROG_LINES 9
+#define PROG_COLS  56
+static char g_prog[PROG_LINES][PROG_COLS];
+static int  g_prog_n;              /* lines written, monotonic */
+static int  g_prog_running;
+static int  g_prog_ok;
+static char g_prog_title[64];
+
+void ui_progress_begin(const char *title)
+{
+	snprintf(g_prog_title, sizeof(g_prog_title), "%s", title ? title : "Working");
+	memset(g_prog, 0, sizeof g_prog);
+	g_prog_n = 0;
+	g_prog_running = 1;
+	g_prog_ok = 0;
+	g_modal = M_PROGRESS;
+}
+
+void ui_progress_line(const char *line)
+{
+	size_t n;
+	if (!line || !*line) return;
+	/* A scrolling window over the tail: the interesting part of a long install
+	 * is always the most recent line. */
+	snprintf(g_prog[g_prog_n % PROG_LINES], PROG_COLS, "%s", line);
+	n = strlen(g_prog[g_prog_n % PROG_LINES]);
+	while (n && (g_prog[g_prog_n % PROG_LINES][n-1] == '\n' ||
+	             g_prog[g_prog_n % PROG_LINES][n-1] == '\r'))
+		g_prog[g_prog_n % PROG_LINES][--n] = 0;
+	g_prog_n++;
+}
+
+void ui_progress_done(int ok)
+{
+	g_prog_running = 0;
+	g_prog_ok = ok;
+}
+
+int ui_progress_active(void) { return g_modal == M_PROGRESS; }
 
 /* ---- primitives ---------------------------------------------------------- */
 
@@ -433,31 +481,36 @@ struct mitem {
 	int         id;          /* 0 = separator */
 	int         needs_run;   /* only enabled while a guest is up */
 	int         needs_idle;  /* only enabled while nothing is running */
+	int         needs_sys;   /* only enabled once the system files exist */
 };
 
 enum {
 	IT_RUN_UI = 1, IT_SWF, IT_PKG, IT_FW, IT_STOP, IT_QUIT,
-	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD
+	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE
 };
 
 static const struct mitem FILE_ITEMS[] = {
-	{ "Run System Menu",        IT_RUN_UI, 0, 1 },
-	{ "Launch .swf...",         IT_SWF,    0, 1 },
-	{ "",                       0,         0, 0 },
-	{ "Install Package...",     IT_PKG,    0, 0 },
-	{ "Setup System Firmware...", IT_FW,   0, 0 },
-	{ "",                       0,         0, 0 },
-	{ "Stop Emulation",         IT_STOP,   1, 0 },
-	{ "Quit",                   IT_QUIT,   0, 0 },
+	/* Booting needs the system files. Offering it without them produces a wall
+	 * of missing-path errors in a terminal the user may not even be looking at,
+	 * which is precisely what the wizard exists to prevent. */
+	{ "Run System Menu",        IT_RUN_UI, 0, 1, 1 },
+	{ "Launch .swf...",         IT_SWF,    0, 1, 1 },
+	{ "",                       0,         0, 0, 0 },
+	{ "Install Package...",     IT_PKG,    0, 0, 0 },
+	{ "Setup System Firmware...", IT_FW,   0, 0, 0 },
+	{ "Erase System Firmware",  IT_ERASE,  0, 1, 1 },
+	{ "",                       0,         0, 0, 0 },
+	{ "Stop Emulation",         IT_STOP,   1, 0, 0 },
+	{ "Quit",                   IT_QUIT,   0, 0, 0 },
 };
 static const struct mitem OPT_ITEMS[] = {
-	{ "Audio Settings...",      IT_AUDIO,  0, 0 },
-	{ "Graphics Settings...",   IT_GFX,    0, 0 },
-	{ "Controller Settings...", IT_PAD,    0, 0 },
+	{ "Audio Settings...",      IT_AUDIO,  0, 0, 0 },
+	{ "Graphics Settings...",   IT_GFX,    0, 0, 0 },
+	{ "Controller Settings...", IT_PAD,    0, 0, 0 },
 };
 static const struct mitem HELP_ITEMS[] = {
-	{ "Setup Wizard...",        IT_WIZARD, 0, 0 },
-	{ "About Tadpole",          IT_ABOUT,  0, 0 },
+	{ "Setup Wizard...",        IT_WIZARD, 0, 0, 0 },
+	{ "About Tadpole",          IT_ABOUT,  0, 0, 0 },
 };
 
 struct menu {
@@ -498,6 +551,17 @@ static int item_enabled(const struct mitem *it)
 	if (!it->id) return 0;
 	if (it->needs_run && !g_running) return 0;
 	if (it->needs_idle && g_running) return 0;
+	if (it->needs_sys) {
+		/* Cached: this stats the filesystem, and it is asked once per item per
+		 * frame while a menu is open. Invalidated whenever a tool finishes,
+		 * which is the only way the answer changes. */
+		if (g_sys_ready < 0) {
+			struct prereq pq;
+			prereq_check(&pq);
+			g_sys_ready = (pq.rootfs && pq.sysroot) ? 1 : 0;
+		}
+		if (!g_sys_ready) return 0;
+	}
 	return 1;
 }
 
@@ -568,6 +632,7 @@ static void fb_open(const char *title, const char *start, const char *ext,
 	path_join(g_fb_dir, sizeof(g_fb_dir), start, "");
 	snprintf(g_fb_filter, sizeof(g_fb_filter), "%s", ext ? ext : "");
 	g_fb_action = act;
+	g_fb_return = (g_modal == M_WIZARD) ? M_WIZARD : M_NONE;
 	g_modal = M_FILES;
 	fb_scan();
 }
@@ -648,6 +713,9 @@ struct ui_settings *ui_cfg(void) { return &g_cfg; }
 int ui_modal(void) { return g_modal != M_NONE; }
 void ui_set_running(int r) { g_running = r; }
 
+/* Something may have installed or erased the system files. */
+void ui_invalidate_prereqs(void) { g_sys_ready = -1; }
+
 void ui_status(const char *fmt, ...)
 {
 	va_list ap;
@@ -698,6 +766,12 @@ static void activate(int id)
 	case IT_PAD:   g_modal = M_PAD;   break;
 	case IT_ABOUT: g_modal = M_ABOUT; break;
 	case IT_WIZARD: g_wiz_page = 0; g_modal = M_WIZARD; break;
+	case IT_ERASE:
+		/* Confirm first: this is the one menu item that throws work away. */
+		g_confirm = IT_ERASE;
+		msg("Erase System Firmware",
+		    "Remove the installed system files?");
+		break;
 	default: break;
 	}
 }
@@ -727,6 +801,7 @@ static struct dlg cur_dlg(int lw, int lh)
 	case M_PAD:   return dlg_rect(lw, lh, 240, 140);
 	case M_FILES: return dlg_rect(lw, lh, 300, 172);
 	case M_WIZARD: return dlg_rect(lw, lh, 340, 196);
+	case M_PROGRESS: return dlg_rect(lw, lh, 350, 150);
 	case M_MSG:   return dlg_rect(lw, lh, 250, 92);
 	default:      { struct dlg z = {0,0,0,0}; return z; }
 	}
@@ -859,6 +934,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_AUDIO: title = "Audio Settings"; break;
 	case M_PAD:   title = "Controller Settings"; break;
 	case M_FILES: title = g_fb_title; break;
+	case M_PROGRESS: title = g_prog_title; break;
 	case M_MSG:   title = g_msg_title; break;
 	default: break;
 	}
@@ -938,8 +1014,51 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		text(r, d.x + 10, d.y + d.h - 30, "Remapping: not yet.", C_TEXT_DIM);
 		break;
 	}
+	case M_PROGRESS: {
+		int i2, first = (g_prog_n > PROG_LINES) ? g_prog_n - PROG_LINES : 0;
+		int ly = d.y + 18;
+
+		/* A moving bar, NOT a percentage. The steps are unpacking a zip,
+		 * scanning packages and extracting a UBIFS volume, and their durations
+		 * are wildly different and not knowable in advance — a fake percentage
+		 * would be a lie. This says "still working" honestly, and the log lines
+		 * below say what it is working on. */
+		fill(r, d.x + 8, ly, d.w - 16, 7, C_VOID);
+		bevel(r, d.x + 8, ly, d.w - 16, 7, 0);
+		if (g_prog_running) {
+			int span = d.w - 20, wdt = 46;
+			int pos = (int)((SDL_GetTicks() / 12) % (unsigned)(span + wdt)) - wdt;
+			int x0 = d.x + 10 + (pos < 0 ? 0 : pos);
+			int x1 = d.x + 10 + (pos + wdt > span ? span : pos + wdt);
+			if (x1 > x0) fill(r, x0, ly + 1, x1 - x0, 5, C_ACCENT);
+		} else {
+			fill(r, d.x + 10, ly + 1, d.w - 20, 5,
+			     g_prog_ok ? C_ACCENT : C_EDGE_LT);
+		}
+
+		fill(r, d.x + 8, ly + 12, d.w - 16, PROG_LINES * 9 + 4, C_VOID);
+		bevel(r, d.x + 8, ly + 12, d.w - 16, PROG_LINES * 9 + 4, 0);
+		for (i2 = first; i2 < g_prog_n; i2++)
+			text(r, d.x + 12, ly + 16 + (i2 - first) * 9,
+			     g_prog[i2 % PROG_LINES], C_TEXT_DIM);
+
+		if (!g_prog_running)
+			text(r, d.x + 10, d.y + d.h - 30,
+			     g_prog_ok ? "Finished." : "Failed - see the lines above.",
+			     g_prog_ok ? C_ACCENT : C_TEXT);
+		break;
+	}
 	case M_MSG:
 		text(r, d.x + 10, d.y + 24, g_msg_body, C_TEXT);
+		if (g_confirm) {
+			SDL_Rect b = { d.x + d.w - 96, d.y + d.h - 18, 44, 13 };
+			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+			bevel(r, b.x, b.y, b.w, b.h, 1);
+			text_c(r, b.x, b.w, b.y + 3, "Erase", hot ? C_ACCENT : C_TEXT);
+			text(r, d.x + 10, d.y + 40, "Games and firmware downloads", C_TEXT_DIM);
+			text(r, d.x + 10, d.y + 50, "are not touched.", C_TEXT_DIM);
+		}
 		break;
 	case M_WIZARD: {
 		struct prereq pq;
@@ -980,11 +1099,18 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			text(r, bx, by + 11, pq.qemu ? GL_CHECK_1 " qemu-arm" : GL_CHECK_0 " qemu-arm  MISSING",
 			     pq.qemu ? C_TEXT : C_ACCENT);
 			text(r, bx, by + 21, GL_CHECK_1 " SDL2  (already running)", C_TEXT);
-			text(r, bx, by + 31, "  ubi_reader  (to read firmware)", C_TEXT_DIM);
-			text(r, bx, by + 47, "Legal:", C_ACCENT);
-			text(r, bx, by + 58, "Dump firmware and games from a", C_TEXT_DIM);
-			text(r, bx, by + 68, "LeapPad you own. Do not download", C_TEXT_DIM);
-			text(r, bx, by + 78, "them. See README.md.", C_TEXT_DIM);
+			/* ubi_reader needs lzallright, cryptography and zstandard, and it
+			 * imports them lazily — so "is ubi_reader installed" is not the
+			 * question. tools/check-deps.sh tests the whole set at once. */
+			text(r, bx, by + 31, "  firmware tools: run", C_TEXT_DIM);
+			text(r, bx, by + 41, "  ./tools/check-deps.sh", C_ACCENT);
+			/* Glyphs are 7px tall, so rows need 10 and a SECTION break needs
+			 * more. This heading was 6px below the line above it and the two
+			 * overlapped into an unreadable smear. */
+			text(r, bx, by + 60, "System files and games:", C_ACCENT);
+			text(r, bx, by + 72, "Tadpole ships none. It uses the", C_TEXT_DIM);
+			text(r, bx, by + 82, "files from your own device --", C_TEXT_DIM);
+			text(r, bx, by + 92, "see README.md. No warranty.", C_TEXT_DIM);
 			break;
 		case WIZ_SYSTEM:
 			text(r, bx, by, pq.rootfs ? GL_CHECK_1 " Firmware installed"
@@ -1002,6 +1128,18 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
 				bevel(r, b.x, b.y, b.w, b.h, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
+			}
+			/* THE SYSROOT NEEDS ITS OWN BUTTON. Installing firmware builds it,
+			 * but the two can get out of step — an interrupted install, or an
+			 * Erase that took the sysroot with it — and then the page reported
+			 * "Sysroot not built" with no way to act on it. */
+			if (pq.rootfs && !pq.sysroot) {
+				SDL_Rect b = { bx + 84, by + 60, 96, 13 };
+				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+				bevel(r, b.x, b.y, b.w, b.h, 1);
+				text_c(r, b.x, b.w, b.y + 3, "Build sysroot",
+				       hot ? C_ACCENT : C_TEXT);
 			}
 			break;
 		case WIZ_GAMES:
@@ -1087,11 +1225,13 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		return;                      /* it has its own Back/Next/Cancel */
 	cb = close_rect(&d);
 	{
-		int hot = inside(g_mx, g_my, cb.x, cb.y, cb.w, cb.h);
+		int busy = (g_modal == M_PROGRESS && g_prog_running);
+		int hot = !busy && inside(g_mx, g_my, cb.x, cb.y, cb.w, cb.h);
 		fill(r, cb.x, cb.y, cb.w, cb.h, hot ? C_BAR_HI : C_PANEL);
 		bevel(r, cb.x, cb.y, cb.w, cb.h, 1);
 		text_c(r, cb.x, cb.w, cb.y + 3,
-		       g_modal == M_FILES ? "Cancel" : "Close", hot ? C_ACCENT : C_TEXT);
+		       g_modal == M_FILES ? "Cancel" : "Close",
+		       busy ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 	}
 	if (g_modal == M_FILES) {
 		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
@@ -1099,6 +1239,18 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		fill(r, ok.x, ok.y, ok.w, ok.h, hot ? C_BAR_HI : C_PANEL);
 		bevel(r, ok.x, ok.y, ok.w, ok.h, 1);
 		text_c(r, ok.x, ok.w, ok.y + 3, "Open", hot ? C_ACCENT : C_TEXT);
+		/* Firmware can be a DIRECTORY (an LFC_Downloads folder) as well as an
+		 * archive, and install-firmware.sh takes either — but a browser that
+		 * only ever opens directories cannot express "I mean this one". No
+		 * filter means we are picking firmware, so offer it. */
+		if (!*g_fb_filter) {
+			SDL_Rect uf = { ok.x - 74, ok.y, 70, 13 };
+			int h2 = inside(g_mx, g_my, uf.x, uf.y, uf.w, uf.h);
+			fill(r, uf.x, uf.y, uf.w, uf.h, h2 ? C_BAR_HI : C_PANEL);
+			bevel(r, uf.x, uf.y, uf.w, uf.h, 1);
+			text_c(r, uf.x, uf.w, uf.y + 3, "Use folder",
+			       h2 ? C_ACCENT : C_TEXT);
+		}
 	}
 }
 
@@ -1155,6 +1307,15 @@ void ui_debug_state(const char *spec)
 	else if (!strcmp(name, "files"))   activate(IT_SWF);
 	else if (!strcmp(name, "pkg"))     activate(IT_PKG);
 	else if (!strcmp(name, "running")) { g_running = 1; ui_status("running"); }
+	else if (!strcmp(name, "progress")) {
+		ui_progress_begin("Setup System Firmware");
+		ui_progress_line("==> 70 package(s) to inspect");
+		ui_progress_line("==> Firmware-Base version 4.6.0.784");
+		ui_progress_line("  root filesystem: C4G-E1M-W4K-erootfs.ubi");
+		ui_progress_line("  kernel: kernel.bin");
+		ui_progress_line("==> extracting the root filesystem");
+		ui_progress_line("    (a 53 MB volume - takes a minute or two)");
+	}
 	else if (!strncmp(name, "wiz", 3)) {
 		g_modal = M_WIZARD;
 		g_wiz_page = (name[3] >= '0' && name[3] <= '9') ? name[3] - '0' : 0;
@@ -1200,6 +1361,11 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			return 1;
 		}
 		/* the per-page Browse buttons */
+		if (g_wiz_page == WIZ_SYSTEM && pq.rootfs && !pq.sysroot &&
+		    inside(mx, my, d.x + 62 + 84, d.y + 98, 96, 13)) {
+			g_action = UI_ACT_BUILD_SYSROOT;
+			return 1;
+		}
 		if (g_wiz_page == WIZ_SYSTEM &&
 		    inside(mx, my, d.x + 62, d.y + 98, 76, 13)) {
 			path_join(start, sizeof(start), g_proj, "sources");
@@ -1221,14 +1387,44 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		}
 		return 1;
 	}
+	if (g_modal == M_MSG && g_confirm) {
+		SDL_Rect y = { d.x + d.w - 96, d.y + d.h - 18, 44, 13 };
+		if (inside(mx, my, y.x, y.y, y.w, y.h)) {
+			g_action = UI_ACT_ERASE_FW;
+			g_confirm = 0;
+			g_modal = M_NONE;
+			return 1;
+		}
+	}
 	if (inside(mx, my, cb.x, cb.y, cb.w, cb.h)) {
-		g_modal = M_NONE;
+		if (g_modal == M_PROGRESS && g_prog_running)
+			return 1;                 /* cannot dismiss mid-install */
+		g_confirm = 0;
+		/* Back to the wizard if that is where we came from, so a Cancel or a
+		 * finished install returns the user to setup rather than an empty
+		 * screen. */
+		if ((g_modal == M_FILES || g_modal == M_PROGRESS) &&
+		    g_fb_return == M_WIZARD) {
+			g_modal = M_WIZARD;
+			g_fb_return = M_NONE;
+		} else {
+			g_modal = M_NONE;
+		}
 		ui_cfg_save();
 		return 1;
 	}
 	if (g_modal == M_FILES) {
 		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
 		int ly = d.y + 16, i;
+		if (!*g_fb_filter) {
+			SDL_Rect uf = { ok.x - 74, ok.y, 70, 13 };
+			if (inside(mx, my, uf.x, uf.y, uf.w, uf.h)) {
+				path_join(g_action_path, sizeof(g_action_path), g_fb_dir, "");
+				g_action = g_fb_action;
+				g_modal = M_NONE;      /* the progress panel takes over */
+				return 1;
+			}
+		}
 		if (inside(mx, my, ok.x, ok.y, ok.w, ok.h)) { fb_enter(); return 1; }
 		for (i = 0; i < FB_ROWS && g_fb_top + i < g_fb_n; i++) {
 			if (inside(mx, my, d.x + 8, ly + 12 + i * 11, d.w - 16, 11)) {
@@ -1371,7 +1567,14 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 		if (g_modal != M_NONE) {
 			if (e->key.keysym.sym == SDLK_ESCAPE ||
 			    e->key.keysym.sym == SDLK_RETURN) {
-				g_modal = M_NONE;
+				if (g_modal == M_PROGRESS && g_prog_running)
+					return 1;
+				if (g_modal == M_PROGRESS && g_fb_return == M_WIZARD) {
+					g_modal = M_WIZARD;
+					g_fb_return = M_NONE;
+				} else {
+					g_modal = M_NONE;
+				}
 				ui_cfg_save();
 			}
 			return 1;

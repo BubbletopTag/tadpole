@@ -3406,3 +3406,1014 @@ troubleshooting section keyed to the messages the application actually prints.
 Every claim in it was checked against the tree rather than written from memory —
 `--list`, `--boot`, `make check`, both installers and all three environment
 variables were verified to exist.
+
+## The front end must survive a bare checkout
+
+Reported from a clean `git clone`:
+
+```
+$ ./tadpole.sh --ui
+missing: .../rootfs/stock-4.6.0.784/1221351650/ubi_rfs
+run runtime/setup-sysroot.sh first
+```
+
+Exactly the wall of text the setup wizard exists to replace — `tadpole.sh` had a
+hard precondition check that exited BEFORE the viewer could start. Two faults:
+
+* The precondition now applies only to modes that actually boot something. The
+  `front` mode starts the viewer regardless, because a first-time user has no
+  firmware and the wizard is the whole point.
+* `ROOTFS` was hardcoded to `stock-4.6.0.784/1221351650/ubi_rfs`. It is now
+  discovered by globbing `rootfs/*/ubi_rfs` and `rootfs/*/*/ubi_rfs`, since the
+  version depends on whatever the user's own device shipped with.
+
+The shim-built check moved behind the same condition, and a missing VIEWER now
+says "run: cd tadpole && make" rather than failing obscurely later.
+
+## Run System Menu greyed out on a working install
+
+`guest_external()` reads `$TADPOLE_DIR/.lock` and treats a live pid as "a guest
+is running", which disables the `needs_idle` menu items. But `tadpole.sh` writes
+its OWN pid to that lock and then, in front-end mode, starts the viewer and
+waits — so the viewer always saw a live lock and greyed out Run System Menu and
+Launch .swf permanently.
+
+The lock means "this TADPOLE_DIR is in use", not "a guest is running".
+`tadpole.sh` now exports `TADPOLE_LOCK_PID=$$` and the viewer ignores a lock
+matching it.
+
+### --ui-shot could not see this bug, and now can
+
+`ui_shot()` rendered before anything evaluated the guest state, so every shot
+showed the idle case and a greyed-out File menu was unreproducible. It now calls
+`ui_set_running(guest_external())` first, which made the difference measurable:
+
+```
+no override (the bug) : bright=0    dim=1100 -> GREYED OUT
+with override (fixed) : bright=1100 dim=0    -> ENABLED
+```
+
+Note the remaining limitation: `--ui-shot idle` explicitly clears the modal, so
+it cannot show an AUTO-OPENED wizard. Check the status bar for "setup needed"
+instead — only the auto-open branch sets it.
+
+## Erase System Firmware
+
+`tools/erase-firmware.sh`, and File -> Erase System Firmware with a confirmation.
+For testing the wizard, which is otherwise hard to reach once an install works.
+
+It MOVES rather than deletes by default. Re-installing needs the firmware
+packages and `ubi_reader`, and if either is missing a real `rm -rf` leaves you
+unable to run anything; a rename is reversible in one command. `--really-delete`
+opts in.
+
+The backup PRESERVES relative paths (`.erased-<stamp>/rootfs/<ver>`,
+`.erased-<stamp>/runtime/sysroot`) so restoring is a single `cp -a`. The first
+version flattened everything into one directory, which lost where each piece came
+from and made the printed restore command wrong.
+
+Never touches `games/` or `sources/`.
+
+## AppImage
+
+`tools/build-appimage.sh` assembles `build/Tadpole.AppDir`, which is runnable as
+`AppRun` without packing. It calls `appimagetool` if present and otherwise says
+what to install — appimagetool needs squashfs-tools, and neither is here.
+
+What is bundled: the viewer, the cross-compiled ARM shim libraries, tadpole.sh,
+tools/, and SDL2.
+
+What is NOT, and why:
+
+* **OpenGL and X11** — bundling those breaks against the user's driver. Every
+  AppImage relies on the host for the graphics stack.
+* **qemu-arm** — large, with its own library tail, and packaged everywhere.
+  `AppRun` checks for it and prints the exact package name per distribution.
+* **runtime/libs and runtime/sysroot** — GENERATED. `runtime/libs` is a directory
+  of ABSOLUTE symlinks into wherever the firmware was extracted, so shipping it
+  would bake in the build machine's paths.
+
+### Building one
+
+```sh
+./tools/build-appimage.sh          # assembles build/Tadpole.AppDir
+```
+
+The AppDir is runnable immediately as `build/Tadpole.AppDir/AppRun` — packing is
+only for distribution. To pack it you need `appimagetool` AND `squashfs-tools`
+(appimagetool shells out to `mksquashfs`); the script says so and exits cleanly
+rather than half-producing a file.
+
+Verified end to end with `XDG_DATA_HOME=/tmp/xdgtest`: the data directory is
+seeded, the viewer starts from it, and `TADPOLE_PROJECT` points at it.
+
+An AppImage is read-only and Tadpole writes a lot, so `AppRun` seeds
+`$XDG_DATA_HOME/tadpole` with the program parts and runs from there, with
+`TADPOLE_PROJECT` pointing at it. A stamp file means an upgraded AppImage
+refreshes the program without touching firmware, games or settings.
+
+`TADPOLE_PROJECT` now OVERRIDES the argv[0]-derived project directory, which is
+what makes this possible — and it is also how one tree's viewer can be tested
+against another tree's data.
+
+Verified end to end: data directory seeded, viewer running, `TADPOLE_PROJECT`
+correct.
+
+## Documentation tone
+
+The legal section was rewritten from prohibitive to descriptive, because Tadpole
+is GPL software and a free-software licence cannot add usage restrictions on top.
+
+It now describes working with the files already on your own device, states that
+copyright in the system software and games is unaffected and that what you do
+with your copies is your responsibility, and carries an AS IS warranty
+disclaimer. It gives no links to vendor servers or archives and asks
+contributors not to add any. Same change in the wizard's page 2.
+
+`README.md` references a `LICENSE` file that does not exist yet — choosing GPLv2
+or GPLv3 is the author's decision, not one to make on their behalf.
+
+## The wizard vanished when you picked a firmware archive
+
+Reported: selecting `LFC_downloads_full.zip` in the setup wizard made the whole
+wizard disappear.
+
+It did, and there was nothing to replace it. `fb_open()` sets `g_modal = M_FILES`
+over the wizard, `fb_enter()` then sets `g_modal = M_NONE` and emits the action,
+and `tool_run()` spawned the installer as a background child whose output went to
+the viewer's stdout — invisible behind the window. So the user saw setup abandon
+itself, with no way to tell working from finished from failed. An install takes
+minutes: unzip, scan 70 packages, extract a 53 MB UBIFS volume.
+
+Three parts to the fix.
+
+**A progress modal.** `ui_progress_begin/line/done` and `M_PROGRESS`. The tool's
+output is captured and shown live, nine lines at a time, scrolling.
+
+**A moving bar, deliberately not a percentage.** The steps have wildly different
+and unknowable durations, so a percentage would be fiction. The bar says "still
+working"; the log lines say what it is working on.
+
+**Close is DISABLED while it runs** — both the button and Escape — so a
+half-extracted rootfs cannot be walked away from.
+
+`spawn_script()` grew an optional pipe carrying the child's stdout and stderr,
+set non-blocking so the UI keeps drawing, drained a line at a time each frame.
+
+### The browser now returns where it came from
+
+`g_fb_return` remembers whether the browser was opened from the wizard, so
+Cancel and a finished install both go back to setup rather than to an empty
+screen.
+
+### And it can pick a DIRECTORY
+
+`install-firmware.sh` accepts an LFC_Downloads folder or a single archive, and
+the README documents the folder — but a file browser that only ever opens
+directories cannot express "I mean this one". There is now a **Use folder**
+button, shown when the browser has no extension filter (i.e. when picking
+firmware).
+
+## ubi_reader needs lzallright, and hiding its error cost a run
+
+With ubi_reader installed the extraction still failed, and the script said only
+`ubireader_extract_files failed`. The real message was three frames deeper:
+
+```
+ModuleNotFoundError: No module named 'lzallright'
+```
+
+The LeapPad's UBIFS volume is LZO-compressed, and `ubireader/ubifs/misc.py` does
+a hard `from lzallright import LZOCompressor` with no fallback — so ubi_reader
+alone is not enough. A one-line fix, invisible because the script sent stderr to
+`/dev/null`.
+
+It now captures the tool's output, prints it on failure, and recognises this case
+specifically to name the package. **Never discard a subprocess's stderr on the
+failure path**; the generic message is always worse than the real one.
+
+README lists `lzallright` alongside `ubi_reader` for the same reason.
+
+### Still unverified
+
+Extraction past that point has never run to completion here, so the rest of
+`install-firmware.sh` — locating the root inside ubi_reader's output tree,
+copying it into `rootfs/<version>/ubi_rfs`, and the content-package pass — is
+written but untested against real output.
+
+## Dependency checking: report the whole list, not one at a time
+
+Installing firmware failed three times in a row, each on a different missing
+Python module:
+
+```
+ModuleNotFoundError: No module named 'lzallright'
+ModuleNotFoundError: No module named 'cryptography'
+```
+
+ubi_reader imports its dependencies LAZILY, so each one surfaces only when
+extraction is already running — minutes in, after the zip is unpacked and 70
+packages scanned — and the first failure hides the next. Three round trips for
+something knowable at the start.
+
+`tools/check-deps.sh` checks everything at once and prints one install command
+for the detected distribution. `install-firmware.sh` runs it before doing any
+work, so it now fails in two seconds with the full picture instead of minutes in
+with a fragment.
+
+### Getting the list right, rather than guessing it
+
+The authoritative source is ubi_reader's own package metadata:
+
+```
+Requires-Dist: cryptography (>=44.0.2,<49.0.0)
+Requires-Dist: lzallright   (>=0.2.1,<0.3.0)
+Requires-Dist: zstandard    (>=0.25.0,<0.26.0)
+```
+
+Walking the imports statically found the same three plus two false positives
+(`ConfigParser` in a Python-2 script path, and a word matched out of prose), so
+metadata beats regex here.
+
+Which are AUR and which are in Arch's official repos was checked with
+`pacman -Si`, not assumed:
+
+```
+extra: python-cryptography, python-zstandard
+AUR:   python-ubi-reader, python-lzallright
+```
+
+The first version suggested `yay -S python-cryptography`, which sends people to
+the AUR for a package sitting in `extra`.
+
+### Note for the future
+
+`cryptography` is needed only for UBIFS ENCRYPTION, which the LeapPad image does
+not use — `ubifs/decrypt.py` is imported unconditionally regardless. Nothing to
+do about it from here, but worth knowing that the dependency is not doing any
+work for us.
+
+
+## The lock deadlocked the front end against its own child
+
+Reported: Run System Menu failed with
+
+```
+tadpole: another instance (pid 3653998) is using /tmp/tadpole
+```
+
+Front-mode `tadpole.sh` took the lock and then waited. The viewer's Run System
+Menu spawns `tadpole.sh --no-viewer --boot`, and that child hit its own PARENT's
+lock and refused. Two processes deadlocking over a directory, one of which was
+running no guest at all.
+
+**The lock protects a running GUEST, not the directory.** Front mode now takes no
+lock. `--boot` still does, and still exports `TADPOLE_LOCK_PID` so a viewer it
+starts does not mistake its own launcher for a guest.
+
+Verified both halves: front mode leaves no lock file, and a child launch
+afterwards reaches AppManager.
+
+## Booting is now gated on the system files existing
+
+The same report noted that Run System Menu was OFFERED with no sysroot, which
+then failed in a terminal the user may not be looking at — exactly what the
+wizard exists to prevent. `struct mitem` grew a `needs_sys` flag; Run System
+Menu, Launch .swf and Erase require it.
+
+The check is cached (it stats the filesystem, and is asked once per item per
+frame while a menu is open) and invalidated by `ui_invalidate_prereqs()` when a
+tool finishes, which is the only thing that can change the answer.
+
+Measured both ways: ENABLED with the system files present, greyed out with the
+sysroot removed.
+
+## The wizard could report a problem it could not fix
+
+Page 3 said "Sysroot not built" and offered only Browse — which installs
+firmware, not a sysroot. The two can get out of step (an interrupted install, or
+an Erase) and then the page was a dead end.
+
+There is now a **Build sysroot** button, shown only when the rootfs exists and
+the sysroot does not, running `runtime/setup-sysroot.sh`. Confirmed that script
+works standalone against an existing rootfs.
+
+## The AppImage packs now
+
+`appimagetool` and `squashfs-tools` became available, and the whole path works:
+
+```
+build/Tadpole-x86_64.AppImage    1.3 MB
+```
+
+Verified by running the PACKED file, not just the AppDir: it seeds
+`$XDG_DATA_HOME/tadpole`, starts the viewer, and sets `TADPOLE_PROJECT`. The
+refresh path was checked too — an existing data directory with an older stamp
+gets the new program files while firmware, games and settings are left alone.
+
+1.3 MB is small because the emulator IS small: the guest shim libraries are a
+few hundred KB of ARM code and the viewer is one binary. Only SDL2 is bundled;
+GL, X11 and qemu-arm come from the host.
+
+## A fresh firmware install does not boot yet — what is fixed and what is not
+
+The wizard path now runs end to end: extraction works, packages install, the
+sysroot builds. **AppManager starts and runs deep into startup**, then the
+12-second shutdown timer fires and the boot ends at the shutdown screen.
+
+### Fixed on the way here
+
+**`runtime/libs` was never generated by anything.** It is 168 symlinks into the
+rootfs and it is on `LD_LIBRARY_PATH`, but it had been made by hand early in the
+project — nothing in the tree recreated it. A fresh install therefore had an
+empty `libs/` and could not start:
+
+```
+AppManager: can't load library 'libVideoMPI.so'
+```
+
+An error that points at a library rather than at the missing directory.
+`setup-sysroot.sh` now builds it from `/lib`, `/usr/lib`, `/LF/Base/lib`,
+`/LF/Base/Brio/lib` and `/LF/Base/Flash/lib`. Verified against the hand-made
+original: same 168 entries, nothing missing.
+
+**Execute bits.** `ubireader_extract_files` only preserves permissions with
+`-k`, which requires root, so everything extracts 0644 — including AppManager,
+which then fails with a baffling "Exec format error". Rather than demand root,
+`install-firmware.sh` marks ELF files and shebang scripts executable. Checked
+against the known-good tree: reproduces 537 of its 538 executables, the miss
+being a `meta.inf` that nothing runs.
+
+**`TADPOLE_DEBUG=0` turned debug ON, in every run ever.** `tadpole.sh` passed
+`${debug:+-E TADPOLE_DEBUG=$debug}`, and `${x:+...}` expands for `"0"` because it
+is non-empty; the shim then tested presence rather than value. One headless boot
+produced **2 112 816 log lines**. Both sides now test the value: 244 lines.
+
+**No backoff on the audio FIFO.** With no reader, `open_fifo()` retried on every
+write — the bulk of those 2.1 million lines. It now retries every 64th attempt.
+
+**`setup-sysroot.sh` had the same hardcoded rootfs path** that `tadpole.sh` did
+(`stock-4.6.0.784/1221351650/ubi_rfs`), so "Build sysroot" failed with "no
+rootfs" on a machine that plainly had one. Both discover it now.
+
+**The AppImage stamp was a timestamp**, so editing a tool without rebuilding left
+users on the old copy — which is exactly how the fixed `setup-sysroot.sh` failed
+to reach the AppImage. It is a content hash now.
+
+### The remaining difference, and the next thing to check
+
+The freshly extracted rootfs has **1611 files against the known-good tree's
+1635**. All 24 missing files are in one directory:
+
+```
+LF/Base/LST3-0x0017000B-000004/    libAccelerometerMPI.so, libButtonMPI.so,
+                                   libCameraMPI.so, libGameViewFrame.so, ...
+```
+
+Symlink counts match exactly (301 each), so this is not a general extraction
+failure — one directory is absent. Whether ubi_reader missed it or it was added
+to the original tree by other means is NOT established, and that is the first
+thing to determine: if the firmware image genuinely contains it, this is an
+extraction bug; if not, the known-good tree has provenance the wizard cannot
+reproduce and the wizard path can never match it.
+
+Note that directory is NOT on the library search path (the original
+`runtime/libs` draws from five other directories), so it is not obviously the
+cause of the shutdown — but it is the one concrete difference between a tree that
+boots and one that does not.
+
+### Also unresolved
+
+Announcing external power repeatedly rather than once did NOT prevent the
+shutdown timer, so the race theory is unconfirmed. The announcement is still
+worth keeping — sending it once was a genuine race — but it is not the cause.
+
+## CORRECTION: the "12-second shutdown timer" was never real
+
+Everything above about a shutdown timer firing on every boot describes a
+symptom that did not exist. A long bisection ran on that premise — restoring
+`LST3-0x0017000B-000004`, testing `--debug`, repeating the power announcement,
+restoring the whole known-good rootfs — and each result was read as "still
+shuts down", which was taken as evidence of a regression in the shim.
+
+The emulator was booting the entire time. Nothing in that section should be
+treated as a finding, and the power-announcement change it produced is
+unmotivated by anything observed.
+
+The lesson worth keeping: **confirm the symptom is reproducible before
+bisecting for its cause.** Three eliminations in a row that all "fail" the same
+way is a signal the premise is wrong, not that the next hypothesis is due.
+
+## User accounts — SOLVED by transplanting real `/LF/Bulk`
+
+Account creation appeared to succeed but produced a nameless profile with the
+default background, and settings did not persist. Fixed on the device side: a
+LeapPad2 in developer mode, FTP, and the whole of `/LF/Bulk` copied into
+`runtime/sysroot/LF/Bulk`. Accounts and settings then work and save.
+
+That dump is now the most valuable artefact in the tree and it is not
+reproducible from firmware — `setup-sysroot.sh` is careful (`mkdir -p`
+throughout, `[ ! -f ]` around `UIData.json`) and will not clobber it, but
+`erase-firmware.sh` moves the entire sysroot including Bulk. Keep a copy
+outside the project.
+
+What Bulk supplies that a generated sysroot does not is still undiffed, and is
+the path to making account creation work natively rather than by transplant.
+
+## Crash reports: `tadpole_crash.c` and `tools/crash-triage.py`
+
+79 of the 112 installed packages are native Brio apps (`App.so`) sharing one
+engine — LST3 33, MULT 21, PADS 13, LPAD 11 — against 15 Flash titles and one
+on the newer Rio runtime (`App.Rio.*.so`). At that ratio a single fault in a
+shared library reproduces across dozens of unrelated titles, so the question is
+never "did it crash" but "did it crash in the SAME PLACE".
+
+### Why the cores are useless, and what to do instead
+
+qemu writes a core on every guest fault, but it cannot be symbolised:
+
+* every `r-x` segment in it has `p_filesz == 0` — qemu does not dump executable
+  file-backed pages, so the code the PC points into is not in the file
+* there is no `NT_FILE` note, so there is no mapping table either
+* `elf_siginfo.si_signo` is left zero; the signal is in `pr_cursig`
+* gdb resolves the guest's recorded paths against the HOST filesystem, so guest
+  ARM libraries appear as x86-64 objects
+
+Inside the process all of this is available from `/proc/self/maps`, so the shim
+catches SIGSEGV/BUS/ILL/FPE/ABRT, resolves the addresses itself, and re-raises
+so qemu still writes its core. Reports go to stderr and to
+`$TADPOLE_DIR/crash.log`, which is not wiped between launches.
+
+    === tadpole: guest crashed ===
+      signal   SIGSEGV (11)
+      cwd      .../ProgramFiles/LST3-0x00180025-000000
+      fault    0x00000000  <unmapped>
+      pc       0x4a2b1c40  libLightningBase.so+0x0004bc40
+      lr       ...
+      stack (executable words, most recent first):
+        ...
+
+`cwd` identifies the title: AppManager `chdir()`s into the package directory
+before calling `CreateApp`, which is also why stray core files land inside the
+game's own folder.
+
+The backtrace is a STACK SCAN, not an unwind — the guest libraries carry no
+usable frame pointers or `.ARM.exidx` — so it reports every stack word pointing
+into executable memory. It over-reports, because dead values from earlier calls
+survive, but it reliably contains the real chain, which is enough to tell
+whether two crashes share a path. Verified against a purpose-built three-deep
+test: `_start -> level_one -> level_two -> level_three`, all four recovered.
+
+### Three traps this hit while being written, all silent
+
+* **`sigaction()`'s struct layout is a C-library build choice.** libc puts a
+  `sigset_t` between the handler and the flags, and its size (glibc 1024 bits,
+  kernel 64) is not knowable from here. Guess wrong and `sa_flags` lands at the
+  wrong offset, so `SA_SIGINFO` never reaches the kernel — the handler is then
+  called as a plain `void(int)`, its third argument is garbage, and the first
+  read of the ucontext faults. `SA_RESETHAND` is lost the same way, so the
+  second fault goes straight to `SIG_DFL` and the process dies with no output
+  at all. Use `rt_sigaction` (syscall 174) directly: handler, flags, restorer,
+  64-bit mask, with `sigsetsize` passed explicitly.
+* **Do not call the shim's own hooked `open()`.** It rewrites absolute paths
+  into the sysroot, so the report went to `<sysroot>/tmp/tadpole/crash.log` and
+  failed to create, and reading `/proc/self/maps` through it fails identically,
+  which loses every symbol. The shim passes its `real_open` in.
+* **No division.** ARM has no divide instruction here and the shim links
+  `-nostdlib`, so `v / 10` becomes a call to `__aeabi_uidiv`. Nothing in the
+  shim's own dependency set provides it — it resolves at runtime only because
+  AppManager happens to load `libgcc_s.so.1` — so formatting decimals uses
+  repeated subtraction of powers of ten instead.
+
+### Using it
+
+    ./tools/crash-triage.py                  # $TADPOLE_DIR/crash.log
+
+Groups by faulting library+offset, names the affected titles, and prints
+per-library totals underneath to catch the looser case of one library faulting
+in several places. Play normally; the log accumulates.
+
+### What it does NOT catch
+
+White screens and softlocks raise no signal. `SIGABRT` covers failed
+assertions, which is the common "asserts at startup" case, but a genuine hang
+needs a watchdog and is a separate problem.
+
+## LeapDog — differential tracing against real hardware
+
+`tools/leapdog.py`. Compares what a real LeapPad2 does against what Tadpole
+does, using a channel that costs nothing to open.
+
+### The serial console
+
+The device has no accessible console over USB — plugging it in puts it into a
+"computer connected" mode. The way in is UART: wires onto a cartridge edge and
+a CP2102 at **115200 8N1**, which gives a root shell and the full boot log with
+no USB involvement at all, so the connected screen never appears.
+
+For the record, the USB path was mapped before the serial hack made it moot:
+
+    vbus-monitor        watches an input device named "LF2000 USB"
+      -> vbus-actions 1    avahi-autoipd --refresh usb0
+                           /etc/init.d/dftpdevice start
+    dftpdevice          writes /tmp/usb_events_socket
+    libUSBDeviceMPI     /LF/System/USBDevice, /tmp/monitoring_socket
+    AppManager          CUSBDeviceMPI::GetUSBDeviceState()
+
+`vbus-actions` starts DFTP separately from networking, and `usbether`,
+`telnetd` and `vsftpd` are independent init scripts — so stopping
+`dftpdevice` and `vbus` should leave telnet up with the device usable. Untested;
+serial made it unnecessary.
+
+### Why the console is a free differential channel
+
+AppManager and the Flash UI narrate themselves:
+
+    trace:  ----------HomePickerState::KeyDown----------
+    [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+
+Tadpole runs the same binaries and emits the same lines. No injection, no
+patched libraries, no risk to the hardware.
+
+### Two failure modes, two instruments
+
+`tadpole_crash.c` catches anything that raises a signal. It is blind to white
+screens and softlocks, which hang without dying. Those produce *silence*, and
+silence is measurable — hence `--stall`, which timestamps every line and flags
+gaps. Between them the two cover both halves of the bug list.
+
+### Use `term`, not `capture`
+
+Two readers on one serial port split the byte stream, so each gets a random
+half and the log looks corrupted rather than contended — the same trap as two
+guests holding the ev2 FIFO. `term` replaces minicom instead of competing with
+it: it forwards the keyboard too, so the shell stays usable. Quit with Ctrl-].
+
+    sudo ./tools/leapdog.py term -o dev.log        # or join group uucp once
+    ./tools/leapdog.py stalls dev.log --min 2
+    ./tools/leapdog.py diff dev.log emu.log --in-game
+
+### ANCHOR IN-GAME, or the diff is worthless
+
+The device and the emulator do not have the same titles installed, so boot and
+the home screen differ for reasons already understood — different icon counts,
+a different app enumeration. Diffing from t=0 reports the icon list as the
+first divergence and buries the real one. `--in-game` anchors on
+`LaunchApp|ReplaceTopApp|LoadNewApp` and drops icon chatter; `--from`, `--to`
+and `--ignore` are the general forms.
+
+Only the FIRST divergence has a cause. Everything after it is consequence.
+
+### What will legitimately differ, and what will not
+
+The game is the same ARM binary executing the same instructions, so the call
+sequence is deterministic until it reads something back. Divergence traces to
+what we feed it: `glGetString(GL_EXTENSIONS)` steering a different render path,
+`eglChooseConfig` picking another visual, a nonzero `glGetError` where hardware
+returns zero, and frame timing — a racing game integrates physics against frame
+delta, so at 57 fps against 30 every matrix downstream differs legitimately.
+
+So compare in three phases, not one:
+
+| phase | expectation | value |
+|---|---|---|
+| init / setup | near-identical | highest — extension negotiation, config choice, texture upload; deterministic, no timing |
+| per-frame structure | same call sequence | state-machine bugs: a missing enable, a texture bound at the wrong moment |
+| argument values | will differ | first frame only; after that timing makes it meaningless |
+
+### No Python on the device
+
+Confirmed on the serial console. Anything that must run on the LeapPad itself
+has to be busybox `sh` or a compiled ARM binary. LeapDog is entirely host-side,
+and `pyserial` is deliberately not a dependency — `stty` configures the line and
+the device node is then just a file.
+
+## 3D surface pitch — REAL DIVERGENCE, but the obvious fix is WRONG (reverted)
+
+The first substantive divergence between a real LeapPad2 and Tadpole running
+Clam Prix, captured with `tools/leapdog.py` over the serial console and
+anchored at the app launch:
+
+    device    [0x5] CreateHandle: 0xaa5a0: 320x240 (1280) @ 0x408e5000
+    emulator  [0x5] CreateHandle: 0xab7e8: 320x240 (1920) @ 0x82400000
+
+Both agree the 3D surface is 320x240. They disagree on its PITCH. 1280 is
+320 x 4, tightly packed. 1920 is **480** x 4 — the full panel width. Tadpole
+was handing the game the 2D layer's stride for a 320-wide surface, so every
+row of 3D output landed 640 bytes further along than the game believed.
+
+`fill_fix()` had `line_length = g_w * (g_bpp / 8)` unconditionally, for every
+layer, despite the shim already tracking each layer's width in
+`layer[].win_w` from FBIOPUT_VSCREENINFO.
+
+### Why the viewer had to change with it
+
+The viewer computed its own pitch the same way, `w * bpp/8`, in both the
+compositor and the HLE blit. Fixing only the shim would have desynchronised
+them; worse, 2D titles that work today set `win_w` for the ViewFrame viewport,
+so recomputing a pitch on the host could have broken what already works.
+
+So the shim now RECORDS what it told the guest, in a new
+`layer_state.line_length`, and the viewer reads that. Neither side derives the
+number independently, so they cannot disagree regardless of the order in which
+the guest issues PUT_VSCREENINFO and GET_FSCREENINFO. Zero means "the guest
+never asked", and the viewer falls back to the panel width, so the change is
+inert until a layer is actually configured narrower.
+
+Verified at the ioctl boundary with a purpose-built ARM test rather than by
+running the game:
+
+    before PUT (full width): line_length=1920      unchanged, 2D unaffected
+    after  PUT 320x240:      line_length=1280      matches hardware
+
+### Still open from the same capture
+
+* `ExitPopUnloadApp: OGL context still active after unloading` appears in the
+  emulator and NEVER on hardware. Same family as the `/tmp/3dlockup` reboot
+  LeapFrog shipped for "unhandled exceptions that leave OGL locked up".
+* The 3D surface lives at `0x408e5000` on hardware — ordinary mapped memory,
+  allocated by the NEXEL GPU driver through EGL — but at `0x82400000` in the
+  emulator, inside the framebuffer arena. Different allocation source, not yet
+  understood, and possibly the deeper cause.
+* `OpenGL ES vendor` is `NEXEL` on hardware and `Tadpole` here; extensions are
+  empty on both, which is the important half.
+* `DaemonControl socket connect failed ret=-1` is emulator-only.
+
+### Traps in reading these logs
+
+* Two readers on one serial port split the byte stream. The first 40 seconds
+  of the first capture are interleaved garbage because minicom was still
+  attached — the log looks corrupted rather than contended.
+* The device and the emulator do not have the same titles installed, so the
+  home screen diverges for known reasons. Anchor on the app launch or the diff
+  reports the icon list as the first divergence.
+* Free-memory figures in `LoadNewApp: before/after` differ by three orders of
+  magnitude (12820 KB against 1152612 KB) and are pure noise.
+
+### THE FIX ABOVE WAS REVERTED — it regressed scaling across many titles
+
+Deriving `line_length` from `layer[].win_w` is wrong, and the ioctl-level test
+that "verified" it could not have caught why.
+
+**`win_w` is the layer's ON-PANEL WINDOW RECTANGLE — the ViewFrame box — not
+the width of its source buffer.** The shim stores both concepts in that one
+field. For the 3D surface they coincide at 320. For every 2D title that scales
+its viewport they do not: the buffer stays 480 wide while the window shrinks.
+Keying the pitch off `win_w` told those games their rows were 1280 bytes apart
+while they carried on writing them 1920 apart, and content rendered far too
+large. Clam Prix was affected too. This is a bug that had been fixed long ago
+and was reintroduced by this change.
+
+Why the ARM test passed anyway: it asserted that the shim returns 1280 after a
+PUT of 320x240, which it did. That is a test of the mechanism, not of the
+premise — it never asked whether 320 was the source width or the window width,
+which was the entire question. **A test built from the same wrong assumption as
+the change cannot falsify it.**
+
+The divergence itself is real and still unexplained: hardware genuinely reports
+1280 for that surface and Tadpole reports 1920. A correct fix needs a source
+width tracked SEPARATELY from the window rectangle, which the shared layer
+state does not currently distinguish. Note also that on hardware the surface
+lives in GPU memory (`0x408e5000`, allocated by the NEXEL driver through EGL)
+rather than in the framebuffer arena (`0x82400000`), so the pitch may be a
+symptom of the surface having a different owner entirely, not a cause.
+
+Do not re-attempt this without first establishing which of the two widths the
+guest actually uses for its writes.
+
+## Native 3D titles were never using our OpenGL at all
+
+`libopengles_lite.so`. That is the whole bug.
+
+On the device it is a SYMLINK to `libGLESv1_CM.so` — the same library under a
+second name — and native titles link that second name. Clam Prix's DT_NEEDED
+says `libopengles_lite.so`, not `libGLESv1_CM.so.1`.
+
+The loader resolves DT_NEEDED **by filename**. `runtime/shimlibs-gl/` shipped
+`libGLESv1_CM.so`, `libGLESv1_CM.so.1`, `libEGL.so` and `libEGL.so.1` — and no
+file called `libopengles_lite.so`. So the search fell through shimlibs-gl to
+`runtime/libs/libopengles_lite.so`, which points at the STOCK VR5 driver.
+
+It then fails to link, because our libEGL replaced the stock one and does not
+provide the stock driver's C++ internals:
+
+    symbol '_ZN3EGL6Object9OnReleaseEi': can't resolve symbol
+    symbol '_ZN3EGL18g_CommandContainerE': can't resolve symbol
+    symbol '__cxa_pure_virtual': can't resolve symbol
+
+Native 3D titles have been running on a half-linked dead driver. Nothing our
+GL implementation did — software rasteriser, HLE replay, any of it — was ever
+reached by them. The EGL init lines in the log that say `vendor = Tadpole` come
+from Brio's own DisplayMPI, which links `libGLESv1_CM.so.1` and so did get
+ours; that is why the logs looked fine.
+
+### Verified, not inferred
+
+A test binary linked exactly as Clam Prix is (`-l:libopengles_lite.so`), run
+under the emulator's real LD_LIBRARY_PATH:
+
+    before:  symbol '_ZN3EGL6Object9OnReleaseEi': can't resolve symbol  (x17)
+    after:   GL_VENDOR = Tadpole GLES 1.1
+
+All 58 GL/EGL symbols Clam Prix imports are exported by our libGLESv1_CM +
+libEGL, so with the alias present the game gets a fully resolved Tadpole GL.
+
+The fix is one symlink, now created by a `gl-links` target rather than as a
+side effect of the build recipe — the old arrangement only ran when the .so was
+out of date, so a missing alias could not be restored by rebuilding, which is
+exactly how this one stayed missing.
+
+### Do not conclude 3D now works
+
+The alias means our GL is finally *reached*. Whether it renders Clam Prix
+correctly is a separate question, and the API-surface diff says we implement 94
+of the device's 180 GL/EGL entry points. Clam Prix's own imports are covered,
+but other titles' may not be — and the float/fixed split is suspicious: we have
+`glFrustumx` but not `glFrustumf`, `glTexEnvx` but not `glTexEnvf`/`glTexEnvi`,
+`glLightxv` but not `glLightfv`. Check imports per title before assuming.
+
+## GL state survived across games — the "melting", and the resync flood
+
+Reported as: a title renders as smeared bands ("on drugs, melts away"), and once
+that happens it STAYS broken across relaunches and gets worse in other titles.
+Accompanied by `[hle] host asked for a state resync` repeating without end.
+
+One cause. **AppManager does not exit between games.** It dlopen()s the title's
+`App.so`, runs it, and `UnloadModule()`s it, so every static in
+`tadpole_gles_core.c` is process-lifetime. And the EGL teardown entry points
+were no-ops:
+
+    u32 eglTerminate(void *dpy)                 { return EGL_TRUE; }
+    u32 eglDestroyContext(void *dpy, void *ctx) { return EGL_TRUE; }
+
+Nothing ever freed a texture slot. `glGenTextures` names a texture after its
+slot index and scans for a free one; with the previous title still holding all
+of them it returned **name 0**, and a title drawing with name 0 renders
+untextured. Each launch left the table fuller than the last, which is exactly
+why the damage accumulated rather than merely persisting.
+
+The resync flood is the same bug seen from the host. `want_tex_if_missing()`
+sets `want_resync` before any draw whose bound texture has no image here, and
+the guest's `hle_sync_state()` can only resend textures it still holds a
+decoded copy of. A texture it never tracked can never be resent, so the request
+is unsatisfiable and the next draw asks again — forever.
+
+Brio had been reporting this all along, in the one log line that appears in
+Tadpole and never on the device:
+
+    ExitPopUnloadApp: OGL context still active after unloading
+
+### The fix
+
+`tad_gl_context_reset()` at the end of `tadpole_gles_core.c`, called from
+`eglTerminate` and `eglDestroyContext`: frees every texture and buffer, clears
+the array and binding state, and sends the new `TADGL_RESET` opcode so the host
+drops its mirrors too. Clearing the host's `g_tex_have[]` is the important half
+— a stale entry makes the next title's recycled name silently sample the
+PREVIOUS game's image instead of asking for the right one.
+
+Verified without needing the game, by doing what AppManager does:
+
+    title A allocated 192 textures, then table full
+      next alloc without teardown = 0      <- renders untextured
+    -- eglDestroyContext --
+    title B first alloc = 1                <- fixed
+
+Caps raised at the same time, since Clam Prix alone loads ~11.8 MB of textures:
+guest `MAX_TEXS` 192 -> 512, host `MAX_TEX` 256 -> 576, `MAX_BUF` 128 -> 256.
+**The host's MAX_TEX indexes by guest name and must stay larger than the
+guest's MAX_TEXS.** If `[gl] WARN glGenTextures EXHAUSTED` still appears in a
+log, the cap is still too low — that warning was already being printed and is
+the single most useful line for this failure.
+
+### Also fixed: a stale frame at startup
+
+The framebuffer arena is a plain file that the shim only ftruncates, so a fresh
+launch opened showing whatever was on screen when the previous one closed.
+Harmless in itself, but it makes a dead frame indistinguishable from a live one
+when reading screenshots — which cost real time here. `tadpole.sh` now removes
+`fb?.bin` alongside `audio.fmt`.
+
+## Clam Prix race scene: what is noise and what is not
+
+With the `libopengles_lite.so` alias and the context reset in place, Clam Prix
+reaches `Scene::Initialize` and loads the full track — ~11 MB of textures, no
+`glGenTextures EXHAUSTED`. Raising MAX_TEXS to 512 was independently worthwhile:
+Letter Factory had been hitting that limit too.
+
+### The RacingEngine warnings are NOT a lead
+
+Checked against the hardware capture rather than assumed, and the counts are
+identical:
+
+| | device | emulator |
+|---|---|---|
+| `getInt32 with name groupid does not exist` | 16 | 16 |
+| `getResource(skybox) does not exist` | 1 | 1 |
+| `Scene::Initialize` | 2 | 2 |
+| `loadCars` | 2 | 2 |
+
+They are the game's own resource chatter and the real device prints exactly the
+same. That the device log contains `loadCars` also means the hardware capture
+DID reach the race, so there is a baseline to diff the race scene against.
+
+### `GL error 0x0500` IS a lead
+
+`GL_INVALID_ENUM`, raised during race scene init. A rejected call draws nothing
+and raises no further symptom, so this is the strongest remaining candidate for
+the black 3D.
+
+`check_gl()` samples once per frame — correct for the steady state, since
+glGetError is a pipeline flush point, but useless for diagnosis: "at frame"
+means "somewhere among thousands of commands". Under `TADPOLE_HLE_DEBUG=1` the
+replay loop now checks after EVERY opcode and names it, once per distinct
+(opcode, error) pair so a call failing on every draw reports once:
+
+    hle: GL error 0x0500 from TEXENV (op 10, len 12) at frame 37
+
+`g_opnames[]` carries a compile-time size assertion against `TADGL_OP_COUNT`.
+Add an opcode and forget the table and every name after the insertion point
+shifts by one — a diagnostic that lies is worse than none.
+
+Suspects for INVALID_ENUM, given the GLES1-to-desktop mapping: a `TEXENV`
+pname/value combination desktop GL does not accept, a GLES-only enum forwarded
+verbatim, or a client-array type (`GLES_FIXED` 0x140C) reaching a call that was
+not converted.
+
+## THE 3D bug, identified: client-side ELEMENT arrays are dropped
+
+From a `TADPOLE_HLE_DEBUG=1` capture of a Clam Prix race:
+
+    hle: drawelements elembuf=0 (MAX_BUF 256) data=(nil) size=0
+    hle: frame 2580: 2 draws, 0/3528 px non-black
+         | drawelem pkts 2566 skipped-nobuf 2439
+
+**2439 of 2566 draw calls are skipped.** `elembuf=0` means no
+GL_ELEMENT_ARRAY_BUFFER is bound: the racing engine passes its indices as a
+CLIENT-SIDE array. `TADGL_DRAWELEMENTS` carries only a buffer name and an
+offset, so the host has nothing to draw from and skips the call. The scene
+renders nothing, which is the black 3D.
+
+This is the same class of problem already solved for VERTEX arrays — client
+arrays are uploaded to reserved buffer names 100-103 — and simply never done
+for the element array. The fix is symmetric: upload the index data to a
+reserved name at encode time and reference it.
+
+The resync flood is downstream of this, not separate: every skipped draw calls
+`want_tex_if_missing()`/sets `want_resync`, and no resend can satisfy a request
+caused by a missing index buffer.
+
+Also seen in the same capture, lower priority:
+
+* `GL error 0x0500 from TEXPARAM (op 30, len 8)` — a glTexParameter pname or
+  value desktop GL rejects.
+* `GL error 0x0500 from ENABLE (op 4)` and `from DISABLE (op 5)` — a GLES-only
+  capability forwarded verbatim. `glEnable(0x0B44)` (GL_CULL_FACE) is already
+  special-cased and ignored; something else is not.
+
+## CORRECTION: the context reset must be DEFERRED, not immediate
+
+Resetting on `eglTerminate`/`eglDestroyContext` crashed the guest:
+
+    [hle] encoding to host GPU
+    hle: context reset — mirrors dropped
+    qemu: uncaught target signal 11 (Segmentation fault) - core dumped
+
+Three runs out of five, on sign-in and the home screen. **Brio keeps using GL
+after destroying a context**, so freeing the texture and buffer tables there
+hands it dangling pointers. Real hardware survives because its driver keeps the
+objects alive until the memory is genuinely reclaimed.
+
+Destruction now only sets `g_reset_pending`; the tables are cleared at the next
+`eglCreateContext`, when the old context is gone and the new one has not been
+handed out yet. The cross-game protection is unchanged — verified with the same
+ARM test, extended to the real sequence:
+
+    title A allocated 512 textures, then table full
+      next alloc without teardown = 0
+    -- eglDestroyContext --
+    -- eglCreateContext (next title starts) --
+    title B first alloc = 1
+
+**The lesson: a teardown hook is not permission to free.** Guest code may hold
+references past the call that nominally ends their lifetime, so reclaim at the
+start of the next lifetime instead of the end of the previous one.
+
+## tadpole.sh clears the runtime directory on every launch
+
+`rm -rf "$TADPOLE_DIR"`, plus reaping guests still bound to it, but ONLY when
+this invocation owns the viewer (`use_viewer=1`). The child spawned by "Run
+System Menu" (`--no-viewer --boot`) must skip it: removing the arena while the
+parent's viewer has it mapped gives the guest a NEW inode and leaves the viewer
+reading the old unlinked one — black forever, home screen included.
+
+The reap excludes our own ANCESTORS, not merely `$$`. The pattern appears in the
+command line of whatever launched us, and killing a parent kills the pipeline.
+
+## Buffer-object exhaustion — the actual cause of black 3D in races
+
+`MAX_BUFS` was **64** on the guest, and `buf_slot()` returned NULL above that
+SILENTLY — unlike glGenTextures, glGenBuffers said nothing at all. The chain,
+read straight out of a `TADPOLE_HLE_DEBUG=1` capture:
+
+1. the race scene allocates 64 buffers and fills the table
+2. `glGenBuffers` returns **name 0**
+3. `glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0)` clears `g_bound_elem`
+4. `glBufferData` finds no slot and stores nothing
+5. `glDrawElements(..., NULL)` sends `elembuf=0`
+6. the host has no indices and skips the draw
+
+    hle: drawelements elembuf=0 (MAX_BUF 256) data=(nil) size=0
+    frame 2580: 2 draws, 0/3528 px non-black
+                | drawelem pkts 2566 skipped-nobuf 2439
+
+2439 of 2566 draws discarded. The giveaway was in the host's mirrored-buffer
+dump: it stops dead at name 64.
+
+Client-side element arrays were NOT the problem — that path already exists
+(`HLE_CLIENT_IDX`) and works. It simply never ran, because the guard is
+`if (!ebuf && indices)` and `indices` was NULL.
+
+Fixed: `MAX_BUFS` 64 -> 256, host `MAX_BUF` -> 1024, and glGenBuffers now warns
+on exhaustion the way glGenTextures does.
+
+**The reserved names had to move.** `HLE_CLIENT_VTX..IDX` were 100..103 only
+because the guest's own names could never exceed 64. At MAX_BUFS 256 a real
+buffer would have collided with a client-array upload — geometry and vertex data
+overwriting each other, worse than the exhaustion being fixed. They are now
+1000..1003, with a compile-time assertion that they stay above MAX_BUFS.
+
+## Symbol completeness became mandatory, and Pet Pals 2 proved it
+
+    AppManager: can't resolve symbol 'glLightx'
+
+Pet Pals 2's startup logo went black after the `libopengles_lite.so` alias
+landed. Before the alias those titles fell through to the stock driver, which
+exports all 180 entry points — dead, but PRESENT, so they always loaded. Against
+our library one missing entry point is fatal at load time.
+
+`tools/gen-gl-stubs.py` regenerates `tadpole_gles_stubs.c` from the difference
+between the device's exports and our built library's. It reads what we have from
+the SYMBOL TABLE, not by scanning source: an earlier source-regex version
+claimed `glGetIntegerv` was missing when we plainly export it, and emitting a
+stub for it would have broken the link with a duplicate symbol.
+
+    device exports        180
+      real implementations 64
+      no-op stubs          115
+      MISSING ENTIRELY     0
+
+### A stub is not an implementation, and the numbers say so
+
+64 real out of 180. The tool prints, separately, the entry points that are
+stubbed but need real behaviour — a stub lets a title load and then draw the
+wrong thing, which is harder to notice than a failure:
+
+    glColor4f  glCullFace  glFrustumx  glLightxv  glNormalPointer
+    glReadPixels  glScissor  glShadeModel  glTexEnvfv
+
+**`glFrustumx` is a no-op.** The projection matrix is never set, which on its own
+is enough to explain geometry that never appears. That is the next thing to fix,
+along with `glFrustumf` (newly stubbed, also needed).
+
+## Perspective: glFrustum was a no-op, and it looked exactly like that
+
+With the buffer cap raised, a Clam Prix race finally rendered geometry at 26 fps
+— flattened into a thin horizontal band across the top of the viewport, scenery
+strung out along a single line.
+
+That shape IS the diagnosis. `glFrustumx` was a no-op stub and `glFrustumf` did
+not exist at all, so the projection matrix was never multiplied in: the pipeline
+stayed orthographic, every depth collapsed onto one plane, and the scene
+squashed into a strip. No amount of fixing buffers or textures could have helped
+while the projection was missing.
+
+`frustum_f()` now builds the standard GL frustum matrix and `mat_apply()`s it,
+mirroring `ortho_f()` beside it, and forwards to `hle_frustum` — the wire
+opcode and the host handler for `TADGL_FRUSTUM` already existed and had simply
+never been fed. `glFrustumx`, `glFrustumf` and `glFrustumfOES` are all real now;
+the OES spelling matters because titles link whichever their SDK emitted and a
+stub there flattens the scene just as thoroughly.
+
+Guard: near and far must be positive and the three ranges non-empty. A zero
+divisor would poison the whole matrix stack instead of failing visibly.
+
+## Texture flicker: deletions were never mirrored
+
+Reported as textures flickering constantly during a race. Two halves, both
+silent:
+
+* **The guest never told the host about a deletion.** `glDeleteTextures` freed
+  its own copy and sent nothing, so the host's mirror outlived the texture.
+  Names are handed out by slot index and Clam Prix cycles textures continuously
+  during a race — its own log is full of `Release Texture` / `Load Texture` —
+  so a name was reused almost immediately and any draw between the delete and
+  the next upload sampled the PREVIOUS texture's pixels.
+* **The host's delete handler never cleared `g_tex_have[]`.** It destroyed the
+  GL object and zeroed `g_tex[n]` but left the have-flag set, so
+  `want_tex_if_missing()` believed an image was still present and the draw
+  sampled nothing rather than asking for the new upload.
+
+`hle_deletetexture()` had existed in the encoder and been declared in the core
+all along. It was simply never called — the same shape of bug as
+`libopengles_lite.so`: the mechanism was built and never wired up.

@@ -1,0 +1,1358 @@
+[    0.000] *** LeapDog: capture started ***
+[    1.094]  v1.18.4 (20 pid 421, tty '': '/etc/init.d/rcSmunt -a
+[    2.453] ta    27 End eoDaemon: Stss: 3.38 0.merald tory
+[    3.053] ++      367    3a get adc
+[    3.233] ++ 32 End settivity calib from /flagsEration data from /flagssset-ts.sh salencia.wav'6 bit Littl, Stereo
+[    3.278] E Base: setcaet-ts.sh sucsng tails to /flags/set-tn 4
+[    3.286] Em setcal: Setto 0 based ot-ts.sh version 4
+[    3.291] 4.40 29 380 hing Bulk
+[    3.509] etcal:CAL in /flagl 37917 -65 6 21044 -174
+[    3.527] merald Base: setclags/pointe65 -351608536
+[    3.593] =================
+[    3.861] === 9   420    3tarting /usr   32 Bgn c+++    4.+++    4.91    30Erald Base: +++ 4.88 30 4ail, setcolrknown type
+[    3.897] ail, setcolrenown type
+[    5.287] ail, s type
+[    5.390] ++    6.57  lay chime
+[    5.783] ++ AppManagerin function
+[    6.423] 0x6]erUSBTask: U[0x6] LoadTSLib:, handle=0x17938, tsl=0x17020, fd=rt ButtonPowerUSB Task ... !
+[    6.552] [0x6] Start Car lf2000-power: Report Low Battery ridge task [dule: ScreentModule: Sc 272, pitch[5] InitModu3c00000 to 0x83c00000, size 003fc000
+[    6.556] [0x5] Increen = 480 x 272, pitch = 1920
+[    6.566] [ule: Mapped 83c00000 to, size 003fcInitModule: 0 x 272, pitch = 4096
+[    6.572] dule: Mapped a3800000 t0, size 00200000
+[    6.576] +++ ABgn Init Log0.32
+[    7.187] 0x6]se tslib
+[    7.255] ++    8.457    32 End t
+[    7.330] meraldting Ethernet USB drive[6] LoadTSLib1, handle=0x18808, tsl=16
+[    7.915] dbe_driver() meralorking ...
+[    8.449]  /etc/init.d: /flags/devcing static IP
+[    8.479] ++  8   809    
+[    9.522] BI dmera 837 32 BgnUation file
+[    9.717] merald Baex: 10.87 0.AllocBuffer:* Stavahi-daemon
+[   10.004] 0x5] Regvice Watchdo++ AppManagerSystem: 11.1ger signal ++ AppManagerCLogFile: 110x6] AddListl number 1
+[   10.014] d() failed tNULL) mRsrcase/DidjPattches.json
+[   10.131] s: 11.20 0.ayer id = -anager: Bgn Logging: 11[t data at p+ AppManagerng: 11.28 0 done.
+[   10.234]    158   945merald Base: St-monitor ..++   11.43 bus start
+[   10.597]  stpd... 0x1] FlatfW Nsion: 4.5.5.775
+[   10.601] sta-/bin/sh'
+[   10.979] ~[params: buffer time=128096
+[   10.988] [0x1] : period time=32000, si+ AppManagerower & USB: 
+[   10.995] [0x280] mCtion = kLogi: Bgn Load m.18 0.65
+[   11.003] [0pp Start: LP; LightningBManager.cpp; 1121; 27636
+[   11.007] [0x280] ath = /LF/Base/LPAD/main.swf
+[   11.013] [0x280] LoadNewA; 1706; 27624
+[   11.307] [0x1] Caaudio threa[0x280] Loadr ; /LF/Basswf; 1812; 0] PushApp main.swf; LightningBase/ger.cpp; 11er: End Loa12.50 0.65
+[   11.314] ed: 12.50 0] mCurrentTrkPushApp !
+[   11.330] 0x53098, totded listener 0x530dc, tanager: Flatruct DidjP 0.65
+[   11.346] [0x5r: new buf E800, length[0x5] Creat33e0: 480x272 (1920) @ terLayer: 0x272 (1920) 
+[   11.350] [0x5] Seton: 0x533e0,272
+[   11.355] [0x5] CreateHandld9008
+[   11.366] [0x5: 480x272 (1920) @ 0x4erLayer: 0x53458: 480x2
+[   11.375] [0x5] Regi@ 0x83cff000WindowPosit0,272
+[   11.379] +++ Flash: Bgn 12.55 0.65
+[   11.384] +++ AppManagBgn CreateP 0.65
+[   11.388] [0x2ata::FindFottf )
+[   11.523] 0x281] CSystemData::FindFont( LFCurry.ttf )
+[   12.732] ++ AFlash: End C+nager: UI eer: UI upda] Low batterrt
+[   12.779] 0x28Transition =
+[   12.869] get temp restart player id = -1
+[   13.308] [0x280] mCurrentTransition = kPopApp !
+[   13.311] [0x280] CAppManager::ExitPopUnloadApp()
+[   13.318] [0x0] CLowBatteryState::Exit()
+[   13.864] trace:  ----------main::loadMainStageOne----------
+[   13.868] trace:  ----------UIData::GetInstance----------
+[   13.872] trace:  ----------UIData::UIData----------
+[   14.024] trace:   ### default theme path is : /LF/Bulk/Downloads/PADS-0x1F1E0002-200001/UI_Tropical.swf
+[   14.036] [0x281] CJSonFile::Load() failed to open (filehandle was NULL) mRsrcPath = /LF/Bulk/Data/Local/All/PAD2-0x1F1E0002-100000/UIData.json
+[   14.042] trace:  ----------UIData::UIData---------- _0ProfileUIData = undefined
+[   14.048] trace:  ----------UIData::UIData---------- _1ProfileUIData = undefined
+[   14.055] trace:  ----------UIData::UIData---------- _2ProfileUIData = undefined
+[   14.059] trace:  ----------UIData::ResetPaths----------
+[   14.063] [0x200] SystemPlugin::GetLocaleCode(): en-us
+[   14.066] trace:  cuuLocaleCode = en-us
+[   14.068] trace:  _language_code = en
+[   14.071] trace:  _language_code = en
+[   14.075] trace:  ----------SoundManager::GetInstance----------
+[   14.080] trace:  ----------SoundManager::SoundManager----------
+[   14.083] trace:  ..... theme is : undefined
+[   14.088] [0x200] AppManagerPlugin::isBaseAppRelaunch, FALSE
+[   14.095] trace:  ---------------- Main ------------- current logged in player is : 0
+[   14.102] trace:  ..... bgPath is : /LF/Base//LpadAssets/Art/UI_StandardBackground.swf
+[   14.173] trace:  BG Main Theme Loaded
+[   14.178] trace:  ----------main::loadMainStageTwo----------
+[   14.182] [0x200] SystemPlugin::SetDidjLegacyFlag( 0 )
+[   14.187] [0x200] AppManagerPlugin::isBaseAppRelaunch, FALSE
+[   14.192] trace:  ------main:: LF.AppManager.IsBaseAppRelaunch()------false
+[   14.197] trace:  ------main:: LF.CSystem.GetLocale()-----en-us
+[   14.202] [0x200] AppManagerPlugin::isBaseAppRelaunch, FALSE
+[   14.208] trace:  ---------------- Main ------------- current logged in player is : 0
+[   14.213] trace:  ----------UIData::isAnyProfilePresent----------
+[   14.222] [0xf] fopenAtomic(/LF/Bulk/Data/Local/0/PAD2-0x1F1E0002-100000/UIData.json) returning 0x0006e670
+[   14.225] [0xf] fcloseAtomic returning 0
+[   14.233] [0xf] fopenAtomic(/LF/Bulk/Data/Local/1/PAD2-0x1F1E0002-100000/UIData.json) returning 0x0006efe8
+[   14.236] [0xf] fcloseAtomic returning 0
+[   14.245] [0xf] fopenAtomic(/LF/Bulk/Data/Local/2/PAD2-0x1F1E0002-100000/UIData.json) returning 0x0006efe8
+[   14.247] [0xf] fcloseAtomic returning 0
+[   14.252] trace:  ----------UIData::isAnyProfilePresent----------
+[   14.258] trace:  ------------TabsTransition::TabsTransition---------------
+[   14.261] trace:  _bgToShow = undefined
+[   14.264] trace:  _bgToHide = undefined
+[   14.269] trace:  ----------StateMachine::PushState----------- SignIn.swf
+[   14.275] [0x200] SystemPlugin::GetPetResourcesPath(): /LF/Base/PetResources/
+[   14.279] trace:  creating /tmp/ui_ready flag
+[   14.284] trace:  ########################## setting flag ###### 0
+[   14.288] ===============================================
+[   14.291]           !!!CLEARED UI_READY FLAG!!!
+[   14.296] ===============================================
+[   14.528] trace:  ----------State::GrabStateData----------
+[   14.532] [0x200] SystemPlugin::GetLocaleCode(): en-us
+[   14.534] trace:  cuuLocaleCode = en-us
+[   14.537] trace:  _language_code = en
+[   14.539] trace:  country_code = us
+[   14.671] trace:  ----------StateMachine::_mcListener.onLoadInit( _level0.mcContent.SignIn_mc )----------
+[   14.676] trace:  ------------TabsTransition::Init---------------
+[   14.728] trace:  ------------TabsTransition::Update-------------- 0
+[   14.733] trace:  _animRefNext._tabWaitForLoad = undefined
+[   14.738] trace:   .... animating next ....upper -39 lower 467
+[   14.748] trace:  ------------TabsTransition::Update-------------- 0
+[   14.753] trace:  _animRefNext._tabWaitForLoad = undefined
+[   14.757] trace:   .... animating next ....upper -26 lower 454
+[   14.787] trace:  ------------TabsTransition::Update-------------- 0
+[   14.792] trace:  _animRefNext._tabWaitForLoad = undefined
+[   14.796] trace:   .... animating next ....upper -13 lower 441
+[   14.822] trace:  ------------TabsTransition::Update-------------- 0
+[   14.826] trace:  _animRefNext._tabWaitForLoad = undefined
+[   14.831] trace:   .... animating next ....upper 0 lower 428
+[   14.835] trace:   ... done animating next, done with transition
+[   14.865] trace:  ------------TabsTransition::Update-------------- 6
+[   14.905] trace:  ------------TabsTransition::Update-------------- 5
+[   14.946] trace:  ------------TabsTransition::Update-------------- 4
+[   14.987] trace:  ------------TabsTransition::Update-------------- 3
+[   15.026] trace:  ------------TabsTransition::Update-------------- 2
+[   15.068] trace:  ------------TabsTransition::Update-------------- 1
+[   15.077] trace:  ----------main::ChangeBackground----------/LF/Base//LpadAssets/Art/UI_StandardBackground.swf
+[   15.081] trace:  --------SoundManager::StopSequence-----
+[   15.085] trace:  _sequenceSound = [object Object]
+[   15.089] trace:  _sequenceIntervalId = undefined
+[   15.094] trace:  --------SoundManager::ClearEndOfSeqCallback-----
+[   15.295] trace:  BG Main Theme Loaded in ChangeBackground
+[   25.085] ~ # trace:  --------SoundManager::PlaySequence-----
+[   25.088] trace:  --------SoundManager::StopSequence-----
+[   25.092] trace:  _sequenceSound = [object Object]
+[   25.096] trace:  _sequenceIntervalId = undefined
+[   25.101] trace:  --------SoundManager::ClearEndOfSeqCallback-----
+[   25.108] trace:  loadSound : sound = /LF/Base/LpadAssets_en/Audio/LPAD_BN0018.mp3
+[   25.261] trace:  --------SoundManager::HandleLoad-----
+[   28.438] trace:  -----Callback.PrintDebugInfo-----
+[   28.442] trace:       _cbFunc:  [type Function]
+[   28.447] trace:       _cbScope: _level0.mcContent.SignIn_mc.main_mc
+[   28.452] trace:       _cbArgs:  _level0.mcContent.SignIn_mc.main_mc._0
+[   28.456] trace:  --------SoundManager::StopSequence-----
+[   28.460] trace:  _sequenceSound = [object Object]
+[   28.464] trace:  _sequenceIntervalId = undefined
+[   28.470] trace:  --------SoundManager::ClearEndOfSeqCallback-----
+[   28.475] [0xf] fopenAtomic(/LF/Bulk/settings.cfg) returning 0x0006f010
+[   28.478] [0xf] fcloseAtomic returning 0
+[   28.482] [0x200] SystemPlugin::setCurrentPlayerID( 0 )
+[   28.487] trace:  ----------main::DeleteAllPageBitmaps----------
+[   28.492] trace:  ------------TabsTransition::TabsTransition---------------
+[   28.494] trace:  _bgToShow = null
+[   28.497] trace:  _bgToHide = _signInBG
+[   28.503] trace:  ----------StateMachine::ReplaceTopState----------- HomePicker.swf
+[   28.510] trace:  _currState._container = _level0.mcContent.SignIn_mc
+[   28.513] trace:  movieclip = _level0.mcContent.HomePicker_mc
+[   28.724] trace:  ----------HomePickerState::HomePickerState----------
+[   28.765] trace:  ----------UIPetLPAD::UIPetLPAD----------
+[   28.769] [0x200] SystemPlugin::GetLocaleCode(): en-us
+[   28.773] [0x200] SystemPlugin::IsLFPlatform(): true
+[   28.777] [0x200] SystemPlugin::GetLocaleCode(): en-us
+[   28.781] [0x200] SystemPlugin::IsLFPlatform(): true
+[   28.790] trace:  --------BaseImageButton::BaseImageButton-----_level0.mcContent.HomePicker_mc._upperTab._userImageBtn
+[   28.796] trace:  --------BaseOnPressButton::BaseOnPressButton-----
+[   28.801] trace:  --------BaseTextButton::BaseTextButton-----
+[   28.867] trace:  ----------StateMachine::_mcListener.onLoadInit( _level0.mcContent.HomePicker_mc )----------
+[   28.873] trace:  ------------TabsTransition::Init---------------
+[   28.876] trace:   _incrementUpper : 52
+[   28.879] trace:   _incrementLower : 52
+[   28.905] trace:  ----------UIData::LogIn----------
+[   28.911] [0xf] fopenAtomic(/LF/Bulk/settings.cfg) returning 0x00071880
+[   28.914] [0xf] fcloseAtomic returning 0
+[   28.918] [0x200] SystemPlugin::setCurrentPlayerID( 0 )
+[   28.922] trace:  ################################
+[   28.924] trace:   playerId = 0
+[   28.927] trace:   _currProfileID = 0
+[   28.934] trace:   _currThemePath = /LF/Bulk/Downloads/PADS-0x1F1E0002-200002/UI_MistyRocks.swf
+[   28.938] trace:  ################################
+[   28.948] trace:  ----------main::ChangeBackground----------/LF/Bulk/Downloads/PADS-0x1F1E0002-200002/UI_MistyRocks.swf
+[   28.954] [0xf] fopenAtomic(/LF/Bulk/Data/Local/0/./profile.dsc) returning 0x000a0980
+[   28.956] [0xf] fcloseAtomic returning 0
+[   28.960] [0x200] Setting Current Profile to 0
+[   28.965] trace:  ----------HomePickerState::PreEnter----------
+[   28.970] trace:  ----------State::GrabStateData----------
+[   28.974] [0x200] SystemPlugin::GetLocaleCode(): en-us
+[   28.976] trace:  cuuLocaleCode = en-us
+[   28.978] trace:  _language_code = en
+[   28.980] trace:  country_code = us
+[   28.986] trace:  --------BaseTextButton::SetTextField----- Tadpole
+[   28.991] trace:  WARNING: Player profile picture load failed!
+[   28.996] trace:  ----------HomePickerState::OnUserImageLoad----------
+[   29.001] trace:  ----------HomePickerState::SetCartStatus---------- 6
+[   29.007] trace:  ----------HomePickerState::GetAllIcons----------
+[   29.013] [0x200] SystemPlugin::getProgramFileApps - Valencia - getting ready to sort
+[   29.025] [0x200] SystemPlugin::getProgramFileApps - Valencia - sort file exists /LF/Bulk/Data/Local/0/PAD2-0x1F1E0002-100000/ProgramFileAppOrder.json
+[   29.250] trace:  ----------HomePickerState::AdjustStatusbar----------
+[   29.256] trace:  ----------HomePickerState::StartPowerListener----------
+[   29.260] [0x6] AddListener: added listener 0xaa9b0, total number 4
+[   29.265] trace:  ------------TabsTransition::Update-------------- 0
+[   29.268] trace:   .... animating prev ... 
+[   29.283] trace:  MODE_LOAD_ICONS 
+[   29.288] trace:  ----------HomePickerState::ManageIconLoading----------
+[   29.295] trace:  ----------HomePickerState::ChangeCartIconData----------
+[   29.300] trace:  ----------HomePickerState::ChangeCartIconImage----------
+[   29.307] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   29.312] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon0
+[   29.319] trace:  ----------HomePickerState::SetIconLabelText----------icon0
+[   29.325] trace:  ----------HomePickerState::LoadIconImage----------icon0
+[   29.330] trace:  ------------TabsTransition::Update-------------- 0
+[   29.333] trace:   .... animating prev ... 
+[   29.347] trace:  MODE_LOAD_ICONS 
+[   29.353] trace:  ----------HomePickerState::ManageIconLoading----------
+[   29.360] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   29.366] trace:  ----------HomePickerState::LoadIconData----------icon1
+[   29.371] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon1
+[   29.377] trace:  ----------HomePickerState::SetIconLabelText----------icon1
+[   29.384] trace:  ----------HomePickerState::LoadIconImage----------icon1
+[   29.388] trace:  ------------TabsTransition::Update-------------- 0
+[   29.392] trace:   .... animating prev ... 
+[   29.408] trace:  MODE_LOAD_ICONS 
+[   29.413] trace:  ----------HomePickerState::ManageIconLoading----------
+[   29.420] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   29.425] trace:  ----------HomePickerState::LoadIconData----------icon2
+[   29.432] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon2
+[   29.438] trace:  ----------HomePickerState::SetIconLabelText----------icon2
+[   29.444] trace:  ----------HomePickerState::LoadIconImage----------icon2
+[   29.448] trace:  ------------TabsTransition::Update-------------- 0
+[   29.452] trace:   .... animating prev ... 
+[   29.457] trace:   ... done animating previous, now start animating next
+[   29.460] trace:  MODE_LOAD_ICONS 
+[   29.464] trace:  ----------HomePickerState::ManageIconLoading----------
+[   29.471] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   29.476] trace:  ----------HomePickerState::LoadIconData----------icon3
+[   29.483] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon3
+[   29.490] trace:  ----------HomePickerState::SetIconLabelText----------icon3
+[   29.495] trace:  ----------HomePickerState::LoadIconImage----------icon3
+[   29.501] trace:  ------------TabsTransition::Update-------------- 12
+[   29.612] trace:  MODE_LOAD_ICONS 
+[   29.617] trace:  ----------HomePickerState::ManageIconLoading----------
+[   29.624] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   29.630] trace:  ----------HomePickerState::LoadIconData----------icon4
+[   29.635] [0x200] SystemPlugin::getProgramFileApps - Valencia - getting ready to sort
+[   29.648] [0x200] SystemPlugin::getProgramFileApps - Valencia - sort file exists /LF/Bulk/Data/Local/0/PAD2-0x1F1E0002-100000/ProgramFileAppOrder.json
+[   29.705] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon4
+[   29.712] trace:  ----------HomePickerState::SetIconLabelText----------icon4
+[   29.718] trace:  ----------HomePickerState::LoadIconImage----------icon4
+[   29.722] trace:  ------------TabsTransition::Update-------------- 11
+[   29.727] trace:  BG Main Theme Loaded in ChangeBackground
+[   29.730] trace:  MODE_LOAD_ICONS 
+[   29.735] trace:  ----------HomePickerState::ManageIconLoading----------
+[   29.741] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   29.747] trace:  ----------HomePickerState::LoadIconData----------icon5
+[   29.754] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon5
+[   29.760] trace:  ----------HomePickerState::SetIconLabelText----------icon5
+[   29.765] trace:  ----------HomePickerState::LoadIconImage----------icon5
+[   29.771] trace:  ------------TabsTransition::Update-------------- 10
+[   29.805] trace:  MODE_LOAD_ICONS 
+[   29.810] trace:  ----------HomePickerState::ManageIconLoading----------
+[   29.817] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   29.823] trace:  ----------HomePickerState::LoadIconData----------icon6
+[   29.879] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon6
+[   29.885] trace:  ----------HomePickerState::SetIconLabelText----------icon6
+[   29.891] trace:  ----------HomePickerState::LoadIconImage----------icon6
+[   29.895] trace:  ------------TabsTransition::Update-------------- 9
+[   29.904] trace:  MODE_LOAD_ICONS 
+[   29.910] trace:  ----------HomePickerState::ManageIconLoading----------
+[   29.915] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   29.921] trace:  ----------HomePickerState::LoadIconData----------icon7
+[   29.927] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon7
+[   29.934] trace:  ----------HomePickerState::SetIconLabelText----------icon7
+[   29.939] trace:  ----------HomePickerState::LoadIconImage----------icon7
+[   29.945] trace:  ------------TabsTransition::Update-------------- 8
+[   29.948] trace:  MODE_LOAD_ICONS 
+[   29.953] trace:  ----------HomePickerState::ManageIconLoading----------
+[   29.958] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   29.964] trace:  ----------HomePickerState::LoadIconData----------icon8
+[   29.971] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon8
+[   29.978] trace:  ----------HomePickerState::SetIconLabelText----------icon8
+[   29.983] trace:  ----------HomePickerState::LoadIconImage----------icon8
+[   29.989] trace:  ------------TabsTransition::Update-------------- 7
+[   29.991] trace:  MAKING CART BITMAPS
+[   29.998] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon0
+[   30.003] trace:  ----------HomePickerState::MakeIconBitmap----------icon0
+[   30.019] trace:  MODE_LOAD_ICONS 
+[   30.025] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.031] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.036] trace:  ----------HomePickerState::LoadIconData----------icon9
+[   30.044] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon9
+[   30.050] trace:  ----------HomePickerState::SetIconLabelText----------icon9
+[   30.054] trace:  ----------HomePickerState::LoadIconImage----------icon9
+[   30.060] trace:  ------------TabsTransition::Update-------------- 6
+[   30.063] trace:  MODE_LOAD_ICONS 
+[   30.068] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.075] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.079] trace:  ----------HomePickerState::LoadIconData----------icon10
+[   30.087] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon10
+[   30.093] trace:  ----------HomePickerState::SetIconLabelText----------icon10
+[   30.098] trace:  ----------HomePickerState::LoadIconImage----------icon10
+[   30.103] trace:  ------------TabsTransition::Update-------------- 5
+[   30.107] trace:  MODE_LOAD_ICONS 
+[   30.112] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.118] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.123] trace:  ----------HomePickerState::LoadIconData----------icon11
+[   30.131] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon11
+[   30.136] trace:  ----------HomePickerState::SetIconLabelText----------icon11
+[   30.143] trace:  ----------HomePickerState::LoadIconImage----------icon11
+[   30.148] trace:  ------------TabsTransition::Update-------------- 4
+[   30.149] trace:  MODE_LOAD_ICONS 
+[   30.155] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.162] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.167] trace:  ----------HomePickerState::LoadIconData----------icon12
+[   30.174] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon12
+[   30.181] trace:  ----------HomePickerState::SetIconLabelText----------icon12
+[   30.186] trace:  ----------HomePickerState::LoadIconImage----------icon12
+[   30.192] trace:  ------------TabsTransition::Update-------------- 3
+[   30.193] trace:  MODE_LOAD_ICONS 
+[   30.199] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.206] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.210] trace:  ----------HomePickerState::LoadIconData----------icon13
+[   30.217] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon13
+[   30.223] trace:  ----------HomePickerState::SetIconLabelText----------icon13
+[   30.230] trace:  ----------HomePickerState::LoadIconImage----------icon13
+[   30.234] trace:  ------------TabsTransition::Update-------------- 2
+[   30.237] trace:  MODE_LOAD_ICONS 
+[   30.242] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.249] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.255] trace:  ----------HomePickerState::LoadIconData----------icon14
+[   30.262] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon14
+[   30.267] trace:  ----------HomePickerState::SetIconLabelText----------icon14
+[   30.273] trace:  ----------HomePickerState::LoadIconImage----------icon14
+[   30.279] trace:  ------------TabsTransition::Update-------------- 1
+[   30.282] trace:  waiting for load of the image
+[   30.284] trace:  MODE_LOAD_ICONS 
+[   30.290] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.295] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.302] trace:  ----------HomePickerState::LoadIconData----------icon15
+[   30.309] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon15
+[   30.315] trace:  ----------HomePickerState::SetIconLabelText----------icon15
+[   30.320] trace:  ----------HomePickerState::LoadIconImage----------icon15
+[   30.326] trace:  ------------TabsTransition::Update-------------- 0
+[   30.329] trace:  waiting for load of the image
+[   30.331] trace:  MODE_LOAD_ICONS 
+[   30.336] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.342] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.349] trace:  ----------HomePickerState::LoadIconData----------icon16
+[   30.356] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon16
+[   30.362] trace:  ----------HomePickerState::SetIconLabelText----------icon16
+[   30.368] trace:  ----------HomePickerState::LoadIconImage----------icon16
+[   30.372] trace:  ------------TabsTransition::Update-------------- 0
+[   30.375] trace:  waiting for load of the image
+[   30.379] trace:  MODE_LOAD_ICONS 
+[   30.383] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.390] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.396] trace:  ----------HomePickerState::LoadIconData----------icon17
+[   30.402] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon17
+[   30.408] trace:  ----------HomePickerState::SetIconLabelText----------icon17
+[   30.415] trace:  ----------HomePickerState::LoadIconImage----------icon17
+[   30.420] trace:  ------------TabsTransition::Update-------------- 0
+[   30.422] trace:  waiting for load of the image
+[   30.426] trace:  MODE_LOAD_ICONS 
+[   30.430] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.438] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.442] trace:  ----------HomePickerState::LoadIconData----------icon18
+[   30.449] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon18
+[   30.456] trace:  ----------HomePickerState::SetIconLabelText----------icon18
+[   30.462] trace:  ----------HomePickerState::LoadIconImage----------icon18
+[   30.467] trace:  ------------TabsTransition::Update-------------- 0
+[   30.470] trace:  waiting for load of the image
+[   30.473] trace:  MODE_LOAD_ICONS 
+[   30.478] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.484] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.489] trace:  ----------HomePickerState::LoadIconData----------icon19
+[   30.496] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon19
+[   30.503] trace:  ----------HomePickerState::SetIconLabelText----------icon19
+[   30.509] trace:  ----------HomePickerState::LoadIconImage----------icon19
+[   30.513] trace:  ------------TabsTransition::Update-------------- 0
+[   30.517] trace:  waiting for load of the image
+[   30.520] trace:  MODE_LOAD_ICONS 
+[   30.525] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.532] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.537] trace:  ----------HomePickerState::LoadIconData----------icon20
+[   30.544] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon20
+[   30.549] trace:  ----------HomePickerState::SetIconLabelText----------icon20
+[   30.556] trace:  ----------HomePickerState::LoadIconImage----------icon20
+[   30.560] trace:  ------------TabsTransition::Update-------------- 0
+[   30.564] trace:  waiting for load of the image
+[   30.567] trace:  MODE_LOAD_ICONS 
+[   30.572] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.579] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.584] trace:  ----------HomePickerState::LoadIconData----------icon21
+[   30.591] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon21
+[   30.596] trace:  ----------HomePickerState::SetIconLabelText----------icon21
+[   30.603] trace:  ----------HomePickerState::LoadIconImage----------icon21
+[   30.608] trace:  ------------TabsTransition::Update-------------- 0
+[   30.612] trace:  waiting for load of the image
+[   30.613] trace:  MODE_LOAD_ICONS 
+[   30.619] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.626] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.631] trace:  ----------HomePickerState::LoadIconData----------icon22
+[   30.637] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon22
+[   30.643] trace:  ----------HomePickerState::SetIconLabelText----------icon22
+[   30.650] trace:  ----------HomePickerState::LoadIconImage----------icon22
+[   30.655] trace:  ------------TabsTransition::Update-------------- 0
+[   30.659] trace:  waiting for load of the image
+[   30.661] trace:  MODE_LOAD_ICONS 
+[   30.667] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.672] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.678] trace:  ----------HomePickerState::LoadIconData----------icon23
+[   30.685] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon23
+[   30.691] trace:  ----------HomePickerState::SetIconLabelText----------icon23
+[   30.696] trace:  ----------HomePickerState::LoadIconImage----------icon23
+[   30.702] trace:  ------------TabsTransition::Update-------------- 0
+[   30.706] trace:  waiting for load of the image
+[   30.708] trace:  MODE_LOAD_ICONS 
+[   30.713] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.719] trace:  ----------HomePickerState::GetCategoryColorFieldName----------
+[   30.726] trace:  ----------HomePickerState::LoadIconData----------icon24
+[   30.732] trace:  ----------HomePickerState::SetCategoryLabelFieldName----------icon24
+[   30.737] trace:  ----------HomePickerState::SetIconLabelText----------icon24
+[   30.744] trace:  ----------HomePickerState::LoadIconImage----------icon24
+[   30.748] trace:  ------------TabsTransition::Update-------------- 0
+[   30.753] trace:  waiting for load of the image
+[   30.754] trace:  MODE_LOAD_ICONS 
+[   30.761] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.765] trace:  ------------TabsTransition::Update-------------- 0
+[   30.769] trace:  waiting for load of the image
+[   30.772] trace:  MODE_LOAD_ICONS 
+[   30.777] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.781] trace:  ------------TabsTransition::Update-------------- 0
+[   30.785] trace:  waiting for load of the image
+[   30.788] trace:  MODE_LOAD_ICONS 
+[   30.794] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.799] trace:  ------------TabsTransition::Update-------------- 0
+[   30.801] trace:  waiting for load of the image
+[   30.805] trace:  MODE_LOAD_ICONS 
+[   30.810] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.815] trace:  ------------TabsTransition::Update-------------- 0
+[   30.819] trace:  waiting for load of the image
+[   30.821] trace:  MODE_LOAD_ICONS 
+[   30.827] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.832] trace:  ------------TabsTransition::Update-------------- 0
+[   30.835] trace:  waiting for load of the image
+[   30.843] trace:  MODE_LOAD_ICONS 
+[   30.850] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.855] trace:  ------------TabsTransition::Update-------------- 0
+[   30.858] trace:  waiting for load of the image
+[   30.882] trace:  MODE_LOAD_ICONS 
+[   30.888] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.892] trace:  ------------TabsTransition::Update-------------- 0
+[   30.896] trace:  waiting for load of the image
+[   30.923] trace:  MODE_LOAD_ICONS 
+[   30.929] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.934] trace:  ------------TabsTransition::Update-------------- 0
+[   30.937] trace:  waiting for load of the image
+[   30.967] trace:  MODE_LOAD_ICONS 
+[   30.972] trace:  ----------HomePickerState::ManageIconLoading----------
+[   30.978] trace:  ------------TabsTransition::Update-------------- 0
+[   30.980] trace:  waiting for load of the image
+[   31.002] trace:  MODE_LOAD_ICONS 
+[   31.008] trace:  ----------HomePickerState::ManageIconLoading----------
+[   31.013] trace:  ------------TabsTransition::Update-------------- 0
+[   31.017] trace:  waiting for load of the image
+[   31.042] trace:  ------------TabsTransition::Update-------------- 0
+[   31.046] trace:  _animRefNext._tabWaitForLoad = false
+[   31.051] trace:   .... animating next ....upper -63.1125 lower 467
+[   31.078] trace:  ------------TabsTransition::Update-------------- 0
+[   31.082] trace:  _animRefNext._tabWaitForLoad = false
+[   31.088] trace:   .... animating next ....upper -40.2625 lower 454
+[   31.126] trace:  ------------TabsTransition::Update-------------- 0
+[   31.130] trace:  _animRefNext._tabWaitForLoad = false
+[   31.134] trace:   .... animating next ....upper -17.4125 lower 441
+[   31.166] trace:  ------------TabsTransition::Update-------------- 0
+[   31.170] trace:  _animRefNext._tabWaitForLoad = false
+[   31.174] trace:   .... animating next ....upper 5.4375 lower 428
+[   31.180] trace:   ... done animating next, done with transition
+[   31.204] trace:  ------------TabsTransition::Update-------------- 6
+[   31.248] trace:  ------------TabsTransition::Update-------------- 5
+[   31.283] trace:  ------------TabsTransition::Update-------------- 4
+[   31.326] trace:  ------------TabsTransition::Update-------------- 3
+[   31.368] trace:  ------------TabsTransition::Update-------------- 2
+[   31.412] trace:  ------------TabsTransition::Update-------------- 1
+[   31.419] trace:  ----------HomePickerState::Enter----------
+[   31.425] trace:  ----------HomePickerState::ActivateButtons----------
+[   31.429] trace:  ----------HomePickerState::CheckForConnectNag----------
+[   31.465] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.471] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.509] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.517] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.523] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon1
+[   31.548] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.554] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.562] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon2
+[   31.588] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.594] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.600] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon3
+[   31.625] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.631] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.639] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon4
+[   31.663] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.670] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.677] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon5
+[   31.703] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.710] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.716] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon6
+[   31.742] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.748] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.756] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon7
+[   31.779] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.786] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.793] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon8
+[   31.827] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   31.833] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   31.869] trace:  MODE_LOAD_ICON_BITMAPS 
+[   31.875] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   31.912] trace:  MODE_LOAD_ICON_BITMAPS 
+[   31.919] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   31.924] trace:  ----------HomePickerState::MakeIconBitmap----------icon1
+[   31.950] trace:  MODE_LOAD_ICON_BITMAPS 
+[   31.956] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   31.962] trace:  ----------HomePickerState::MakeIconBitmap----------icon2
+[   31.989] trace:  MODE_LOAD_ICON_BITMAPS 
+[   31.996] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   32.002] trace:  ----------HomePickerState::MakeIconBitmap----------icon3
+[   32.027] trace:  MODE_LOAD_ICON_BITMAPS 
+[   32.033] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   32.039] trace:  ----------HomePickerState::MakeIconBitmap----------icon4
+[   32.064] trace:  MODE_LOAD_ICON_BITMAPS 
+[   32.070] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   32.076] trace:  ----------HomePickerState::MakeIconBitmap----------icon5
+[   32.101] trace:  MODE_LOAD_ICON_BITMAPS 
+[   32.108] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   32.113] trace:  ----------HomePickerState::MakeIconBitmap----------icon6
+[   32.139] trace:  MODE_LOAD_ICON_BITMAPS 
+[   32.145] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   32.150] trace:  ----------HomePickerState::MakeIconBitmap----------icon7
+[   32.176] trace:  MODE_LOAD_ICON_BITMAPS 
+[   32.182] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   32.188] trace:  ----------HomePickerState::MakeIconBitmap----------icon8
+[   32.219] trace:  MODE_LOAD_ICON_BITMAPS 
+[   32.225] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   32.262] trace:  MODE_BITMAP_BACKGROUND 
+[   32.269] trace:  ----------HomePickerState::ManageBackgroundBitmapping----------
+[   32.274] trace:  ----------HomePickerState::MakeUpperTabBitmap----------
+[   32.282] trace:  ----------HomePickerState::CheckIfCurrentPageIsLoaded----------
+[   32.287] trace:  ----------HomePickerState::EnableButtons----------
+[   32.292] [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+[   32.297] trace:  ----------HomePickerState::EnableArrows----------
+[   32.303] [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+[   32.410] trace:  MODE_BITMAP_BACKGROUND 
+[   32.417] trace:  ----------HomePickerState::ManageBackgroundBitmapping----------
+[   32.421] trace:  ----------SoundManager::StopMusic----------
+[   32.426] trace:  ----------SoundManager::PlayMusic----------
+[   32.447] trace:  MODE_INITIALIZE_PET 
+[   32.453] trace:  ----------HomePickerState::ManagePetInitialization----------
+[   32.457] trace:  ----------HomePickerState::InitializePet----------
+[   32.462] trace:  ----------UIPetLPAD::LoadPet----------
+[   32.471] trace:  ----------LF.LPAD.Pet.com.frimastudio.emerald.utils.SaveManager::ReadSavedData----------
+[   32.474] trace:  About to AddAvatar
+[   32.474] trace:  
+[   32.476] READ SCRIPT
+[   32.501] trace:  READ SCRIPT DONE
+[   32.508] trace:  ----------PetAccelerometerManager::PetAccelerometerManager----------
+[   32.512] [0x200] AccelerometerPlugin::setAccelerometerRate, rate = 10
+[   32.519] trace:  ----------PetAccelerometerManager::Deactivate----------
+[   32.525] [0x6] RemoveListener: could not find listener 0x41b7a530, total number 4
+[   32.612] trace:  ----------PetAccelerometerManager::Init----------
+[   32.615] trace:  mAvatar._name = _UIPetLPAD
+[   32.616] trace:  mIsActive = true
+[   32.623] trace:  ----------UIPetLPAD::ChangeStateToJumpIn----------
+[   32.680] trace:  ----------UIPetLPAD::ResumePet----------
+[   32.686] trace:  ----------PetAccelerometerManager::Activate----------
+[   32.787] [0x6] AddListener: added listener 0x41b7a530, total number 5
+[   32.791] trace:  MODE_PLAY_INITIAL_AUDIO_PROMPTS 
+[   32.797] trace:  ----------HomePickerState::PlayInitialAudioPrompts----------
+[   32.801] trace:  ----------IdlePrompts::GetInstance----------
+[   32.805] trace:  ----------IdlePrompts::IdlePrompts----------
+[   32.811] trace:  ----------IdlePrompts::PullData----------
+[   32.816] trace:  ----------IdlePrompts::SetAllPrompts----------
+[   32.821] trace:  ----------IdlePrompts::StartPromptTimer----------
+[   32.826] trace:  MODE_JUMP_PET_IN 
+[   32.833] trace:  ----------HomePickerState::ManagePetJumpingIn----------
+[   32.837] trace:  ----------UIPetLPAD::SuspendPet----------
+[   32.843] trace:  ----------PetAccelerometerManager::Deactivate----------
+[   32.849] [0x6] RemoveListener: removed listener 0x41b7a530, total number 4
+[   32.937] trace:  MODE_LOAD_ICONS 
+[   32.943] trace:  ----------HomePickerState::ManageIconLoading----------
+[   32.969] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   32.976] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   32.982] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon9
+[   33.085] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.092] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.099] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon10
+[   33.202] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.209] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.216] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon11
+[   33.326] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.333] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.339] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon12
+[   33.424] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.429] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.437] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon13
+[   33.522] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.528] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.536] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon14
+[   33.620] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.627] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.634] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon15
+[   33.697] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.704] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.710] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon16
+[   33.771] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.778] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.785] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon17
+[   33.849] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.856] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.862] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon18
+[   33.972] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   33.979] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   33.987] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon19
+[   34.097] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   34.104] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   34.110] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon20
+[   34.221] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   34.228] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   34.235] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon21
+[   34.326] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   34.333] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   34.339] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon22
+[   34.427] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   34.434] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   34.441] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon23
+[   34.532] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   34.538] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   34.545] trace:  ----------HomePickerState::MakeIconHighlightBitmap----------icon24
+[   34.612] trace:  MODE_LOAD_ICON_HIGHLIGHT_BITMAPS 
+[   34.618] trace:  ----------HomePickerState::ManageIconHighlightBitmapLoading----------
+[   34.643] trace:  MODE_LOAD_ICON_BITMAPS 
+[   34.649] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   34.655] trace:  ----------HomePickerState::MakeIconBitmap----------icon9
+[   34.768] trace:  MODE_LOAD_ICON_BITMAPS 
+[   34.774] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   34.780] trace:  ----------HomePickerState::MakeIconBitmap----------icon10
+[   34.888] trace:  MODE_LOAD_ICON_BITMAPS 
+[   34.893] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   34.900] trace:  ----------HomePickerState::MakeIconBitmap----------icon11
+[   35.010] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.016] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.022] trace:  ----------HomePickerState::MakeIconBitmap----------icon12
+[   35.107] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.114] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.119] trace:  ----------HomePickerState::MakeIconBitmap----------icon13
+[   35.206] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.212] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.218] trace:  ----------HomePickerState::MakeIconBitmap----------icon14
+[   35.303] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.309] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.314] trace:  ----------HomePickerState::MakeIconBitmap----------icon15
+[   35.380] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.386] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.392] trace:  ----------HomePickerState::MakeIconBitmap----------icon16
+[   35.453] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.459] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.465] trace:  ----------HomePickerState::MakeIconBitmap----------icon17
+[   35.530] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.536] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.541] trace:  ----------HomePickerState::MakeIconBitmap----------icon18
+[   35.650] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.656] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.662] trace:  ----------HomePickerState::MakeIconBitmap----------icon19
+[   35.770] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.776] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.782] trace:  ----------HomePickerState::MakeIconBitmap----------icon20
+[   35.891] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.896] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   35.903] trace:  ----------HomePickerState::MakeIconBitmap----------icon21
+[   35.992] trace:  MODE_LOAD_ICON_BITMAPS 
+[   35.998] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   36.004] trace:  ----------HomePickerState::MakeIconBitmap----------icon22
+[   36.091] trace:  MODE_LOAD_ICON_BITMAPS 
+[   36.097] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   36.103] trace:  ----------HomePickerState::MakeIconBitmap----------icon23
+[   36.192] trace:  MODE_LOAD_ICON_BITMAPS 
+[   36.199] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   36.204] trace:  ----------HomePickerState::MakeIconBitmap----------icon24
+[   36.264] trace:  MODE_LOAD_ICON_BITMAPS 
+[   36.270] trace:  ----------HomePickerState::ManageIconBitmapLoading----------
+[   36.311] trace:  MODE_BITMAP_BACKGROUND 
+[   36.317] trace:  ----------HomePickerState::ManageBackgroundBitmapping----------
+[   36.346] trace:  MODE_INITIALIZE_PET 
+[   36.352] trace:  ----------HomePickerState::ManagePetInitialization----------
+[   36.390] trace:  MODE_RESUME_PET 
+[   36.395] trace:  ----------HomePickerState::ManagePetResume----------
+[   36.400] trace:  ----------UIPetLPAD::ResumePet----------
+[   36.405] trace:  ----------PetAccelerometerManager::Activate----------
+[   36.498] [0x6] AddListener: added listener 0x41b7a530, total number 5
+[   36.503] trace:  ----------UIPetLPAD::EnableButtons----------
+[   37.793] trace:  ----------IdlePrompts::PlayPrompt----------
+[   37.800] trace:  ----------IdlePrompts::GetNextPromptToPlay----------Home_Idle_Badge
+[   37.808] trace:  profile.GetBadges() and _global._uiData._currProfileUIData.BadgeNumber 0 and 0
+[   37.815] trace:  ----------IdlePrompts::PlaySubsequentPrompt----------rightAway = true
+[   38.071] trace:  ----------IdlePrompts::PlayPrompt----------
+[   38.078] trace:  ----------IdlePrompts::GetNextPromptToPlay----------Home_Idle_Connect
+[   38.086] trace:  _profile.GetBadges() and _global._uiData._currProfileUIData.BadgeNumber 0 and 0
+[   38.090] [0x200] AppManagerPlugin::isBaseAppRelaunch, FALSE
+[   38.097] trace:  ----------IdlePrompts::PlaySubsequentPrompt----------rightAway = true
+[   38.355] trace:  ----------IdlePrompts::PlayPrompt----------
+[   38.361] trace:  ----------IdlePrompts::GetNextPromptToPlay----------Home_Idle_nav
+[   38.364] trace:  _mainPicker._numPages = 3
+[   38.369] trace:  --------SoundManager::PlaySequence-----
+[   38.373] trace:  --------SoundManager::StopSequence-----
+[   38.377] trace:  _sequenceSound = [object Object]
+[   38.380] trace:  _sequenceIntervalId = undefined
+[   38.385] trace:  --------SoundManager::ClearEndOfSeqCallback-----
+[   38.392] trace:  loadSound : sound = /LF/Base/LpadAssets_en/Audio/LPAD_BN0041.mp3
+[   38.515] trace:  --------SoundManager::HandleLoad-----
+[   40.152] trace:  ----------HomePickerState::KeyDown----------
+[   40.157] trace:  ----------HomePickerState::OnNavPress----------1
+[   40.163] trace:  ----------HomePickerState::ProcessNavPress----------1
+[   40.168] trace:  ----------HomePickerState::ChangePage( 1 )----------
+[   40.173] trace:  ----------HomePickerState::DisableButtons----------
+[   40.179] [0x200] SystemPlugin::SetTouchscreenSampleRate( 1 ): false
+[   40.184] trace:  ----------HomePickerState::DisableArrows----------
+[   40.190] trace:  ----------HomePickerState::SetNumberOfIconsOnCurrentPage----------
+[   40.197] trace:  ----------HomePickerState::SwapAnimatingIconsToBitmap----------
+[   40.321] trace:  ----------HomePickerState::KeyUp----------
+[   40.323] trace:  key pressed 39
+[   40.612] trace:  ----------HomePickerState::EnableButtons----------
+[   40.617] [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+[   40.622] trace:  ----------HomePickerState::EnableArrows----------
+[   40.628] [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+[   40.633] trace:  ----------HomePickerState::EnableArrows----------
+[   40.638] [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+[   40.644] trace:  ----------HomePickerState::SwapAnimatingIconsToBitmap----------
+[   40.739] trace:  MODE_RESUME_PET 
+[   40.744] trace:  ----------HomePickerState::ManagePetResume----------
+[   40.749] trace:  ----------UIPetLPAD::EnableButtons----------
+[   40.987] trace:  -----Callback.PrintDebugInfo-----
+[   40.990] trace:       _cbFunc:  null
+[   40.995] trace:       _cbScope: _level0.mcContent.HomePicker_mc.main_mc
+[   40.998] trace:       _cbArgs:  undefined
+[   42.636] trace:  --------SoundManager::HandleSequence-----
+[   42.909] trace:  ----------SoundManager::onSequenceDelay----------
+[   42.916] trace:  --------SoundManager::DoEndOfSeqCallback-----[object Object]
+[   42.919] trace:  -----Callback.PrintDebugInfo-----
+[   42.923] trace:       _cbFunc:  [type Function]
+[   42.926] trace:       _cbScope: [object Object]
+[   42.929] trace:       _cbArgs:  false
+[   42.936] trace:  ----------IdlePrompts::PlaySubsequentPrompt----------rightAway = false
+[   42.941] trace:  --------SoundManager::ClearEndOfSeqCallback-----
+[   44.599] trace:  ----------HomePickerState::KeyDown----------
+[   44.604] trace:  ----------HomePickerState::OnNavPress----------1
+[   44.609] trace:  ----------HomePickerState::ProcessNavPress----------1
+[   44.615] trace:  ----------HomePickerState::ChangePage( 1 )----------
+[   44.620] trace:  ----------HomePickerState::DisableButtons----------
+[   44.625] [0x200] SystemPlugin::SetTouchscreenSampleRate( 1 ): false
+[   44.631] trace:  ----------HomePickerState::DisableArrows----------
+[   44.637] trace:  ----------HomePickerState::SetNumberOfIconsOnCurrentPage----------
+[   44.644] trace:  ----------HomePickerState::SwapAnimatingIconsToBitmap----------
+[   44.730] trace:  ----------HomePickerState::KeyUp----------
+[   44.732] trace:  key pressed 39
+[   45.114] trace:  ----------HomePickerState::EnableButtons----------
+[   45.119] [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+[   45.124] trace:  ----------HomePickerState::EnableArrows----------
+[   45.129] [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+[   45.135] trace:  ----------HomePickerState::EnableArrows----------
+[   45.140] [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+[   45.146] trace:  ----------HomePickerState::SwapAnimatingIconsToBitmap----------
+[   45.148] trace:  MODE_RESUME_PET 
+[   45.154] trace:  ----------HomePickerState::ManagePetResume----------
+[   45.158] trace:  ----------UIPetLPAD::EnableButtons----------
+[   45.394] trace:  -----Callback.PrintDebugInfo-----
+[   45.397] trace:       _cbFunc:  null
+[   45.402] trace:       _cbScope: _level0.mcContent.HomePicker_mc.main_mc
+[   45.405] trace:       _cbArgs:  undefined
+[   45.984] trace:  ----------HomePickerState::ProcessMouseDown----------
+[   45.990] trace:  ----------BaseIconButton::onPress()---------- icon19
+[   45.995] trace:  ----------HomePickerState::ProcessIconOnPress----------
+[   46.000] trace:  game_info._title = SpongeBob SquarePants:
+[   46.001] The Clam Prix
+[   46.143] trace:  ----------HomePickerState::ProcessMouseUp----------
+[   46.149] trace:  ----------BaseIconButton::onRelease()---------- icon19
+[   46.155] trace:  ----------HomePickerState::ProcessIconOnRelease----------
+[   46.160] trace:  ----------HomePickerState::DisableButtons----------
+[   46.165] [0x200] SystemPlugin::SetTouchscreenSampleRate( 1 ): false
+[   46.170] trace:  ----------HomePickerState::DisableArrows----------
+[   46.175] trace:  ----------UIPetLPAD::SuspendPet----------
+[   46.181] trace:  ----------PetAccelerometerManager::Deactivate----------
+[   46.186] [0x6] RemoveListener: removed listener 0x41b7a530, total number 4
+[   46.253] trace:  ----------HomePickerState::PausePrompts----------
+[   46.258] trace:  ----------IdlePrompts::PausePrompts----------
+[   46.263] trace:  ----------IdlePrompts::SavePromptData----------
+[   46.268] trace:  --------SoundManager::StopSequence-----
+[   46.271] trace:  _sequenceSound = [object Object]
+[   46.274] trace:  _sequenceIntervalId = 7
+[   46.279] trace:  --------SoundManager::ClearEndOfSeqCallback-----
+[   46.860] trace:  -----Callback.PrintDebugInfo-----
+[   46.864] trace:       _cbFunc:  [type Function]
+[   46.870] trace:       _cbScope: _level0.mcContent.HomePicker_mc.main_mc
+[   46.873] trace:       _cbArgs:  [object Object]
+[   46.879] trace:  ----------HomePickerState::PlayAppGameInfoSound----------
+[   46.884] trace:  ----------HomePickerState::LaunchApp----------
+[   46.888] trace:  ----------SoundManager::StopMusic----------
+[   46.894] trace:  ------------TabsTransition::TabsTransition---------------
+[   46.897] trace:  _bgToShow = undefined
+[   46.900] trace:  _bgToHide = undefined
+[   46.906] trace:  ----------StateMachine::ReplaceTopState----------- LaunchApp.swf
+[   46.912] trace:  _currState._container = _level0.mcContent.HomePicker_mc
+[   46.916] trace:  movieclip = _level0.mcContent.LaunchApp_mc
+[   46.923] [0x6] RemoveListener: could not find listener 0x41b7aa1c, total number 4
+[   46.956] trace:  ----------StateMachine::_mcListener.onLoadInit( _level0.mcContent.LaunchApp_mc )----------
+[   46.961] trace:  ------------TabsTransition::Init---------------
+[   46.964] trace:   _incrementUpper : 97.55
+[   46.966] trace:   _incrementLower : 52
+[   47.002] trace:  ----------HomePickerState::Exit----------
+[   47.009] trace:  ----------HomePickerState::ClearIconBitmaps----------
+[   47.057] trace:  ----------HomePickerState::ClearUpperTabBitmap----------
+[   47.063] [0x6] RemoveListener: removed listener 0xaa9b0, total number 3
+[   47.069] [0x6] RemoveListener: could not find listener 0xaa9b0, total number 3
+[   47.074] trace:  ----------HomePickerState::PausePrompts----------
+[   47.079] trace:  ----------IdlePrompts::PausePrompts----------
+[   47.084] trace:  ----------IdlePrompts::SavePromptData----------
+[   47.088] trace:  --------SoundManager::StopSequence-----
+[   47.092] trace:  _sequenceSound = [object Object]
+[   47.094] trace:  _sequenceIntervalId = 7
+[   47.100] trace:  --------SoundManager::ClearEndOfSeqCallback-----
+[   47.104] trace:  ----------SoundManager::FadeOutMusic----------
+[   47.107] trace:  _music.position = 12904
+[   47.112] trace:  ----------UIPetLPAD::RemovePet----------
+[   47.116] trace:  ----------UIPetLPAD::Dispose----------
+[   47.121] trace:  ----------PetAccelerometerManager::Dispose----------
+[   47.128] [0x6] RemoveListener: could not find listener 0x41b7a530, total number 3
+[   47.170] trace:  ----------UIPetLPAD::Exit----------
+[   47.176] [0x200] SystemPlugin::ResetTouchscreenSampleRate(): false
+[   47.181] trace:  ------------TabsTransition::Update-------------- 0
+[   47.184] trace:   .... animating prev ... 
+[   47.214] trace:  ------------TabsTransition::Update-------------- 0
+[   47.217] trace:   .... animating prev ... 
+[   47.256] trace:  ------------TabsTransition::Update-------------- 0
+[   47.259] trace:   .... animating prev ... 
+[   47.293] trace:  ------------TabsTransition::Update-------------- 0
+[   47.296] trace:   .... animating prev ... 
+[   47.302] trace:   ... done animating previous, now start animating next
+[   47.338] trace:  ------------TabsTransition::Update-------------- 12
+[   47.381] trace:  ------------TabsTransition::Update-------------- 11
+[   47.423] trace:  ------------TabsTransition::Update-------------- 10
+[   47.465] trace:  ------------TabsTransition::Update-------------- 9
+[   47.509] trace:  ------------TabsTransition::Update-------------- 8
+[   47.551] trace:  ------------TabsTransition::Update-------------- 7
+[   47.593] trace:  ------------TabsTransition::Update-------------- 6
+[   47.635] trace:  ------------TabsTransition::Update-------------- 5
+[   47.677] trace:  ------------TabsTransition::Update-------------- 4
+[   47.721] trace:  ------------TabsTransition::Update-------------- 3
+[   47.763] trace:  ------------TabsTransition::Update-------------- 2
+[   47.806] trace:  ------------TabsTransition::Update-------------- 1
+[   47.811] trace:  _animRefNext._tabWaitForLoad = undefined
+[   47.815] trace:   .... animating next ....upper NaN lower NaN
+[   47.820] trace:   ... done animating next, done with transition
+[   47.851] trace:  ------------TabsTransition::Update-------------- 6
+[   47.894] trace:  ------------TabsTransition::Update-------------- 5
+[   47.938] trace:  ------------TabsTransition::Update-------------- 4
+[   47.982] trace:  ------------TabsTransition::Update-------------- 3
+[   48.023] trace:  ------------TabsTransition::Update-------------- 2
+[   48.066] trace:  ------------TabsTransition::Update-------------- 1
+[   48.098] [0x200] SystemPlugin::SetDidjLegacyFlag( 0 )
+[   48.102] [0x280] ReplaceTopApp: 1 DATA IS  NULL ..... 
+[   48.109] [0x280] LoadNewApp path = /LF/Bulk/ProgramFiles/LST3-0x00180025-000000/App.so
+[   48.118] [0x280] LoadNewApp: before; /LF/Bulk/ProgramFiles/LST3-0x00180025-000000/App.so; 1706; 12820
+[   51.216] [0x280] LoadNewApp: after ; /LF/Bulk/ProgramFiles/LST3-0x00180025-000000/App.so; 1812; 1472
+[   51.225] [0x280] LoadNewApp: loading ViewFrame /LF/Base//EmeraldTitles/LST3-0x00180025-000000/ViewFrame.json
+[   51.229] [0x280] mCurrentTransition = kReplaceTopApp !
+[   51.232] [0x280] CAppManager::ExitPopUnloadApp()
+[   51.279] trace:  ------------TabsTransition::TabsTransition---------------
+[   51.281] trace:  _bgToShow = undefined
+[   51.284] trace:  _bgToHide = undefined
+[   51.291] trace:  ----------StateMachine::ReplaceTopState----------- HomePicker.swf
+[   51.296] trace:  _currState._container = _level0.mcContent.LaunchApp_mc
+[   51.301] trace:  movieclip = _level0.mcContent.HomePicker_mc
+[   51.880] [0x6] RemoveListener: could not find listener 0x41b7aa1c, total number 3
+[   51.887] [0x6] RemoveListener: could not find listener 0x41b7a530, total number 3
+[   51.892] [0x6] RemoveListener: removed listener 0x530dc, total number 2
+[   51.898] [0x6] RemoveListener: removed listener 0x53098, total number 1
+[   51.903] [0x5] UnRegisterLayer: 0x533e0: 480x272 (1920) @ 0x83d7e800
+[   51.908] [0x5] DestroyHandle: 0x533e0: 480x272 (1920) @ 0x83d7e800
+[   51.914] [0x5] UnRegisterLayer: 0x533e0: 480x272 (1920) @ 0x83d7e800
+[   51.919] [0x5] DeAllocBuffer: remove offset 0017E800, length 0007F800
+[   51.924] [0x5] UnRegisterLayer: 0x53458: 480x272 (1920) @ 0x41bd9008
+[   51.930] [0x5] DestroyHandle: 0x53458: 480x272 (1920) @ 0x41bd9008
+[   51.935] [0x5] UnRegisterLayer: 0x53458: 480x272 (1920) @ 0x41bd9008
+[   51.941] [0x6] RemoveListener: could not find listener 0x53370, total number 1
+[   51.945] MPCriticalSection::~MPCriticalSection() error 22
+[   51.952] [0x6] RemoveListener: could not find listener 0x530dc, total number 1
+[   51.958] [0x6] RemoveListener: could not find listener 0x53098, total number 1
+[   51.963] [0x280] ExitPopUnloadApp: before; /LF/Base/LPAD/; 1943; 9056
+[   51.969] [0x280] ExitPopUnloadApp: before UnloadModule /LF/Base/LPAD/
+[   51.973] [0x280] ExitPopUnloadApp: module unloaded 308568
+[   51.978] [0x280] ExitPopUnloadApp: after ; /LF/Base/LPAD/; 1949; 9128
+[   51.985] [0x280] ExitPopUnloadApp: aborting all Atomic I/O with fabortAllAtomic
+[   51.989] [0xf] fabortAllAtomic: aborted 0 files
+[   51.992] [0x280] CGameViewFrame::Enter
+[   52.157] [0x6] AddListener: added listener 0xc45e8, total number 2
+[   52.159] current path is /
+[   52.165] set current path to /LF/Bulk/ProgramFiles/LST3-0x00180025-000000
+[   52.170] [0x5] CreateHandle: 0xaa5a0: 320x240 (1280) @ 0x408e5000
+[   52.175] [0x5] RegisterLayer: 0xaa5a0: 320x240 (1280) @ 0x408e5000
+[   52.179] [0x5] SetWindowPosition: 0xaa5a0: 0,0 .. 320,240
+[   52.184] [0x5] SetWindowPosition: 0xaa5a0: 0,0 .. 320,240
+[   52.186] [0x5] eglInitialize()
+[   52.190] [0x5] eglInitialize(): success = 1, version = 1.4
+[   52.193] [0x5] OpenGL ES vendor = NEXEL
+[   52.196] [0x5] OpenGL ES version = EGL 1.4
+[   52.199] [0x5] OpenGL ES extensions = 
+[   52.201] [0x5] eglChooseConfig()
+[   52.204] [0x5] eglCreateWindowSurface()
+[   52.206] [0x5] eglCreateContext()
+[   52.228] [0x5] eglMakeCurrent()
+[   52.230] [0x5] eglSwapBuffers()
+[   52.244] [0x5] RegisterLayer: 0xaa5a0: 320x240 (1280) @ 0x408e5000
+[   52.248] [0x5] SetWindowPosition: 0xaa5a0: 0,0 .. 320,240
+[   52.251] [0x5] display handle = 0xaa5a0
+[   52.256] [0x6] AddListener: added listener 0x885e0, total number 3
+[   52.261] [0x6] AddListener: added listener 0xc4460, total number 4
+[   53.249] [GLTextureManager] Load Texture SpongeboyTT1_30.udi, 262144, total is 262144
+[   53.261] [GLTextureManager] Load Texture LFCurry_20_00.udi, 65536, total is 327680
+[   53.272] [GLTextureManager] Load Texture SpongeboyTT1_18_00.udi, 65536, total is 393216
+[   53.280] [GLTextureManager] Load Texture SpongeboyTT1_40_Number_00.udi, 32768, total is 425984
+[   53.303] [GLTextureManager] Load Texture LFCurry_25_0.udi, 131072, total is 557056
+[   53.331] [GLTextureManager] Load Texture LFCurry_25_hollow.udi, 131072, total is 688128
+[   53.358] [GLTextureManager] Load Texture LFCurry_25_006.udi, 131072, total is 819200
+[   53.382] [GLTextureManager] Load Texture LFCurry_25_007.udi, 131072, total is 950272
+[   53.403] [GLTextureManager] Load Texture SpongeboyTT1_22_00.udi, 131072, total is 1081344
+[   53.411] [GLTextureManager] Load Texture LFCurry_15_00.udi, 65536, total is 1146880
+[   53.431] [GLTextureManager] Load Texture LFCurry_18_00.udi, 131072, total is 1277952
+[   53.451] [GLTextureManager] Load Texture SpongeboyTT1_18_B_3_00.udi, 131072, total is 1409024
+[   53.470] [GLTextureManager] Load Texture SpongeboyTT1_22_B_3_00.udi, 131072, total is 1540096
+[   53.490] [GLTextureManager] Load Texture LFCurry_20_B_3_00.udi, 131072, total is 1671168
+[   53.510] [GLTextureManager] Load Texture LFCurry_20_B_2_1_00.udi, 131072, total is 1802240
+[   53.528] [GLTextureManager] Load Texture LFCurry_15_B_1_00.udi, 131072, total is 1933312
+[   53.547] [GLTextureManager] Load Texture LFCurry_18_B_1_00.udi, 131072, total is 2064384
+[   53.566] [GLTextureManager] Load Texture LFCurry_18_B_2_2_00.udi, 131072, total is 2195456
+[   53.585] [GLTextureManager] Load Texture LFCurry_20_B_2_2_00.udi, 131072, total is 2326528
+[   53.602] [GLTextureManager] Load Texture LFCurry_15_B_2_00.udi, 131072, total is 2457600
+[   53.619] src/BobKart/GameObjects/PlayerProfile/CoinMan.cpp(41): Total coins: 0
+[   53.631] src/BobKart/GameObjects/PlayerProfile/LevelRecord.cpp(66): curriculumID: 0, current level: 3, current sub level: 1, current CA: 0, play round: 0
+[   53.644] src/BobKart/GameObjects/PlayerProfile/LevelRecord.cpp(66): curriculumID: 1, current level: 3, current sub level: 1, current CA: 0, play round: 0
+[   53.657] src/BobKart/GameObjects/PlayerProfile/LevelRecord.cpp(66): curriculumID: 2, current level: 3, current sub level: 1, current CA: 0, play round: 0
+[   53.670] src/BobKart/GameObjects/PlayerProfile/LevelRecord.cpp(66): curriculumID: 3, current level: 3, current sub level: 1, current CA: 0, play round: 0
+[   53.682] src/BobKart/GameObjects/PlayerProfile/LevelRecord.cpp(66): curriculumID: 4, current level: 3, current sub level: 1, current CA: 0, play round: 0
+[   53.686] [PlayerProfile] Save data loaded.
+[   53.822] [0x281] CJSonFile::Load() failed to open (filehandle was NULL) mRsrcPath = /LF/Bulk/Data/Local/0/./Milestones.json
+[   53.856] [GLTextureManager] Load Texture UIAnimation/LoadingAnim/LoadingAnim__page0.udi, 131072, total is 2588672
+[   53.869] TitleStart
+[   53.878] Create ParticleSystem template DriveDust_LX success!
+[   53.890] Create ParticleSystem template speedline success!
+[   53.895] Create ParticleSystem template splash success!
+[   53.903] Create ParticleSystem template splash_L success!
+[   53.943] [GLTextureManager] Load Texture Nickelodeon_Logo.udi, 38432, total is 2627104
+[   53.968] [GLTextureManager] Load Texture Logo_words_virtuos_situ.udi, 77312, total is 2704416
+[   54.024] [GLTextureManager] Load Texture Title screen.udi, 153600, total is 2858016
+[   54.071] [GLTextureManager] Load Texture UITexture/Badges_Popup.udi, 22464, total is 2880480
+[   64.081] *** LeapDog: console SILENT for 10.0s — possible hang ***
+[   67.415] *** LeapDog: console resumed after 13.3s of silence ***
+[   67.423] [GLTextureManager] Release Texture Nickelodeon_Logo.udi, 38432, total is 2842048
+[   67.431] [GLTextureManager] Release Texture Logo_words_virtuos_situ.udi, 77312, total is 2764736
+[   67.438] [GLTextureManager] Release Texture Title screen.udi, 153600, total is 2611136
+[   67.508] [GLTextureManager] Load Texture UITexture/main_menu_bg.udi, 153600, total is 2764736
+[   67.514] [GLTextureManager] Load Texture UITexture/ok.udi, 3072, total is 2767808
+[   67.523] [GLTextureManager] Load Texture UITexture/main_menu_play_normal.udi, 13120, total is 2780928
+[   67.531] [GLTextureManager] Load Texture UITexture/main_menu_play_focus.udi, 13120, total is 2794048
+[   67.538] [GLTextureManager] Load Texture UITexture/settings_bb1a.udi, 26208, total is 2820256
+[   67.546] [GLTextureManager] Load Texture UITexture/settings_bb2a.udi, 26208, total is 2846464
+[   67.554] [GLTextureManager] Load Texture UITexture/main_menu_micromods_normal.udi, 13120, total is 2859584
+[   67.563] [GLTextureManager] Load Texture UITexture/main_menu_micromods_focus.udi, 13120, total is 2872704
+[   67.571] [GLTextureManager] Load Texture UITexture/main_menu_badges_normal.udi, 13120, total is 2885824
+[   67.580] [GLTextureManager] Load Texture UITexture/main_menu_badges_focus.udi, 13120, total is 2898944
+[   67.588] [GLTextureManager] Load Texture UITexture/main_menu_option_normal.udi, 13120, total is 2912064
+[   67.596] [GLTextureManager] Load Texture UITexture/main_menu_option_focus.udi, 13120, total is 2925184
+[   67.605] [GLTextureManager] Load Texture UITexture/main_menu_expansion_pack.udi, 12792, total is 2937976
+[   67.614] [GLTextureManager] Load Texture UITexture/main_menu_expansion_pack_02.udi, 12792, total is 2950768
+[   67.621] [GLTextureManager] Load Texture UITexture/main_menu_bob_hand.udi, 2304, total is 2953072
+[   67.629] [GLTextureManager] Load Texture UITexture/main_menu_bob.udi, 35880, total is 2988952
+[   67.637] [GLTextureManager] Load Texture UITexture/main_menu_bob_fist.udi, 1008, total is 2989960
+[   67.645] [GLTextureManager] Load Texture UITexture/main_menu_bob_eyelid.udi, 2128, total is 2992088
+[   67.653] [GLTextureManager] Load Texture UITexture/main_menu_bob_eye.udi, 2128, total is 2994216
+[   67.661] [GLTextureManager] Load Texture UITexture/main_menu_font_Tune_Up_Garage.udi, 14560, total is 3008776
+[   67.668] [GLTextureManager] Load Texture UITexture/sm_01.udi, 12992, total is 3021768
+[   67.677] [GLTextureManager] Load Texture UIAnimation/BubbleAni/BubbleAni__page0.udi, 65536, total is 3087304
+[   67.686] [GLTextureManager] Release Texture UITexture/main_menu_font_Tune_Up_Garage.udi, 14560, total is 3072744
+[   67.696] [GLTextureManager] Load Texture UITextureOutOfPage/main_menu/main_menu_font_play.udi, 16120, total is 3088864
+[   67.705] [GLTextureManager] Release Texture UITexture/main_menu_expansion_pack.udi, 12792, total is 3076072
+[   67.715] [GLTextureManager] Load Texture UITextureOutOfPage/main_menu/main_menu_expansion_pack_03.udi, 12792, total is 3088864
+[   67.724] [GLTextureManager] Release Texture UITexture/main_menu_expansion_pack_02.udi, 12792, total is 3076072
+[   67.734] [GLTextureManager] Load Texture UITextureOutOfPage/main_menu/main_menu_expansion_pack_04.udi, 12792, total is 3088864
+[   77.745] *** LeapDog: console SILENT for 10.0s — possible hang ***
+[   80.171] *** LeapDog: console resumed after 12.4s of silence ***
+[   80.175] [0x280] kPowerLowBattery event
+[   80.180] lf2000-power lf2000-power: Report Low Battery (4089 mv)
+[   80.183] [0x280] mLowBatteryEventOccurred
+[   80.185] [0x280] Low battery state start
+[   80.237] [0x280] mCurrentTransition = kPushApp !
+[   80.240] [0x280] CGameViewFrame::Suspend
+[   80.241] resume path to / 
+[   80.738] [0x280] mCurrentTransition = kPopApp !
+[   80.742] [0x280] CAppManager::ExitPopUnloadApp()
+[   80.746] [0x0] CLowBatteryState::Exit()
+[   80.752] [0x280] CGameViewFrame::Resume
+[   80.753] current path is /
+[   80.759] set current path to /LF/Bulk/ProgramFiles/LST3-0x00180025-000000
+[   90.769] *** LeapDog: console SILENT for 10.0s — possible hang ***
+[   97.835] *** LeapDog: console resumed after 17.1s of silence ***
+[   97.843] [GLTextureManager] Load Texture UITexture/playmodesbg.udi, 77312, total is 3166176
+[   97.850] [GLTextureManager] Load Texture UITexture/back.udi, 4080, total is 3170256
+[   97.860] [GLTextureManager] Load Texture UITexture/playmodesmb.udi, 39872, total is 3210128
+[   97.871] [GLTextureManager] Load Texture UITexture/tournament2.udi, 25584, total is 3235712
+[   97.878] [GLTextureManager] Load Texture UITexture/tournament1.udi, 25584, total is 3261296
+[   97.890] [GLTextureManager] Load Texture UITexture/tutorials2.udi, 24948, total is 3286244
+[   97.897] [GLTextureManager] Load Texture UITexture/tutorials1.udi, 24948, total is 3311192
+[   97.905] [GLTextureManager] Load Texture UITexture/quickrace2.udi, 25584, total is 3336776
+[   97.913] [GLTextureManager] Load Texture UITexture/quickrace1.udi, 25584, total is 3362360
+[   97.921] [GLTextureManager] Load Texture UITexture/play_modes_quickplay.udi, 24480, total is 3386840
+[   97.929] [GLTextureManager] Release Texture UITexture/play_modes_quickplay.udi, 24480, total is 3362360
+[   97.945] [GLTextureManager] Load Texture UITextureOutOfPage/play_modes_menu/play_modes_driving.udi, 12240, total is 3374600
+[  101.736] [GLTextureManager] Release Texture UITextureOutOfPage/play_modes_menu/play_modes_driving.udi, 12240, total is 3362360
+[  101.746] [GLTextureManager] Load Texture UITextureOutOfPage/play_modes_menu/play_modes_quickplay.udi, 12240, total is 3374600
+[  102.447] 	GameStart id: QP
+[  102.521] [GLTextureManager] Load Texture UITexture/track_selection_bg.udi, 77312, total is 3451912
+[  102.528] [GLTextureManager] Load Texture UITexture/dJb.udi, 1920, total is 3453832
+[  102.540] [GLTextureManager] Load Texture UITexture/Under_Water_Heartbreaker.udi, 26012, total is 3479844
+[  102.548] [GLTextureManager] Load Texture UITexture/character_tahs.udi, 22032, total is 3501876
+[  102.555] [GLTextureManager] Load Texture UITexture/Value5.udi, 6272, total is 3508148
+[  102.562] [GLTextureManager] Load Texture UITexture/Value4.udi, 6272, total is 3514420
+[  102.568] [GLTextureManager] Load Texture UITexture/Value3.udi, 6272, total is 3520692
+[  102.575] [GLTextureManager] Load Texture UITexture/Value2.udi, 6272, total is 3526964
+[  102.583] [GLTextureManager] Load Texture UITexture/character_mp.udi, 20648, total is 3547612
+[  102.591] [GLTextureManager] Load Texture UITexture/character_direction_01.udi, 2280, total is 3549892
+[  102.599] [GLTextureManager] Load Texture UITexture/character_direction_0102.udi, 2280, total is 3552172
+[  102.608] [GLTextureManager] Load Texture UITexture/character_direction_02.udi, 2280, total is 3554452
+[  102.616] [GLTextureManager] Load Texture UITexture/character_direction_0202.udi, 2280, total is 3556732
+[  102.624] [GLTextureManager] Load Texture UITexture/character_lock_02.udi, 11352, total is 3568084
+[  102.632] [GLTextureManager] Load Texture UITexture/character_lock_00.udi, 5952, total is 3574036
+[  102.639] [GLTextureManager] Load Texture UITexture/character_lock_03.udi, 1152, total is 3575188
+[  102.647] [GLTextureManager] Load Texture UITexture/character_lock_200.udi, 1824, total is 3577012
+[  102.655] [GLTextureManager] Load Texture UITexture/character_lock_04.udi, 6000, total is 3583012
+[  102.663] [GLTextureManager] Load Texture UITexture/character_lock_01.udi, 2720, total is 3585732
+[  102.670] [GLTextureManager] Release Texture UITexture/Value5.udi, 6272, total is 3579460
+[  102.677] [GLTextureManager] Release Texture UITexture/Value4.udi, 6272, total is 3573188
+[  102.684] [GLTextureManager] Release Texture UITexture/Value2.udi, 6272, total is 3566916
+[  105.953] [GLTextureManager] Load Texture UITexture/track_selection_mp.udi, 31536, total is 3598452
+[  105.964] [GLTextureManager] Load Texture UITexture/Around the Block _1.udi, 40768, total is 3639220
+[  105.972] [GLTextureManager] Load Texture UITexture/choose_direction_01.udi, 3128, total is 3642348
+[  105.980] [GLTextureManager] Load Texture UITexture/choose_direction_0101.udi, 3128, total is 3645476
+[  105.988] [GLTextureManager] Load Texture UITexture/choose_direction_02.udi, 3264, total is 3648740
+[  105.996] [GLTextureManager] Load Texture UITexture/choose_direction_0202.udi, 3264, total is 3652004
+[  106.003] [GLTextureManager] Load Texture UITexture/shell_lock.udi, 16128, total is 3668132
+[  109.750] 		GameAreaStart id: 13
+[  109.777] [GLTextureManager] Load Texture UITexture/pre_race_preview_best.udi, 7568, total is 3675700
+[  109.785] [GLTextureManager] Load Texture UITexture/pre_race_preview_sd1.udi, 45760, total is 3721460
+[  109.792] [GLTextureManager] Load Texture UITexture/bubble_squirrel.udi, 1352, total is 3722812
+[  109.801] [GLTextureManager] Load Texture UITexture/pre_race_preview_time.udi, 5504, total is 3728316
+[  110.857] 		GameAreaExit
+[  110.859] 		GameAreaStart id: 13
+[  110.880] [GLTextureManager] Release Texture UITexture/pre_race_preview_best.udi, 7568, total is 3720748
+[  110.888] [GLTextureManager] Release Texture UITexture/pre_race_preview_sd1.udi, 45760, total is 3674988
+[  110.896] [GLTextureManager] Release Texture UITexture/bubble_squirrel.udi, 1352, total is 3673636
+[  110.904] [GLTextureManager] Release Texture UITexture/pre_race_preview_time.udi, 5504, total is 3668132
+[  110.913] [GLTextureManager] Release Texture UITexture/track_selection_mp.udi, 31536, total is 3636596
+[  110.921] [GLTextureManager] Release Texture UITexture/Around the Block _1.udi, 40768, total is 3595828
+[  110.929] [GLTextureManager] Release Texture UITexture/choose_direction_01.udi, 3128, total is 3592700
+[  110.937] [GLTextureManager] Release Texture UITexture/choose_direction_0101.udi, 3128, total is 3589572
+[  110.946] [GLTextureManager] Release Texture UITexture/choose_direction_02.udi, 3264, total is 3586308
+[  110.954] [GLTextureManager] Release Texture UITexture/choose_direction_0202.udi, 3264, total is 3583044
+[  110.961] [GLTextureManager] Release Texture UITexture/shell_lock.udi, 16128, total is 3566916
+[  110.970] [GLTextureManager] Release Texture UITexture/track_selection_bg.udi, 77312, total is 3489604
+[  110.976] [GLTextureManager] Release Texture UITexture/dJb.udi, 1920, total is 3487684
+[  110.985] [GLTextureManager] Release Texture UITexture/Under_Water_Heartbreaker.udi, 26012, total is 3461672
+[  110.993] [GLTextureManager] Release Texture UITexture/character_tahs.udi, 22032, total is 3439640
+[  111.000] [GLTextureManager] Release Texture UITexture/Value3.udi, 6272, total is 3433368
+[  111.008] [GLTextureManager] Release Texture UITexture/character_mp.udi, 20648, total is 3412720
+[  111.016] [GLTextureManager] Release Texture UITexture/character_direction_01.udi, 2280, total is 3410440
+[  111.025] [GLTextureManager] Release Texture UITexture/character_direction_0102.udi, 2280, total is 3408160
+[  111.033] [GLTextureManager] Release Texture UITexture/character_direction_02.udi, 2280, total is 3405880
+[  111.042] [GLTextureManager] Release Texture UITexture/character_direction_0202.udi, 2280, total is 3403600
+[  111.050] [GLTextureManager] Release Texture UITexture/character_lock_02.udi, 11352, total is 3392248
+[  111.058] [GLTextureManager] Release Texture UITexture/character_lock_00.udi, 5952, total is 3386296
+[  111.066] [GLTextureManager] Release Texture UITexture/character_lock_03.udi, 1152, total is 3385144
+[  111.074] [GLTextureManager] Release Texture UITexture/character_lock_200.udi, 1824, total is 3383320
+[  111.082] [GLTextureManager] Release Texture UITexture/character_lock_04.udi, 6000, total is 3377320
+[  111.090] [GLTextureManager] Release Texture UITexture/character_lock_01.udi, 2720, total is 3374600
+[  111.097] [GLTextureManager] Release Texture UITexture/playmodesbg.udi, 77312, total is 3297288
+[  111.104] [GLTextureManager] Release Texture UITexture/back.udi, 4080, total is 3293208
+[  111.112] [GLTextureManager] Release Texture UITexture/playmodesmb.udi, 39872, total is 3253336
+[  111.119] [GLTextureManager] Release Texture UITexture/tournament2.udi, 25584, total is 3227752
+[  111.127] [GLTextureManager] Release Texture UITexture/tournament1.udi, 25584, total is 3202168
+[  111.134] [GLTextureManager] Release Texture UITexture/tutorials2.udi, 24948, total is 3177220
+[  111.142] [GLTextureManager] Release Texture UITexture/tutorials1.udi, 24948, total is 3152272
+[  111.149] [GLTextureManager] Release Texture UITexture/quickrace2.udi, 25584, total is 3126688
+[  111.157] [GLTextureManager] Release Texture UITexture/quickrace1.udi, 25584, total is 3101104
+[  111.167] [GLTextureManager] Release Texture UITextureOutOfPage/play_modes_menu/play_modes_quickplay.udi, 12240, total is 3088864
+[  111.176] [GLTextureManager] Release Texture UIAnimation/BubbleAni/BubbleAni__page0.udi, 65536, total is 3023328
+[  111.184] [GLTextureManager] Release Texture UITexture/main_menu_bg.udi, 153600, total is 2869728
+[  111.191] [GLTextureManager] Release Texture UITexture/ok.udi, 3072, total is 2866656
+[  111.199] [GLTextureManager] Release Texture UITexture/main_menu_play_normal.udi, 13120, total is 2853536
+[  111.207] [GLTextureManager] Release Texture UITexture/main_menu_play_focus.udi, 13120, total is 2840416
+[  111.215] [GLTextureManager] Release Texture UITexture/settings_bb1a.udi, 26208, total is 2814208
+[  111.223] [GLTextureManager] Release Texture UITexture/settings_bb2a.udi, 26208, total is 2788000
+[  111.232] [GLTextureManager] Release Texture UITexture/main_menu_micromods_normal.udi, 13120, total is 2774880
+[  111.241] [GLTextureManager] Release Texture UITexture/main_menu_micromods_focus.udi, 13120, total is 2761760
+[  111.249] [GLTextureManager] Release Texture UITexture/main_menu_badges_normal.udi, 13120, total is 2748640
+[  111.258] [GLTextureManager] Release Texture UITexture/main_menu_badges_focus.udi, 13120, total is 2735520
+[  111.267] [GLTextureManager] Release Texture UITexture/main_menu_option_normal.udi, 13120, total is 2722400
+[  111.275] [GLTextureManager] Release Texture UITexture/main_menu_option_focus.udi, 13120, total is 2709280
+[  111.286] [GLTextureManager] Release Texture UITextureOutOfPage/main_menu/main_menu_expansion_pack_04.udi, 12792, total is 2696488
+[  111.296] [GLTextureManager] Release Texture UITextureOutOfPage/main_menu/main_menu_expansion_pack_03.udi, 12792, total is 2683696
+[  111.304] [GLTextureManager] Release Texture UITexture/main_menu_bob_hand.udi, 2304, total is 2681392
+[  111.312] [GLTextureManager] Release Texture UITexture/main_menu_bob.udi, 35880, total is 2645512
+[  111.320] [GLTextureManager] Release Texture UITexture/main_menu_bob_fist.udi, 1008, total is 2644504
+[  111.329] [GLTextureManager] Release Texture UITexture/main_menu_bob_eyelid.udi, 2128, total is 2642376
+[  111.337] [GLTextureManager] Release Texture UITexture/main_menu_bob_eye.udi, 2128, total is 2640248
+[  111.347] [GLTextureManager] Release Texture UITextureOutOfPage/main_menu/main_menu_font_play.udi, 16120, total is 2624128
+[  111.354] [GLTextureManager] Release Texture UITexture/sm_01.udi, 12992, total is 2611136
+[  111.364] [0x281] CJSonFile::Load() failed to open (filehandle was NULL) mRsrcPath = /LF/Bulk/Data/Local/0/./Milestones.json
+[  111.369] RacingEngine/Race/SR_Scene.cpp(447): Scene::Initialize() start.
+[  111.375] RacingEngine/Race/SR_Scene.cpp(477): Scene::Initialize() end.
+[  111.382] [GLTextureManager] Load Texture Aroundtheblock.udi, 153600, total is 2764736
+[  111.388] [GLTextureManager] Load Texture atb_4.udi, 38432, total is 2803168
+[  111.391] [LOADING] Render accepted (0.000000)
+[  111.396] RacingEngine/Race/SR_Scene.cpp(107): Scene:load()!
+[  111.399] [LOADING] Render accepted (0.125000)
+[  111.410] [0x281] CJSonFile::Load() failed to open (filehandle was NULL) mRsrcPath = /LF/Bulk/Data/Local/0/./Milestones.json
+[  111.667] [GLTextureManager] Load Texture Textures\SpongebobUI\HUD\WordBuilder.udi, 153600, total is 2956768
+[  111.685] [GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0001.udi, 9632, total is 2966400
+[  111.693] [GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0002.udi, 9632, total is 2976032
+[  111.702] [GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0003.udi, 9632, total is 2985664
+[  111.710] [GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0004.udi, 9632, total is 2995296
+[  111.719] [GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0008.udi, 9632, total is 3004928
+[  111.727] [GLTextureManager] Load Texture Textures\SFX\Lightning\Electric0010.udi, 9632, total is 3014560
+[  111.775] [GLTextureManager] Load Texture UIAnimation/ButtonTutorial/ButtonTutorial__page0.udi, 262144, total is 3276704
+[  111.778] [LOADING] Render accepted (0.375000)
+[  111.856] [GLTextureManager] Load Texture Textures\SpongebobUI\HUD\race.udi, 393216, total is 3669920
+[  111.859] [LOADING] Render accepted (0.125000)
+[  111.875] [GLTextureManager] Load Texture Textures\SpongebobUI\HUD\powerup.udi, 10620, total is 3680540
+[  111.973] [LOADING] Render accepted (0.125000)
+[  112.196] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\sky_01.udi, 262144, total is 3942684
+[  112.199] [LOADING] Render accepted (0.125000)
+[  112.237] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_gate_02.udi, 33280, total is 3975964
+[  112.241] [LOADING] Render accepted (0.125000)
+[  112.298] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_gate_01.udi, 131072, total is 4107036
+[  112.346] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_05.udi, 66048, total is 4173084
+[  112.390] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_lighthouse.udi, 66048, total is 4239132
+[  112.393] [LOADING] Render accepted (0.125000)
+[  112.559] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_poster.udi, 524288, total is 4763420
+[  112.563] [LOADING] Render accepted (0.125000)
+[  112.629] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_02.udi, 66048, total is 4829468
+[  112.632] [LOADING] Render accepted (0.125000)
+[  112.664] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_patrickstar.udi, 33280, total is 4862748
+[  112.716] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_squidward.udi, 66048, total is 4928796
+[  112.759] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_spongebob.udi, 66048, total is 4994844
+[  112.762] [LOADING] Render accepted (0.125000)
+[  112.818] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_07.udi, 66048, total is 5060892
+[  112.846] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_shop.udi, 66048, total is 5126940
+[  112.872] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_slow.udi, 4096, total is 5131036
+[  112.875] [LOADING] Render accepted (0.125000)
+[  112.904] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_06.udi, 16896, total is 5147932
+[  112.966] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_path.udi, 131072, total is 5279004
+[  112.979] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_interspace_02.udi, 33280, total is 5312284
+[  113.024] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_grass.udi, 131072, total is 5443356
+[  113.027] [LOADING] Render accepted (0.125000)
+[  113.078] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_foliage.udi, 131072, total is 5574428
+[  113.128] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\prp_kart.udi, 131072, total is 5705500
+[  113.132] [LOADING] Render accepted (0.125000)
+[  113.180] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\brr_net.udi, 131072, total is 5836572
+[  113.228] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\track_01.udi, 131072, total is 5967644
+[  113.258] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_sand.udi, 131072, total is 6098716
+[  113.261] [LOADING] Render accepted (0.125000)
+[  113.292] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_grass_01.udi, 65536, total is 6164252
+[  113.329] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_grasshouse.udi, 66048, total is 6230300
+[  113.358] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_03.udi, 66048, total is 6296348
+[  113.387] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_house_01.udi, 66048, total is 6362396
+[  113.390] [LOADING] Render accepted (0.125000)
+[  113.447] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\prp_flake.udi, 131072, total is 6493468
+[  113.459] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\prp_guide_04.udi, 65536, total is 6559004
+[  113.494] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_interspace_01.udi, 131072, total is 6690076
+[  113.505] [LOADING] Render accepted (0.125000)
+[  113.546] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\con_roadblock.udi, 16896, total is 6706972
+[  113.590] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_alley_01.udi, 131072, total is 6838044
+[  113.626] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\trn_alley_02.udi, 131072, total is 6969116
+[  113.669] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\prp_start_01.udi, 66048, total is 7035164
+[  113.673] [LOADING] Render accepted (0.125000)
+[  113.743] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\plt_benthos.udi, 262144, total is 7297308
+[  113.760] [LOADING] Render accepted (0.125000)
+[  113.838] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\Textures\sky.udi, 262144, total is 7559452
+[  113.859] [GLTextureManager] Load Texture models\tracks\AroundTheBlock\textures\con_bottle.udi, 65536, total is 7624988
+[  113.867] RacingEngine/Common/SR_Resources.cpp(515): Warning: getResource(skybox) does not exist
+[  113.873] RacingEngine/GamePlay/PMR_Race.cpp(172): Race::loadCars--begin!
+[  113.910] [GLTextureManager] Load Texture Models\DriverAnimations\SpongeBob\Texture\SpongeBob_hi.udi, 131072, total is 7756060
+[  114.384] [GLTextureManager] Load Texture models\cars\PlayerCars\SpongeBobCar\Textures\SpongeBob_kart_hi.udi, 66048, total is 7822108
+[  114.423] [GLTextureManager] Load Texture models\TrackObject\Hook\Textures\hook.tga, 65536, total is 7887644
+[  114.434] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0000.udi, 32768, total is 7920412
+[  114.443] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0001.udi, 32768, total is 7953180
+[  114.451] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0002.udi, 32768, total is 7985948
+[  114.460] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0003.udi, 32768, total is 8018716
+[  114.468] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0004.udi, 32768, total is 8051484
+[  114.477] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0005.udi, 32768, total is 8084252
+[  114.485] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0006.udi, 32768, total is 8117020
+[  114.494] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0007.udi, 32768, total is 8149788
+[  114.502] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0008.udi, 32768, total is 8182556
+[  114.510] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0009.udi, 32768, total is 8215324
+[  114.519] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0010.udi, 32768, total is 8248092
+[  114.527] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0011.udi, 32768, total is 8280860
+[  114.536] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0012.udi, 32768, total is 8313628
+[  114.544] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0013.udi, 32768, total is 8346396
+[  114.553] [GLTextureManager] Load Texture Textures\SFX\BubbleShield\BBS_0014.udi, 32768, total is 8379164
+[  114.561] [GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0001.udi, 32768, total is 8411932
+[  114.570] [GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0002.udi, 32768, total is 8444700
+[  114.579] [GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0003.udi, 32768, total is 8477468
+[  114.587] [GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0004.udi, 32768, total is 8510236
+[  114.596] [GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0005.udi, 32768, total is 8543004
+[  114.605] [GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0006.udi, 32768, total is 8575772
+[  114.613] [GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0007.udi, 32768, total is 8608540
+[  114.622] [GLTextureManager] Load Texture Textures\SFX\LightningHit\hitted0008.udi, 32768, total is 8641308
+[  114.632] [GLTextureManager] Load Texture Models\WeaponAnimation\AnchorDrag\Textures\con_bus.udi, 131072, total is 8772380
+[  114.640] [GLTextureManager] Load Texture Textures\Particle\speedline.udi, 512, total is 8772892
+[  114.647] Catchup Boost = 10
+[  114.703] [GLTextureManager] Load Texture Models\DriverAnimations\Squidward\Texture\Squidward_hi.udi, 66048, total is 8838940
+[  114.737] [GLTextureManager] Load Texture Models\DriverAnimations\Squidward\Texture\flute.tga, 32768, total is 8871708
+[  114.784] [GLTextureManager] Load Texture models\cars\AICars\Squidward\Textures\Squidward_kart_hi.udi, 66048, total is 8937756
+[  114.789] Catchup Boost = 10
+[  114.851] [GLTextureManager] Load Texture Models\DriverAnimations\Sandy\Texture\mk_sandy_char_mod_player_0.tga, 262144, total is 9199900
+[  114.911] [GLTextureManager] Load Texture models\cars\AICars\Sandy\Textures\Sandy_hi.udi, 131072, total is 9330972
+[  114.932] [GLTextureManager] Load Texture models\cars\AICars\Sandy\Textures\Sandy_kart_hi.udi, 66048, total is 9397020
+[  114.937] Catchup Boost = 10
+[  115.002] [GLTextureManager] Load Texture Models\DriverAnimations\Patrick\Texture\mk_patrick_char_mod_player_0.tga, 262144, total is 9659164
+[  115.022] [GLTextureManager] Load Texture Models\DriverAnimations\Patrick\Texture\Can.tga, 16384, total is 9675548
+[  115.058] [GLTextureManager] Load Texture models\cars\AICars\Patrick\Textures\Patrick_hi.udi, 66048, total is 9741596
+[  115.084] [GLTextureManager] Load Texture models\cars\AICars\Patrick\Textures\Patrick_kart_hi.udi, 66048, total is 9807644
+[  115.087] Catchup Boost = 8
+[  115.152] [GLTextureManager] Load Texture Models\DriverAnimations\Gary\Texture\mk_gary_char_mod_player_0.tga, 262144, total is 10069788
+[  115.181] [GLTextureManager] Load Texture Models\DriverAnimations\Gary\Texture\Note.tga, 8192, total is 10077980
+[  115.215] [GLTextureManager] Load Texture models\cars\AICars\Gary\Textures\Gary_hi.udi, 66048, total is 10144028
+[  115.240] [GLTextureManager] Load Texture models\cars\AICars\Gary\Textures\Gary_kart_hi.udi, 66048, total is 10210076
+[  115.243] Catchup Boost = 8
+[  115.309] [GLTextureManager] Load Texture Models\DriverAnimations\Krabs\Texture\mk_krabs_char_mod_player_0.tga, 262144, total is 10472220
+[  115.330] [GLTextureManager] Load Texture Models\DriverAnimations\Krabs\Texture\PaperMoney.tga, 8192, total is 10480412
+[  115.363] [GLTextureManager] Load Texture models\cars\AICars\Krabs\Textures\Mr.Krabs_kart_hi.udi, 131072, total is 10611484
+[  115.384] [GLTextureManager] Load Texture models\cars\AICars\Krabs\Textures\Mr.Krabs_hi.udi, 66048, total is 10677532
+[  115.391] Catchup Boost = 10
+[  115.396] RacingEngine/GamePlay/PMR_Race.cpp(283): Race::loadCars()--end!
+[  115.413] [GLTextureManager] Load Texture Models\WeaponAnimation\LifeRing\Textures\lifering.tga, 65536, total is 10743068
+[  115.423] [GLTextureManager] Load Texture Models\WeaponAnimation\OilSlick\Textures\oilslick.udi, 8192, total is 10751260
+[  115.431] [GLTextureManager] Load Texture Textures\SFX\Spatula\trident.udi, 4096, total is 10755356
+[  115.439] [GLTextureManager] Load Texture Textures\SFX\Spatula\progress.udi, 1056, total is 10756412
+[  115.447] [GLTextureManager] Load Texture Textures\SFX\Spatula\sfx0001.udi, 4096, total is 10760508
+[  115.455] [GLTextureManager] Load Texture Textures\SFX\Spatula\sfx0002.udi, 4096, total is 10764604
+[  115.458] [LOADING] Render accepted (1.625000)
+[  115.467] [GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0000.udi, 8704, total is 10773308
+[  115.476] [GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0001.udi, 8704, total is 10782012
+[  115.485] [GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0002.udi, 8704, total is 10790716
+[  115.494] [GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0003.udi, 8704, total is 10799420
+[  115.503] [GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0004.udi, 8704, total is 10808124
+[  115.512] [GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0005.udi, 8704, total is 10816828
+[  115.521] [GLTextureManager] Load Texture models\pickup\textures\ic_powerupvfx0006.udi, 8704, total is 10825532
+[  115.529] [GLTextureManager] Load Texture models\pickup\textures\ic_coin.5tx, 4096, total is 10829628
+[  115.538] [GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0001.udi, 8224, total is 10837852
+[  115.547] [GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0002.udi, 8224, total is 10846076
+[  115.556] [GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0003.udi, 8224, total is 10854300
+[  115.564] [GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0004.udi, 8224, total is 10862524
+[  115.573] [GLTextureManager] Load Texture models\pickup\textures\CoinvfxII_0005.udi, 8224, total is 10870748
+[  115.582] [GLTextureManager] Load Texture models\pickup\textures\Coinchest_0000.udi, 8224, total is 10878972
+[  115.590] [GLTextureManager] Load Texture models\pickup\textures\Coinchest_0001.udi, 8224, total is 10887196
+[  115.599] [GLTextureManager] Load Texture models\pickup\textures\Coinchest_0002.udi, 8224, total is 10895420
+[  115.608] [GLTextureManager] Load Texture models\pickup\textures\Coinchest_0003.udi, 8224, total is 10903644
+[  115.616] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.625] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.633] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.641] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.650] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.658] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.667] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.675] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.684] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.692] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.701] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.709] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.717] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.726] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.734] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.743] RacingEngine/Common/SR_Resources.cpp(312): Warning: getInt32 with name groupid does not exist
+[  115.752] [GLTextureManager] Load Texture models\scalingfx\boostarea\Textures\BoostArea.5tx, 16384, total is 10920028
+[  115.756] [LOADING] Render accepted (0.125000)
+[  115.765] [GLTextureManager] Load Texture textures\gadget\ic_letterbubble_lower.udi, 65536, total is 10985564
+[  115.773] [GLTextureManager] Load Texture textures\gadget\ic_letterbubble.udi, 65536, total is 11051100
+[  115.782] [GLTextureManager] Load Texture textures\gadget\ic_letterbubble_double.udi, 33280, total is 11084380
+[  115.789] [GLTextureManager] Load Texture textures\gadget\pop0001.udi, 4608, total is 11088988
+[  115.797] [GLTextureManager] Load Texture textures\gadget\pop0002.udi, 8192, total is 11097180
+[  115.800] [LOADING] Render accepted (0.125000)
+[  115.830] [LOADING] Render accepted (0.125000)
+[  115.946] [LOADING] Render accepted (0.125000)
+[  116.112] [LOADING] Render accepted (0.250000)
+[  116.227] [LOADING] Render accepted (0.125000)
+[  116.343] [LOADING] Render accepted (0.125000)
+[  116.458] [LOADING] Render accepted (0.125000)
+[  116.624] [LOADING] Render accepted (0.125000)
+[  116.739] [LOADING] Render accepted (0.125000)
+[  116.855] [LOADING] Render accepted (0.125000)
+[  116.970] [LOADING] Render accepted (0.125000)
+[  117.136] [LOADING] Render accepted (0.125000)
+[  117.251] [LOADING] Render accepted (0.125000)
+[  117.270] [GLTextureManager] Release Texture Aroundtheblock.udi, 153600, total is 10943580
+[  117.277] [GLTextureManager] Release Texture atb_4.udi, 38432, total is 10905148
+[  117.338] [GLTextureManager] Load Texture Textures\Particle\dustLX.udi, 2048, total is 10907196
+[  117.346] [GLTextureManager] Load Texture Textures\Particle\splash.udi, 2048, total is 10909244
+[  125.771] [GLTextureManager] Load Texture UITexture/staging_light_launch_time2.udi, 44384, total is 10953628
+[  125.779] [GLTextureManager] Load Texture UITexture/staging_light_launch_color5.udi, 3136, total is 10956764
+[  125.788] [GLTextureManager] Load Texture UITexture/staging_light_launch_color2.udi, 5776, total is 10962540
+[  125.796] [GLTextureManager] Load Texture UITexture/time_board_02.udi, 18032, total is 10980572
+[  125.803] [GLTextureManager] Load Texture UITexture/time_board_cursor.udi, 2592, total is 10983164
+[  125.811] [GLTextureManager] Load Texture UITexture/time_board_06.udi, 784, total is 10983948
+[  125.818] [GLTextureManager] Load Texture UITexture/time_board.udi, 14592, total is 10998540
+[  125.826] [GLTextureManager] Load Texture UITexture/staging_3.udi, 131072, total is 11129612
+[  125.853] [GLTextureManager] Load Texture UITexture/staging_2.udi, 131072, total is 11260684
+[  125.866] [GLTextureManager] Load Texture UITexture/staging_1.udi, 65536, total is 11326220
+[  125.923] [GLTextureManager] Load Texture UITexture/staging_go.udi, 262144, total is 11588364
+[  125.937] [GLTextureManager] Load Texture UITextureOutOfPage/staging_light/forbid.udi, 2888, total is 11591252
+[  125.947] [GLTextureManager] Load Texture UITextureOutOfPage/staging_light/staging_light_launch_color1.udi, 2888, total is 11594140
+[  125.958] [GLTextureManager] Load Texture UITextureOutOfPage/staging_light/staging_light_launch_06.udi, 9200, total is 11603340
+[  126.052] 			ActivityStart activity: SLL mode:  level: 3.1
+[  131.665] [GLTextureManager] Load Texture UITextureOutOfPage/staging_light/staging_light_launch_color3.udi, 1568, total is 11604908
+[  136.716] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(836): current ca in a row num: 0
+[  136.724] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(837): most ca in a row num: 0
+[  136.734] [GLTextureManager] Load Texture UITextureOutOfPage/staging_light/staging_light_lighten.udi, 1568, total is 11606476
+[  143.209] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(836): current ca in a row num: 0
+[  143.216] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(837): most ca in a row num: 0
+[  144.680] [GLTextureManager] Release Texture UITexture/staging_light_launch_color5.udi, 3136, total is 11603340
+[  149.685] ~ # ===src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(836): current ca in a row num: 0
+[  149.692] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(837): most ca in a row num: 0
+[  151.156] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(881): total ca num for race 0 is: 0
+[  151.164] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(890): total ca num is: 0
+[  151.171] [0xf] fopenAtomic(/LF/Bulk/Data/Local/0/./profile_private.dsc) returning 0x009f9bb8
+[  151.174] [0xf] fcloseAtomic returning 0
+[  151.176] 	AchievementEarned id: 12
+[  151.184] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(836): current ca in a row num: 0
+[  151.192] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(837): most ca in a row num: 0
+[  151.204] src/BobKart/GameObjects/GamePlay/Cirriculum/Curriculum.cpp(397): Normal level system: current curriculum: 0, current CA: 0, go next round!
+[  154.549] =++
+[  154.749] ~ # 
+[  155.079] ~ # 
+[  155.269] ~ # 
+[  156.679] ~ # 
+[  156.819] ~ # 
+[  156.929] ~ # 
+[  157.049] ~ # 
+[  157.169] ~ # 
+[  157.289] ~ # 

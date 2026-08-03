@@ -678,6 +678,8 @@ static void blit_layer(uint32_t *dst, int w, int h, const struct layer_state *ls
 	}
 }
 
+static int guest_external(void);   /* defined with the guest controls below */
+
 /* ---- --ui-shot: render one frame of a named UI state to a PNG -------------
  *
  * Companion to --selftest. The interface is now a real part of the program, so
@@ -768,6 +770,10 @@ static int ui_shot(SDL_Renderer *ren, SDL_Window *win, const char *state,
 	int lw = (rotate == 90 || rotate == 270) ? h : w;
 	int lh = (rotate == 90 || rotate == 270) ? w : h;
 
+	/* Evaluate the SAME guest state the main loop does. Without this a shot
+	 * always renders the idle case, so it cannot show a greyed-out File menu —
+	 * exactly the thing being debugged when Run System Menu stuck disabled. */
+	ui_set_running(guest_external());
 	ui_debug_state(state);
 	SDL_SetRenderDrawColor(ren, 12, 30, 20, 255);
 	SDL_RenderClear(ren);
@@ -867,9 +873,19 @@ static void find_project_dir(const char *argv0)
 	char buf[1024];
 	int i;
 
-	if (!realpath(argv0, buf)) {
+	/* An explicit override WINS. Deriving the project from argv[0] works for a
+	 * normal checkout, but not when the binary lives somewhere else entirely —
+	 * inside an AppImage mount, or when testing one tree's viewer against
+	 * another tree's data. */
+	{
 		const char *e = getenv("TADPOLE_PROJECT");
-		snprintf(g_projdir, sizeof(g_projdir), "%s", e ? e : ".");
+		if (e && *e) {
+			snprintf(g_projdir, sizeof(g_projdir), "%s", e);
+			return;
+		}
+	}
+	if (!realpath(argv0, buf)) {
+		snprintf(g_projdir, sizeof(g_projdir), "%s", ".");
 		return;
 	}
 	for (i = 0; i < 3; i++) {
@@ -905,7 +921,19 @@ static int guest_external(void)
 	if (!(f = fopen(path, "r"))) return 0;
 	if (fscanf(f, "%d", &pid) != 1) pid = 0;
 	fclose(f);
-	return pid > 0 && kill(pid, 0) == 0;
+	if (pid <= 0 || kill(pid, 0) != 0)
+		return 0;
+	/* The lock means "this TADPOLE_DIR is in use", NOT "a guest is running".
+	 * Since tadpole.sh now launches us and waits, the pid in there is usually
+	 * the script that started us — and treating that as a running guest greys
+	 * out Run System Menu and Launch .swf permanently, on a perfectly good
+	 * install. tadpole.sh exports its own pid so we can tell them apart. */
+	{
+		const char *own = getenv("TADPOLE_LOCK_PID");
+		if (own && atoi(own) == pid)
+			return 0;
+	}
+	return 1;
 }
 
 static int guest_alive(void)
@@ -930,23 +958,46 @@ static void guest_stop(void)
 	g_guest = 0;
 }
 
-/* argv must be NULL-terminated; runs <proj>/<script> with the settings applied. */
-static pid_t spawn_script(const char *script, char *const argv[], int as_guest)
+/* argv must be NULL-terminated; runs <proj>/<script> with the settings applied.
+ *
+ * `outfd`, when non-NULL, receives a read end carrying the child's stdout AND
+ * stderr. Installing firmware takes minutes, and without its output the UI has
+ * nothing to show but a spinner — the progress panel exists to display exactly
+ * these lines. */
+static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
+                          int *outfd)
 {
 	char path[1100];
 	pid_t pid;
+	int pfd[2] = { -1, -1 };
 
 	snprintf(path, sizeof(path), "%s/%s", g_projdir, script);
+	if (outfd && pipe(pfd) != 0) { *outfd = -1; outfd = NULL; }
 	pid = fork();
-	if (pid < 0) return -1;
+	if (pid < 0) {
+		if (pfd[0] >= 0) { close(pfd[0]); close(pfd[1]); }
+		return -1;
+	}
 	if (pid == 0) {
 		setpgid(0, 0);
+		if (outfd) {
+			close(pfd[0]);
+			dup2(pfd[1], 1);
+			dup2(pfd[1], 2);
+			close(pfd[1]);
+		}
 		if (as_guest) guest_setenv(ui_cfg());
 		if (chdir(g_projdir) != 0) _exit(126);
 		execv(path, argv);
 		_exit(127);
 	}
 	setpgid(pid, pid);          /* also set in the parent: avoids the race */
+	if (outfd) {
+		close(pfd[1]);
+		/* Non-blocking: the UI loop must keep drawing while the tool works. */
+		fcntl(pfd[0], F_SETFL, O_NONBLOCK);
+		*outfd = pfd[0];
+	}
 	return pid;
 }
 
@@ -962,7 +1013,7 @@ static void guest_launch_ui(void)
 	if (ui_cfg()->shim_debug) av[n++] = (char *)"--debug";
 	av[n] = NULL;
 	guest_stop();
-	g_guest = spawn_script("tadpole.sh", av, 1);
+	g_guest = spawn_script("tadpole.sh", av, 1, NULL);
 	ui_set_running(g_guest > 0);
 	ui_status(g_guest > 0 ? "booting..." : "launch failed");
 }
@@ -990,10 +1041,14 @@ static void guest_launch_swf(const char *hostpath)
 	av[i++] = (char *)g;
 	av[i] = NULL;
 	guest_stop();
-	g_guest = spawn_script("tadpole.sh", av, 1);
+	g_guest = spawn_script("tadpole.sh", av, 1, NULL);
 	ui_set_running(g_guest > 0);
 	ui_status(g_guest > 0 ? "running swf" : "launch failed");
 }
+
+static int  g_tool_fd = -1;
+static char g_tool_buf[512];
+static int  g_tool_len;
 
 static void tool_run(const char *what, const char *script, const char *arg)
 {
@@ -1003,17 +1058,52 @@ static void tool_run(const char *what, const char *script, const char *arg)
 	av[2] = NULL;
 	if (g_tool > 0) { ui_status("busy: %s", g_tool_what); return; }
 	snprintf(g_tool_what, sizeof(g_tool_what), "%s", what);
-	g_tool = spawn_script(script, av, 0);
+	g_tool_len = 0;
+	g_tool = spawn_script(script, av, 0, &g_tool_fd);
 	ui_status("%s...", what);
+	if (g_tool > 0) {
+		ui_progress_begin(what);
+		ui_progress_line("starting...");
+	} else {
+		ui_status("%s could not start", what);
+	}
+}
+
+/* Drain whatever the tool has written, a line at a time. Called every frame. */
+static void tool_drain(void)
+{
+	char chunk[256];
+	ssize_t n;
+
+	if (g_tool_fd < 0) return;
+	while ((n = read(g_tool_fd, chunk, sizeof chunk)) > 0) {
+		ssize_t i;
+		for (i = 0; i < n; i++) {
+			if (chunk[i] == '\n' || g_tool_len == (int)sizeof(g_tool_buf) - 1) {
+				g_tool_buf[g_tool_len] = 0;
+				if (g_tool_len) ui_progress_line(g_tool_buf);
+				g_tool_len = 0;
+			} else if (chunk[i] != '\r') {
+				g_tool_buf[g_tool_len++] = chunk[i];
+			}
+		}
+	}
 }
 
 static void tool_poll(void)
 {
-	int st;
+	int st, ok;
 	if (g_tool <= 0) return;
+	tool_drain();
 	if (waitpid(g_tool, &st, WNOHANG) != g_tool) return;
-	ui_status("%s %s", g_tool_what,
-	          (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? "done" : "FAILED");
+	tool_drain();                      /* anything written just before exit */
+	if (g_tool_len) { g_tool_buf[g_tool_len] = 0; ui_progress_line(g_tool_buf); }
+	g_tool_len = 0;
+	if (g_tool_fd >= 0) { close(g_tool_fd); g_tool_fd = -1; }
+	ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+	ui_status("%s %s", g_tool_what, ok ? "done" : "FAILED");
+	ui_invalidate_prereqs();      /* it may have installed or erased things */
+	ui_progress_done(ok);
 	g_tool = 0;
 }
 
@@ -1373,12 +1463,33 @@ int main(int argc, char **argv)
 				ui_status("running");
 		}
 		ev_open_missing();
-		if (!power_announced && g_evfd[EV_POWER] >= 0) {
-			/* Tell the guest it is on external power, exactly once. Never
-			 * send KEY_POWER unless a shutdown is actually wanted. */
-			send_key(EV_POWER, KEY_UP_, 1);
-			send_key(EV_POWER, KEY_UP_, 0);
-			power_announced = 1;
+		/* ANNOUNCE EXTERNAL POWER REPEATEDLY, NOT ONCE.
+		 *
+		 * AppManager arms a 12-second shutdown timer at boot and cancels it
+		 * when told it is on external power. Sending that once, as soon as the
+		 * FIFO opens, is a RACE: if it lands before AppManager starts reading,
+		 * the guest never sees it, the timer fires, and the boot ends in the
+		 * shutdown screen.
+		 *
+		 * It used to win that race by accident — tadpole.sh passed
+		 * TADPOLE_DEBUG=0, which the shim read as "on" (it tested presence, not
+		 * value), and the resulting log flood slowed the guest enough. Fixing
+		 * the debug flag made the guest faster and exposed this.
+		 *
+		 * Repeat for the first ~15 seconds, which covers the timer with room to
+		 * spare. KEY_UP_ is idle-poll traffic to a guest that is already awake,
+		 * so repeating it is harmless — unlike KEY_POWER, which must never be
+		 * sent unless a shutdown is actually wanted.
+		 */
+		if (g_evfd[EV_POWER] >= 0 && power_announced < 30) {
+			static Uint32 last_power;
+			Uint32 now3 = SDL_GetTicks();
+			if (!power_announced || now3 - last_power >= 500) {
+				send_key(EV_POWER, KEY_UP_, 1);
+				send_key(EV_POWER, KEY_UP_, 0);
+				last_power = now3;
+				power_announced++;
+			}
 		}
 		tool_poll();
 		if (g_guest > 0 && !guest_alive()) {
@@ -1419,7 +1530,18 @@ int main(int argc, char **argv)
 			tool_run("install", "tools/install-game.sh", actpath);
 			break;
 		case UI_ACT_SETUP_FIRMWARE:
-			tool_run("firmware", "tools/setup-firmware.sh", actpath);
+			tool_run("firmware", "tools/install-firmware.sh", actpath);
+			break;
+		case UI_ACT_BUILD_SYSROOT:
+			tool_run("sysroot", "runtime/setup-sysroot.sh", NULL);
+			break;
+		case UI_ACT_ERASE_FW:
+			/* Stop the guest first: it has the old sysroot mapped, and pulling
+			 * that out from under a running emulator is a poor way to find out
+			 * what breaks. */
+			guest_stop();
+			ui_set_running(0);
+			tool_run("erase", "tools/erase-firmware.sh", NULL);
 			break;
 		case UI_ACT_RELAYOUT:
 			rotate = ui_cfg()->rotate;

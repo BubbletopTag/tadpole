@@ -54,6 +54,11 @@ extern int clock_gettime(int clk, struct tad_timespec *tp);
 extern int nanosleep(const struct tad_timespec *req, struct tad_timespec *rem);
 #define CLOCK_MONOTONIC_ 1
 
+/* tadpole_crash.c — catches SIGSEGV/BUS/ILL/FPE/ABRT and writes a report that
+ * names the faulting library and offset, then re-raises so qemu still cores. */
+extern void tad_crash_install(const char *dir,
+                              int (*real_open)(const char *, int, ...));
+
 #define RTLD_NEXT ((void *)-1L)
 
 #define O_RDONLY 00
@@ -303,7 +308,14 @@ static void init(void)
 		g_ev_of_fd[i] = -1;
 	}
 
-	g_debug = getenv("TADPOLE_DEBUG") != 0;
+	{
+		/* TESTING THE VALUE, not just presence. tadpole.sh used to pass
+		 * TADPOLE_DEBUG=0 unconditionally — `${debug:+...}` expands for "0"
+		 * because it is non-empty — so every run had full debug logging on.
+		 * One boot produced 2.1 MILLION log lines and never finished. */
+		const char *d = getenv("TADPOLE_DEBUG");
+		g_debug = (d && d[0] && d[0] != '0');
+	}
 	{
 		/* TADPOLE_HZ=0 restores the old uncapped behaviour, for measuring
 		 * how fast the guest COULD run. */
@@ -329,6 +341,11 @@ static void init(void)
 	e = getenv("TADPOLE_DIR");
 	snprintf(g_dir, sizeof(g_dir), "%s", e ? e : "/tmp/tadpole");
 	mkdir(g_dir, 0777);
+
+	/* Installed EARLY and unconditionally, not behind TADPOLE_DEBUG: a crash is
+	 * always worth a report, and most of them happen during an app's own
+	 * startup — before anything else here has run. */
+	tad_crash_install(g_dir, real_open);
 
 	if ((e = getenv("TADPOLE_W")) != 0) { u32 v = 0; while (*e >= '0' && *e <= '9') v = v*10 + (u32)(*e++ - '0'); if (v) g_w = v; }
 	if ((e = getenv("TADPOLE_H")) != 0) { u32 v = 0; while (*e >= '0' && *e <= '9') v = v*10 + (u32)(*e++ - '0'); if (v) g_h = v; }
@@ -780,9 +797,22 @@ static void fill_fix(struct fb_fix_screeninfo *f, int idx)
 	f->smem_len    = g_w * g_h * (g_bpp / 8) * NBUF;
 	f->type        = 0;   /* FB_TYPE_PACKED_PIXELS */
 	f->visual      = 2;   /* FB_VISUAL_TRUECOLOR */
-	f->line_length = g_w * (g_bpp / 8);
 	f->accel       = 0;
 	f->ypanstep    = 1;
+
+	/* ALWAYS THE PANEL WIDTH. Hardware really does report 1280 for Clam Prix's
+	 * 320x240 3D surface where we report 1920, but deriving the pitch from
+	 * layer[].win_w — as an earlier attempt did — is WRONG and regressed
+	 * scaling across many titles.
+	 *
+	 * win_w is the layer's ON-PANEL WINDOW RECTANGLE (the ViewFrame box), not
+	 * the width of its source buffer. The two coincide for the 3D surface and
+	 * differ for every 2D title that scales its viewport, so keying the pitch
+	 * off win_w told those games their rows were 1280 bytes apart while they
+	 * carried on writing them 1920 apart. Symptom: content rendered far too
+	 * large. Fixing this properly needs a source width tracked separately from
+	 * the window rect — see HANDOVER. */
+	f->line_length = g_w * (g_bpp / 8);
 }
 
 int ioctl(int fd, ulong req, ...)

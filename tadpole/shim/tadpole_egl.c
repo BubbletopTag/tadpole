@@ -96,7 +96,43 @@ u32 eglInitialize(void *dpy, i32 *major, i32 *minor)
 	return EGL_TRUE;
 }
 
-u32 eglTerminate(void *dpy) { (void)dpy; return EGL_TRUE; }
+/* CONTEXT TEARDOWN IS DEFERRED, NOT IMMEDIATE.
+ *
+ * AppManager stays resident across game launches — it dlopen()s App.so and
+ * later UnloadModule()s it — so the GL shim's tables are process-lifetime.
+ * Without a teardown the previous title's textures were still held when the
+ * next one started, its glGenTextures found no free slot and handed back name
+ * 0, and it rendered untextured; the damage accumulated across launches.
+ *
+ * But freeing on eglTerminate/eglDestroyContext CRASHES. Brio goes on using GL
+ * after destroying a context — the guest segfaulted immediately after the
+ * host logged "context reset — mirrors dropped", on sign-in and the home
+ * screen, repeatedly. It was reading textures we had just freed. Real hardware
+ * survives this because its driver keeps the objects alive until the memory is
+ * genuinely reclaimed.
+ *
+ * So destruction only RAISES A FLAG, and the tables are cleared at the start of
+ * the next context instead. The new title still gets a clean table — which is
+ * the whole point — and nothing is ever freed while something may still be
+ * holding it.
+ */
+extern void tad_gl_context_reset(void);
+static int g_reset_pending;
+
+static void reset_if_pending(void)
+{
+	if (!g_reset_pending)
+		return;
+	g_reset_pending = 0;
+	tad_gl_context_reset();
+}
+
+u32 eglTerminate(void *dpy)
+{
+	(void)dpy;
+	g_reset_pending = 1;
+	return EGL_TRUE;
+}
 
 const char *eglQueryString(void *dpy, i32 name)
 {
@@ -141,9 +177,21 @@ void *eglCreateWindowSurface(void *dpy, void *config, void *win, const i32 *a)
 u32 eglDestroySurface(void *dpy, void *surf) { (void)dpy; (void)surf; return EGL_TRUE; }
 
 void *eglCreateContext(void *dpy, void *config, void *share, const i32 *a)
-{ (void)dpy; (void)config; (void)share; (void)a; return TAD_CONTEXT; }
+{
+	(void)dpy; (void)config; (void)share; (void)a;
+	/* The safe moment to drop the previous title's tables: the old context is
+	 * gone and the new one has not been handed out yet, so nothing can be
+	 * mid-draw against what we are about to free. */
+	reset_if_pending();
+	return TAD_CONTEXT;
+}
 
-u32 eglDestroyContext(void *dpy, void *ctx) { (void)dpy; (void)ctx; return EGL_TRUE; }
+u32 eglDestroyContext(void *dpy, void *ctx)
+{
+	(void)dpy; (void)ctx;
+	g_reset_pending = 1;      /* cleared at the next eglCreateContext */
+	return EGL_TRUE;
+}
 
 u32 eglMakeCurrent(void *dpy, void *draw, void *read, void *ctx)
 { (void)dpy; (void)draw; (void)read; (void)ctx; return EGL_TRUE; }

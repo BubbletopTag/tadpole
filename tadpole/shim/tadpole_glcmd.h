@@ -105,6 +105,21 @@ enum tadgl_op {
 	TADGL_DRAWELEMENTS,     /* u32 mode, i32 count, u32 type,
 	                         * u32 elembuf, u32 offset */
 
+	/* ---- context teardown ---- */
+	/* No payload. Drop every mirrored texture, buffer and array.
+	 *
+	 * AppManager does not exit between games — it dlopen()s App.so, runs it,
+	 * and UnloadModule()s it — so the shim's GL tables are process-lifetime and
+	 * used to survive into the next title. Game A would fill all 192 texture
+	 * slots, then game B's glGenTextures found none free and returned name 0,
+	 * so it drew untextured; each title after that was worse than the last.
+	 * Real hardware never showed this because its driver tears the context
+	 * down, which is exactly what Brio was complaining about in the one log
+	 * line that appears here and never on the device:
+	 *     ExitPopUnloadApp: OGL context still active after unloading
+	 * Appended last so existing opcode numbers are unchanged. */
+	TADGL_RESET,
+
 	TADGL_OP_COUNT
 };
 

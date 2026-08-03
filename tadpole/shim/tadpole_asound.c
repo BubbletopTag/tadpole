@@ -156,9 +156,20 @@ static void publish_format(struct tad_pcm *p)
 	close(fd);
 }
 
+/* BACK OFF when there is no reader.
+ *
+ * With no viewer the FIFO has no reader, open() fails, and this used to be
+ * retried on every single write — 2.1 million attempts in one headless boot,
+ * enough I/O to stop the guest making progress. Retry occasionally instead: a
+ * viewer that starts later is picked up within a second, and one that never
+ * starts costs nothing. */
 static void open_fifo(struct tad_pcm *p)
 {
 	char path[512];
+	static unsigned tries;
+
+	if (p->fd < 0 && (tries++ & 0x3F))
+		return;
 
 	if (g_debug_audio > 0) {
 		char b[96];
@@ -183,7 +194,8 @@ int snd_pcm_open(snd_pcm_t **pcmp, const char *name, int stream, int mode)
 	if (!pcmp)
 		return -22;
 	if (g_debug_audio < 0)
-		g_debug_audio = getenv("TADPOLE_DEBUG") ? 1 : 0;
+		{ const char *d = getenv("TADPOLE_DEBUG");
+		  g_debug_audio = (d && d[0] && d[0] != '0'); }
 	if (g_npcm >= 4)
 		return -24;
 
@@ -335,7 +347,8 @@ slong snd_pcm_mmap_writei(snd_pcm_t *pcm, const void *buffer, ulong frames)
 	if (!pcm || !buffer)
 		return -22;
 	if (g_debug_audio < 0)
-		g_debug_audio = getenv("TADPOLE_DEBUG") ? 1 : 0;
+		{ const char *d = getenv("TADPOLE_DEBUG");
+		  g_debug_audio = (d && d[0] && d[0] != '0'); }
 	if (pcm->fd < 0) {
 		open_fifo(pcm);
 		if (pcm->fd < 0)

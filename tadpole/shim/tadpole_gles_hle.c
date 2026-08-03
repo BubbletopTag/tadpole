@@ -320,6 +320,11 @@ void hle_color(float r, float g, float b, float a)
 { float v[4]={r,g,b,a}; enc_u32(TADGL_COLOR, (const u32 *)v, 4); }
 
 void hle_matrixmode(u32 m) { enc_u32(TADGL_MATRIXMODE, &m, 1); }
+/* Tell the host to drop every mirrored texture, buffer and array. Sent when the
+ * guest tears its context down, so a recycled texture name in the next title
+ * cannot resolve to the previous title's image. */
+void hle_reset(void) { if (g_ring) enc0(TADGL_RESET); }
+
 void hle_loadidentity(void){ enc0(TADGL_LOADIDENTITY); }
 void hle_pushmatrix(void)  { enc0(TADGL_PUSHMATRIX); }
 void hle_popmatrix(void)   { enc0(TADGL_POPMATRIX); }

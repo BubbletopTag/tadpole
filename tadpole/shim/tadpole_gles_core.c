@@ -392,7 +392,17 @@ static int depth_passes(float z, float ref)
 }
 #define g_tex2d_on (g_tex2d_unit[0])
 
-#define MAX_TEXS 192          /* hoisted: the frame counters below index by it */
+/* Texture-name capacity. glGenTextures names a texture after its slot index and
+ * fails once every slot is taken, returning name 0 — and a title that draws
+ * with name 0 renders untextured. Clam Prix alone loads ~11.8 MB of textures,
+ * so 192 was not obviously enough for a single title, never mind that nothing
+ * used to free them between titles (see tad_gl_context_reset).
+ *
+ * The table costs 16 bytes a slot; the pixel copies are allocated per texture
+ * either way, so raising this buys headroom for almost nothing. tadpole_hle.c's
+ * MAX_TEX indexes by guest name and MUST stay larger than this. If the
+ * "glGenTextures EXHAUSTED" warning still appears, raise it again. */
+#define MAX_TEXS 512          /* hoisted: the frame counters below index by it */
 static int g_f_draws, g_f_tris_in, g_f_tris_out, g_f_pixels;
 static u8  g_f_texused[MAX_TEXS + 1];
 static int g_f_untex_tris;      /* triangles drawn with no texture at all */
@@ -841,6 +851,43 @@ void glOrthof(GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f)
 { ortho_f(l, r, b, t, n, f);
   if (hle_ready()) hle_ortho(l, r, b, t, n, f); }
 
+/* PERSPECTIVE. Both entry points were no-op stubs, which is why a race rendered
+ * as a thin horizontal band: with no projection the transform stays orthographic
+ * and every depth collapses onto one plane, so the track and the scenery flatten
+ * into a strip and objects string out along a line.
+ *
+ * The standard GL frustum matrix, column-major to match ortho_f above. The near
+ * plane must be positive and the three ranges non-empty; a zero divisor here
+ * would poison the whole matrix stack rather than fail visibly. */
+static void frustum_f(float l, float r, float b, float t, float n, float f)
+{
+	mat4 p;
+	if (r == l || t == b || f == n || n <= 0.0f || f <= 0.0f)
+		return;
+	mat_identity(&p);
+	p.m[0]  =  (2.0f*n)/(r-l);
+	p.m[5]  =  (2.0f*n)/(t-b);
+	p.m[8]  =  (r+l)/(r-l);
+	p.m[9]  =  (t+b)/(t-b);
+	p.m[10] = -(f+n)/(f-n);
+	p.m[11] = -1.0f;
+	p.m[14] = -(2.0f*f*n)/(f-n);
+	p.m[15] =  0.0f;
+	mat_apply(&p);
+}
+void glFrustumx(GLfixed l, GLfixed r, GLfixed b, GLfixed t, GLfixed n, GLfixed f)
+{ frustum_f(fx2f(l), fx2f(r), fx2f(b), fx2f(t), fx2f(n), fx2f(f));
+  if (hle_ready()) hle_frustum(fx2f(l), fx2f(r), fx2f(b), fx2f(t), fx2f(n), fx2f(f)); }
+void glFrustumf(GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f)
+{ frustum_f(l, r, b, t, n, f);
+  if (hle_ready()) hle_frustum(l, r, b, t, n, f); }
+/* The OES spelling is the same function; titles link whichever their SDK
+ * emitted, and a stub here would silently flatten the scene exactly as the
+ * missing glFrustumx did. */
+void glFrustumfOES(GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f)
+{ frustum_f(l, r, b, t, n, f);
+  if (hle_ready()) hle_frustum(l, r, b, t, n, f); }
+
 static void translate_f(float x, float y, float z)
 { mat4 m; mat_identity(&m); m.m[12]=x; m.m[13]=y; m.m[14]=z; mat_apply(&m); }
 void glTranslatex(GLfixed x, GLfixed y, GLfixed z) { translate_f(fx2f(x), fx2f(y), fx2f(z));
@@ -1106,7 +1153,19 @@ static struct gl_texture *tex_slot(GLuint n)
 	return t;
 }
 
-#define MAX_BUFS 64
+/* Buffer-object capacity. Exhausting this is a SILENT catastrophe and was the
+ * cause of the black 3D in Clam Prix races:
+ *
+ *   glGenBuffers returns name 0 -> glBindBuffer(ELEMENT_ARRAY, 0) clears
+ *   g_bound_elem -> glBufferData finds no slot and stores nothing ->
+ *   glDrawElements(..., NULL) sends elembuf=0 -> the host has no indices and
+ *   skips the draw. 2439 of 2566 draws in one frame, and a black screen.
+ *
+ * The old value was 64, which the race scene blows through immediately: the
+ * host's mirrored-buffer list stopped dead at name 64 while the track was still
+ * loading. Raising it also required moving HLE_CLIENT_* below, which were 100
+ * ONLY because 64 could never reach them. */
+#define MAX_BUFS 256
 struct gl_buffer { GLuint name; u8 *data; u32 size; };
 static struct gl_buffer g_bufs[MAX_BUFS];
 static GLuint g_bound_array, g_bound_elem;
@@ -1157,6 +1216,7 @@ static void hle_sync_state(void)
 }
 
 extern int hle_want_resync(void);
+extern void hle_reset(void);
 
 
 
@@ -1787,14 +1847,22 @@ static void draw_indexed(GLenum mode, GLsizei count, const void *indices, GLenum
  * usable vertex array, so the host skipped them and the screen stayed black.
  *
  * Rather than add an opcode, upload the client data into RESERVED buffer names
- * and reference those. The guest's own tables only ever use names 1..MAX_BUFS
- * (64), so 100+ cannot collide, and every existing mechanism — mirroring,
- * GL_FIXED conversion on the host, the resync — applies unchanged.
+ * and reference those. Every existing mechanism — mirroring, GL_FIXED
+ * conversion on the host, the resync — then applies unchanged.
+ *
+ * THESE MUST STAY ABOVE MAX_BUFS. They were 100..103 when the guest's own names
+ * could only reach 64. Raising MAX_BUFS to 256 would have made a real buffer
+ * collide with a reserved one — the game's geometry and a client-array upload
+ * writing over each other, which is far worse than the exhaustion it was meant
+ * to fix. The compile-time check below is what makes that impossible to get
+ * wrong again; tadpole_hle.c's MAX_BUF must exceed HLE_CLIENT_IDX in turn.
  */
-#define HLE_CLIENT_VTX 100
-#define HLE_CLIENT_COL 101
-#define HLE_CLIENT_TEX 102
-#define HLE_CLIENT_IDX 103
+#define HLE_CLIENT_VTX 1000
+#define HLE_CLIENT_COL 1001
+#define HLE_CLIENT_TEX 1002
+#define HLE_CLIENT_IDX 1003
+typedef char hle_client_names_above_maxbufs[
+	(HLE_CLIENT_VTX > MAX_BUFS) ? 1 : -1];
 
 static void hle_send_array(struct array *a, u32 which, u32 nverts, u32 name)
 {
@@ -2263,6 +2331,14 @@ void glDeleteTextures(GLsizei n, const GLuint *names)
 	for (i = 0; i < n; i++) {
 		struct gl_texture *t = tex_find(names[i]);
 		if (t) { if (t->argb) free(t->argb); t->argb = NULL; t->w = t->h = 0; t->name = 0; }
+		/* TELL THE HOST. Without this its mirror outlives the texture, and
+		 * since names are handed out by slot index the game reuses them almost
+		 * immediately — so a draw between the delete and the next upload
+		 * samples the PREVIOUS texture's pixels. Clam Prix cycles textures
+		 * continuously during a race ("Release Texture" / "Load Texture" in its
+		 * own log), which is why the symptom was constant flicker rather than
+		 * an occasional wrong image. */
+		if (hle_ready()) hle_deletetexture(names[i]);
 	}
 }
 
@@ -2313,6 +2389,13 @@ void glGenTextures(GLsizei n, GLuint *o)
 	}
 }
 
+/* Returning 0 here was a SILENT catastrophe, and it is what made Clam Prix
+ * races render black: the app binds element-array name 0, glBufferData finds no
+ * slot and stores nothing, and every glDrawElements then arrives at the host
+ * with elembuf=0 and is skipped. Unlike glGenTextures this said nothing at all,
+ * so the only visible symptom was an empty frame. */
+int g_buf_gen_fail;
+
 void glGenBuffers(GLsizei n, GLuint *o)
 {
 	GLsizei k; int i;
@@ -2326,6 +2409,11 @@ void glGenBuffers(GLsizei n, GLuint *o)
 				o[k] = g_bufs[i].name;
 				break;
 			}
+		if (!o[k]) {
+			g_buf_gen_fail++;
+			warn2("glGenBuffers EXHAUSTED (MAX_BUFS), fails so far",
+			      MAX_BUFS, g_buf_gen_fail);
+		}
 	}
 }
 
@@ -2442,3 +2530,60 @@ void DataConvert_to_enumv(void) { }
 void DataConvert_to_intv(void)  { }
 char g_shader_es1_fs[512];
 char g_shader_es1_vs[4096];
+
+/* ---- context teardown --------------------------------------------------- */
+/* Placed at the end of the file deliberately: it touches nearly every static in
+ * it, and C wants them all declared first.
+ *
+ * AppManager does NOT exit between games. It dlopen()s the title's App.so, runs
+ * it, and UnloadModule()s it, so everything static here is process-lifetime and
+ * used to survive into the next title. The consequences compounded rather than
+ * merely lingering:
+ *
+ *   * glGenTextures names a texture after its slot index and scans for a free
+ *     one. With all 192 slots still held by the previous game it found none,
+ *     returned name 0, and the new title drew untextured — the "melting", and
+ *     worse with every title launched.
+ *   * A recycled name that DID get a slot still had the previous title's pixels
+ *     mirrored on the host, so it drew the wrong image.
+ *   * Every draw against a texture the host held no image for set want_resync,
+ *     and hle_sync_state() can only resend textures the guest still has a
+ *     decoded copy of — so the request could never be satisfied and the host
+ *     asked again on the next draw, forever. That is the "host asked for a
+ *     state resync" flood.
+ *
+ * Real hardware tears the context down inside its driver, which is why the
+ * device never logs Brio's complaint and Tadpole always did:
+ *     ExitPopUnloadApp: OGL context still active after unloading
+ */
+void tad_gl_context_reset(void)
+{
+	int i;
+
+	for (i = 0; i < MAX_TEXS; i++) {
+		if (g_texs[i].argb) free(g_texs[i].argb);
+		g_texs[i].argb = NULL;
+		g_texs[i].name = 0;
+		g_texs[i].w = g_texs[i].h = 0;
+	}
+	for (i = 0; i < MAX_BUFS; i++) {
+		if (g_bufs[i].data) free(g_bufs[i].data);
+		g_bufs[i].data = NULL;
+		g_bufs[i].name = 0;
+		g_bufs[i].size = 0;
+	}
+
+	g_bound_tex   = 0;
+	g_bound_array = 0;
+	g_bound_elem  = 0;
+	g_vtx.on  = g_col.on  = g_tex.on  = 0;
+	g_vtx.ptr = g_col.ptr = g_tex.ptr = 0;
+	g_vtx.buf = g_col.buf = g_tex.buf = 0;
+	g_cur_color = 0xFFFFFFFFu;
+	g_tex_gen_fail = 0;
+
+	/* Drop the host's mirrors too, then force a fresh sync — otherwise the
+	 * host keeps the old title's images under names the next one reuses. */
+	if (hle_on()) hle_reset();
+	g_hle_synced = 0;
+}

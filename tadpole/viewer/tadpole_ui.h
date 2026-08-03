@@ -47,6 +47,8 @@ enum ui_action {
 	UI_ACT_RUN_SWF,          /* path filled in */
 	UI_ACT_INSTALL_PKG,      /* path filled in */
 	UI_ACT_SETUP_FIRMWARE,   /* path filled in */
+	UI_ACT_ERASE_FW,         /* wipe the installed system files */
+	UI_ACT_BUILD_SYSROOT,    /* regenerate runtime/sysroot from the rootfs */
 	UI_ACT_STOP,
 	UI_ACT_QUIT,
 	UI_ACT_RELAYOUT          /* rotate/scale changed; viewer must resize */
@@ -72,8 +74,25 @@ void  ui_cfg_save(void);
 /* A modal is up: the guest must not receive input, and the emulator can pause. */
 int   ui_modal(void);
 
+/* ---- progress ----------------------------------------------------------
+ *
+ * Installing firmware takes a minute or more: unpacking a zip, scanning 70
+ * packages, extracting a 53 MB UBIFS volume. Running that silently in the
+ * background made the wizard simply vanish, with no way to tell whether it was
+ * working, finished, or had failed — the caller feeds the tool's output here
+ * instead, and the modal stays up until the user dismisses it.
+ */
+void ui_progress_begin(const char *title);
+void ui_progress_line(const char *line);
+void ui_progress_done(int ok);
+int  ui_progress_active(void);
+
 /* One-line status shown at the right of the bar. */
 void  ui_status(const char *fmt, ...);
+
+/* Re-test whether the system files exist. Call after anything that could
+ * have installed or removed them. */
+void  ui_invalidate_prereqs(void);
 
 /* Told by the viewer so the bar can show it and File can offer Stop. */
 void  ui_set_running(int running);

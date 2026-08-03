@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Tadpole
+GenericName=LeapPad2 Emulator
+Comment=Run LeapPad2 software on your computer
+Exec=tadpole
+Icon=tadpole
+Categories=Game;Emulator;
+Terminal=false
