@@ -161,6 +161,7 @@ static const char *const g_opnames[] = {
 	"DRAWARRAYS", "DRAWELEMENTS",
 	"RESET", "TEXENVCOLOR",
 	"SCISSOR", "COLORMASK", "LINEWIDTH", "POINTSIZE", "POLYGONOFFSET",
+	"LIGHT", "MATERIAL", "LIGHTMODEL", "NORMAL",
 };
 typedef char tadgl_opnames_match[
 	(sizeof(g_opnames) / sizeof(g_opnames[0]) == TADGL_OP_COUNT) ? 1 : -1];
@@ -725,24 +726,29 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			 * faces of signs and buildings draw over their fronts, which is
 			 * why lettering appeared mirrored.
 			 *
-			 * Lighting and fog stay filtered because their state — glLightfv,
-			 * glMaterialf, glFogf — really is still missing, and enabling them
-			 * without it shades everything black. */
-			if (c == 0x0B50 /* GL_LIGHTING */ || c == 0x0B60 /* GL_FOG */) {
-				/* NAME WHAT IS MISSING, not just what was dropped. "ignoring
-				 * glEnable(0x0B50)" reads as a deliberate policy; it is a
-				 * SYMPTOM of 22 unimplemented entry points, and the log is
-				 * where someone will go looking for why lighting does nothing.
-				 * The guest prints the matching list of stubs it hit. */
+			 * GL_LIGHTING IS NO LONGER FILTERED. The reason it was — "the
+			 * light and material state is still missing, so enabling lighting
+			 * shades everything black" — stopped being true when glLight*,
+			 * glMaterial*, glLightModel* and glNormalPointer landed. The
+			 * filter was always a symptom, and removing it is the point of
+			 * having implemented them.
+			 *
+			 * GL_FOG stays filtered, and now for a measured reason rather than
+			 * an aspirational one: tools/gl-demand.py reports that NO installed
+			 * title imports any glFog* entry point, so fog state can only ever
+			 * be the GL defaults here — white, exponential, density 1 — which
+			 * is not what any title that enabled fog would be asking for. */
+			if (c == 0x0B60 /* GL_FOG */) {
+				/* SAY WHY, not just what. "ignoring glEnable(0x0B60)" reads
+				 * as arbitrary policy; the log is where someone will go
+				 * looking for why fog does nothing. */
 				if (!g_filtered++)
-					fprintf(stderr, "hle: ignoring glEnable(0x%04X) — %s. Turning"
-					        " it on with no state shades everything black, which"
-					        " is worse than flat. Implement the guest-side"
-					        " gl%s* entry points and delete this filter.\n",
-					        c, c == 0x0B50 ? "glLight*/glMaterial*/glNormal3* are"
-					                         " still stubs"
-					                       : "glFog* is still a stub",
-					        c == 0x0B50 ? "Light" : "Fog");
+					fprintf(stderr, "hle: ignoring glEnable(GL_FOG) — every"
+					        " glFog* entry point is still a stub, and no"
+					        " installed title imports one (tools/gl-demand.py),"
+					        " so fog state here could only ever be the GL"
+					        " defaults. Implement glFog*/glFogx* and delete"
+					        " this filter if a title ever needs it.\n");
 				break;
 			}
 			/* CONSUMED, NOT FORWARDED — see apply_scissor(). The host's
@@ -838,6 +844,43 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		case TADGL_POLYGONOFFSET: {
 			float v[2]; ring_get(v, 8);
 			glPolygonOffset(v[0], v[1]);
+			break;
+		}
+
+		/* ---- lighting ---------------------------------------------------
+		 * Straight through. Desktop GL's compatibility profile has the same
+		 * fixed-function pipeline and the same enum values, and the guest has
+		 * already validated light index, face and pname — so anything arriving
+		 * here is a combination GLES 1.1 defines, which desktop GL also
+		 * defines. Nothing to filter, unlike TEXENV and TEXPARAM where GLES
+		 * has parameters the desktop does not. */
+		case TADGL_LIGHT: {
+			unsigned int hd[3]; float v[4];
+			ring_get(hd, 12);
+			if (hd[2] > 4) hd[2] = 4;
+			ring_get(v, hd[2] * 4);
+			glLightfv(hd[0], hd[1], v);
+			break;
+		}
+		case TADGL_MATERIAL: {
+			unsigned int hd[3]; float v[4];
+			ring_get(hd, 12);
+			if (hd[2] > 4) hd[2] = 4;
+			ring_get(v, hd[2] * 4);
+			glMaterialfv(hd[0], hd[1], v);
+			break;
+		}
+		case TADGL_LIGHTMODEL: {
+			unsigned int hd[2]; float v[4];
+			ring_get(hd, 8);
+			if (hd[1] > 4) hd[1] = 4;
+			ring_get(v, hd[1] * 4);
+			glLightModelfv(hd[0], v);
+			break;
+		}
+		case TADGL_NORMAL: {
+			float v[3]; ring_get(v, 12);
+			glNormal3f(v[0], v[1], v[2]);
 			break;
 		}
 		case TADGL_COLOR:     { float v[4]; ring_get(v,16);

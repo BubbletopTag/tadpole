@@ -103,14 +103,6 @@ void glGetClipPlanex(void)
 { static unsigned int hits; tad_gl_stub_hit("glGetClipPlanex", &hits); }
 void glGetFramebufferAttachmentParameterivOES(void)
 { static unsigned int hits; tad_gl_stub_hit("glGetFramebufferAttachmentParameterivOES", &hits); }
-void glGetLightfv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glGetLightfv", &hits); }
-void glGetLightxv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glGetLightxv", &hits); }
-void glGetMaterialfv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glGetMaterialfv", &hits); }
-void glGetMaterialxv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glGetMaterialxv", &hits); }
 void glGetPointerv(void)
 { static unsigned int hits; tad_gl_stub_hit("glGetPointerv", &hits); }
 void glGetRenderbufferParameterivOES(void)
@@ -119,40 +111,12 @@ GLboolean glIsFramebufferOES(void)
 { static unsigned int hits; tad_gl_stub_hit("glIsFramebufferOES", &hits); return 0 /* GL_FALSE */; }
 GLboolean glIsRenderbufferOES(void)
 { static unsigned int hits; tad_gl_stub_hit("glIsRenderbufferOES", &hits); return 0 /* GL_FALSE */; }
-void glLightModelf(void)
-{ static unsigned int hits; tad_gl_stub_hit("glLightModelf", &hits); }
-void glLightModelfv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glLightModelfv", &hits); }
-void glLightModelx(void)
-{ static unsigned int hits; tad_gl_stub_hit("glLightModelx", &hits); }
-void glLightModelxv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glLightModelxv", &hits); }
-void glLightf(void)
-{ static unsigned int hits; tad_gl_stub_hit("glLightf", &hits); }
-void glLightfv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glLightfv", &hits); }
-void glLightx(void)
-{ static unsigned int hits; tad_gl_stub_hit("glLightx", &hits); }
-void glLightxv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glLightxv", &hits); }
 void glLogicOp(void)
 { static unsigned int hits; tad_gl_stub_hit("glLogicOp", &hits); }
-void glMaterialf(void)
-{ static unsigned int hits; tad_gl_stub_hit("glMaterialf", &hits); }
-void glMaterialfv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glMaterialfv", &hits); }
-void glMaterialx(void)
-{ static unsigned int hits; tad_gl_stub_hit("glMaterialx", &hits); }
-void glMaterialxv(void)
-{ static unsigned int hits; tad_gl_stub_hit("glMaterialxv", &hits); }
 void glMultiTexCoord4f(void)
 { static unsigned int hits; tad_gl_stub_hit("glMultiTexCoord4f", &hits); }
 void glMultiTexCoord4x(void)
 { static unsigned int hits; tad_gl_stub_hit("glMultiTexCoord4x", &hits); }
-void glNormal3f(void)
-{ static unsigned int hits; tad_gl_stub_hit("glNormal3f", &hits); }
-void glNormal3x(void)
-{ static unsigned int hits; tad_gl_stub_hit("glNormal3x", &hits); }
 void glOrthofOES(void)
 { static unsigned int hits; tad_gl_stub_hit("glOrthofOES", &hits); }
 void glPixelStorei(void)

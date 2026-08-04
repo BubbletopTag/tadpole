@@ -334,6 +334,24 @@ void hle_pointsize(float s)  { enc_u32(TADGL_POINTSIZE,  (const u32 *)&s, 1); }
 void hle_polygonoffset(float factor, float units)
 { float v[2]={factor,units}; enc_u32(TADGL_POLYGONOFFSET, (const u32 *)v, 2); }
 
+/* Lighting. The header travels as u32 and the values as float in the same
+ * packet, which enc_blob already does — the alternative, two packets, could be
+ * split by a ring wrap and read as one. */
+void hle_light(u32 light, u32 pname, const float *v, u32 count)
+{ u32 hd[3]={light,pname,count};
+  enc_blob(TADGL_LIGHT, hd, 3, v, count * 4u); }
+
+void hle_material(u32 face, u32 pname, const float *v, u32 count)
+{ u32 hd[3]={face,pname,count};
+  enc_blob(TADGL_MATERIAL, hd, 3, v, count * 4u); }
+
+void hle_lightmodel(u32 pname, const float *v, u32 count)
+{ u32 hd[2]={pname,count};
+  enc_blob(TADGL_LIGHTMODEL, hd, 2, v, count * 4u); }
+
+void hle_normal(float x, float y, float z)
+{ float v[3]={x,y,z}; enc_u32(TADGL_NORMAL, (const u32 *)v, 3); }
+
 void hle_color(float r, float g, float b, float a)
 { float v[4]={r,g,b,a}; enc_u32(TADGL_COLOR, (const u32 *)v, 4); }
 

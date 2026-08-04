@@ -414,6 +414,10 @@ extern void hle_colormask(u32 r, u32 g, u32 b, u32 a);
 extern void hle_linewidth(float w);
 extern void hle_pointsize(float s);
 extern void hle_polygonoffset(float factor, float units);
+extern void hle_light(u32 light, u32 pname, const float *v, u32 count);
+extern void hle_material(u32 face, u32 pname, const float *v, u32 count);
+extern void hle_lightmodel(u32 pname, const float *v, u32 count);
+extern void hle_normal(float x, float y, float z);
 extern void hle_color(float r, float g, float b, float a);
 extern void hle_matrixmode(u32 m);
 extern void hle_loadidentity(void);
@@ -3100,6 +3104,347 @@ void glPolygonOffset(GLfloat factor, GLfloat units)
 }
 void glPolygonOffsetx(GLfixed factor, GLfixed units)
 { glPolygonOffset(fx2f(factor), fx2f(units)); }
+
+/* ---- lighting, materials and the light model ----------------------------
+ *
+ * THE BIGGEST REMAINING CLUSTER, AND THE MEASUREMENT SAYS SO TWICE. 31 of the
+ * 87 installed titles link glLightxv and 30 link glMaterialxv
+ * (tools/gl-demand.py); one Pet Pals 2 session called glLightx and glLightxv
+ * 6490 times EACH (gl-warnings.log). It is also why the viewer filtered
+ * GL_LIGHTING out of glEnable entirely — turning lighting on with no light
+ * state shades everything black, which is worse than flat — so implementing
+ * this is what removes that hack rather than working around it.
+ *
+ * THE HOST DOES THE LIGHTING, NOT US. Desktop GL's compatibility profile has
+ * the whole fixed-function lighting pipeline, so the state is forwarded and
+ * evaluated there. The software rasteriser stays unlit: writing a second
+ * lighting implementation to run inside qemu, in soft-float, per vertex, would
+ * cost more than it could ever return. Titles run on the HLE path.
+ *
+ * EVERY x-SUFFIXED VALUE HERE IS SCALED, which is the opposite of the TexEnv
+ * family a few hundred lines up. There, most parameters are enums and 16.16 of
+ * an enum is meaningless. Here every parameter is a real number — a colour, a
+ * position, an exponent, an attenuation coefficient — so glLightx and friends
+ * divide by 65536. The one exception is GL_LIGHT_MODEL_TWO_SIDE, which is a
+ * boolean; see glLightModelx.
+ */
+#define MAX_LIGHTS 8
+#define GL_AMBIENT_               0x1200
+#define GL_DIFFUSE_               0x1201
+#define GL_SPECULAR_              0x1202
+#define GL_POSITION_              0x1203
+#define GL_SPOT_DIRECTION_        0x1204
+#define GL_SPOT_EXPONENT_         0x1205
+#define GL_SPOT_CUTOFF_           0x1206
+#define GL_CONSTANT_ATTENUATION_  0x1207
+#define GL_LINEAR_ATTENUATION_    0x1208
+#define GL_QUADRATIC_ATTENUATION_ 0x1209
+#define GL_EMISSION_              0x1600
+#define GL_SHININESS_             0x1601
+#define GL_AMBIENT_AND_DIFFUSE_   0x1602
+#define GL_LIGHT_MODEL_TWO_SIDE_  0x0B52
+#define GL_LIGHT_MODEL_AMBIENT_   0x0B53
+#define GL_FRONT_                 0x0404
+#define GL_BACK_                  0x0405
+#define GL_FRONT_AND_BACK_        0x0408
+
+struct gl_light {
+	float ambient[4], diffuse[4], specular[4], position[4];
+	float spot_dir[3], spot_exp, spot_cutoff;
+	float att[3];                  /* constant, linear, quadratic */
+};
+struct gl_material {
+	float ambient[4], diffuse[4], specular[4], emission[4], shininess;
+};
+
+static struct gl_light    g_lights[MAX_LIGHTS];
+static struct gl_material g_material;
+static float g_light_model_ambient[4];
+static int   g_light_model_two_side;
+static int   g_light_init;
+
+static void set4(float *d, float a, float b, float c, float e)
+{ d[0]=a; d[1]=b; d[2]=c; d[3]=e; }
+
+/* GLES 1.1 §2.12.1 initial state. These are not filler: a title that enables
+ * GL_LIGHT0 and sets only its position expects the SPEC's white diffuse and
+ * specular for light 0 specifically, and black for lights 1-7. Getting that
+ * wrong lights the scene at the wrong brightness with no call to blame. */
+static void light_init_once(void)
+{
+	int i;
+	if (g_light_init) return;
+	g_light_init = 1;
+	for (i = 0; i < MAX_LIGHTS; i++) {
+		struct gl_light *l = &g_lights[i];
+		set4(l->ambient, 0.0f, 0.0f, 0.0f, 1.0f);
+		set4(l->diffuse,  i == 0 ? 1.0f : 0.0f, i == 0 ? 1.0f : 0.0f,
+		                  i == 0 ? 1.0f : 0.0f, 1.0f);
+		set4(l->specular, i == 0 ? 1.0f : 0.0f, i == 0 ? 1.0f : 0.0f,
+		                  i == 0 ? 1.0f : 0.0f, 1.0f);
+		set4(l->position, 0.0f, 0.0f, 1.0f, 0.0f);   /* directional, +z */
+		l->spot_dir[0] = 0.0f; l->spot_dir[1] = 0.0f; l->spot_dir[2] = -1.0f;
+		l->spot_exp = 0.0f; l->spot_cutoff = 180.0f;
+		l->att[0] = 1.0f; l->att[1] = 0.0f; l->att[2] = 0.0f;
+	}
+	set4(g_material.ambient,  0.2f, 0.2f, 0.2f, 1.0f);
+	set4(g_material.diffuse,  0.8f, 0.8f, 0.8f, 1.0f);
+	set4(g_material.specular, 0.0f, 0.0f, 0.0f, 1.0f);
+	set4(g_material.emission, 0.0f, 0.0f, 0.0f, 1.0f);
+	g_material.shininess = 0.0f;
+	set4(g_light_model_ambient, 0.2f, 0.2f, 0.2f, 1.0f);
+	g_light_model_two_side = 0;
+}
+
+/* How many components a light parameter carries, 0 if it is not one. */
+static int light_count(GLenum p)
+{
+	switch (p) {
+	case GL_AMBIENT_: case GL_DIFFUSE_: case GL_SPECULAR_: case GL_POSITION_:
+		return 4;
+	case GL_SPOT_DIRECTION_: return 3;
+	case GL_SPOT_EXPONENT_: case GL_SPOT_CUTOFF_:
+	case GL_CONSTANT_ATTENUATION_: case GL_LINEAR_ATTENUATION_:
+	case GL_QUADRATIC_ATTENUATION_:
+		return 1;
+	default: return 0;
+	}
+}
+
+static int material_count(GLenum p)
+{
+	switch (p) {
+	case GL_AMBIENT_: case GL_DIFFUSE_: case GL_SPECULAR_: case GL_EMISSION_:
+	case GL_AMBIENT_AND_DIFFUSE_:
+		return 4;
+	case GL_SHININESS_: return 1;
+	default: return 0;
+	}
+}
+
+static void light_set(GLenum light, GLenum p, const float *v)
+{
+	int idx = (int)light - 0x4000;      /* GL_LIGHT0 */
+	struct gl_light *l;
+	int n = light_count(p), i;
+
+	light_init_once();
+	if (idx < 0 || idx >= MAX_LIGHTS) { tad_gl_error(TAD_GL_INVALID_ENUM, "glLight"); return; }
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glLight"); return; }
+	l = &g_lights[idx];
+
+	switch (p) {
+	case GL_AMBIENT_:  for (i=0;i<4;i++) l->ambient[i]  = v[i]; break;
+	case GL_DIFFUSE_:  for (i=0;i<4;i++) l->diffuse[i]  = v[i]; break;
+	case GL_SPECULAR_: for (i=0;i<4;i++) l->specular[i] = v[i]; break;
+	case GL_POSITION_: for (i=0;i<4;i++) l->position[i] = v[i]; break;
+	case GL_SPOT_DIRECTION_: for (i=0;i<3;i++) l->spot_dir[i] = v[i]; break;
+	case GL_SPOT_EXPONENT_: l->spot_exp = v[0]; break;
+	case GL_SPOT_CUTOFF_:   l->spot_cutoff = v[0]; break;
+	case GL_CONSTANT_ATTENUATION_:  l->att[0] = v[0]; break;
+	case GL_LINEAR_ATTENUATION_:    l->att[1] = v[0]; break;
+	case GL_QUADRATIC_ATTENUATION_: l->att[2] = v[0]; break;
+	}
+	/* FORWARDED IMMEDIATELY, AND THE ORDER IS THE POINT. GL_POSITION and
+	 * GL_SPOT_DIRECTION are transformed by the modelview matrix in force AT THE
+	 * MOMENT OF THE CALL, not at draw time. Matrix commands travel the same
+	 * ring in the same order, so the host's modelview is whatever the guest's
+	 * was when this call was made — provided we send it now rather than
+	 * batching it. Deferring light state to the next draw would silently move
+	 * every positional light. */
+	if (hle_ready()) hle_light(light, p, v, n);
+}
+
+static void material_set(GLenum face, GLenum p, const float *v)
+{
+	int n = material_count(p), i;
+	light_init_once();
+	/* GLES 1.1 has no per-face materials: GL_FRONT_AND_BACK is the only legal
+	 * face, and GL_FRONT/GL_BACK are an error rather than a subset. */
+	if (face != GL_FRONT_AND_BACK_) { tad_gl_error(TAD_GL_INVALID_ENUM, "glMaterial"); return; }
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glMaterial"); return; }
+	switch (p) {
+	case GL_AMBIENT_:  for (i=0;i<4;i++) g_material.ambient[i]  = v[i]; break;
+	case GL_DIFFUSE_:  for (i=0;i<4;i++) g_material.diffuse[i]  = v[i]; break;
+	case GL_SPECULAR_: for (i=0;i<4;i++) g_material.specular[i] = v[i]; break;
+	case GL_EMISSION_: for (i=0;i<4;i++) g_material.emission[i] = v[i]; break;
+	case GL_AMBIENT_AND_DIFFUSE_:
+		for (i=0;i<4;i++) { g_material.ambient[i] = v[i];
+		                    g_material.diffuse[i] = v[i]; } break;
+	case GL_SHININESS_: g_material.shininess = v[0]; break;
+	}
+	if (hle_ready()) hle_material(face, p, v, n);
+}
+
+static void lightmodel_set(GLenum p, const float *v)
+{
+	int i;
+	light_init_once();
+	if (p == GL_LIGHT_MODEL_AMBIENT_) {
+		for (i = 0; i < 4; i++) g_light_model_ambient[i] = v[i];
+		if (hle_ready()) hle_lightmodel(p, v, 4);
+	} else if (p == GL_LIGHT_MODEL_TWO_SIDE_) {
+		g_light_model_two_side = v[0] != 0.0f;
+		if (hle_ready()) hle_lightmodel(p, v, 1);
+	} else {
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glLightModel");
+	}
+}
+
+/* ---- the twelve setters ------------------------------------------------- */
+
+void glLightf(GLenum l, GLenum p, GLfloat v)  { light_set(l, p, &v); }
+void glLightfv(GLenum l, GLenum p, const GLfloat *v) { if (v) light_set(l, p, v); }
+void glLightx(GLenum l, GLenum p, GLfixed v)  { float f = fx2f(v); light_set(l, p, &f); }
+void glLightxv(GLenum l, GLenum p, const GLfixed *v)
+{
+	float f[4]; int i, n = light_count(p);
+	if (!v) return;
+	if (!n) n = 1;
+	for (i = 0; i < n; i++) f[i] = fx2f(v[i]);
+	light_set(l, p, f);
+}
+
+void glMaterialf(GLenum f, GLenum p, GLfloat v)  { material_set(f, p, &v); }
+void glMaterialfv(GLenum f, GLenum p, const GLfloat *v) { if (v) material_set(f, p, v); }
+void glMaterialx(GLenum f, GLenum p, GLfixed v)  { float x = fx2f(v); material_set(f, p, &x); }
+void glMaterialxv(GLenum f, GLenum p, const GLfixed *v)
+{
+	float x[4]; int i, n = material_count(p);
+	if (!v) return;
+	if (!n) n = 1;
+	for (i = 0; i < n; i++) x[i] = fx2f(v[i]);
+	material_set(f, p, x);
+}
+
+void glLightModelf(GLenum p, GLfloat v)  { lightmodel_set(p, &v); }
+void glLightModelfv(GLenum p, const GLfloat *v) { if (v) lightmodel_set(p, v); }
+
+/* NOT SCALED FOR TWO_SIDE. It is a boolean, and a title enabling two-sided
+ * lighting passes GL_TRUE — the integer 1, not 1<<16. Dividing that by 65536
+ * gives 0.0000152, which is non-zero and happens to work here, but would be a
+ * live bug the moment anything compared it against 1.0. Treat it as the
+ * boolean it is. */
+void glLightModelx(GLenum p, GLfixed v)
+{ float f = (p == GL_LIGHT_MODEL_TWO_SIDE_) ? (float)(v != 0) : fx2f(v);
+  lightmodel_set(p, &f); }
+
+void glLightModelxv(GLenum p, const GLfixed *v)
+{
+	float f[4]; int i, n;
+	if (!v) return;
+	if (p == GL_LIGHT_MODEL_TWO_SIDE_) { f[0] = (float)(v[0] != 0);
+	                                     lightmodel_set(p, f); return; }
+	n = (p == GL_LIGHT_MODEL_AMBIENT_) ? 4 : 1;
+	for (i = 0; i < n; i++) f[i] = fx2f(v[i]);
+	lightmodel_set(p, f);
+}
+
+/* ---- the four getters --------------------------------------------------- */
+
+static int light_get(GLenum light, GLenum p, float *out)
+{
+	int idx = (int)light - 0x4000;
+	struct gl_light *l;
+	int n = light_count(p), i;
+	light_init_once();
+	if (idx < 0 || idx >= MAX_LIGHTS || !n) return 0;
+	l = &g_lights[idx];
+	switch (p) {
+	case GL_AMBIENT_:  for (i=0;i<4;i++) out[i] = l->ambient[i];  break;
+	case GL_DIFFUSE_:  for (i=0;i<4;i++) out[i] = l->diffuse[i];  break;
+	case GL_SPECULAR_: for (i=0;i<4;i++) out[i] = l->specular[i]; break;
+	/* A KNOWN, BOUNDED DIVERGENCE. Real GL transforms GL_POSITION and
+	 * GL_SPOT_DIRECTION by the modelview matrix at the moment they are SET, and
+	 * glGetLight returns the transformed value in eye coordinates. We return
+	 * what the title passed in. The two agree whenever the modelview was
+	 * identity at the time of the call — which is what glconform tests, and
+	 * hardware agrees there — and diverge otherwise.
+	 *
+	 * Left as-is deliberately: no installed title imports glGetLightfv or
+	 * glGetLightxv at all (tools/gl-demand.py), so this affects the conformance
+	 * harness and nothing else. Doing it properly means snapshotting the
+	 * modelview per light per set, which is real state for no measured
+	 * benefit. If a title ever shows up in the demand table, do it then. */
+	case GL_POSITION_: for (i=0;i<4;i++) out[i] = l->position[i]; break;
+	case GL_SPOT_DIRECTION_: for (i=0;i<3;i++) out[i] = l->spot_dir[i]; break;
+	case GL_SPOT_EXPONENT_: out[0] = l->spot_exp; break;
+	case GL_SPOT_CUTOFF_:   out[0] = l->spot_cutoff; break;
+	case GL_CONSTANT_ATTENUATION_:  out[0] = l->att[0]; break;
+	case GL_LINEAR_ATTENUATION_:    out[0] = l->att[1]; break;
+	case GL_QUADRATIC_ATTENUATION_: out[0] = l->att[2]; break;
+	}
+	return n;
+}
+
+static int material_get(GLenum face, GLenum p, float *out)
+{
+	int n = material_count(p), i;
+	light_init_once();
+	/* glGetMaterial DOES accept GL_FRONT and GL_BACK even though glMaterial
+	 * only accepts GL_FRONT_AND_BACK — GLES 1.1 §6.1.3. Both return the same
+	 * values here, because there is only one material. */
+	if (face != GL_FRONT_ && face != GL_BACK_ && face != GL_FRONT_AND_BACK_) return 0;
+	if (!n || p == GL_AMBIENT_AND_DIFFUSE_) return 0;   /* not a queryable pname */
+	switch (p) {
+	case GL_AMBIENT_:  for (i=0;i<4;i++) out[i] = g_material.ambient[i];  break;
+	case GL_DIFFUSE_:  for (i=0;i<4;i++) out[i] = g_material.diffuse[i];  break;
+	case GL_SPECULAR_: for (i=0;i<4;i++) out[i] = g_material.specular[i]; break;
+	case GL_EMISSION_: for (i=0;i<4;i++) out[i] = g_material.emission[i]; break;
+	case GL_SHININESS_: out[0] = g_material.shininess; break;
+	}
+	return n;
+}
+
+void glGetLightfv(GLenum l, GLenum p, GLfloat *v)
+{
+	float f[4]; int n, i;
+	if (!v) return;
+	n = light_get(l, p, f);
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glGetLightfv"); return; }
+	for (i = 0; i < n; i++) v[i] = f[i];
+}
+void glGetLightxv(GLenum l, GLenum p, GLfixed *v)
+{
+	float f[4]; int n, i;
+	if (!v) return;
+	n = light_get(l, p, f);
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glGetLightxv"); return; }
+	for (i = 0; i < n; i++) v[i] = f2fx(f[i]);
+}
+void glGetMaterialfv(GLenum f, GLenum p, GLfloat *v)
+{
+	float x[4]; int n, i;
+	if (!v) return;
+	n = material_get(f, p, x);
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glGetMaterialfv"); return; }
+	for (i = 0; i < n; i++) v[i] = x[i];
+}
+void glGetMaterialxv(GLenum f, GLenum p, GLfixed *v)
+{
+	float x[4]; int n, i;
+	if (!v) return;
+	n = material_get(f, p, x);
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glGetMaterialxv"); return; }
+	for (i = 0; i < n; i++) v[i] = f2fx(x[i]);
+}
+
+/* ---- the current normal -------------------------------------------------
+ *
+ * Used when GL_NORMAL_ARRAY is off — one normal for every vertex in the draw.
+ * No installed title imports these (tools/gl-demand.py), which is expected:
+ * they all use glNormalPointer instead. Implemented anyway because they are two
+ * lines each and because "the title lit nothing" and "we dropped its normal"
+ * must not be able to look the same. */
+static float g_normal[3] = { 0.0f, 0.0f, 1.0f };
+
+void glNormal3f(GLfloat x, GLfloat y, GLfloat z)
+{
+	g_normal[0]=x; g_normal[1]=y; g_normal[2]=z;
+	if (hle_ready()) hle_normal(x, y, z);
+}
+void glNormal3x(GLfixed x, GLfixed y, GLfixed z)
+{ glNormal3f(fx2f(x), fx2f(y), fx2f(z)); }
 
 /* ---- stencil: TRACKED, DELIBERATELY NOT FORWARDED -----------------------
  *

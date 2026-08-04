@@ -139,6 +139,21 @@ enum tadgl_op {
 	TADGL_POINTSIZE,        /* float s */
 	TADGL_POLYGONOFFSET,    /* float factor, units */
 
+	/* ---- fixed-function lighting --------------------------------------
+	 * The host evaluates it; desktop GL's compatibility profile has the whole
+	 * pipeline. Each carries a count because these parameters are 1, 3 or 4
+	 * components depending on pname, and sending a fixed 4 would make
+	 * GL_SPOT_DIRECTION read one float past what the guest set.
+	 *
+	 * SENT IN CALL ORDER, NOT BATCHED: GL_POSITION and GL_SPOT_DIRECTION are
+	 * transformed by the modelview matrix in force at the moment of the call,
+	 * and matrix commands share this ring, so order is what makes the host's
+	 * transform match the guest's. */
+	TADGL_LIGHT,            /* u32 light, pname, count; then count floats */
+	TADGL_MATERIAL,         /* u32 face,  pname, count; then count floats */
+	TADGL_LIGHTMODEL,       /* u32 pname, count;        then count floats */
+	TADGL_NORMAL,           /* float x, y, z */
+
 	TADGL_OP_COUNT
 };
 
