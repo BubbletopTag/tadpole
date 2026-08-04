@@ -2004,18 +2004,23 @@ void glLoadPaletteFromModelViewMatrixOES(void)
 { tr2("glLoadPaletteFromModelViewMatrixOES", (int)g_cur_palette, 0);
   if (g_cur_palette < MAX_PALETTE) g_palette[g_cur_palette] = g_mv[g_mv_sp]; }
 
-/* Read one component of a client array as float, whatever it is stored as. */
-static float arr_get(const struct array *a, u32 vertex, int comp)
+/* Bone INDICES must not be normalised. fetch() divides GL_UNSIGNED_BYTE by 255
+ * because that is right for colours; an index of 7 would arrive as 0.027 and
+ * every vertex would collapse onto palette entry 0. */
+static u32 fetch_index(const struct array *a, u32 i, GLint c)
 {
 	u32 stride = a->stride ? (u32)a->stride : elem_size(a->type, a->size);
-	const u8 *q = a->ptr + (unsigned long)vertex * stride;
+	const u8 *ab = array_base(a);
+	const u8 *base;
+	if (!ab || c >= a->size) return 0;
+	base = ab + i * stride;
 	switch (a->type) {
-	case GL_FLOAT:         return ((const float *)q)[comp];
-	case GL_FIXED:         return fx2f(((const GLfixed *)q)[comp]);
-	case GL_UNSIGNED_BYTE: return (float)q[comp];
-	case GL_BYTE:          return (float)((const signed char *)q)[comp];
-	case GL_SHORT:         return (float)((const short *)q)[comp];
-	default:               return 0.0f;
+	case GL_UNSIGNED_BYTE: return (u32)base[c];
+	case GL_BYTE:          return (u32)(unsigned char)((const signed char *)base)[c];
+	case GL_SHORT:         return (u32)((const short *)base)[c];
+	case GL_FLOAT:         return (u32)((const float *)base)[c];
+	case GL_FIXED:         return (u32)fx2f(((const GLfixed *)base)[c]);
+	default:               return 0;
 	}
 }
 
@@ -2030,15 +2035,19 @@ static const float *skin_vertices(u32 nverts)
 	u32 i;
 	int k, nb;
 
-	if (!g_palette_on || !g_vtx.on || !g_vtx.ptr) return 0;
-	if (!g_midx.ptr || !g_wgt.ptr) {
+	/* RESOLVE THROUGH array_base(). A vertex array living in a buffer object
+	 * carries an OFFSET in ->ptr, and that offset is normally 0 — so testing
+	 * ->ptr rejected exactly the case this needs to handle, and skinning was
+	 * never once reached even though the title plainly enables it. */
+	if (!g_palette_on || !g_vtx.on || !array_base(&g_vtx)) return 0;
+	if (!array_base(&g_midx) || !array_base(&g_wgt)) {
 		/* Palette on but no bone data: say so ONCE. Silence here would look
 		 * identical to skinning working, and the character would still be
 		 * missing with nothing to explain why. */
 		static int said;
 		if (g_palette_on && !said) { said = 1;
 			warn2("palette ON but index/weight arrays missing (idx,wgt set?)",
-			      g_midx.ptr ? 1 : 0, g_wgt.ptr ? 1 : 0); }
+			      array_base(&g_midx) ? 1 : 0, array_base(&g_wgt) ? 1 : 0); }
 		return 0;
 	}
 	if (!nverts) return 0;
@@ -2059,15 +2068,15 @@ static const float *skin_vertices(u32 nverts)
 	for (i = 0; i < nverts; i++) {
 		float pos[4], acc[3];
 		acc[0] = acc[1] = acc[2] = 0.0f;
-		pos[0] = arr_get(&g_vtx, i, 0);
-		pos[1] = arr_get(&g_vtx, i, 1);
-		pos[2] = g_vtx.size > 2 ? arr_get(&g_vtx, i, 2) : 0.0f;
+		pos[0] = fetch(&g_vtx, i, 0);
+		pos[1] = fetch(&g_vtx, i, 1);
+		pos[2] = g_vtx.size > 2 ? fetch(&g_vtx, i, 2) : 0.0f;
 		pos[3] = 1.0f;
 		for (k = 0; k < nb; k++) {
-			float w = arr_get(&g_wgt, i, k), t[4];
+			float w = fetch(&g_wgt, i, k), t[4];
 			u32 mi;
 			if (w == 0.0f) continue;      /* the common case: 1-2 live bones */
-			mi = (u32)arr_get(&g_midx, i, k);
+			mi = fetch_index(&g_midx, i, k);
 			if (mi >= MAX_PALETTE) continue;
 			vec_xform(&g_palette[mi], pos, t);
 			acc[0] += w * t[0]; acc[1] += w * t[1]; acc[2] += w * t[2];

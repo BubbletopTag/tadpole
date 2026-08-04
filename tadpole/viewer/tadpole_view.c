@@ -389,11 +389,29 @@ static int g_dpad_shift = -1;   /* -1 = derive from the rotation */
  */
 #define DPAD_GAME_TURN 3
 
+/* TADPOLE_DPAD_MIRROR=1 reflects left/right, leaving up/down alone.
+ *
+ * THE ROTATION MODEL CANNOT EXPRESS EVERY WRONG MAPPING. Four rotations move
+ * both axes together, so "left and right are swapped but up and down are
+ * correct" is unreachable by any shift — that is a reflection, and if the
+ * panel's axes are mirrored relative to the D-pad's no rotation will ever fix
+ * it. Two guesses at the constant have now been wrong, and neither could have
+ * been right if the true relationship is a reflection.
+ *
+ * Together the two knobs cover all eight possibilities (4 rotations x 2
+ * reflections), so one sitting at the keyboard settles it for good.
+ */
+static int g_dpad_mirror;
+
 static uint16_t rotate_dpad(int visual_idx, int rotate)
 {
 	int shift;
 	if (g_raw_dpad)
 		return DPAD_CW[visual_idx];
+	/* Reflect BEFORE rotating: swapping indices 1 and 3 exchanges RIGHT and
+	 * LEFT while UP (0) and DOWN (2) stay put. */
+	if (g_dpad_mirror && (visual_idx & 1))
+		visual_idx ^= 2;
 	shift = (g_dpad_shift >= 0)
 	      ? g_dpad_shift
 	      : ((4 - ((rotate / 90) & 3)) + DPAD_GAME_TURN) & 3;
@@ -1140,6 +1158,7 @@ int main(int argc, char **argv)
 	g_touch_debug = getenv("TADPOLE_TOUCH_DEBUG") != NULL;
 	g_raw_dpad    = getenv("TADPOLE_RAW_DPAD") != NULL;
 	if ((env = getenv("TADPOLE_DPAD_SHIFT")) != NULL) g_dpad_shift = atoi(env) & 3;
+	g_dpad_mirror = getenv("TADPOLE_DPAD_MIRROR") != NULL;
 	if ((env = getenv("TADPOLE_TS_MAX_X")) != NULL) g_ts_max_x = atoi(env);
 	if ((env = getenv("TADPOLE_TS_MAX_Y")) != NULL) g_ts_max_y = atoi(env);
 	for (i = 1; i < argc; i++) {
