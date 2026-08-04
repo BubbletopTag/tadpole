@@ -47,10 +47,10 @@
  * indistinguishable from a texture that simply never arrived. */
 #define MAX_TEX  576
 /* Indexed by GUEST buffer name, so it must exceed both the guest's MAX_BUFS
- * (256) and the reserved client-array names HLE_CLIENT_* (1000..1003). A name
+ * (2048) and the reserved client-array names HLE_CLIENT_* (4000..4003). A name
  * at or above this is dropped, and a dropped ELEMENT buffer makes the host skip
  * the draw entirely — silently, and the frame comes back black. */
-#define MAX_BUF  1024
+#define MAX_BUF  4096
 
 struct hbuf { unsigned char *data; unsigned int size; };
 struct harr { unsigned int buf, type, on; int size, stride; unsigned int off; };
@@ -124,6 +124,8 @@ static unsigned int g_hist_n;
 /* TADPOLE_HLE_DEBUG=1 for the per-frame accounting. Unconditional stderr spam
  * from a working replayer is noise; these exist for when it is NOT working. */
 static int               g_verbose;
+static unsigned int      g_mat_mode = 0x1700;   /* GL_MODELVIEW */
+static unsigned long     g_mat_tex_sets, g_mat_tex_ops;
 static unsigned int      g_gl_err;     /* first GL error seen, 0 if none */
 static unsigned long     g_err_count;
 
@@ -540,6 +542,21 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 					unsigned int i2, nz = 0;
 					for (i2 = 0; i2 < (unsigned)(g_w * g_h); i2 += 37)
 						if (out[i2] & 0x00FFFFFFu) nz++;
+					/* THE MATRIX ITSELF, not a count of pokes at it. If the
+					 * translation or scale terms grow every second, the texture
+					 * matrix is accumulating and every textured surface slides —
+					 * which is the "conveyor belt" symptom exactly. Identity
+					 * reads 1,1 scale and 0,0 translation. */
+					GLfloat tm[16];
+					GLint pm = 0;
+					glGetIntegerv(GL_MATRIX_MODE, &pm);
+					glMatrixMode(GL_TEXTURE);
+					glGetFloatv(GL_TEXTURE_MATRIX, tm);
+					glMatrixMode((GLenum)pm);
+					fprintf(stderr, "hle: texmatrix: %lu sets, %lu ops | "
+					        "scale %.3f,%.3f  translate %.3f,%.3f\n",
+					        g_mat_tex_sets, g_mat_tex_ops,
+					        tm[0], tm[5], tm[12], tm[13]);
 					fprintf(stderr, "hle: frame %lu: %lu draws, %u/%u px non-black,"
 					        " glerr 0x%04X x%lu | drawelem pkts %lu skipped-nobuf"
 					        " %lu no-array %lu\n",
@@ -592,8 +609,18 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		case TADGL_ENABLE: {
 			unsigned int c;
 			ring_get(&c, 4);
-			if (c == 0x0B44 /* GL_CULL_FACE */ || c == 0x0B50 /* GL_LIGHTING */ ||
-			    c == 0x0B60 /* GL_FOG */) {
+			/* GL_CULL_FACE IS NOW HONOURED. The exemption above was
+			 * conditional on glCullFace/glFrontFace not being in the stream —
+			 * both are forwarded now, so the host culls with the title's own
+			 * winding rather than its default, and the reason to skip it is
+			 * gone. Leaving it off is not neutral: without culling the back
+			 * faces of signs and buildings draw over their fronts, which is
+			 * why lettering appeared mirrored.
+			 *
+			 * Lighting and fog stay filtered because their state — glLightfv,
+			 * glMaterialf, glFogf — really is still missing, and enabling them
+			 * without it shades everything black. */
+			if (c == 0x0B50 /* GL_LIGHTING */ || c == 0x0B60 /* GL_FOG */) {
 				if (!g_filtered++)
 					fprintf(stderr, "hle: ignoring glEnable(0x%04X) — the"
 					        " software reference ignores it too\n", c);
@@ -634,19 +661,41 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		case TADGL_COLOR:     { float v[4]; ring_get(v,16);
 		                        glColor4f(v[0],v[1],v[2],v[3]); break; }
 
-		case TADGL_MATRIXMODE:  { unsigned int m; ring_get(&m,4); glMatrixMode(m); break; }
-		case TADGL_LOADIDENTITY: glLoadIdentity(); break;
-		case TADGL_PUSHMATRIX:   glPushMatrix();   break;
-		case TADGL_POPMATRIX:    glPopMatrix();    break;
-		case TADGL_LOADMATRIX:  { float m[16]; ring_get(m,64); glLoadMatrixf(m); break; }
-		case TADGL_MULTMATRIX:  { float m[16]; ring_get(m,64); glMultMatrixf(m); break; }
+		case TADGL_MATRIXMODE:  {
+			unsigned int m; ring_get(&m,4);
+			/* IS THE TEXTURE MATRIX IN PLAY? The guest has only two matrix
+			 * stacks — projection and modelview — so glMatrixMode(GL_TEXTURE)
+			 * silently lands in its modelview one, while the raw enum is
+			 * forwarded here where a real texture matrix exists. If a title
+			 * animates that matrix (a standard trick for scrolling road and
+			 * water) the two sides disagree about what is being transformed,
+			 * and every textured surface slides. Counting the ops per mode is
+			 * how we find out whether that is happening at all. */
+			g_mat_mode = m;
+			if (m == 0x1702) g_mat_tex_sets++;
+			glMatrixMode(m); break; }
+		case TADGL_LOADIDENTITY:
+			if (g_mat_mode == 0x1702) g_mat_tex_ops++;
+			glLoadIdentity(); break;
+		case TADGL_PUSHMATRIX:
+			if (g_mat_mode == 0x1702) g_mat_tex_ops++;
+			glPushMatrix();   break;
+		case TADGL_POPMATRIX:
+			if (g_mat_mode == 0x1702) g_mat_tex_ops++;
+			glPopMatrix();    break;
+		case TADGL_LOADMATRIX:  { float m[16]; ring_get(m,64);
+			if (g_mat_mode == 0x1702) g_mat_tex_ops++;
+			glLoadMatrixf(m); break; }
+		case TADGL_MULTMATRIX:  { float m[16]; ring_get(m,64);
+			if (g_mat_mode == 0x1702) g_mat_tex_ops++;
+			glMultMatrixf(m); break; }
 		case TADGL_ORTHO:       { float v[6]; ring_get(v,24);
 		                          glOrtho(v[0],v[1],v[2],v[3],v[4],v[5]); break; }
 		case TADGL_FRUSTUM:     { float v[6]; ring_get(v,24);
 		                          glFrustum(v[0],v[1],v[2],v[3],v[4],v[5]); break; }
-		case TADGL_TRANSLATE:   { float v[3]; ring_get(v,12); glTranslatef(v[0],v[1],v[2]); break; }
-		case TADGL_SCALE:       { float v[3]; ring_get(v,12); glScalef(v[0],v[1],v[2]); break; }
-		case TADGL_ROTATE:      { float v[4]; ring_get(v,16); glRotatef(v[0],v[1],v[2],v[3]); break; }
+		case TADGL_TRANSLATE:   { float v[3]; ring_get(v,12); (g_mat_mode == 0x1702 ? g_mat_tex_ops++ : 0), glTranslatef(v[0],v[1],v[2]); break; }
+		case TADGL_SCALE:       { float v[3]; ring_get(v,12); (g_mat_mode == 0x1702 ? g_mat_tex_ops++ : 0), glScalef(v[0],v[1],v[2]); break; }
+		case TADGL_ROTATE:      { float v[4]; ring_get(v,16); (g_mat_mode == 0x1702 ? g_mat_tex_ops++ : 0), glRotatef(v[0],v[1],v[2],v[3]); break; }
 
 		case TADGL_BINDTEXTURE: {
 			unsigned int n;

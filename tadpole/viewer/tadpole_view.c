@@ -376,11 +376,18 @@ static int g_dpad_shift = -1;   /* -1 = derive from the rotation */
  * measured visual up arriving as the game's LEFT, right as UP, left as DOWN —
  * precisely one step out.
  *
+ * THEN IT WAS MEASURED AGAIN and found to be three, not one: with 1, both axes
+ * came out reversed — up gave down, left gave right — which is a half turn, so
+ * the mapping was two steps out and 1 + 2 = 3. The earlier value was set from a
+ * single observation of one axis, which cannot distinguish a quarter turn from
+ * three quarters; two axes are needed to pin the direction of rotation, and
+ * that is what the second measurement supplied.
+ *
  * So the shift is the display correction PLUS that constant. TADPOLE_DPAD_SHIFT
  * (0-3) overrides it, because controls cannot be verified without someone
  * holding the keyboard and a wrong guess is worse than an adjustable default.
  */
-#define DPAD_GAME_TURN 1
+#define DPAD_GAME_TURN 3
 
 static uint16_t rotate_dpad(int visual_idx, int rotate)
 {
@@ -1368,8 +1375,34 @@ int main(int argc, char **argv)
 				if (!scratch) scratch = malloc((size_t)w * h * 4);
 				dst = scratch;
 			}
-			if (dst)
+			/* SAY WHERE THE FRAME IS GOING, once, and again if it changes.
+			 *
+			 * Falling back to scratch is indistinguishable from working: the
+			 * replay reports a full scene ("59% non-black") because it counts
+			 * the buffer it just wrote, while the arena the compositor reads
+			 * stays black. A capture then shows an empty screen next to
+			 * statistics claiming a rendered frame, and nothing says which of
+			 * the two is lying. */
+			if (dst) {
+				static const void *last_dst;
+				static int said_scratch = -1;
+				int to_scratch = (g_state && g_fb[1])
+				               ? ((const void *)dst < g_fb[1] ||
+				                  (const char *)dst >= (const char *)g_fb[1] + g_fbsz[1])
+				               : 1;
+				if (dst != last_dst || to_scratch != said_scratch) {
+					last_dst = dst;
+					said_scratch = to_scratch;
+					if (getenv("TADPOLE_HLE_DEBUG"))
+						fprintf(stderr, "hle: presenting to %s "
+						        "(state=%p fb1=%p yoff=%u)\n",
+						        to_scratch ? "SCRATCH — the compositor will "
+						                     "never see this" : "the fb1 arena",
+						        (void *)g_state, g_fb[1],
+						        g_state ? g_state->layer[1].yoffset : 0);
+				}
 				hle_host_pump(dst, (unsigned)w);
+			}
 		}
 
 		memset(pixels, 0, (size_t)w * h * 4);
@@ -1457,8 +1490,24 @@ int main(int argc, char **argv)
 			/* Stand in for the panel's vsync so anything blocking on
 			 * FBIO_WAITFORVSYNC gets a plausible cadence. */
 			g_state->vsync_count++;
-		} else if (g_guest > 0) {
-			/* the shim creates these as it boots */
+		} else {
+			/* RETRY REGARDLESS OF WHO STARTED THE GUEST.
+			 *
+			 * This used to be gated on `g_guest > 0` — only when the VIEWER
+			 * spawned the guest. The initial try_map() at startup runs before
+			 * any guest has created state.bin, so it always fails; without the
+			 * retry the viewer then runs the whole session unmapped.
+			 *
+			 * `tadpole.sh --boot` starts the viewer and the guest as SIBLINGS,
+			 * so g_guest is 0 and the retry never fired. The result was silent
+			 * and total: HLE rendered every frame correctly into a scratch
+			 * buffer, reported a full scene in its own statistics, and the
+			 * window stayed black — because the arena the compositor reads was
+			 * never mapped at all. The front-end path escaped it only because
+			 * "Run System Menu" spawns the guest FROM the viewer.
+			 *
+			 * A failed map is one open() that returns ENOENT; doing it per
+			 * frame until it succeeds costs nothing and stops immediately. */
 			if (try_map())
 				ui_status("running");
 		}

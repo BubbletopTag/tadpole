@@ -10,12 +10,9 @@
  * precedence; anything left here does nothing at all.
  */
 void glClearStencil(void) { }
-void glColor4f(void) { }
 void glColorMask(void) { }
 void glCopyTexSubImage2D(void) { }
-void glCullFace(void) { }
 void glFlush(void) { }
-void glFrontFace(void) { }
 void glGetFixedv(void) { }
 void glGetTexEnvxv(void) { }
 void glGetTexParameteriv(void) { }
@@ -32,7 +29,6 @@ void glPointSizex(void) { }
 void glPolygonOffsetx(void) { }
 void glReadPixels(void) { }
 void glScissor(void) { }
-void glShadeModel(void) { }
 void glStencilFunc(void) { }
 void glStencilMask(void) { }
 void glStencilOp(void) { }

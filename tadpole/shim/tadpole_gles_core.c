@@ -139,8 +139,12 @@ static void tr2(const char *msg, int a, int b)
 #define GL_UNSIGNED_SHORT   0x1403
 #define GL_FLOAT            0x1406
 #define GL_FIXED            0x140C
+#define GL_MATRIX_PALETTE_OES     0x8840
+#define GL_MATRIX_INDEX_ARRAY_OES 0x8844
+#define GL_WEIGHT_ARRAY_OES       0x86AD
 #define GL_MODELVIEW        0x1700
 #define GL_PROJECTION       0x1701
+#define GL_TEXTURE_         0x1702
 #define GL_VERTEX_ARRAY     0x8074
 #define GL_COLOR_ARRAY      0x8076
 #define GL_TEXTURE_COORD_ARRAY 0x8078
@@ -765,6 +769,11 @@ typedef struct { float m[16]; } mat4;
 #define STACK_DEPTH 16
 
 static mat4 g_mv[STACK_DEPTH], g_proj[STACK_DEPTH];
+/* A THIRD STACK, for GL_TEXTURE (0x1702). Without it that mode fell through to
+ * the modelview stack — texture-matrix edits silently corrupted geometry
+ * transforms, and the guest could never mirror what the host was doing. */
+static mat4 g_texm[STACK_DEPTH];
+static int  g_texm_sp;
 static int  g_mv_sp, g_proj_sp, g_mat_inited;
 static GLenum g_matrix_mode = GL_MODELVIEW;
 
@@ -785,7 +794,9 @@ static void mat_init_once(void)
 static mat4 *cur_top(void)
 {
 	mat_init_once();
-	return (g_matrix_mode == GL_PROJECTION) ? &g_proj[g_proj_sp] : &g_mv[g_mv_sp];
+	if (g_matrix_mode == GL_PROJECTION) return &g_proj[g_proj_sp];
+	if (g_matrix_mode == GL_TEXTURE_)   return &g_texm[g_texm_sp];
+	return &g_mv[g_mv_sp];
 }
 
 /* Column-major, like GL. r = a * b */
@@ -819,20 +830,37 @@ static int g_push_drop, g_pop_under, g_max_mv, g_max_pj;
 void glPushMatrix(void)
 {
 	mat_init_once();
-	if (g_matrix_mode == GL_PROJECTION) { if (g_proj_sp+1 >= STACK_DEPTH) g_push_drop++; }
-	else if (g_mv_sp+1 >= STACK_DEPTH) g_push_drop++;
 	if (g_matrix_mode == GL_PROJECTION) {
 		if (g_proj_sp + 1 < STACK_DEPTH) { g_proj[g_proj_sp+1] = g_proj[g_proj_sp]; g_proj_sp++; }
-	} else if (g_mv_sp + 1 < STACK_DEPTH) { g_mv[g_mv_sp+1] = g_mv[g_mv_sp]; g_mv_sp++; }
+		else g_push_drop++;
+	} else if (g_matrix_mode == GL_TEXTURE_) {
+		if (g_texm_sp + 1 < STACK_DEPTH) { g_texm[g_texm_sp+1] = g_texm[g_texm_sp]; g_texm_sp++; }
+		else g_push_drop++;
+	} else {
+		if (g_mv_sp + 1 < STACK_DEPTH) { g_mv[g_mv_sp+1] = g_mv[g_mv_sp]; g_mv_sp++; }
+		else g_push_drop++;
+	}
+	/* FORWARD IT. This was missing, and it was the "conveyor belt": Clam Prix
+	 * wraps each textured draw in glMatrixMode(GL_TEXTURE); glPushMatrix();
+	 * glTranslatef(u,0,0); ... glPopMatrix(). The translate was forwarded and
+	 * the push and pop were not, so on the host nothing ever restored the
+	 * matrix and the U translation grew without bound — measured running from
+	 * -377 to -579 texture-widths in eight reports, accelerating. Every
+	 * textured surface slid, fast, forever. */
+	if (hle_ready()) hle_pushmatrix();
 }
-
 void glPopMatrix(void)
 {
 	if (g_matrix_mode == GL_PROJECTION) {
 		if (g_proj_sp > 0) g_proj_sp--; else g_pop_under++;
-	} else if (g_mv_sp > 0) g_mv_sp--; else g_pop_under++;
+	} else if (g_matrix_mode == GL_TEXTURE_) {
+		if (g_texm_sp > 0) g_texm_sp--; else g_pop_under++;
+	} else {
+		if (g_mv_sp > 0) g_mv_sp--; else g_pop_under++;
+	}
 	if (g_mv_sp > g_max_mv) g_max_mv = g_mv_sp;
 	if (g_proj_sp > g_max_pj) g_max_pj = g_proj_sp;
+	if (hle_ready()) hle_popmatrix();
 }
 
 static void ortho_f(float l, float r, float b, float t, float n, float f)
@@ -1002,12 +1030,7 @@ void glClientActiveTexture(GLenum t) { tr2("glClientActiveTexture unit", (int)t 
 void glViewport(GLint x, GLint y, GLsizei w, GLsizei h)
 { tr2("glViewport xy", x, y); tr2("glViewport wh", (int)w, (int)h); }
 
-void glMatrixIndexPointerOES(GLint size, GLenum type, GLsizei stride, const void *p)
-{ (void)type;(void)stride;(void)p; tr2("glMatrixIndexPointerOES size", size, 0); }
-void glWeightPointerOES(GLint size, GLenum type, GLsizei stride, const void *p)
-{ (void)type;(void)stride;(void)p; tr2("glWeightPointerOES size", size, 0); }
-void glCurrentPaletteMatrixOES(GLuint idx) { tr2("glCurrentPaletteMatrixOES", (int)idx, 0); }
-void glLoadPaletteFromModelViewMatrixOES(void) { tr2("glLoadPaletteFromModelViewMatrixOES", 0, 0); }
+
 
 void glLoadMatrixx(const GLfixed *m)
 {
@@ -1161,11 +1184,13 @@ static struct gl_texture *tex_slot(GLuint n)
  *   glDrawElements(..., NULL) sends elembuf=0 -> the host has no indices and
  *   skips the draw. 2439 of 2566 draws in one frame, and a black screen.
  *
- * The old value was 64, which the race scene blows through immediately: the
+ * 64 was the original; 256 was still far too small — Driving School's track
+ * reported 549 failed allocations against it. The measured need is what set
+ * this, not a guess. The old value was 64, which the race scene blew through:
  * host's mirrored-buffer list stopped dead at name 64 while the track was still
  * loading. Raising it also required moving HLE_CLIENT_* below, which were 100
  * ONLY because 64 could never reach them. */
-#define MAX_BUFS 256
+#define MAX_BUFS 2048
 struct gl_buffer { GLuint name; u8 *data; u32 size; };
 static struct gl_buffer g_bufs[MAX_BUFS];
 static GLuint g_bound_array, g_bound_elem;
@@ -1230,6 +1255,9 @@ static int hle_ready(void)
 
 struct array { const u8 *ptr; GLuint buf; GLint size; GLenum type; GLsizei stride; int on; };
 static struct array g_vtx, g_col, g_tex;
+/* Declared here with the other client arrays rather than beside the skinning
+ * code, because glEnableClientState switches them on well before that point. */
+static struct array g_midx, g_wgt;      /* matrix indices, blend weights */
 static u32 g_cur_color = 0xFFFFFFFFu;
 
 void glVertexPointer(GLint s, GLenum t, GLsizei st, const void *p)
@@ -1245,6 +1273,9 @@ void glTexCoordPointer(GLint s, GLenum t, GLsizei st, const void *p)
 void glEnableClientState(GLenum a)
 { tr2("glEnableClientState", (int)a, 0); if (a==GL_VERTEX_ARRAY) g_vtx.on=1; else if (a==GL_COLOR_ARRAY) g_col.on=1;
   else if (a==GL_TEXTURE_COORD_ARRAY) g_tex.on=1;
+  /* Consumed here, never forwarded: the host has no such client arrays. */
+  else if (a==GL_MATRIX_INDEX_ARRAY_OES) { g_midx.on = 1; return; }
+  else if (a==GL_WEIGHT_ARRAY_OES)       { g_wgt.on  = 1; return; }
   if (hle_ready()) hle_clientstate(a==GL_VERTEX_ARRAY ? 0u :
                                 a==GL_COLOR_ARRAY  ? 1u :
                                 a==GL_TEXTURE_COORD_ARRAY ? 2u : 3u, 1); }
@@ -1265,6 +1296,35 @@ void glColor4x(GLfixed r, GLfixed g, GLfixed b, GLfixed a)
 { g_cur_color = pack(fx2f(r), fx2f(g), fx2f(b), fx2f(a));
   tr2("glColor4x argb", (int)g_cur_color, 0);
   if (hle_ready()) hle_color(fx2f(r), fx2f(g), fx2f(b), fx2f(a)); }
+
+/* THE FLOAT VARIANTS AND THE FACE/SHADE STATE WERE ALL NO-OP STUBS, while their
+ * encoder senders sat declared and never called — the same "built, never wired"
+ * shape as libopengles_lite.so and hle_deletetexture.
+ *
+ * glColor4f is the one that shows: a title that sets its vertex colour in
+ * floats had it silently dropped, so the host kept whatever colour was last
+ * set and filled surfaces rendered black while line and point geometry, which
+ * the engine colours differently, still appeared. Black road, visible markings.
+ *
+ * glCullFace/glFrontFace matter for the opposite reason: with neither
+ * forwarded, the host culls by its own default and whole surfaces can vanish or
+ * show their interior. */
+void glColor4f(GLfloat r, GLfloat g, GLfloat b, GLfloat a)
+{ g_cur_color = pack(r, g, b, a);
+  tr2("glColor4f argb", (int)g_cur_color, 0);
+  if (hle_ready()) hle_color(r, g, b, a); }
+
+void glCullFace(GLenum mode)
+{ tr2("glCullFace", (int)mode, 0);
+  if (hle_ready()) hle_cullface((u32)mode); }
+
+void glFrontFace(GLenum mode)
+{ tr2("glFrontFace", (int)mode, 0);
+  if (hle_ready()) hle_frontface((u32)mode); }
+
+void glShadeModel(GLenum mode)
+{ tr2("glShadeModel", (int)mode, 0);
+  if (hle_ready()) hle_shademodel((u32)mode); }
 
 static u32 elem_size(GLenum t, GLint n)
 {
@@ -1857,10 +1917,10 @@ static void draw_indexed(GLenum mode, GLsizei count, const void *indices, GLenum
  * to fix. The compile-time check below is what makes that impossible to get
  * wrong again; tadpole_hle.c's MAX_BUF must exceed HLE_CLIENT_IDX in turn.
  */
-#define HLE_CLIENT_VTX 1000
-#define HLE_CLIENT_COL 1001
-#define HLE_CLIENT_TEX 1002
-#define HLE_CLIENT_IDX 1003
+#define HLE_CLIENT_VTX 4000
+#define HLE_CLIENT_COL 4001
+#define HLE_CLIENT_TEX 4002
+#define HLE_CLIENT_IDX 4003
 typedef char hle_client_names_above_maxbufs[
 	(HLE_CLIENT_VTX > MAX_BUFS) ? 1 : -1];
 
@@ -1904,6 +1964,145 @@ static u32 hle_max_index(const void *indices, GLsizei count, GLenum type)
 	return mx + 1;
 }
 
+/* ---- matrix palette skinning ---------------------------------------------
+ *
+ * These four were tracing no-ops that threw every argument away, so animated
+ * characters were never deformed by their skeleton at all: Clam Prix's drivers
+ * (Models\\DriverAnimations\\...) simply did not appear, while their rigid
+ * karts, which ride on the ordinary modelview, rendered correctly.
+ *
+ * IT HAS TO BE DONE ON THE CPU. GL_OES_matrix_palette has no desktop
+ * equivalent — GL_ARB_matrix_palette was barely ever implemented and this
+ * machine's Mesa does not advertise it — so there is nothing to forward the
+ * palette TO. Instead the vertices are transformed here and plain positions are
+ * sent, which needs no host capability and works identically for the software
+ * rasteriser.
+ */
+#define MAX_PALETTE 32
+static mat4  g_palette[MAX_PALETTE];
+static u32   g_cur_palette;
+static int   g_palette_on;
+
+void glMatrixIndexPointerOES(GLint size, GLenum type, GLsizei stride, const void *p)
+{ tr2("glMatrixIndexPointerOES size/type", size, (int)type);
+  g_midx.size = size; g_midx.type = type; g_midx.stride = stride;
+  g_midx.ptr = p; g_midx.buf = g_bound_array; }
+
+void glWeightPointerOES(GLint size, GLenum type, GLsizei stride, const void *p)
+{ tr2("glWeightPointerOES size/type", size, (int)type);
+  g_wgt.size = size; g_wgt.type = type; g_wgt.stride = stride;
+  g_wgt.ptr = p; g_wgt.buf = g_bound_array; }
+
+void glCurrentPaletteMatrixOES(GLuint idx)
+{ tr2("glCurrentPaletteMatrixOES", (int)idx, 0);
+  if (idx < MAX_PALETTE) g_cur_palette = idx; }
+
+/* The palette entry becomes a COPY of the current modelview. That is the whole
+ * mechanism: the app poses a bone into the modelview, snapshots it here, and
+ * repeats for each bone. */
+void glLoadPaletteFromModelViewMatrixOES(void)
+{ tr2("glLoadPaletteFromModelViewMatrixOES", (int)g_cur_palette, 0);
+  if (g_cur_palette < MAX_PALETTE) g_palette[g_cur_palette] = g_mv[g_mv_sp]; }
+
+/* Read one component of a client array as float, whatever it is stored as. */
+static float arr_get(const struct array *a, u32 vertex, int comp)
+{
+	u32 stride = a->stride ? (u32)a->stride : elem_size(a->type, a->size);
+	const u8 *q = a->ptr + (unsigned long)vertex * stride;
+	switch (a->type) {
+	case GL_FLOAT:         return ((const float *)q)[comp];
+	case GL_FIXED:         return fx2f(((const GLfixed *)q)[comp]);
+	case GL_UNSIGNED_BYTE: return (float)q[comp];
+	case GL_BYTE:          return (float)((const signed char *)q)[comp];
+	case GL_SHORT:         return (float)((const short *)q)[comp];
+	default:               return 0.0f;
+	}
+}
+
+static float *g_skin;
+static u32    g_skin_cap;
+
+/* Blend each vertex by its bones. Returns tightly packed xyz floats, or NULL
+ * when skinning is not active — in which case the caller sends the vertex array
+ * unchanged. */
+static const float *skin_vertices(u32 nverts)
+{
+	u32 i;
+	int k, nb;
+
+	if (!g_palette_on || !g_vtx.on || !g_vtx.ptr) return 0;
+	if (!g_midx.ptr || !g_wgt.ptr) {
+		/* Palette on but no bone data: say so ONCE. Silence here would look
+		 * identical to skinning working, and the character would still be
+		 * missing with nothing to explain why. */
+		static int said;
+		if (g_palette_on && !said) { said = 1;
+			warn2("palette ON but index/weight arrays missing (idx,wgt set?)",
+			      g_midx.ptr ? 1 : 0, g_wgt.ptr ? 1 : 0); }
+		return 0;
+	}
+	if (!nverts) return 0;
+	{ static int said; if (!said) { said = 1;
+		warn2("SKINNING a draw: bones, verts",
+		      g_midx.size < g_wgt.size ? g_midx.size : g_wgt.size, (int)nverts); } }
+
+	if (g_skin_cap < nverts * 3) {
+		if (g_skin) free(g_skin);
+		g_skin = malloc(nverts * 3 * (u32)sizeof(float));
+		g_skin_cap = g_skin ? nverts * 3 : 0;
+	}
+	if (!g_skin) return 0;
+
+	nb = g_midx.size < g_wgt.size ? g_midx.size : g_wgt.size;
+	if (nb > 4) nb = 4;
+
+	for (i = 0; i < nverts; i++) {
+		float pos[4], acc[3];
+		acc[0] = acc[1] = acc[2] = 0.0f;
+		pos[0] = arr_get(&g_vtx, i, 0);
+		pos[1] = arr_get(&g_vtx, i, 1);
+		pos[2] = g_vtx.size > 2 ? arr_get(&g_vtx, i, 2) : 0.0f;
+		pos[3] = 1.0f;
+		for (k = 0; k < nb; k++) {
+			float w = arr_get(&g_wgt, i, k), t[4];
+			u32 mi;
+			if (w == 0.0f) continue;      /* the common case: 1-2 live bones */
+			mi = (u32)arr_get(&g_midx, i, k);
+			if (mi >= MAX_PALETTE) continue;
+			vec_xform(&g_palette[mi], pos, t);
+			acc[0] += w * t[0]; acc[1] += w * t[1]; acc[2] += w * t[2];
+		}
+		g_skin[i*3+0] = acc[0];
+		g_skin[i*3+1] = acc[1];
+		g_skin[i*3+2] = acc[2];
+	}
+	return g_skin;
+}
+
+/* Send skinned positions and neutralise the modelview for the draw.
+ * The palette matrices ALREADY contain the modelview — that is what
+ * glLoadPaletteFromModelViewMatrixOES copied — so leaving it applied would
+ * transform the character twice. Push/pop keeps the surrounding state intact,
+ * which only works now that both are actually forwarded to the host. */
+static int skin_begin(u32 nverts)
+{
+	const float *sk = skin_vertices(nverts);
+	if (!sk) return 0;
+	hle_matrixmode(GL_MODELVIEW);
+	hle_pushmatrix();
+	hle_loadidentity();
+	hle_bufferdata(HLE_CLIENT_VTX, nverts * 3 * (u32)sizeof(float), sk);
+	hle_arraypointer(0, HLE_CLIENT_VTX, 3, GL_FLOAT, 0, 0);
+	return 1;
+}
+
+static void skin_end(int active)
+{
+	if (!active) return;
+	hle_popmatrix();
+	hle_matrixmode(g_matrix_mode);   /* hand the mode back to the app's choice */
+}
+
 void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
 	tr2("glDrawArrays mode/count", (int)mode, (int)count);
@@ -1912,10 +2111,12 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 	 * is not to rasterise here. */
 	if (hle_ready()) {
 		u32 nv = (u32)first + (u32)count;
-		hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
+		int sk = skin_begin(nv);
+		if (!sk) hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
 		hle_send_array(&g_col, 1, nv, HLE_CLIENT_COL);
 		hle_send_array(&g_tex, 2, nv, HLE_CLIENT_TEX);
 		hle_drawarrays(mode, first, count);
+		skin_end(sk);
 		return;
 	}
 	const u8 *vs = g_vtx.ptr, *cs = g_col.ptr, *ts = g_tex.ptr;
@@ -1947,7 +2148,8 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
 
 		/* Any array without a buffer has to travel by value — see the note on
 		 * client-side arrays above. */
-		hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
+		int sk = skin_begin(nv);
+		if (!sk) hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
 		hle_send_array(&g_col, 1, nv, HLE_CLIENT_COL);
 		hle_send_array(&g_tex, 2, nv, HLE_CLIENT_TEX);
 		if (!ebuf && indices) {         /* client-side indices too */
@@ -1961,6 +2163,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
 		 * on the BINDING, never on the pointer value; the same trap cost hours
 		 * in the software path. */
 		hle_drawelements(mode, count, type, ebuf, eoff);
+		skin_end(sk);
 		return;
 	}
 	draw_indexed(mode, count, indices, type);
@@ -2024,12 +2227,20 @@ void glEnable(GLenum cap)
   if (cap == GL_TEXTURE_2D) g_tex2d_unit[g_active_tex] = 1;
   else if (cap == GL_BLEND) g_blend_on = 1;
   else if (cap == GL_DEPTH_TEST) g_depth_test_on = 1;
+  /* GL_MATRIX_PALETTE_OES is handled ENTIRELY on this side — see
+   * skin_vertices(). Forwarding it raised GL_INVALID_ENUM on the host every
+   * frame, because no desktop driver accepts it. */
+  else if (cap == GL_MATRIX_PALETTE_OES) {
+      static int said; if (!said) { said = 1;
+          warn2("MATRIX_PALETTE enabled by the title (skinning is in use)", 0, 0); }
+      g_palette_on = 1; return; }
   if (hle_ready()) hle_enable(cap); }
 void glDisable(GLenum cap)
 { tr2("glDisable cap", (int)cap, 0);
   if (cap == GL_TEXTURE_2D) g_tex2d_unit[g_active_tex] = 0;
   else if (cap == GL_BLEND) g_blend_on = 0;
   else if (cap == GL_DEPTH_TEST) g_depth_test_on = 0;
+  else if (cap == GL_MATRIX_PALETTE_OES) { g_palette_on = 0; return; }
   if (hle_ready()) hle_disable(cap); }
 void glDepthFunc(GLenum f) { tr2("glDepthFunc", (int)f, 0); g_depth_func = f;
   if (hle_ready()) hle_depthfunc(f); }
