@@ -114,6 +114,7 @@ static unsigned int      g_nobuf_logged;
 static unsigned int      g_bd_logged;
 static unsigned int      g_notex_logged;
 static unsigned int      g_ti_logged;
+static unsigned int      g_texenv_logged, g_texparam_logged;
 static int               g_fellback_seen;
 /* Last few packets consumed, for post-mortem on a desync. The desync is
  * DETERMINISTIC (identical tail/head numbers across runs), so the packet that
@@ -124,6 +125,14 @@ static unsigned int g_hist_n;
 /* TADPOLE_HLE_DEBUG=1 for the per-frame accounting. Unconditional stderr spam
  * from a working replayer is noise; these exist for when it is NOT working. */
 static int               g_verbose;
+/* TADPOLE_GL_DEBUG, the SAME variable and the same three levels the guest shim
+ * uses (see shim/tadpole_gles_debug.c). A GL bug in this project has two
+ * possible homes — the guest encoder and this replayer — and needing a
+ * different switch for each meant every investigation started by picking the
+ * wrong one. Level 2 aborts the viewer on the first host GL error, which is
+ * what makes "which of the 900 commands in this frame was rejected" a question
+ * with an answer instead of a bisection. */
+static int               g_level;
 static unsigned int      g_mat_mode = 0x1700;   /* GL_MODELVIEW */
 static unsigned long     g_mat_tex_sets, g_mat_tex_ops;
 static unsigned int      g_gl_err;     /* first GL error seen, 0 if none */
@@ -150,7 +159,8 @@ static const char *const g_opnames[] = {
 	"BUFFERDATA", "BUFFERSUBDATA", "DELETEBUFFER",
 	"ARRAYPOINTER", "CLIENTSTATE",
 	"DRAWARRAYS", "DRAWELEMENTS",
-	"RESET",
+	"RESET", "TEXENVCOLOR",
+	"SCISSOR", "COLORMASK", "LINEWIDTH", "POINTSIZE", "POLYGONOFFSET",
 };
 typedef char tadgl_opnames_match[
 	(sizeof(g_opnames) / sizeof(g_opnames[0]) == TADGL_OP_COUNT) ? 1 : -1];
@@ -251,7 +261,20 @@ int hle_host_init(const char *dir, int w, int h)
 	       (const char *)glGetString(GL_RENDERER),
 	       (const char *)glGetString(GL_VERSION));
 	fflush(stdout);
+	{
+		const char *d = getenv("TADPOLE_GL_DEBUG");
+		g_level = (!d || !*d) ? 0 : (*d >= '0' && *d <= '9') ? *d - '0' : 1;
+		if (g_level > 2) g_level = 2;
+	}
+	/* TADPOLE_HLE_DEBUG stays as its own switch for the per-frame accounting,
+	 * which is replayer bookkeeping rather than GL correctness — but either
+	 * variable turns on the per-opcode error check, because there is no reason
+	 * to have asked for one kind of GL noise and not want that. */
 	g_verbose = getenv("TADPOLE_HLE_DEBUG") != NULL;
+	if (g_level >= 1)
+		fprintf(stderr, "hle: TADPOLE_GL_DEBUG=%d — checking GL errors after"
+		        " every opcode%s\n", g_level,
+		        g_level >= 2 ? ", and ABORTING on the first" : "");
 	g_ready = 1;
 	ctx_leave();                 /* give SDL its context back */
 	return 1;
@@ -621,9 +644,20 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			 * glMaterialf, glFogf — really is still missing, and enabling them
 			 * without it shades everything black. */
 			if (c == 0x0B50 /* GL_LIGHTING */ || c == 0x0B60 /* GL_FOG */) {
+				/* NAME WHAT IS MISSING, not just what was dropped. "ignoring
+				 * glEnable(0x0B50)" reads as a deliberate policy; it is a
+				 * SYMPTOM of 22 unimplemented entry points, and the log is
+				 * where someone will go looking for why lighting does nothing.
+				 * The guest prints the matching list of stubs it hit. */
 				if (!g_filtered++)
-					fprintf(stderr, "hle: ignoring glEnable(0x%04X) — the"
-					        " software reference ignores it too\n", c);
+					fprintf(stderr, "hle: ignoring glEnable(0x%04X) — %s. Turning"
+					        " it on with no state shades everything black, which"
+					        " is worse than flat. Implement the guest-side"
+					        " gl%s* entry points and delete this filter.\n",
+					        c, c == 0x0B50 ? "glLight*/glMaterial*/glNormal3* are"
+					                         " still stubs"
+					                       : "glFog* is still a stub",
+					        c == 0x0B50 ? "Light" : "Fog");
 				break;
 			}
 			if (c == 0x0DE1 /* GL_TEXTURE_2D */) g_tex_enabled = 1;
@@ -648,14 +682,69 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		case TADGL_TEXENV: {
 			unsigned int v[3];
 			ring_get(v, 12);
-			/* The titles call glTexEnv with values that are NOT valid modes —
-			 * the software path already notes this and ignores them. Forwarding
-			 * them verbatim is a guaranteed GL_INVALID_ENUM, and one rejected
-			 * call leaves the error flag set for everything after it. Only pass
-			 * the combination we actually honour. */
+			/* STILL A WHITELIST, just a wider one. Forwarding whatever arrived
+			 * is a guaranteed GL_INVALID_ENUM the moment a title passes
+			 * something that is not a mode, and one rejected call leaves the
+			 * error flag set for everything after it.
+			 *
+			 * DECAL, BLEND and ADD are new here: the guest now tracks the full
+			 * TexEnv state, all four are ordinary desktop GL enums, and
+			 * dropping them made every non-MODULATE surface composite as if it
+			 * were MODULATE. COMBINE is deliberately still dropped — desktop GL
+			 * accepts the enum but would then use combiner state the guest does
+			 * not forward, which renders differently rather than not at all. */
 			if (v[1] == 0x2200 /* GL_TEXTURE_ENV_MODE */ &&
-			    (v[2] == 0x2100 /* MODULATE */ || v[2] == 0x1E01 /* REPLACE */))
+			    (v[2] == 0x2100 /* MODULATE */ || v[2] == 0x1E01 /* REPLACE */ ||
+			     v[2] == 0x2101 /* DECAL */    || v[2] == 0x0BE2 /* BLEND */ ||
+			     v[2] == 0x0104 /* ADD */))
 				glTexEnvi(0x2300 /* GL_TEXTURE_ENV */, 0x2200, (GLint)v[2]);
+			else if (g_level >= 1 && g_texenv_logged < 8) {
+				g_texenv_logged++;
+				fprintf(stderr, "hle: dropping glTexEnv(pname=0x%04X"
+				        " value=0x%04X) — not forwarded\n", v[1], v[2]);
+			}
+			break;
+		}
+		case TADGL_TEXENVCOLOR: {
+			float c[4];
+			ring_get(c, 16);
+			glTexEnvfv(0x2300 /* GL_TEXTURE_ENV */, 0x2201 /* ENV_COLOR */, c);
+			break;
+		}
+
+		/* SCISSOR COORDINATES NEED NO TRANSLATION. We render into an FBO whose
+		 * pixels are the guest's framebuffer pixels one-for-one — that is the
+		 * same reason TADGL_VIEWPORT is forwarded verbatim — so the guest's
+		 * scissor box is already in this context's window space. */
+		case TADGL_SCISSOR: {
+			int v[4];
+			ring_get(v, 16);
+			glScissor(v[0], v[1], (GLsizei)v[2], (GLsizei)v[3]);
+			break;
+		}
+		case TADGL_COLORMASK: {
+			unsigned int v[4];
+			ring_get(v, 16);
+			glColorMask(v[0] ? GL_TRUE : GL_FALSE, v[1] ? GL_TRUE : GL_FALSE,
+			            v[2] ? GL_TRUE : GL_FALSE, v[3] ? GL_TRUE : GL_FALSE);
+			break;
+		}
+		case TADGL_LINEWIDTH: {
+			float w; ring_get(&w, 4);
+			/* Desktop GL rejects a width of 0 with GL_INVALID_VALUE, and
+			 * anything above GL_ALIASED_LINE_WIDTH_RANGE's maximum is clamped
+			 * rather than refused — so guard only the zero. */
+			if (w > 0.0f) glLineWidth(w);
+			break;
+		}
+		case TADGL_POINTSIZE: {
+			float s; ring_get(&s, 4);
+			if (s > 0.0f) glPointSize(s);
+			break;
+		}
+		case TADGL_POLYGONOFFSET: {
+			float v[2]; ring_get(v, 8);
+			glPolygonOffset(v[0], v[1]);
 			break;
 		}
 		case TADGL_COLOR:     { float v[4]; ring_get(v,16);
@@ -717,8 +806,33 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		}
 		case TADGL_ACTIVETEXTURE:{ unsigned int u; ring_get(&u,4);
 		                          glActiveTexture(GL_TEXTURE0 + u); break; }
-		case TADGL_TEXPARAM:    { unsigned int v[2]; ring_get(v,8);
-		                          glTexParameteri(GL_TEXTURE_2D, v[0], (GLint)v[1]); break; }
+		/* WHITELISTED, and this is the standing "GL error 0x0500 from TEXPARAM"
+		 * in every race. It used to forward whatever pname arrived, and GLES1
+		 * has parameters desktop GL does not — GL_TEXTURE_CROP_RECT_OES above
+		 * all — so one such call per frame poisoned every draw after it until
+		 * something read glGetError. The guest filters these now too; this is
+		 * the second line of defence, because the guest and this replayer are
+		 * built separately and a stale pair must not resurrect the bug. */
+		case TADGL_TEXPARAM: {
+			unsigned int v[2];
+			ring_get(v, 8);
+			switch (v[0]) {
+			case 0x2800: /* MAG_FILTER */ case 0x2801: /* MIN_FILTER */
+			case 0x2802: /* WRAP_S */     case 0x2803: /* WRAP_T */
+			case 0x8191: /* GENERATE_MIPMAP */
+				glTexParameteri(GL_TEXTURE_2D, v[0], (GLint)v[1]);
+				break;
+			default:
+				if (g_level >= 1 && g_texparam_logged < 8) {
+					g_texparam_logged++;
+					fprintf(stderr, "hle: dropping glTexParameteri(pname=0x%04X"
+					        " value=0x%04X) — desktop GL has no such"
+					        " parameter\n", v[0], v[1]);
+				}
+				break;
+			}
+			break;
+		}
 		case TADGL_DELETETEXTURE:{
 			unsigned int n; ring_get(&n,4);
 			if (n < MAX_TEX) {
@@ -925,19 +1039,39 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		 * glGetError is a pipeline flush point, which is right for the steady
 		 * state but useless for diagnosis: "GL error 0x0500 at frame" says an
 		 * enum was rejected somewhere among thousands of commands. Under
-		 * TADPOLE_HLE_DEBUG, check after every opcode and name it — once per
-		 * distinct (opcode, error) pair, so a call that fails on every draw
-		 * reports once rather than flooding. */
-		if (g_verbose) {
+		 * TADPOLE_GL_DEBUG (or TADPOLE_HLE_DEBUG), check after every opcode and
+		 * name it — once per distinct (opcode, error) pair, so a call that fails
+		 * on every draw reports once rather than flooding.
+		 *
+		 * At level 2 the FIRST one is fatal. That is the whole point of the
+		 * level: a GL error silently disables the call that raised it and every
+		 * later call still succeeds, so the frame comes back subtly wrong with
+		 * no other symptom, and by the time anyone looks the evidence is 900
+		 * commands downstream. Stopping here means the packet that caused it is
+		 * still on the screen. */
+		if (g_verbose || g_level >= 1) {
 			GLenum e = glGetError();
 			if (e != GL_NO_ERROR) {
 				static unsigned char seen[TADGL_OP_COUNT];
 				unsigned int op = p.op < TADGL_OP_COUNT ? p.op : 0;
-				if (!seen[op]) {
+				if (!seen[op] || g_level >= 2) {
 					seen[op] = 1;
 					fprintf(stderr, "hle: GL error 0x%04X from %s (op %u, len %u)"
 					        " at frame %lu\n",
 					        e, tadgl_opname(p.op), p.op, p.len, g_frames);
+				}
+				if (g_level >= 2) {
+					fprintf(stderr,
+					  "hle: ============================================\n"
+					  "hle: FATAL (TADPOLE_GL_DEBUG=2): the host rejected a\n"
+					  "hle: replayed command. The opcode named above is the\n"
+					  "hle: one to fix — either the guest encoded a GLES enum\n"
+					  "hle: desktop GL does not accept, or this replayer built\n"
+					  "hle: a call desktop GL will not take. Rerun without\n"
+					  "hle: TADPOLE_GL_DEBUG=2 to carry on regardless.\n"
+					  "hle: ============================================\n");
+					fflush(stderr);
+					abort();
 				}
 			}
 		}

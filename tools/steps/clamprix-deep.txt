@@ -1,0 +1,43 @@
+# Clam Prix -> past the Play Modes menu and into actual 3D gameplay.
+#
+# WHY THIS EXISTS ALONGSIDE clamprix-drivingschool.txt: that route's three `key
+# a` presses land on the PLAY MODES menu and stop there — verified from its own
+# screenshot, which shows the Driving School / Bubble / Trophy picker with OK
+# still unpressed. Everything captured after that point is menu 3D, not a race,
+# so a GL measurement taken from it undercounts what a race actually does.
+#
+# Four more presses carry it through: select Driving School, acknowledge the
+# mode screen, and let the load finish. The extra sleeps are deliberately
+# generous — a headless run rasterises in software and a scene load that takes
+# two seconds on the GPU path takes far longer here.
+#
+# NOTE: for `wait`, the whole rest of the line is the regex — no quotes.
+
+tap 160 130
+waitsecs 120
+wait LoadNewApp path = /LF/Bulk/ProgramFiles/LST3-0x00180025
+wait CGameViewFrame::Enter
+sleep 20
+shot 1-splash
+sleep 15
+shot 2-title
+key a
+sleep 8
+key a
+sleep 8
+key a
+sleep 10
+shot 3-play-modes
+key a
+sleep 12
+shot 4-mode-chosen
+key a
+sleep 12
+shot 5-after
+key a
+sleep 20
+shot 6-loading
+sleep 25
+shot 7-gameplay
+sleep 20
+shot 8-gameplay-later

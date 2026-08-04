@@ -4418,6 +4418,176 @@ silent:
 all along. It was simply never called — the same shape of bug as
 `libopengles_lite.so`: the mechanism was built and never wired up.
 
+## The GL shim now says what it did not do
+
+Three silent failures, all removed. They were separate bugs with one shape: the
+shim did nothing and reported nothing, so every investigation started from a
+rendering symptom instead of from a cause.
+
+* **A stub was `void glFoo(void) { }`.** It swallowed its arguments, returned,
+  and said nothing. A title calling `glLightfv` 1200 times a frame looked
+  identical to a title that never lit anything.
+* **`glGetError()` was `return 0;`.** Not a stale value — hardcoded. Every title
+  that error-checks its own GL usage was told it was fine, and so was any test
+  we might have written.
+* **The diagnostics that existed only fired under `TADPOLE_GL_DEBUG=1`**, which
+  nobody sets until they already suspect GL. The evidence was missing from
+  exactly the logs that get filed as bug reports.
+
+`TADPOLE_GL_DEBUG` now has three levels, and the viewer honours the same
+variable so one switch covers both halves of the stack:
+
+| level | guest shim | viewer |
+|---|---|---|
+| unset | first hit on each unimplemented entry point, once, to stderr **and** `gl-warnings.log`; summary table when the title unloads | per-frame error sampling, as before |
+| `1` | every stub hit, every GL error, the full call trace | `glGetError` after **every** opcode, naming the opcode |
+| `2` | the first stub hit or GL error is **fatal** | the first host GL error is **fatal** |
+
+Level 2 is the one that changes how this gets debugged. Dying at the call site
+puts `tadpole_crash.c`'s stack scan on the screen, and that scan names the guest
+library and offset that made the call — so "SpongeBob does not render" becomes
+"`App.so+0x2f1a4` called `glLightfv`, which we never wrote".
+
+The instrumentation lives in `tools/gen-gl-stubs.py`'s **template**, not in the
+generated file: hand-editing 108 stub bodies would survive exactly until the
+next `--write`. Value-returning stubs also got defined return values —
+`glCheckFramebufferStatusOES` used to hand back whatever was in `r0`, which a
+title polling for framebuffer completeness reads as a valid-but-unrecognised
+status.
+
+State lives in `tadpole/shim/tadpole_gles_debug.c`, deliberately named `tad_gl_*`
+so `gen-gl-stubs.py`'s "is this an entry point" regex cannot see it. A helper
+called `glAnything` would be counted as a GL entry point that does not exist and
+then go missing from the stub list, which is fatal at load time.
+
+### The build now refuses to ship an undefined symbol
+
+`-shared` does not object to a symbol that is declared, called, and never
+defined. It links, and then the guest loader kills the title:
+
+    AppManager: can't resolve symbol 'tad_gl_fatal'
+
+That is the same failure the whole `gen-gl-stubs.py` machinery exists to prevent
+for GL entry points, and it applies to our own internals too — it happened while
+writing the above, and the build said nothing. `make gl` now checks every
+undefined symbol against the guest's libc and fails on anything else.
+`--no-undefined` cannot be used instead: `__aeabi_uidiv` and `__aeabi_idivmod`
+come from the guest's libgcc at runtime and are legitimately unresolved.
+
+## tools/glconform — differential testing against the real device
+
+One freestanding ARM binary that runs unmodified on the LeapPad2 and under
+Tadpole, because it links the device's own library FILENAMES rather than our
+shims' SONAMEs; `LD_LIBRARY_PATH` decides which implementation answers. See
+`tools/glconform/README.md`.
+
+    ./tools/glconform/build.sh
+    ./tools/glconform/run-emu.sh
+    ./tools/glconform/run-hw.py 192.168.0.111
+    ./tools/glconform/diff-conform.py tools/glconform/hw.log tools/glconform/emu.log
+
+### What the first hardware run found
+
+**Our matrix stacks were half the size of the device's.** We reported — and
+enforced — `MAX_MODELVIEW_STACK_DEPTH` 16; the LeapPad2 reports 32. That is not
+a wrong answer to a query, it is a smaller stack. A title nesting past 16 had
+its 17th `glPushMatrix` silently dropped here while it succeeded on the device,
+and every matrix from that point on diverged.
+
+**This is a live suspect for the player-character bug below.** The open question
+there is whether our modelview depth has drifted from the app's at the moment
+`glLoadPaletteFromModelViewMatrixOES` snapshots it — the note asks to "confirm
+the app really is at depth 7 when it snapshots". A stack that overflows 16 push
+levels early does exactly that, and until now overflowing was silent:
+`g_push_drop` counted it and nothing ever printed the count. It raises
+`GL_STACK_OVERFLOW` now.
+
+Also corrected, all measured rather than chosen: `MAX_TEXTURE_SIZE` 1024 -> 4096,
+`MAX_TEXTURE_UNITS` 4 -> 2 (we were advertising our own array size, not the
+hardware's two units), and `MAX_CLIP_PLANES` / `SUBPIXEL_BITS` / `STENCIL_BITS` /
+`MAX_TEXTURE_STACK_DEPTH` answered for the first time. The device's texture
+stack really is 16 while its modelview stack is 32, so those are separate
+constants now — being *more* permissive than the hardware is its own bug.
+
+Two open assumptions were also closed:
+
+* **`eglCreateWindowSurface`'s native window.** `tadpole_egl.c` said the real
+  driver wants a Brio handle "of undocumented layout" whose first two words are
+  the panel size. Passing exactly that, `{480, 272, 0, ...}`, brings EGL up on
+  real hardware — confirmed, not inferred.
+* **`glScissor(0,0,-1,-1)` raises nothing on the device**, where the spec says
+  `GL_INVALID_VALUE`. Matching the device is what makes titles work, so this
+  stays as it is; the harness files it under `BOTH_FAIL`.
+
+### What remains diverging
+
+Seven tests, one root cause each — the entry point is still a stub:
+`glLightfv`/`glGetLightfv`, `glMaterialfv`/`glGetMaterialfv`,
+`glTexEnvi`/`glGetTexEnviv`, `glGetTexParameteriv`,
+`glClipPlanef`/`glGetClipPlanef`, `glGetFloatv`. Implementing a cluster and
+re-running is the loop; the tests start passing without being touched.
+
+`glReadPixels` fails on BOTH sides. On ours it is a stub that never writes the
+buffer — the harness poisons it with `0xAA` first so that is unmistakable rather
+than a coincidental pass. On the device it returns live framebuffer content
+rather than our cleared colour, because nothing was presented. Real pixel
+assertions still need the host-to-guest wire direction that no opcode has yet.
+
+## MEASURED: what Clam Prix actually calls that we do not implement
+
+The stub priority order everyone has been working from was inferred from CLUSTER
+SIZE — lighting/material/fog is 22 of the 108 entry points, so it was "the
+biggest win". Now that stubs count their own calls, a full headless run into an
+actual race says otherwise:
+
+| entry point | calls in one race |
+|---|---|
+| `glGetTexParameteriv` | 532 |
+| `glTexEnvfv` | 524 |
+| `glGetTexEnvxv` | 413 |
+| `glNormalPointer` | 262 |
+| `glGetFixedv` | *(now implemented)* |
+
+**That is the entire list.** Clam Prix calls **zero** lighting, material or fog
+entry points — it is an unlit fixed-function renderer, so the 22-entry cluster
+that looked like the top priority buys this title nothing. The real worklist is
+TexEnv/TexParameter completeness plus `glNormalPointer`, and it is four entry
+points rather than twenty-two.
+
+Two of those are getters, which is the worse kind of stub. A stub getter does
+not return a wrong answer — it never touches the caller's buffer, so the title
+reads whatever was already on its own stack. `glGetTexParameteriv` alone is 532
+uninitialised reads per race.
+
+`glNormalPointer` is the one to look at first for the character bug: the title
+supplies a normal array 262 times per race and we drop every one of them, in a
+title that also enables `GL_MATRIX_PALETTE_OES`.
+
+Reproduce with `tools/steps/clamprix-deep.txt`, which exists because
+`clamprix-drivingschool.txt`'s three `key a` presses stop at the PLAY MODES menu
+— visible in its own screenshot, OK unpressed. Everything measured from that
+route was menu 3D, not a race.
+
+### Two bugs found in tools/gen-gl-stubs.py while doing this
+
+Both were silent and both had been there a while:
+
+* **A COMMENT could un-register a real implementation.** The definition regex
+  lets an argument list span newlines and stops only at `;` or `{`; prose has
+  neither. `tadpole_gles_core.c` contains a comment reading "1156
+  `glEnable(GL_TEXTURE_2D)` against 365 `glDisable` in one Clam Prix run", which
+  opened a match 2251 characters long — straight across the real definition of
+  `glGetIntegerv`, which the scan then called unimplemented and `--write` duly
+  emitted a stub for. Editing a comment silently changed which entry points the
+  build believed existed. Comments and string literals are stripped before the
+  scan now.
+* **`--write` never dropped anything.** It kept every existing stub
+  unconditionally, so implementing an entry point in the core and regenerating
+  produced a stub *and* a definition — a duplicate-symbol link failure that made
+  the documented last step of the workflow look broken. It also refused to run
+  at all without a built library, which is exactly the state that failure leaves
+  you in. Both fixed; the fallback says what it is giving up.
+
 ## NEXT: why the player character does not render
 
 State on stopping: Clam Prix races render — track, banners, kart, perspective,
@@ -4478,3 +4648,18 @@ count violations but are never reported; print them.
 * A segfault where tadpole_crash.c did NOT produce a report. A crash handler
   that silently fails is worse than none; find out why before trusting it.
 * Matrix-palette skinning is implemented but unverified against hardware.
+
+### Still reproduces, and now reproduces HEADLESS
+
+`tools/steps/clamprix-deep.txt` reaches the race with no viewer and no window:
+the kart renders, the track renders, SpongeBob does not. A two-minute
+unattended run per attempt, instead of a boot and eight taps.
+
+Raising the modelview stack from 16 to 32 to match hardware did NOT fix it —
+worth stating plainly, because that mismatch was a good enough suspect to be
+worth checking first and it is now ruled out on its own. It may still be a
+contributing factor; it is not the whole cause.
+
+The `glNormalPointer` finding above is the new lead: the title supplies a normal
+array 262 times per race, we ignore all of them, and it is skinning at the same
+time.

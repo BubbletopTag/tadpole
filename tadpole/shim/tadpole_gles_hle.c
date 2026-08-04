@@ -316,6 +316,24 @@ void hle_alphafunc(u32 f, float ref)
 void hle_texenv(u32 target, u32 pname, i32 value)
 { u32 v[3]={target,pname,(u32)value}; enc_u32(TADGL_TEXENV, v, 3); }
 
+/* GL_TEXTURE_ENV_COLOR only. Its own opcode because it is the one TexEnv
+ * parameter that is a vector; everything else is an enum and rides TADGL_TEXENV
+ * as a single i32. */
+void hle_texenvcolor(const float *rgba)
+{ enc_u32(TADGL_TEXENVCOLOR, (const u32 *)rgba, 4); }
+
+void hle_scissor(i32 x, i32 y, i32 w, i32 h)
+{ u32 v[4]={(u32)x,(u32)y,(u32)w,(u32)h}; enc_u32(TADGL_SCISSOR, v, 4); }
+
+void hle_colormask(u32 r, u32 g, u32 b, u32 a)
+{ u32 v[4]={r,g,b,a}; enc_u32(TADGL_COLORMASK, v, 4); }
+
+void hle_linewidth(float w)  { enc_u32(TADGL_LINEWIDTH,  (const u32 *)&w, 1); }
+void hle_pointsize(float s)  { enc_u32(TADGL_POINTSIZE,  (const u32 *)&s, 1); }
+
+void hle_polygonoffset(float factor, float units)
+{ float v[2]={factor,units}; enc_u32(TADGL_POLYGONOFFSET, (const u32 *)v, 2); }
+
 void hle_color(float r, float g, float b, float a)
 { float v[4]={r,g,b,a}; enc_u32(TADGL_COLOR, (const u32 *)v, 4); }
 

@@ -23,3 +23,4 @@ shots/*.wav
 # erase-firmware.sh moves the old install here rather than deleting it.
 # Hundreds of megabytes of recovered firmware — never commit it.
 .erased-*/
+tools/glconform/*.log

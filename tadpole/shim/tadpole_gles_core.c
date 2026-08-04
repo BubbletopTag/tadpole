@@ -33,9 +33,12 @@
  *   [x] vertex + colour arrays, glDrawArrays / glDrawElements, triangles
  *   [ ] textures (glTexImage2D, glTexCoordPointer)   <- step 3
  *   [ ] alpha blending                               <- step 4
- * Unimplemented entry points are no-op stubs in tadpole_gles_stubs.c so the
- * guest never hits an unresolved symbol.
+ * Unimplemented entry points are stubs in tadpole_gles_stubs.c so the guest
+ * never hits an unresolved symbol. They are no longer SILENT: every one reports
+ * itself once, and TADPOLE_GL_DEBUG=2 makes the first one fatal. See
+ * tadpole_gles_debug.c.
  */
+#include "tadpole_gles_debug.h"
 
 typedef unsigned char  u8;
 typedef unsigned short u16;
@@ -69,62 +72,22 @@ extern int clock_gettime(int clk, struct tad_ts *tp);
 extern int nanosleep(const struct tad_ts *req, struct tad_ts *rem);
 #define CLOCK_MONOTONIC_ 1
 
-/* TADPOLE_GL_DEBUG=1 traces the call sequence to stderr. Essential here: the
- * only way to know what the UI actually asks for is to watch it ask. */
-static int g_trace = -1;
-static void tr(const char *msg)
-{
-	u32 n = 0;
-	if (g_trace < 0)
-		g_trace = getenv("TADPOLE_GL_DEBUG") ? 1 : 0;
-	if (!g_trace)
-		return;
-	while (msg[n]) n++;
-	write(2, "[gl] ", 5);
-	write(2, msg, n);
-	write(2, "\n", 1);
-}
-/* ALWAYS printed, unlike tr()/tr2(). Reserved for conditions that mean the
- * output is definitely wrong — a texture with no data, a format we cannot
- * decode, a name table that ran out. Each is one-shot or near enough, so this
- * costs nothing in a healthy run, and it means a user's ordinary log already
- * contains the evidence instead of needing TADPOLE_GL_DEBUG=1 and a second
- * attempt at reproducing. */
-static void warn2(const char *msg, int a, int b)
-{
-	char buf[160];
-	u32 n = 0;
-	snprintf(buf, sizeof(buf), "[gl] WARN %s %d %d\n", msg, a, b);
-	while (buf[n]) n++;
-	write(2, buf, n);
-
-	/* ALSO to a file, because stderr is easy to lose. A log captured with
-	 * `> log` and no `2>&1` contains Brio's stdout traces and none of ours,
-	 * which wasted a whole round trip diagnosing white textures. This file is
-	 * always there to be read afterwards. */
-	{
-		static int fd = -2;
-		if (fd == -2) {
-			char path[512];
-			const char *d = getenv("TADPOLE_DIR");
-			if (!d) d = "/tmp/tadpole";
-			snprintf(path, sizeof(path), "%s/gl-warnings.log", d);
-			fd = open(path, 01 | 0100 | 02000, 0666);   /* WRONLY|CREAT|APPEND */
-		}
-		if (fd >= 0) write(fd, buf, n);
-	}
-}
-
-static void tr2(const char *msg, int a, int b)
-{
-	char buf[128];
-	if (g_trace < 0)
-		g_trace = getenv("TADPOLE_GL_DEBUG") ? 1 : 0;
-	if (!g_trace)
-		return;
-	snprintf(buf, sizeof(buf), "[gl] %s %d %d\n", msg, a, b);
-	{ u32 n = 0; while (buf[n]) n++; write(2, buf, n); }
-}
+/* Tracing, warning, error state and the fail-fast policy all live in
+ * tadpole_gles_debug.c now, so the stubs file and the core cannot drift into
+ * two different ideas of what TADPOLE_GL_DEBUG means. These three keep their
+ * old names and signatures because ~200 call sites use them.
+ *
+ *   tr2      level >= 1. Trace the call sequence. The only way to know what the
+ *            UI actually asks for is to watch it ask.
+ *   warn2    ALWAYS, and to gl-warnings.log as well. Reserved for conditions
+ *            that mean the output is definitely wrong — a texture with no data,
+ *            a format we cannot decode, a name table that ran out. Each is
+ *            one-shot or near enough, so a healthy run pays nothing and a
+ *            user's ordinary log already contains the evidence instead of
+ *            needing TADPOLE_GL_DEBUG=1 and a second attempt at reproducing.
+ */
+static void tr2(const char *msg, int a, int b) { tad_gl_trace(msg, a, b); }
+static void warn2(const char *msg, int a, int b) { tad_gl_warn(msg, a, b); }
 
 #define O_RDWR      02
 #define PROT_RW     3          /* PROT_READ|PROT_WRITE */
@@ -150,6 +113,7 @@ static void tr2(const char *msg, int a, int b)
 #define GL_VERTEX_ARRAY     0x8074
 #define GL_COLOR_ARRAY      0x8076
 #define GL_TEXTURE_COORD_ARRAY 0x8078
+#define GL_NORMAL_ARRAY_       0x8075
 #define GL_COLOR_BUFFER_BIT 0x00004000
 #define GL_ARRAY_BUFFER         0x8892
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
@@ -444,6 +408,12 @@ extern void hle_frontface(u32 m);
 extern void hle_shademodel(u32 m);
 extern void hle_alphafunc(u32 f, float ref);
 extern void hle_texenv(u32 target, u32 pname, int value);
+extern void hle_texenvcolor(const float *rgba);
+extern void hle_scissor(int x, int y, int w, int h);
+extern void hle_colormask(u32 r, u32 g, u32 b, u32 a);
+extern void hle_linewidth(float w);
+extern void hle_pointsize(float s);
+extern void hle_polygonoffset(float factor, float units);
 extern void hle_color(float r, float g, float b, float a);
 extern void hle_matrixmode(u32 m);
 extern void hle_loadidentity(void);
@@ -532,7 +502,7 @@ static void fps_report(void)
 	static int frames;
 	struct tad_ts now;
 
-	if (!g_trace) return;
+	if (!tad_gl_level()) return;
 	if (clock_gettime(CLOCK_MONOTONIC_, &now) != 0) return;
 	if (!t0.tv_sec) { t0 = now; frames = 0; return; }
 	if (++frames < 60) return;
@@ -544,23 +514,37 @@ static void fps_report(void)
 	t0 = now; frames = 0;
 }
 
-/* TADPOLE_GL_HLE=1 selects host-GPU replay. The transport and encoder are not
- * built yet, so say so once and keep rasterising in software rather than
- * silently doing nothing — a toggle that appears to work but changes nothing is
- * worse than one that admits it. Feasibility is already proven: see
- * viewer/hle_probe.c and the HLE section of HANDOVER. */
+/* TADPOLE_GL_HLE=1 selects host-GPU replay. If it is asked for and does not
+ * happen, say so once and keep rasterising rather than silently doing nothing —
+ * a toggle that appears to work but changes nothing is worse than one that
+ * admits it.
+ *
+ * THE ENCODER IS BUILT. This message used to say it was not, which was true
+ * when it was written and has been wrong ever since tadpole_gles_hle.c landed —
+ * and it is printed on EVERY headless run, so the log of every probe capture
+ * asserted that a working feature did not exist. Diagnostics that lie cost more
+ * than diagnostics that are missing.
+ *
+ * The real reason is always one of three, and hle_on() has already decided
+ * which: no glcmd.bin, no host stamp on it, or no host heartbeat. It logs its
+ * own reason via hle_log(), so say only what THIS side knows. */
 static void hle_notice(void)
 {
 	static int said;
-	if (said || !getenv("TADPOLE_GL_HLE")) return;
+	if (said || !getenv("TADPOLE_GL_HLE") || hle_on()) return;
 	said = 1;
-	warn2("TADPOLE_GL_HLE requested but the encoder is NOT built yet;"
-	      " still rasterising in software", 0, 0);
+	warn2("TADPOLE_GL_HLE was requested but no host replayer is attached"
+	      " (is the viewer running?); rasterising in software", 0, 0);
 }
 
 void tadpole_gl_present(void)
 {
 	hle_notice();
+	/* Keep the "entry points this title asked for and did not get" table
+	 * current in gl-warnings.log. Every probe harness in tools/ kills the guest
+	 * rather than letting it exit, so waiting for teardown means never printing
+	 * it at all. Self-limiting — see tad_gl_report_tick(). */
+	tad_gl_report_tick();
 	if (hle_ready()) {
 		/* The host owns the viewport, and it can only learn it from us. Sending
 		 * it every frame is one packet and removes any chance of the two sides
@@ -611,7 +595,7 @@ void tadpole_gl_present(void)
 	 * of ARM code under qemu is not free. uClibc's memcpy is word-at-a-time. */
 	memcpy(vis, g_back, FB_W * FB_H * 4);
 
-	if (g_trace) {
+	if (tad_gl_level()) {
 		/* Which textures the frame actually SAMPLED. "A texture is bound and
 		 * has data" says nothing if the draw never reads it. */
 		char b[160];
@@ -627,7 +611,7 @@ void tadpole_gl_present(void)
 		              g_f_untex_tris);
 		{ u32 k = 0; while (b[k]) k++; write(2, b, k); }
 	}
-	if (g_trace && g_f_flat_area) {
+	if (tad_gl_level() && g_f_flat_area) {
 		char b2[160];
 		int n2 = snprintf(b2, sizeof(b2),
 		    "[gl] FRAME biggest flat tri %dx%d at (%d,%d) argb %08x"
@@ -641,11 +625,11 @@ void tadpole_gl_present(void)
 	g_f_flat_area = 0;
 	for (i = 0; i <= MAX_TEXS; i++) g_f_texused[i] = 0;
 	g_f_untex_tris = 0;
-	if (g_trace)
+	if (tad_gl_level())
 		tr2("FRAME draws/tris-in", g_f_draws, g_f_tris_in);
-	if (g_trace)
+	if (tad_gl_level())
 		tr2("FRAME tris-on-screen/pixels", g_f_tris_out, g_f_pixels);
-	if (g_trace && !g_f_pixels)
+	if (tad_gl_level() && !g_f_pixels)
 		tr2("FRAME PAINTED NOTHING; clear argb", (int)g_clear_argb, g_f_tris_in);
 	g_f_draws = g_f_tris_in = g_f_tris_out = g_f_pixels = 0;
 
@@ -764,17 +748,40 @@ static void view_update(void)
 static void view_init(void) { if (!g_view_init) view_update(); }
 
 static float fx2f(GLfixed v) { return (float)v / 65536.0f; }
+/* 16.16, the format every x-suffixed GLES 1.x entry point speaks. */
+static GLfixed f2fx(float v) { return (GLfixed)(v * 65536.0f); }
 
 /* ---- matrix stack -------------------------------------------------------- */
 
 typedef struct { float m[16]; } mat4;
-#define STACK_DEPTH 16
 
-static mat4 g_mv[STACK_DEPTH], g_proj[STACK_DEPTH];
+/* THESE DEPTHS ARE MEASURED FROM THE DEVICE, not chosen.
+ *
+ * All three used to be 16, and the modelview one was WRONG: real hardware
+ * reports 32 (tools/glconform, limit.MAX_MODELVIEW_STACK_DEPTH, run against the
+ * LeapPad2 itself). That is not a cosmetic mismatch in a query answer — it is a
+ * smaller stack. A title that nests deeper than 16 had its 17th glPushMatrix
+ * silently DROPPED here while succeeding on the device, and from that point on
+ * our modelview no longer matched the one the title believed it had. Every
+ * matrix downstream is then wrong, including the ones
+ * glLoadPaletteFromModelViewMatrixOES snapshots for skinning.
+ *
+ * The texture stack really is 16 on the device, so it stays 16: being MORE
+ * permissive than the hardware is its own bug, because a title that overflows
+ * on the device and copes gets different behaviour here.
+ *
+ *   modelview   32      projection  32      texture  16
+ */
+#define MV_STACK_DEPTH   32
+#define PROJ_STACK_DEPTH 32
+#define TEXM_STACK_DEPTH 16
+#define STACK_DEPTH MV_STACK_DEPTH      /* the largest, for anything shared */
+
+static mat4 g_mv[MV_STACK_DEPTH], g_proj[PROJ_STACK_DEPTH];
 /* A THIRD STACK, for GL_TEXTURE (0x1702). Without it that mode fell through to
  * the modelview stack — texture-matrix edits silently corrupted geometry
  * transforms, and the guest could never mirror what the host was doing. */
-static mat4 g_texm[STACK_DEPTH];
+static mat4 g_texm[TEXM_STACK_DEPTH];
 static int  g_texm_sp;
 static int  g_mv_sp, g_proj_sp, g_mat_inited;
 static GLenum g_matrix_mode = GL_MODELVIEW;
@@ -822,7 +829,14 @@ static void vec_xform(const mat4 *m, const float *in, float *out)
 		       + m->m[2*4+i]*in[2] + m->m[3*4+i]*in[3];
 }
 
-void glMatrixMode(GLenum mode) { tr2("glMatrixMode", (int)mode, 0); g_matrix_mode = mode;
+void glMatrixMode(GLenum mode) { tr2("glMatrixMode", (int)mode, 0);
+  if (mode != GL_MODELVIEW && mode != GL_PROJECTION && mode != GL_TEXTURE_ &&
+      mode != GL_MATRIX_PALETTE_OES) {
+    /* Silently accepting an unknown mode meant every later matrix call landed
+     * on the MODELVIEW stack — the fallback in cur_top() — so the projection a
+     * title thought it was building quietly modified the view instead. */
+    tad_gl_error(TAD_GL_INVALID_ENUM, "glMatrixMode"); return; }
+  g_matrix_mode = mode;
   if (hle_ready()) hle_matrixmode(mode); }
 void glLoadIdentity(void)      { mat_identity(cur_top());
   if (hle_ready()) hle_loadidentity(); }
@@ -833,14 +847,14 @@ void glPushMatrix(void)
 {
 	mat_init_once();
 	if (g_matrix_mode == GL_PROJECTION) {
-		if (g_proj_sp + 1 < STACK_DEPTH) { g_proj[g_proj_sp+1] = g_proj[g_proj_sp]; g_proj_sp++; }
-		else g_push_drop++;
+		if (g_proj_sp + 1 < PROJ_STACK_DEPTH) { g_proj[g_proj_sp+1] = g_proj[g_proj_sp]; g_proj_sp++; }
+		else { g_push_drop++; tad_gl_error(TAD_GL_STACK_OVERFLOW, "glPushMatrix"); }
 	} else if (g_matrix_mode == GL_TEXTURE_) {
-		if (g_texm_sp + 1 < STACK_DEPTH) { g_texm[g_texm_sp+1] = g_texm[g_texm_sp]; g_texm_sp++; }
-		else g_push_drop++;
+		if (g_texm_sp + 1 < TEXM_STACK_DEPTH) { g_texm[g_texm_sp+1] = g_texm[g_texm_sp]; g_texm_sp++; }
+		else { g_push_drop++; tad_gl_error(TAD_GL_STACK_OVERFLOW, "glPushMatrix"); }
 	} else {
-		if (g_mv_sp + 1 < STACK_DEPTH) { g_mv[g_mv_sp+1] = g_mv[g_mv_sp]; g_mv_sp++; }
-		else g_push_drop++;
+		if (g_mv_sp + 1 < MV_STACK_DEPTH) { g_mv[g_mv_sp+1] = g_mv[g_mv_sp]; g_mv_sp++; }
+		else { g_push_drop++; tad_gl_error(TAD_GL_STACK_OVERFLOW, "glPushMatrix"); }
 	}
 	/* FORWARD IT. This was missing, and it was the "conveyor belt": Clam Prix
 	 * wraps each textured draw in glMatrixMode(GL_TEXTURE); glPushMatrix();
@@ -854,11 +868,11 @@ void glPushMatrix(void)
 void glPopMatrix(void)
 {
 	if (g_matrix_mode == GL_PROJECTION) {
-		if (g_proj_sp > 0) g_proj_sp--; else g_pop_under++;
+		if (g_proj_sp > 0) g_proj_sp--; else { g_pop_under++; tad_gl_error(TAD_GL_STACK_UNDERFLOW, "glPopMatrix"); }
 	} else if (g_matrix_mode == GL_TEXTURE_) {
-		if (g_texm_sp > 0) g_texm_sp--; else g_pop_under++;
+		if (g_texm_sp > 0) g_texm_sp--; else { g_pop_under++; tad_gl_error(TAD_GL_STACK_UNDERFLOW, "glPopMatrix"); }
 	} else {
-		if (g_mv_sp > 0) g_mv_sp--; else g_pop_under++;
+		if (g_mv_sp > 0) g_mv_sp--; else { g_pop_under++; tad_gl_error(TAD_GL_STACK_UNDERFLOW, "glPopMatrix"); }
 	}
 	if (g_mv_sp > g_max_mv) g_max_mv = g_mv_sp;
 	if (g_proj_sp > g_max_pj) g_max_pj = g_proj_sp;
@@ -1003,15 +1017,264 @@ void glLoadMatrixf(const GLfloat *m) { load_matrix_f(m);
 void glMultMatrixf(const GLfloat *m) { mult_matrix_f(m);
   if (hle_ready()) hle_multmatrix(m); }
 
-void glTexEnvx(GLenum tgt, GLenum pname, GLint v)
+/* ---- glTexEnv* / glGetTexEnv* -------------------------------------------
+ *
+ * MEASURED DEMAND, not guessed: one Clam Prix race calls glTexEnvfv 524 times
+ * and glGetTexEnvxv 413 times, both of which were no-op stubs. The getter is the
+ * worse half — a stub getter does not return a wrong answer, it never writes the
+ * caller's buffer at all, so the title read 413 uninitialised values off its own
+ * stack and carried on.
+ *
+ * ALL NINE ENTRY POINTS SHARE ONE STATE BLOCK. GLES 1.1 §3.7.12 defines the f /
+ * i / x / v spellings as the same state reached through different argument
+ * types, so they are converted at the edge and the state is stored once. Writing
+ * nine switches is how the fixed-point and float paths drift apart, which this
+ * project has already paid for once.
+ *
+ * The COMBINE parameters are STORED BUT NOT HONOURED. Our rasteriser and the
+ * host replay both implement MODULATE/REPLACE/DECAL/BLEND/ADD only. Storing the
+ * rest is not pretending — a title that sets a combiner and reads it back gets
+ * its own value, which is what the spec promises, and it renders wrong for a
+ * reason the log now names instead of silently.
+ */
+#define GL_TEXTURE_ENV_MODE_   0x2200
+#define GL_TEXTURE_ENV_COLOR_  0x2201
+#define GL_COMBINE_RGB_        0x8571
+#define GL_COMBINE_ALPHA_      0x8572
+#define GL_RGB_SCALE_          0x8573
+#define GL_ALPHA_SCALE_        0x0D1C
+#define GL_SRC0_RGB_           0x8580     /* SRC0..2_RGB are contiguous */
+#define GL_SRC0_ALPHA_         0x8588
+#define GL_OPERAND0_RGB_       0x8590
+#define GL_OPERAND0_ALPHA_     0x8598
+#define GL_COORD_REPLACE_OES_  0x8862
+
+struct gl_texenv {
+	GLenum mode;
+	float  color[4];
+	GLenum combine_rgb, combine_alpha;
+	GLenum src_rgb[3], src_alpha[3];
+	GLenum op_rgb[3], op_alpha[3];
+	float  rgb_scale, alpha_scale;
+	GLenum coord_replace;
+};
+static struct gl_texenv g_texenv[MAX_TEXUNITS];
+static int g_texenv_init;
+
+static void texenv_init_once(void)
 {
-	(void)tgt;
-	/* Only GL_TEXTURE_ENV_MODE matters to us, and only when the value is a
-	 * mode we recognise — the game also passes values that are not valid
-	 * modes, which we must not latch onto. */
-	if (pname == 0x2200 && (v == (GLint)GL_MODULATE || v == (GLint)GL_REPLACE))
-		g_tex_env = (GLenum)v;
-	if (hle_ready()) hle_texenv(tgt, pname, v);
+	int u, i;
+	if (g_texenv_init) return;
+	g_texenv_init = 1;
+	for (u = 0; u < MAX_TEXUNITS; u++) {
+		struct gl_texenv *e = &g_texenv[u];
+		e->mode = GL_MODULATE;
+		e->color[0] = e->color[1] = e->color[2] = e->color[3] = 0.0f;
+		e->combine_rgb = e->combine_alpha = GL_MODULATE;
+		for (i = 0; i < 3; i++) {
+			/* GLES1 defaults: SRC0=TEXTURE, SRC1=PREVIOUS, SRC2=CONSTANT. */
+			e->src_rgb[i] = e->src_alpha[i] =
+				(i == 0) ? 0x1702u : (i == 1) ? 0x8578u : 0x8576u;
+			e->op_rgb[i]   = (i == 2) ? 0x0302u : 0x0300u;  /* SRC_ALPHA : SRC_COLOR */
+			e->op_alpha[i] = 0x0302u;                        /* SRC_ALPHA */
+		}
+		e->rgb_scale = e->alpha_scale = 1.0f;
+		e->coord_replace = 0;                                /* GL_FALSE */
+	}
+}
+
+static struct gl_texenv *texenv_cur(void)
+{
+	texenv_init_once();
+	return &g_texenv[g_active_tex < MAX_TEXUNITS ? g_active_tex : 0];
+}
+
+/* How many components this pname carries. 0 means "not a TexEnv parameter",
+ * which is GL_INVALID_ENUM rather than something to store. */
+static int texenv_count(GLenum pname)
+{
+	switch (pname) {
+	case GL_TEXTURE_ENV_COLOR_: return 4;
+	case GL_TEXTURE_ENV_MODE_:
+	case GL_COMBINE_RGB_: case GL_COMBINE_ALPHA_:
+	case GL_RGB_SCALE_:   case GL_ALPHA_SCALE_:
+	case GL_COORD_REPLACE_OES_:
+		return 1;
+	default:
+		if (pname >= GL_SRC0_RGB_     && pname <= GL_SRC0_RGB_ + 2)     return 1;
+		if (pname >= GL_SRC0_ALPHA_   && pname <= GL_SRC0_ALPHA_ + 2)   return 1;
+		if (pname >= GL_OPERAND0_RGB_ && pname <= GL_OPERAND0_RGB_ + 2) return 1;
+		if (pname >= GL_OPERAND0_ALPHA_ && pname <= GL_OPERAND0_ALPHA_ + 2) return 1;
+		return 0;
+	}
+}
+
+/* The one place TexEnv state is written. `v` is always float; the integer and
+ * fixed-point entry points convert before calling. */
+static void texenv_set(GLenum tgt, GLenum pname, const float *v)
+{
+	struct gl_texenv *e = texenv_cur();
+	int n = texenv_count(pname);
+
+	/* GL_POINT_SPRITE_OES is the only other legal target, and it carries
+	 * exactly one parameter. */
+	if (tgt != 0x2300u /* GL_TEXTURE_ENV */ && tgt != 0x8861u) {
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glTexEnv"); return; }
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glTexEnv"); return; }
+
+	if (pname == GL_TEXTURE_ENV_COLOR_) {
+		int i; for (i = 0; i < 4; i++) e->color[i] = v[i];
+		if (hle_ready()) hle_texenvcolor(e->color);
+		return;
+	}
+	if (pname == GL_RGB_SCALE_)   { e->rgb_scale = v[0];   return; }
+	if (pname == GL_ALPHA_SCALE_) { e->alpha_scale = v[0]; return; }
+
+	{
+		GLenum val = (GLenum)v[0];
+		switch (pname) {
+		case GL_TEXTURE_ENV_MODE_:
+			e->mode = val;
+			/* g_tex_env drives the software rasteriser's texel path, which
+			 * only distinguishes REPLACE from everything else. Keep it in
+			 * step, but only for modes it can act on — latching a mode it
+			 * cannot honour would make it render as if it could. */
+			if (val == GL_MODULATE || val == GL_REPLACE)
+				g_tex_env = val;
+			break;
+		case GL_COMBINE_RGB_:       e->combine_rgb = val; break;
+		case GL_COMBINE_ALPHA_:     e->combine_alpha = val; break;
+		case GL_COORD_REPLACE_OES_: e->coord_replace = val; break;
+		default:
+			if (pname >= GL_SRC0_RGB_ && pname <= GL_SRC0_RGB_ + 2)
+				e->src_rgb[pname - GL_SRC0_RGB_] = val;
+			else if (pname >= GL_SRC0_ALPHA_ && pname <= GL_SRC0_ALPHA_ + 2)
+				e->src_alpha[pname - GL_SRC0_ALPHA_] = val;
+			else if (pname >= GL_OPERAND0_RGB_ && pname <= GL_OPERAND0_RGB_ + 2)
+				e->op_rgb[pname - GL_OPERAND0_RGB_] = val;
+			else
+				e->op_alpha[pname - GL_OPERAND0_ALPHA_] = val;
+			break;
+		}
+		if (hle_ready()) hle_texenv(tgt, pname, (int)val);
+	}
+}
+
+/* Reads TexEnv state as float. Returns the component count, 0 if `pname` is not
+ * TexEnv state — the caller turns that into GL_INVALID_ENUM. */
+static int texenv_get(GLenum tgt, GLenum pname, float *out)
+{
+	struct gl_texenv *e = texenv_cur();
+	int n = texenv_count(pname);
+
+	if (tgt != 0x2300u && tgt != 0x8861u) return 0;
+	if (!n) return 0;
+
+	switch (pname) {
+	case GL_TEXTURE_ENV_COLOR_:
+		{ int i; for (i = 0; i < 4; i++) out[i] = e->color[i]; }
+		return 4;
+	case GL_TEXTURE_ENV_MODE_:   out[0] = (float)e->mode; return 1;
+	case GL_COMBINE_RGB_:        out[0] = (float)e->combine_rgb; return 1;
+	case GL_COMBINE_ALPHA_:      out[0] = (float)e->combine_alpha; return 1;
+	case GL_RGB_SCALE_:          out[0] = e->rgb_scale; return 1;
+	case GL_ALPHA_SCALE_:        out[0] = e->alpha_scale; return 1;
+	case GL_COORD_REPLACE_OES_:  out[0] = (float)e->coord_replace; return 1;
+	default:
+		if (pname >= GL_SRC0_RGB_ && pname <= GL_SRC0_RGB_ + 2)
+			out[0] = (float)e->src_rgb[pname - GL_SRC0_RGB_];
+		else if (pname >= GL_SRC0_ALPHA_ && pname <= GL_SRC0_ALPHA_ + 2)
+			out[0] = (float)e->src_alpha[pname - GL_SRC0_ALPHA_];
+		else if (pname >= GL_OPERAND0_RGB_ && pname <= GL_OPERAND0_RGB_ + 2)
+			out[0] = (float)e->op_rgb[pname - GL_OPERAND0_RGB_];
+		else
+			out[0] = (float)e->op_alpha[pname - GL_OPERAND0_ALPHA_];
+		return 1;
+	}
+}
+
+void glTexEnvf(GLenum tgt, GLenum pname, GLfloat v)
+{ tr2("glTexEnvf pname", (int)pname, (int)v); texenv_set(tgt, pname, &v); }
+
+void glTexEnvfv(GLenum tgt, GLenum pname, const GLfloat *v)
+{ tr2("glTexEnvfv pname", (int)pname, 0);
+  if (v) texenv_set(tgt, pname, v); }
+
+void glTexEnvi(GLenum tgt, GLenum pname, GLint v)
+{ float f = (float)v; tr2("glTexEnvi pname/val", (int)pname, (int)v);
+  texenv_set(tgt, pname, &f); }
+
+void glTexEnviv(GLenum tgt, GLenum pname, const GLint *v)
+{
+	float f[4]; int i, n;
+	if (!v) return;
+	tr2("glTexEnviv pname", (int)pname, 0);
+	n = texenv_count(pname); if (!n) n = 1;
+	for (i = 0; i < n; i++) f[i] = (float)v[i];
+	texenv_set(tgt, pname, f);
+}
+
+/* THE ONLY SCALED ONE. GL_TEXTURE_ENV_COLOR is a colour, so its fixed-point
+ * form really is 16.16; every other TexEnv parameter is an ENUM, and 16.16 of
+ * an enum is meaningless — GLES 1.1 §3.7.12 passes those through unscaled.
+ * Dividing GL_MODULATE by 65536 would set the mode to 0. */
+void glTexEnvx(GLenum tgt, GLenum pname, GLfixed v)
+{
+	float f;
+	tr2("glTexEnvx pname/val", (int)pname, (int)v);
+	f = (pname == GL_TEXTURE_ENV_COLOR_ || pname == GL_RGB_SCALE_ ||
+	     pname == GL_ALPHA_SCALE_) ? fx2f(v) : (float)v;
+	texenv_set(tgt, pname, &f);
+}
+
+void glTexEnvxv(GLenum tgt, GLenum pname, const GLfixed *v)
+{
+	float f[4]; int i, n;
+	int scaled;
+	if (!v) return;
+	tr2("glTexEnvxv pname", (int)pname, 0);
+	scaled = (pname == GL_TEXTURE_ENV_COLOR_ || pname == GL_RGB_SCALE_ ||
+	          pname == GL_ALPHA_SCALE_);
+	n = texenv_count(pname); if (!n) n = 1;
+	for (i = 0; i < n; i++) f[i] = scaled ? fx2f(v[i]) : (float)v[i];
+	texenv_set(tgt, pname, f);
+}
+
+void glGetTexEnvfv(GLenum tgt, GLenum pname, GLfloat *v)
+{
+	float f[4]; int n, i;
+	if (!v) return;
+	tr2("glGetTexEnvfv pname", (int)pname, 0);
+	n = texenv_get(tgt, pname, f);
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glGetTexEnvfv"); return; }
+	for (i = 0; i < n; i++) v[i] = f[i];
+}
+
+void glGetTexEnviv(GLenum tgt, GLenum pname, GLint *v)
+{
+	float f[4]; int n, i;
+	if (!v) return;
+	tr2("glGetTexEnviv pname", (int)pname, 0);
+	n = texenv_get(tgt, pname, f);
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glGetTexEnviv"); return; }
+	/* A COLOUR ROUNDS, AN ENUM CASTS. glGetTexEnviv on GL_TEXTURE_ENV_COLOR
+	 * returns the colour scaled to the full int range per GLES 1.1 §6.1.2;
+	 * everything else is already an integer. */
+	for (i = 0; i < n; i++)
+		v[i] = (pname == GL_TEXTURE_ENV_COLOR_)
+		           ? (GLint)(f[i] * 2147483647.0f) : (GLint)f[i];
+}
+
+void glGetTexEnvxv(GLenum tgt, GLenum pname, GLfixed *v)
+{
+	float f[4]; int n, i;
+	if (!v) return;
+	tr2("glGetTexEnvxv pname", (int)pname, 0);
+	n = texenv_get(tgt, pname, f);
+	if (!n) { tad_gl_error(TAD_GL_INVALID_ENUM, "glGetTexEnvxv"); return; }
+	for (i = 0; i < n; i++)
+		v[i] = (pname == GL_TEXTURE_ENV_COLOR_ || pname == GL_RGB_SCALE_ ||
+		        pname == GL_ALPHA_SCALE_) ? f2fx(f[i]) : (GLfixed)f[i];
 }
 void glAlphaFuncx(GLenum func, GLfixed ref)
 { g_alpha_func = func; g_alpha_ref = (u32)(fx2f(ref) * 255.0f);
@@ -1150,10 +1413,45 @@ void glClear(GLbitfield mask)
  * Everything is converted to ARGB8888 once at upload time so the inner sampling
  * loop has a single format to deal with. Sizes seen: 256x256 down to 38x28.
  */
-struct gl_texture { GLuint name; u32 w, h; u32 *argb; };
+/* Sampler state lives WITH THE TEXTURE OBJECT, not with the unit — that is what
+ * makes glGetTexParameteriv answerable at all. Defaults are the spec's
+ * (§3.7.4), and they are not arbitrary: a title that only ever sets WRAP_S must
+ * still read GL_LINEAR back for MAG_FILTER, and a title that sets nothing at all
+ * must read GL_REPEAT. Answering 0 to any of these tells the caller its texture
+ * has no filter, which is not a value GL can produce. */
+struct gl_texture {
+	GLuint name; u32 w, h; u32 *argb;
+	GLenum min_filter, mag_filter, wrap_s, wrap_t;
+	GLenum gen_mipmap;
+};
 static struct gl_texture g_texs[MAX_TEXS];
 static GLuint g_bound_tex;
 static int    g_blend_on;
+
+#define GL_NEAREST_               0x2600
+#define GL_LINEAR_                0x2601
+#define GL_NEAREST_MIPMAP_LINEAR_ 0x2702
+#define GL_REPEAT_                0x2901
+#define GL_TEXTURE_MAG_FILTER_    0x2800
+#define GL_TEXTURE_MIN_FILTER_    0x2801
+#define GL_TEXTURE_WRAP_S_        0x2802
+#define GL_TEXTURE_WRAP_T_        0x2803
+#define GL_GENERATE_MIPMAP_       0x8191
+
+static void tex_defaults(struct gl_texture *t)
+{
+	t->min_filter = GL_NEAREST_MIPMAP_LINEAR_;
+	t->mag_filter = GL_LINEAR_;
+	t->wrap_s = t->wrap_t = GL_REPEAT_;
+	t->gen_mipmap = 0;                       /* GL_FALSE */
+}
+
+/* THE DEFAULT TEXTURE, name 0. Binding 0 is legal and every glTexParameter
+ * after it applies to this object, so without it those calls would either be
+ * dropped or write through a null pointer. GL has always had it; we simply
+ * never modelled it. */
+static struct gl_texture g_tex_default;
+static int g_tex_default_init;
 
 static struct gl_texture *tex_find(GLuint n)
 {
@@ -1174,7 +1472,10 @@ static struct gl_texture *tex_slot(GLuint n)
 	struct gl_texture *t;
 	if (!n || n > MAX_TEXS) return NULL;
 	t = &g_texs[n - 1];
-	if (!t->name) { t->name = n; t->argb = NULL; t->w = t->h = 0; }
+	if (!t->name) {
+		t->name = n; t->argb = NULL; t->w = t->h = 0;
+		tex_defaults(t);
+	}
 	return t;
 }
 
@@ -1256,7 +1557,14 @@ static int hle_ready(void)
 }
 
 struct array { const u8 *ptr; GLuint buf; GLint size; GLenum type; GLsizei stride; int on; };
-static struct array g_vtx, g_col, g_tex;
+/* g_nrm IS NEW, AND IT WAS THE MOST-NEEDED MISSING ENTRY POINT IN THE LIBRARY.
+ * tools/gl-demand.py: 49 of the installed titles import glNormalPointer, more
+ * than any other stub. The host replayer has handled TADGL_ARR_NORMAL and called
+ * glNormalPointer since the array plumbing was written — the guest simply never
+ * sent one, because its entry point was a no-op. Same shape as
+ * libopengles_lite.so and hle_deletetexture: the mechanism was built and never
+ * wired up. */
+static struct array g_vtx, g_col, g_tex, g_nrm;
 /* Declared here with the other client arrays rather than beside the skinning
  * code, because glEnableClientState switches them on well before that point. */
 static struct array g_midx, g_wgt;      /* matrix indices, blend weights */
@@ -1265,6 +1573,18 @@ static u32 g_cur_color = 0xFFFFFFFFu;
 void glVertexPointer(GLint s, GLenum t, GLsizei st, const void *p)
 { tr2("glVertexPointer size/type", s, (int)t); tr2("glVertexPointer stride/off", (int)st, (int)(unsigned long)p); tr2("glVertexPointer boundbuf", (int)g_bound_array, 0); g_vtx.buf = g_bound_array; g_vtx.size=s; g_vtx.type=t; g_vtx.stride=st; g_vtx.ptr=p;
   if (hle_ready()) hle_arraypointer(0, g_bound_array, s, t, st, (u32)(unsigned long)p); }
+/* NO size ARGUMENT — a normal is always three components, which is why this
+ * cannot share glVertexPointer's shape and needs its own entry point. Recorded
+ * as size 3 so the host's bind_array, which is written against `size`, converts
+ * the right number of elements. */
+void glNormalPointer(GLenum t, GLsizei st, const void *p)
+{
+	tr2("glNormalPointer type/stride", (int)t, (int)st);
+	g_nrm.buf = g_bound_array; g_nrm.size = 3; g_nrm.type = t;
+	g_nrm.stride = st; g_nrm.ptr = p;
+	if (hle_ready())
+		hle_arraypointer(3, g_bound_array, 3, t, st, (u32)(unsigned long)p);
+}
 void glColorPointer(GLint s, GLenum t, GLsizei st, const void *p)
 { g_col.buf = g_bound_array; g_col.size=s; g_col.type=t; g_col.stride=st; g_col.ptr=p;
   if (hle_ready()) hle_arraypointer(1, g_bound_array, s, t, st, (u32)(unsigned long)p); }
@@ -1272,21 +1592,44 @@ void glTexCoordPointer(GLint s, GLenum t, GLsizei st, const void *p)
 { tr2("glTexCoordPointer size/type", s, (int)t); tr2("glTexCoordPointer stride/off", (int)st, (int)(unsigned long)p); g_tex.buf = g_bound_array; g_tex.size=s; g_tex.type=t; g_tex.stride=st; g_tex.ptr=p;
   if (hle_ready()) hle_arraypointer(2, g_bound_array, s, t, st, (u32)(unsigned long)p); }
 
+/* WHICH WIRE SLOT AN ARRAY ENUM MEANS, or -1 for one the host has no notion of.
+ *
+ * This used to be a ternary chain ending in `: 3u`, so EVERY unrecognised enum
+ * — including GL_POINT_SIZE_ARRAY_OES — was forwarded as the NORMAL array and
+ * silently rebound it. A default that names a real slot is worse than no
+ * default at all. */
+static int array_slot(GLenum a)
+{
+	switch (a) {
+	case GL_VERTEX_ARRAY:        return 0;
+	case GL_COLOR_ARRAY:         return 1;
+	case GL_TEXTURE_COORD_ARRAY: return 2;
+	case GL_NORMAL_ARRAY_:       return 3;
+	default:                     return -1;
+	}
+}
+
+static void client_state(GLenum a, int on)
+{
+	int slot;
+	if (a == GL_VERTEX_ARRAY)             g_vtx.on = on;
+	else if (a == GL_COLOR_ARRAY)         g_col.on = on;
+	else if (a == GL_TEXTURE_COORD_ARRAY) g_tex.on = on;
+	else if (a == GL_NORMAL_ARRAY_)       g_nrm.on = on;
+	/* Consumed here, never forwarded: the host has no such client arrays. */
+	else if (a == GL_MATRIX_INDEX_ARRAY_OES) { g_midx.on = on; return; }
+	else if (a == GL_WEIGHT_ARRAY_OES)       { g_wgt.on  = on; return; }
+	slot = array_slot(a);
+	if (slot < 0) { tad_gl_error(TAD_GL_INVALID_ENUM, on ?
+	                             "glEnableClientState" : "glDisableClientState");
+	                return; }
+	if (hle_ready()) hle_clientstate((u32)slot, (u32)on);
+}
+
 void glEnableClientState(GLenum a)
-{ tr2("glEnableClientState", (int)a, 0); if (a==GL_VERTEX_ARRAY) g_vtx.on=1; else if (a==GL_COLOR_ARRAY) g_col.on=1;
-  else if (a==GL_TEXTURE_COORD_ARRAY) g_tex.on=1;
-  /* Consumed here, never forwarded: the host has no such client arrays. */
-  else if (a==GL_MATRIX_INDEX_ARRAY_OES) { g_midx.on = 1; return; }
-  else if (a==GL_WEIGHT_ARRAY_OES)       { g_wgt.on  = 1; return; }
-  if (hle_ready()) hle_clientstate(a==GL_VERTEX_ARRAY ? 0u :
-                                a==GL_COLOR_ARRAY  ? 1u :
-                                a==GL_TEXTURE_COORD_ARRAY ? 2u : 3u, 1); }
+{ tr2("glEnableClientState", (int)a, 0); client_state(a, 1); }
 void glDisableClientState(GLenum a)
-{ if (a==GL_VERTEX_ARRAY) g_vtx.on=0; else if (a==GL_COLOR_ARRAY) g_col.on=0;
-  else if (a==GL_TEXTURE_COORD_ARRAY) g_tex.on=0;
-  if (hle_ready()) hle_clientstate(a==GL_VERTEX_ARRAY ? 0u :
-                                a==GL_COLOR_ARRAY  ? 1u :
-                                a==GL_TEXTURE_COORD_ARRAY ? 2u : 3u, 0); }
+{ tr2("glDisableClientState", (int)a, 0); client_state(a, 0); }
 
 void glColor4ub(u8 r, u8 g, u8 b, u8 a)
 { g_cur_color = ((u32)a<<24)|((u32)r<<16)|((u32)g<<8)|b;
@@ -1414,7 +1757,7 @@ static void raster_tri(struct vert a, struct vert b, struct vert c)
 			if (noflat < 0) noflat = getenv("TADPOLE_GL_NOFLAT") ? 1 : 0;
 			if (noflat) { g_f_untex_tris++; return; }
 		}
-		if (g_trace && g_f_untex_tris < 4) {
+		if (tad_gl_level() && g_f_untex_tris < 4) {
 			char msg[192];
 			int n = snprintf(msg, sizeof(msg),
 			    "[gl] FLAT tri (%d,%d)(%d,%d)(%d,%d) argb %08x"
@@ -1462,7 +1805,7 @@ static void raster_tri(struct vert a, struct vert b, struct vert c)
 	dst = fb_target();
 	if (!dst) return;
 	g_tri_logged++;
-	if (g_trace && g_tri_logged < 12) {
+	if (tad_gl_level() && g_tri_logged < 12) {
 		tr2("tri A", (int)a.x, (int)a.y);
 		tr2("tri B", (int)b.x, (int)b.y);
 		tr2("tri C", (int)c.x, (int)c.y);
@@ -1803,7 +2146,7 @@ static void draw_indexed(GLenum mode, GLsizei count, const void *indices, GLenum
 	 * covered by one 64-triangle untextured mesh submitted last; knowing
 	 * exactly which tests were enabled for it is the only way to tell which
 	 * of them should have rejected it. */
-	if (g_trace && count >= 100) {
+	if (tad_gl_level() && count >= 100) {
 		char b3[224];
 		int n3 = snprintf(b3, sizeof(b3),
 		    "[gl] BIGDRAW count=%d tex2d=%d boundtex=%d blend=%d depth=%d"
@@ -1923,8 +2266,10 @@ static void draw_indexed(GLenum mode, GLsizei count, const void *indices, GLenum
 #define HLE_CLIENT_COL 4001
 #define HLE_CLIENT_TEX 4002
 #define HLE_CLIENT_IDX 4003
+#define HLE_CLIENT_NRM 4004
+/* Must stay below tadpole_hle.c's MAX_BUF (4096) as well as above MAX_BUFS. */
 typedef char hle_client_names_above_maxbufs[
-	(HLE_CLIENT_VTX > MAX_BUFS) ? 1 : -1];
+	(HLE_CLIENT_VTX > MAX_BUFS && HLE_CLIENT_NRM < 4096) ? 1 : -1];
 
 static void hle_send_array(struct array *a, u32 which, u32 nverts, u32 name)
 {
@@ -2121,6 +2466,10 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
 	tr2("glDrawArrays mode/count", (int)mode, (int)count);
 	tr2("glDrawArrays first", first, 0);
+	/* A negative count is GL_INVALID_VALUE, and it is not hypothetical here: it
+	 * is cast to u32 three lines down and becomes a request for four billion
+	 * vertices, which either exhausts the ring or reads far past the array. */
+	if (count < 0) { tad_gl_error(TAD_GL_INVALID_VALUE, "glDrawArrays"); return; }
 	/* The one place HLE REPLACES work rather than adding to it: the whole point
 	 * is not to rasterise here. */
 	if (hle_ready()) {
@@ -2129,6 +2478,10 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 		if (!sk) hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
 		hle_send_array(&g_col, 1, nv, HLE_CLIENT_COL);
 		hle_send_array(&g_tex, 2, nv, HLE_CLIENT_TEX);
+		/* Normals travel like every other array. Only sent when the title
+		 * actually enabled GL_NORMAL_ARRAY — hle_send_array() checks `on`,
+		 * so a title that never lights anything pays nothing. */
+		hle_send_array(&g_nrm, 3, nv, HLE_CLIENT_NRM);
 		hle_drawarrays(mode, first, count);
 		skin_end(sk);
 		return;
@@ -2155,6 +2508,14 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
 {
 	tr2("glDrawElements mode/count/type", (int)mode, (int)count);
 	tr2("glDrawElements itype", (int)type, 0);
+	if (count < 0) { tad_gl_error(TAD_GL_INVALID_VALUE, "glDrawElements"); return; }
+	/* GLES 1.1 allows only these two index types — GL_UNSIGNED_INT is an
+	 * extension the device does not export. An unrecognised type used to fall
+	 * through to the byte reader and index the array at a third of the intended
+	 * stride, which draws a real but wrong mesh: exactly the kind of failure
+	 * that looks like a modelling bug rather than ours. */
+	if (type != GL_UNSIGNED_BYTE && type != GL_UNSIGNED_SHORT) {
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glDrawElements"); return; }
 	if (hle_ready()) {
 		u32 nv = hle_max_index(indices, count, type);
 		u32 ebuf = g_bound_elem;
@@ -2166,6 +2527,10 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
 		if (!sk) hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
 		hle_send_array(&g_col, 1, nv, HLE_CLIENT_COL);
 		hle_send_array(&g_tex, 2, nv, HLE_CLIENT_TEX);
+		/* Normals travel like every other array. Only sent when the title
+		 * actually enabled GL_NORMAL_ARRAY — hle_send_array() checks `on`,
+		 * so a title that never lights anything pays nothing. */
+		hle_send_array(&g_nrm, 3, nv, HLE_CLIENT_NRM);
 		if (!ebuf && indices) {         /* client-side indices too */
 			u32 isz = (type == GL_UNSIGNED_SHORT) ? 2u : 1u;
 			hle_bufferdata(HLE_CLIENT_IDX, (u32)count * isz, indices);
@@ -2236,8 +2601,40 @@ void glBindTexture(GLenum target, GLuint n)
 	if (hle_ready()) hle_bindtexture(n);
 }
 
+/* THE CAPABILITIES glEnable/glDisable ACCEPT, per GLES 1.1 §6.3 plus the two
+ * OES extensions we answer for. Anything else is GL_INVALID_ENUM.
+ *
+ * This is not pedantry. Forwarding an unrecognised cap to the host is how
+ * GL_MATRIX_PALETTE_OES used to raise GL_INVALID_ENUM on the host every single
+ * frame, and a host GL error poisons every draw after it until something calls
+ * glGetError. Rejecting it here, where we can name it, is the difference
+ * between "a frame came back empty" and "the title enabled 0x8840 and we do not
+ * take that". It is also the one check tools/glconform can use to prove error
+ * tracking works at all: it enables a deliberately bogus cap and looks for
+ * GL_INVALID_ENUM. */
+static int cap_valid(GLenum c)
+{
+	switch (c) {
+	case 0x0B44: case 0x0B50: case 0x0B60: case 0x0B90: case 0x0BC0:
+	/*   CULL_FACE     LIGHTING     FOG        STENCIL_TEST ALPHA_TEST */
+	case 0x0BD0: case 0x0BE2: case 0x0B71: case 0x0C11: case 0x0DE1:
+	/*   DITHER        BLEND        DEPTH_TEST SCISSOR_TEST TEXTURE_2D */
+	case 0x0B57: case 0x0BA1: case 0x0B20: case 0x0B10: case 0x0C4D:
+	/*   COLOR_MATERIAL NORMALIZE  LINE_SMOOTH POINT_SMOOTH RESCALE_NORMAL */
+	case 0x0BF2: case 0x8037: case 0x809D: case 0x809E: case 0x809F:
+	/*   COLOR_LOGIC_OP POLY_OFF_FILL MULTISAMPLE  S_A_TO_COVERAGE S_A_TO_ONE */
+	case 0x80A0: case 0x8861: case 0x8840:
+	/*   SAMPLE_COVERAGE POINT_SPRITE_OES MATRIX_PALETTE_OES */
+		return 1;
+	default:
+		/* GL_LIGHT0..7 and GL_CLIP_PLANE0..5 are contiguous ranges. */
+		return (c >= 0x4000 && c <= 0x4007) || (c >= 0x3000 && c <= 0x3005);
+	}
+}
+
 void glEnable(GLenum cap)
 { tr2("glEnable cap", (int)cap, 0);
+  if (!cap_valid(cap)) { tad_gl_error(TAD_GL_INVALID_ENUM, "glEnable"); return; }
   if (cap == GL_TEXTURE_2D) g_tex2d_unit[g_active_tex] = 1;
   else if (cap == GL_BLEND) g_blend_on = 1;
   else if (cap == GL_DEPTH_TEST) g_depth_test_on = 1;
@@ -2251,6 +2648,7 @@ void glEnable(GLenum cap)
   if (hle_ready()) hle_enable(cap); }
 void glDisable(GLenum cap)
 { tr2("glDisable cap", (int)cap, 0);
+  if (!cap_valid(cap)) { tad_gl_error(TAD_GL_INVALID_ENUM, "glDisable"); return; }
   if (cap == GL_TEXTURE_2D) g_tex2d_unit[g_active_tex] = 0;
   else if (cap == GL_BLEND) g_blend_on = 0;
   else if (cap == GL_DEPTH_TEST) g_depth_test_on = 0;
@@ -2263,8 +2661,9 @@ void glDepthMask(GLboolean on)   { g_depth_mask = on ? 1 : 0;
 void glClearDepthf(GLfloat d)    { g_depth_clear = d; }
 void glClearDepthx(GLfixed d)    { g_depth_clear = fx2f(d); }
 void glDepthRangef(GLfloat n, GLfloat f) { (void)n; (void)f; }
-void glTexParameterx(GLenum t, GLenum p, GLint v) { (void)t; tr2("glTexParameterx pname/val", (int)p, (int)v);
-  if (hle_ready()) hle_texparam(p, v); }
+/* Defined with the rest of the family further down; declared here because this
+ * is where the other texture state setters live. */
+void glTexParameterx(GLenum t, GLenum p, GLfixed v);
 void glBlendFunc(GLenum sf, GLenum df) { tr2("glBlendFunc src/dst", (int)sf, (int)df);
   if (hle_ready()) hle_blendfunc(sf, df); }
 
@@ -2506,6 +2905,7 @@ void glCompressedTexImage2D(GLenum tgt, GLint lvl, GLenum ifmt,
 		/* Not paletted. Nothing else is core in GLES1, so this would be a
 		 * vendor format we cannot decode — say so instead of drawing white. */
 		warn2("UNSUPPORTED compressed format / size", (int)ifmt, (int)imgsz);
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glCompressedTexImage2D");
 		return;
 	}
 	/* Level is non-positive in this extension (it encodes how many mip levels
@@ -2540,12 +2940,274 @@ void glCompressedTexImage2D(GLenum tgt, GLint lvl, GLenum ifmt,
 	if (hle_ready()) hle_teximage2d(g_bound_tex, t->w, t->h, t->argb);
 }
 
-/* Integer form of glTexParameterx. Same state, different argument type — the
- * stub meant wrap and filter modes set through the int entry point were lost. */
-void glTexParameteri(GLenum t, GLenum p, GLint v)
+/* ---- glTexParameter* / glGetTexParameter* -------------------------------
+ *
+ * Six of these nine were stubs, and glGetTexParameteriv is the single
+ * most-called missing entry point measured so far: 532 times in one Clam Prix
+ * race, each one reading uninitialised memory because a stub getter never
+ * touches the caller's buffer.
+ *
+ * All nine share tex_param_set/get for the same reason the TexEnv family does.
+ * The state lives on the texture OBJECT — see struct gl_texture — because that
+ * is where GL keeps it and because answering per-unit would give the wrong
+ * answer the moment a title binds a second texture.
+ */
+static struct gl_texture *tex_param_target(GLenum target)
 {
-	(void)t; tr2("glTexParameteri pname/val", (int)p, (int)v);
-	if (hle_ready()) hle_texparam(p, v);
+	struct gl_texture *t;
+	if (target != GL_TEXTURE_2D) {
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glTexParameter");
+		return NULL;
+	}
+	if (!g_bound_tex) {
+		if (!g_tex_default_init) { g_tex_default_init = 1;
+		                           tex_defaults(&g_tex_default); }
+		return &g_tex_default;
+	}
+	t = tex_slot(g_bound_tex);
+	return t;
+}
+
+/* `v` is the raw enum value in every case: GLES 1.1 has no float-valued texture
+ * parameter, so nothing here is ever scaled and the f/x spellings are pure
+ * casts. Getting that wrong is how GL_LINEAR becomes 0. */
+static void tex_param_set(GLenum target, GLenum pname, GLint v)
+{
+	struct gl_texture *t = tex_param_target(target);
+	if (!t) return;
+	switch (pname) {
+	case GL_TEXTURE_MIN_FILTER_: t->min_filter = (GLenum)v; break;
+	case GL_TEXTURE_MAG_FILTER_: t->mag_filter = (GLenum)v; break;
+	case GL_TEXTURE_WRAP_S_:     t->wrap_s = (GLenum)v; break;
+	case GL_TEXTURE_WRAP_T_:     t->wrap_t = (GLenum)v; break;
+	case GL_GENERATE_MIPMAP_:    t->gen_mipmap = (GLenum)v; break;
+	default:
+		/* GL_TEXTURE_CROP_RECT_OES and friends land here. Raise the error the
+		 * device would raise rather than storing state we cannot answer for,
+		 * and — critically — do NOT forward it. Forwarding whatever arrived was
+		 * the cause of the standing "GL error 0x0500 from TEXPARAM" in every
+		 * race: one rejected call on the host leaves the error flag set for
+		 * every call after it. */
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glTexParameter");
+		return;
+	}
+	if (hle_ready()) hle_texparam(pname, v);
+}
+
+static int tex_param_get(GLenum target, GLenum pname, GLint *out)
+{
+	struct gl_texture *t = tex_param_target(target);
+	if (!t) return 0;
+	switch (pname) {
+	case GL_TEXTURE_MIN_FILTER_: *out = (GLint)t->min_filter; return 1;
+	case GL_TEXTURE_MAG_FILTER_: *out = (GLint)t->mag_filter; return 1;
+	case GL_TEXTURE_WRAP_S_:     *out = (GLint)t->wrap_s; return 1;
+	case GL_TEXTURE_WRAP_T_:     *out = (GLint)t->wrap_t; return 1;
+	case GL_GENERATE_MIPMAP_:    *out = (GLint)t->gen_mipmap; return 1;
+	default: return 0;
+	}
+}
+
+void glTexParameteri(GLenum t, GLenum p, GLint v)
+{ tr2("glTexParameteri pname/val", (int)p, (int)v); tex_param_set(t, p, v); }
+
+void glTexParameterx(GLenum t, GLenum p, GLfixed v)
+{ tr2("glTexParameterx pname/val", (int)p, (int)v); tex_param_set(t, p, (GLint)v); }
+
+/* ---- per-fragment and per-primitive state -------------------------------
+ *
+ * Fifteen entry points that were no-op stubs, ranked by how many of the 87
+ * installed titles link them (tools/gl-demand.py): glLineWidthx 32,
+ * glScissor 23, glPolygonOffsetx 20, glPointSizex 19, glStencilMask 19,
+ * glColorMask 12. None of them is hard; they were skipped because "state
+ * setters" sounded less important than geometry, and the cost was that a title
+ * asking for a 2-pixel line or a clipped viewport got neither and was told
+ * nothing.
+ *
+ * The x-suffixed forms take GLfixed and the plain forms take float. GLES 1.1
+ * §2.3: the conversion is the value divided by 65536, never a cast — this is
+ * exactly the trap glTexEnvx documents on the other side, where the value is an
+ * enum and must NOT be scaled. Here every value really is a number.
+ */
+static float g_line_width = 1.0f, g_point_size = 1.0f;
+static float g_poly_factor, g_poly_units;
+static int   g_scissor_on;
+static GLint g_scissor[4];
+static GLboolean g_color_mask[4] = { 1, 1, 1, 1 };
+
+void glScissor(GLint x, GLint y, GLsizei w, GLsizei h)
+{
+	tr2("glScissor xy", x, y);
+	tr2("glScissor wh", (int)w, (int)h);
+	/* NO ERROR, DELIBERATELY, THOUGH THE SPEC SAYS GL_INVALID_VALUE.
+	 *
+	 * Measured on the device: glconform's errors.negative_size calls
+	 * glScissor(0,0,-1,-1) and the VR5 driver raises nothing at all. Raising it
+	 * here would mean a title that makes this call — and ignores it on real
+	 * hardware, because nothing happens — starts seeing a GL error only under
+	 * Tadpole. Titles were written against this driver, not against the spec,
+	 * so the driver is what to match.
+	 *
+	 * Still not FORWARDED: desktop GL does enforce it, and one rejected call
+	 * leaves the host's error flag set for everything after it. And still said
+	 * out loud, once, because a negative scissor box is a bug in the title
+	 * whether or not anyone raises an error for it. */
+	if (w < 0 || h < 0) {
+		static int said;
+		if (!said) { said = 1;
+			warn2("glScissor with a negative size — ignored, as the device"
+			      " ignores it (w, h)", (int)w, (int)h); }
+		return;
+	}
+	g_scissor[0] = x; g_scissor[1] = y; g_scissor[2] = w; g_scissor[3] = h;
+	g_scissor_on = 1;
+	if (hle_ready()) hle_scissor(x, y, (int)w, (int)h);
+}
+
+void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a)
+{
+	tr2("glColorMask rg", r, g);
+	g_color_mask[0] = r; g_color_mask[1] = g;
+	g_color_mask[2] = b; g_color_mask[3] = a;
+	if (hle_ready()) hle_colormask(r ? 1u : 0u, g ? 1u : 0u,
+	                               b ? 1u : 0u, a ? 1u : 0u);
+}
+
+void glLineWidth(GLfloat w)
+{
+	tr2("glLineWidth x1000", (int)(w * 1000.0f), 0);
+	if (w <= 0.0f) { tad_gl_error(TAD_GL_INVALID_VALUE, "glLineWidth"); return; }
+	g_line_width = w;
+	if (hle_ready()) hle_linewidth(w);
+}
+void glLineWidthx(GLfixed w) { glLineWidth(fx2f(w)); }
+
+void glPointSize(GLfloat s)
+{
+	tr2("glPointSize x1000", (int)(s * 1000.0f), 0);
+	if (s <= 0.0f) { tad_gl_error(TAD_GL_INVALID_VALUE, "glPointSize"); return; }
+	g_point_size = s;
+	if (hle_ready()) hle_pointsize(s);
+}
+void glPointSizex(GLfixed s) { glPointSize(fx2f(s)); }
+
+void glPolygonOffset(GLfloat factor, GLfloat units)
+{
+	tr2("glPolygonOffset f/u x1000", (int)(factor * 1000.0f),
+	    (int)(units * 1000.0f));
+	g_poly_factor = factor; g_poly_units = units;
+	if (hle_ready()) hle_polygonoffset(factor, units);
+}
+void glPolygonOffsetx(GLfixed factor, GLfixed units)
+{ glPolygonOffset(fx2f(factor), fx2f(units)); }
+
+/* ---- stencil: TRACKED, DELIBERATELY NOT FORWARDED -----------------------
+ *
+ * 19 titles link glStencilMask and 8 each link glStencilFunc/Op/ClearStencil,
+ * which makes this look like a significant gap. It is not, and the device says
+ * so: glconform reports GL_STENCIL_BITS = 0 on real hardware. The VR5's EGL
+ * config has no stencil attachment, so on a real LeapPad2 every one of these
+ * calls is accepted and changes nothing observable — a title that draws a
+ * stencilled shadow gets no shadow on the device either.
+ *
+ * Forwarding them to the host WOULD change the picture, because the host's FBO
+ * could be given a stencil buffer, and then we would render something the
+ * hardware never renders. Matching the device is the goal, so the state is
+ * stored — glGet* can answer honestly — and nothing crosses the wire.
+ *
+ * If a title ever turns out to depend on real stencilling, the fix is to add a
+ * stencil attachment in make_target() and start forwarding; this comment is the
+ * record of why that was not done speculatively.
+ */
+static GLenum g_stencil_func = GL_ALWAYS;
+static GLint  g_stencil_ref;
+static GLuint g_stencil_valuemask = 0xFFFFFFFFu, g_stencil_writemask = 0xFFFFFFFFu;
+static GLenum g_stencil_fail = 0x1E00, g_stencil_zfail = 0x1E00, g_stencil_zpass = 0x1E00;
+static GLint  g_stencil_clear;
+
+void glStencilFunc(GLenum func, GLint ref, GLuint mask)
+{ tr2("glStencilFunc func/ref", (int)func, ref);
+  g_stencil_func = func; g_stencil_ref = ref; g_stencil_valuemask = mask; }
+
+void glStencilOp(GLenum sfail, GLenum zfail, GLenum zpass)
+{ tr2("glStencilOp sfail/zfail", (int)sfail, (int)zfail);
+  g_stencil_fail = sfail; g_stencil_zfail = zfail; g_stencil_zpass = zpass; }
+
+void glStencilMask(GLuint mask)
+{ g_stencil_writemask = mask; }
+
+void glClearStencil(GLint s)
+{ g_stencil_clear = s; }
+
+/* ---- ordering: honest no-ops -------------------------------------------
+ *
+ * There is nothing to flush. In software mode the rasteriser has already
+ * written the pixels by the time either of these returns; in HLE mode the
+ * command ring is drained by the host and the guest is held at PRESENT until
+ * the frame is replayed, which is a stronger guarantee than glFinish asks for.
+ *
+ * Issuing a real host glFinish here would be actively harmful: it is a full
+ * pipeline stall, and titles call it per frame. */
+void glFlush(void)  { tr2("glFlush", 0, 0); }
+void glFinish(void) { tr2("glFinish", 0, 0); }
+
+/* Advisory by definition — GLES 1.1 §5.2 lets an implementation ignore any
+ * hint. Validated rather than ignored silently, so a bad enum is still an
+ * error the way it is on the device. */
+void glHint(GLenum target, GLenum mode)
+{
+	tr2("glHint target/mode", (int)target, (int)mode);
+	switch (target) {
+	case 0x0C50: /* PERSPECTIVE_CORRECTION */ case 0x0C51: /* POINT_SMOOTH */
+	case 0x0C52: /* LINE_SMOOTH */            case 0x0C53: /* POLYGON_SMOOTH */
+	case 0x0C54: /* FOG */                    case 0x8192: /* GENERATE_MIPMAP */
+		break;
+	default: tad_gl_error(TAD_GL_INVALID_ENUM, "glHint"); return;
+	}
+	if (mode != 0x1100 /* DONT_CARE */ && mode != 0x1101 /* FASTEST */ &&
+	    mode != 0x1102 /* NICEST */)
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glHint");
+}
+
+void glTexParameterf(GLenum t, GLenum p, GLfloat v)
+{ tr2("glTexParameterf pname/val", (int)p, (int)v); tex_param_set(t, p, (GLint)v); }
+
+void glTexParameteriv(GLenum t, GLenum p, const GLint *v)
+{ if (v) { tr2("glTexParameteriv pname", (int)p, 0); tex_param_set(t, p, v[0]); } }
+
+void glTexParameterfv(GLenum t, GLenum p, const GLfloat *v)
+{ if (v) { tr2("glTexParameterfv pname", (int)p, 0);
+           tex_param_set(t, p, (GLint)v[0]); } }
+
+void glTexParameterxv(GLenum t, GLenum p, const GLfixed *v)
+{ if (v) { tr2("glTexParameterxv pname", (int)p, 0); tex_param_set(t, p, v[0]); } }
+
+void glGetTexParameteriv(GLenum t, GLenum p, GLint *v)
+{
+	tr2("glGetTexParameteriv pname", (int)p, 0);
+	if (!v) return;
+	if (!tex_param_get(t, p, v)) tad_gl_error(TAD_GL_INVALID_ENUM,
+	                                          "glGetTexParameteriv");
+}
+
+void glGetTexParameterfv(GLenum t, GLenum p, GLfloat *v)
+{
+	GLint i = 0;
+	tr2("glGetTexParameterfv pname", (int)p, 0);
+	if (!v) return;
+	if (tex_param_get(t, p, &i)) *v = (GLfloat)i;
+	else tad_gl_error(TAD_GL_INVALID_ENUM, "glGetTexParameterfv");
+}
+
+void glGetTexParameterxv(GLenum t, GLenum p, GLfixed *v)
+{
+	GLint i = 0;
+	tr2("glGetTexParameterxv pname", (int)p, 0);
+	if (!v) return;
+	/* Not scaled: every GLES1 texture parameter is an enum or a boolean, and
+	 * 16.16 of GL_LINEAR is not GL_LINEAR. */
+	if (tex_param_get(t, p, &i)) *v = (GLfixed)i;
+	else tad_gl_error(TAD_GL_INVALID_ENUM, "glGetTexParameterxv");
 }
 
 void glDeleteTextures(GLsizei n, const GLuint *names)
@@ -2610,6 +3272,7 @@ void glGenTextures(GLsizei n, GLuint *o)
 			g_tex_gen_fail++;
 			warn2("glGenTextures EXHAUSTED (MAX_TEXS), fails so far",
 			      MAX_TEXS, g_tex_gen_fail);
+			tad_gl_error(TAD_GL_OUT_OF_MEMORY, "glGenTextures");
 		}
 	}
 }
@@ -2638,11 +3301,25 @@ void glGenBuffers(GLsizei n, GLuint *o)
 			g_buf_gen_fail++;
 			warn2("glGenBuffers EXHAUSTED (MAX_BUFS), fails so far",
 			      MAX_BUFS, g_buf_gen_fail);
+			tad_gl_error(TAD_GL_OUT_OF_MEMORY, "glGenBuffers");
 		}
 	}
 }
 
-GLenum glGetError(void) { return 0; }              /* GL_NO_ERROR */
+/* THIS USED TO BE `return 0;` — a hardcoded "everything is fine".
+ *
+ * Not a stale value, a lie, and the most expensive line in the file: a title
+ * that checks its own GL usage was told it had none to fix, and so was every
+ * test we might have written against this shim. The differential harness in
+ * tools/glconform exists to compare us against real hardware, and until this
+ * tracked real state every error assertion it made passed on our side by
+ * construction.
+ *
+ * The state itself lives in tadpole_gles_debug.c so the stubs and the core
+ * share one copy. Sticky-first-error semantics are GLES 1.1 §2.5: the FIRST
+ * error since the last read is the one reported, because that is the one
+ * nearest the cause. */
+GLenum glGetError(void) { return tad_gl_error_take(); }
 const u8 *glGetString(GLenum n) { (void)n; return (const u8 *)"Tadpole GLES 1.1"; }
 /* ---- STATE QUERIES -------------------------------------------------------
  *
@@ -2676,20 +3353,40 @@ const u8 *glGetString(GLenum n) { (void)n; return (const u8 *)"Tadpole GLES 1.1"
 #define GL_ALPHA_BITS                    0x0D55
 #define GL_MAX_MODELVIEW_STACK_DEPTH     0x0D36
 #define GL_MAX_PROJECTION_STACK_DEPTH    0x0D38
+#define GL_MAX_TEXTURE_STACK_DEPTH       0x0D39
 #define GL_MAX_LIGHTS                    0x0D31
+#define GL_MAX_CLIP_PLANES               0x0D32
+#define GL_SUBPIXEL_BITS                 0x0D50
+#define GL_STENCIL_BITS                  0x0D57
 #define GL_NORMAL_ARRAY                  0x8075
 #define GL_CULL_FACE                     0x0B44
 
+/* EVERY CONSTANT BELOW WAS READ OFF THE DEVICE, not chosen to look plausible.
+ * tools/glconform's limit.* tests query all of them through the same binary on
+ * both sides, so this table can be re-derived rather than trusted:
+ *
+ *     ./tools/glconform/run-hw.py 192.168.0.111
+ *     grep '^RESULT limit\.' tools/glconform/hw.log
+ *
+ * Three were wrong before that run and none of them looked wrong: 1024 for
+ * MAX_TEXTURE_SIZE against the device's 4096, 16 for both stack depths against
+ * 32, and MAX_TEXTURE_UNITS answered from our own array size (4) rather than
+ * the two units the hardware actually has. A limit reported too SMALL is the
+ * dangerous direction — a title that respects it produces different geometry
+ * here than on the device, and nothing raises an error to say so. */
 void glGetIntegerv(GLenum p, GLint *v)
 {
 	if (!v) return;
 	switch (p) {
-	case GL_MAX_TEXTURE_SIZE:             *v = 1024; break;
-	case GL_MAX_TEXTURE_UNITS:            *v = MAX_TEXUNITS; break;
+	case GL_MAX_TEXTURE_SIZE:             *v = 4096; break;
+	/* Our arrays hold MAX_TEXUNITS (4); the DEVICE has 2, and that is the
+	 * number a title is entitled to act on. Spare capacity on our side is
+	 * harmless, advertising it is not. */
+	case GL_MAX_TEXTURE_UNITS:            *v = 2; break;
 	case GL_TEXTURE_BINDING_2D:           *v = (GLint)g_bound_tex; break;
 	case GL_ARRAY_BUFFER_BINDING:         *v = (GLint)g_bound_array; break;
 	case GL_ELEMENT_ARRAY_BUFFER_BINDING: *v = (GLint)g_bound_elem; break;
-	case GL_MAX_MODELVIEW_STACK_DEPTH:    *v = 16; break;
+	case GL_MAX_MODELVIEW_STACK_DEPTH:    *v = MV_STACK_DEPTH; break;
 	/* SKINNING CAPABILITIES. Unanswered, these fell to the default below and
 	 * reported ZERO — telling a title that no palette matrices and no bones per
 	 * vertex exist. A model that asks before setting up skinning is then
@@ -2698,9 +3395,19 @@ void glGetIntegerv(GLenum p, GLint *v)
 	 * feature has zero capacity" and silently disables what depended on it. */
 	case GL_MAX_PALETTE_MATRICES_OES:     *v = MAX_PALETTE; break;
 	case GL_MAX_VERTEX_UNITS_OES:         *v = 4; break;
-	case GL_MAX_PROJECTION_STACK_DEPTH:   *v = 16; break;
+	case GL_MAX_PROJECTION_STACK_DEPTH:   *v = PROJ_STACK_DEPTH; break;
+	case GL_MAX_TEXTURE_STACK_DEPTH:      *v = TEXM_STACK_DEPTH; break;
 	case GL_MAX_LIGHTS:                   *v = 8; break;
+	/* ONE. Not six, which is the GLES 1.1 minimum and the number every
+	 * reference implementation offers — the VR5 gives a single user clip
+	 * plane, so a title using two would silently lose one on hardware. */
+	case GL_MAX_CLIP_PLANES:              *v = 1; break;
+	case GL_SUBPIXEL_BITS:                *v = 4; break;
 	case GL_DEPTH_BITS:                   *v = 16; break;
+	/* Zero on the device: its EGL config has no stencil attachment at all,
+	 * which is why the stencil entry points can stay unimplemented far longer
+	 * than their count in the stub list suggests. */
+	case GL_STENCIL_BITS:                 *v = 0; break;
 	case GL_RED_BITS: case GL_GREEN_BITS:
 	case GL_BLUE_BITS: case GL_ALPHA_BITS: *v = 8; break;
 	case GL_VIEWPORT:
@@ -2708,15 +3415,171 @@ void glGetIntegerv(GLenum p, GLint *v)
 		v[0] = g_vx; v[1] = g_vy; v[2] = g_vw; v[3] = g_vh;
 		break;
 	default:
-		/* Say so once. A silent 0 here is indistinguishable from a real answer
-		 * and disables features in the caller without explanation. */
+		/* SAY SO, AND RAISE THE ERROR THE DEVICE RAISES.
+		 *
+		 * A silent 0 is indistinguishable from a real answer and disables
+		 * features in the caller without explanation. Hardware rejects a pname
+		 * it does not know with GL_INVALID_ENUM — measured, via glconform's
+		 * limit.MAX_ELEMENTS_VERTICES, which is a GLES2 enum the VR5 correctly
+		 * refuses — so match that rather than inventing a value.
+		 *
+		 * The 0 is still written, deliberately. This branch cannot tell an enum
+		 * that is invalid everywhere from a perfectly valid GLES1 query we have
+		 * not implemented yet, and for the second kind a caller that ignores the
+		 * error should read a defined value rather than its own stack. The
+		 * warning is what distinguishes them: anything showing up here that a
+		 * real title asks for belongs in the switch above.
+		 *
+		 * Reported per distinct pname, not once ever. A single "said" flag meant
+		 * the first unhandled query hid every one after it, so the log named one
+		 * pname and implied it was the only one. */
 		tr2("glGetIntegerv UNHANDLED pname", (int)p, 0);
-		{ static int said; if (!said) { said = 1;
-			warn2("glGetIntegerv UNHANDLED pname (answering 0 — this can"
-			      " disable a feature in the title)", (int)p, 0); } }
+		{
+			static GLenum said[16];
+			static unsigned n_said;
+			unsigned i;
+			for (i = 0; i < n_said; i++)
+				if (said[i] == p) break;
+			if (i == n_said) {
+				if (n_said < 16) said[n_said++] = p;
+				warn2("glGetIntegerv UNHANDLED pname (answering 0 and raising"
+				      " GL_INVALID_ENUM — implement it if a title needs it)",
+				      (int)p, 0);
+			}
+		}
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glGetIntegerv");
 		*v = 0;
 		break;
 	}
+}
+
+/* ---- glGetFloatv / glGetFixedv / glGetBooleanv ---------------------------
+ *
+ * ALL THREE WERE STUBS, AND CLAM PRIX CALLS glGetFixedv. That is not a guess:
+ * a full headless run of the title under the new stub instrumentation reported
+ * exactly two unimplemented entry points, and this was one of them. A stub
+ * getter does not return a wrong answer — it never touches the caller's buffer
+ * at all, so the title reads whatever was already on its own stack and carries
+ * on. Every one of those reads was silent before this.
+ *
+ * ONE SOURCE OF TRUTH, THREE TYPES. GLES 1.1 §6.1.2 defines the glGet variants
+ * as the same state converted on the way out, so state_floats() answers once and
+ * the three entry points differ only in how they write it down. Writing three
+ * separate switches is how the fixed-point and float paths drift apart, which
+ * is a bug this project has already paid for once — see the note on
+ * glLoadMatrixx/glLoadMatrixf being genuinely different functions on the device.
+ *
+ * Anything state_floats() does not know falls through to glGetIntegerv, which
+ * owns the integer-typed state and raises GL_INVALID_ENUM for a pname nobody
+ * knows. That keeps the "which queries do titles actually make" warning in one
+ * place instead of three.
+ */
+#define GL_CURRENT_COLOR         0x0B00
+#define GL_POINT_SIZE            0x0B11
+#define GL_LINE_WIDTH            0x0B21
+#define GL_ALPHA_TEST_REF        0x0BC2
+#define GL_DEPTH_RANGE           0x0B70
+#define GL_DEPTH_CLEAR_VALUE     0x0B73
+#define GL_COLOR_CLEAR_VALUE     0x0C22
+#define GL_MODELVIEW_MATRIX      0x0BA6
+#define GL_PROJECTION_MATRIX     0x0BA7
+#define GL_TEXTURE_MATRIX        0x0BA8
+#define GL_POLYGON_OFFSET_UNITS  0x2A00
+#define GL_POLYGON_OFFSET_FACTOR 0x8038
+
+GLboolean glIsEnabled(GLenum c);      /* defined just below; used by glGetBooleanv */
+
+/* Returns how many components were written, 0 if this pname is not float-typed
+ * state we track. `out` must have room for 16. */
+static int state_floats(GLenum p, float *out)
+{
+	int i;
+	mat_init_once();
+	switch (p) {
+	case GL_MODELVIEW_MATRIX:
+		for (i = 0; i < 16; i++) out[i] = g_mv[g_mv_sp].m[i];
+		return 16;
+	case GL_PROJECTION_MATRIX:
+		for (i = 0; i < 16; i++) out[i] = g_proj[g_proj_sp].m[i];
+		return 16;
+	case GL_TEXTURE_MATRIX:
+		for (i = 0; i < 16; i++) out[i] = g_texm[g_texm_sp].m[i];
+		return 16;
+	case GL_CURRENT_COLOR:
+		out[0] = (float)((g_cur_color >> 16) & 0xFF) / 255.0f;
+		out[1] = (float)((g_cur_color >>  8) & 0xFF) / 255.0f;
+		out[2] = (float)( g_cur_color        & 0xFF) / 255.0f;
+		out[3] = (float)((g_cur_color >> 24) & 0xFF) / 255.0f;
+		return 4;
+	case GL_COLOR_CLEAR_VALUE:
+		out[0] = (float)((g_clear_argb >> 16) & 0xFF) / 255.0f;
+		out[1] = (float)((g_clear_argb >>  8) & 0xFF) / 255.0f;
+		out[2] = (float)( g_clear_argb        & 0xFF) / 255.0f;
+		out[3] = (float)((g_clear_argb >> 24) & 0xFF) / 255.0f;
+		return 4;
+	case GL_DEPTH_CLEAR_VALUE: out[0] = g_depth_clear; return 1;
+	case GL_ALPHA_TEST_REF:    out[0] = (float)g_alpha_ref / 255.0f; return 1;
+	/* Fixed at the GL defaults: the entry points that would change them
+	 * (glDepthRangef, glPointSize, glLineWidth, glPolygonOffset) are still
+	 * stubs, so answering the default is the honest answer — and when one of
+	 * them lands, this is where its state gets read back from. */
+	case GL_DEPTH_RANGE:       out[0] = 0.0f; out[1] = 1.0f; return 2;
+	case GL_POINT_SIZE:        out[0] = 1.0f; return 1;
+	case GL_LINE_WIDTH:        out[0] = 1.0f; return 1;
+	case GL_POLYGON_OFFSET_UNITS:
+	case GL_POLYGON_OFFSET_FACTOR: out[0] = 0.0f; return 1;
+	default: return 0;
+	}
+}
+
+void glGetFloatv(GLenum p, GLfloat *v)
+{
+	float f[16];
+	int n, i;
+	if (!v) return;
+	tr2("glGetFloatv pname", (int)p, 0);
+	n = state_floats(p, f);
+	if (n) { for (i = 0; i < n; i++) v[i] = f[i]; return; }
+	{ GLint iv[4] = { 0, 0, 0, 0 };
+	  glGetIntegerv(p, iv);
+	  for (i = 0; i < 4; i++) v[i] = (GLfloat)iv[i]; }
+}
+
+void glGetFixedv(GLenum p, GLfixed *v)
+{
+	float f[16];
+	int n, i;
+	if (!v) return;
+	tr2("glGetFixedv pname", (int)p, 0);
+	n = state_floats(p, f);
+	if (n) { for (i = 0; i < n; i++) v[i] = f2fx(f[i]); return; }
+	/* INTEGER-TYPED STATE IS NOT SCALED. GLES 1.1 §6.1.2: a value that is
+	 * already an integer — a limit, a binding, a bit count — is returned as-is
+	 * by glGetFixedv, NOT converted to 16.16. Multiplying MAX_TEXTURE_SIZE by
+	 * 65536 would hand the caller 268435456. */
+	{ GLint iv[4] = { 0, 0, 0, 0 };
+	  glGetIntegerv(p, iv);
+	  for (i = 0; i < 4; i++) v[i] = (GLfixed)iv[i]; }
+}
+
+void glGetBooleanv(GLenum p, GLboolean *v)
+{
+	float f[16];
+	int n, i;
+	if (!v) return;
+	tr2("glGetBooleanv pname", (int)p, 0);
+	n = state_floats(p, f);
+	if (n) { for (i = 0; i < n; i++) v[i] = f[i] != 0.0f; return; }
+	/* A CAPABILITY reads through glIsEnabled, which already answers honestly
+	 * from the state we track — and answering "not enabled" to everything is
+	 * the specific bug that covered the credits screen with a white quad.
+	 * cap_valid() is what keeps this from swallowing every other pname: without
+	 * it, glGetBooleanv(GL_MAX_LIGHTS) would take the capability path and log a
+	 * spurious "UNHANDLED cap" for something that was never a cap. */
+	if (cap_valid(p)) { v[0] = glIsEnabled(p) ? 1 : 0; return; }
+	{ GLint iv[4] = { 0, 0, 0, 0 };
+	  glGetIntegerv(p, iv);
+	  for (i = 0; i < 4; i++) v[i] = iv[i] != 0; }
 }
 
 GLboolean glIsEnabled(GLenum c)
@@ -2814,14 +3677,29 @@ void tad_gl_context_reset(void)
 	g_bound_tex   = 0;
 	g_bound_array = 0;
 	g_bound_elem  = 0;
-	g_vtx.on  = g_col.on  = g_tex.on  = 0;
-	g_vtx.ptr = g_col.ptr = g_tex.ptr = 0;
-	g_vtx.buf = g_col.buf = g_tex.buf = 0;
+	g_vtx.on  = g_col.on  = g_tex.on  = g_nrm.on  = 0;
+	g_vtx.ptr = g_col.ptr = g_tex.ptr = g_nrm.ptr = 0;
+	g_vtx.buf = g_col.buf = g_tex.buf = g_nrm.buf = 0;
 	g_cur_color = 0xFFFFFFFFu;
 	g_tex_gen_fail = 0;
+	/* TexEnv is per-unit, not per-object, so clearing the texture table does
+	 * not touch it — the next title would inherit the previous one's combiner
+	 * and env colour. Texture sampler state needs nothing here: tex_slot()
+	 * re-applies the defaults when it reuses a freed slot. */
+	g_texenv_init = 0;
+	g_tex_default_init = 0;
+	g_tex_env = GL_MODULATE;
 
 	/* Drop the host's mirrors too, then force a fresh sync — otherwise the
 	 * host keeps the old title's images under names the next one reuses. */
 	if (hle_on()) hle_reset();
 	g_hle_synced = 0;
+
+	/* SAY WHAT THIS TITLE ASKED FOR AND DID NOT GET, then start a fresh tally.
+	 * This is the natural boundary: AppManager dlopen()s a title, runs it and
+	 * unloads it without the process ever exiting, so a session-long table would
+	 * merge a dozen titles into one row set and lose the only thing that makes
+	 * it actionable — WHICH title needs which entry point. */
+	tad_gl_report("title unloaded");
+	tad_gl_report_reset();
 }

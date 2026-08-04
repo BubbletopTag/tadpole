@@ -52,7 +52,7 @@ ASOUND_OUT := $(SHIMLIBS)/libasound.so.2
 
 EGL_SRC   := shim/tadpole_egl.c
 GLES_SRC  := shim/tadpole_gles_core.c shim/tadpole_gles_stubs.c \
-             shim/tadpole_gles_hle.c
+             shim/tadpole_gles_hle.c shim/tadpole_gles_debug.c
 SHIMLIBS_GL := ../runtime/shimlibs-gl
 # CHAIN, DO NOT REPLACE. The stock libGLESv1_CM.so.1.1 is a 1.9 MB blob that
 # exports 697 symbols, only 180 of which are GL — it also carries Flash Lite
@@ -99,13 +99,45 @@ $(EGL_OUT): $(EGL_SRC) $(GLES_OUT)
 		-L$(SHIMLIBS_GL) -l:libGLESv1_CM.so $(GUESTLIBS)/libc.so.0
 	@echo "built $@"
 
-$(GLES_OUT): $(GLES_SRC) shim/tadpole_glcmd.h
+$(GLES_OUT): $(GLES_SRC) shim/tadpole_glcmd.h shim/tadpole_gles_debug.h
 	@mkdir -p $(SHIMLIBS_GL)
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
 		-fuse-ld=lld -Wl,-soname,libGLESv1_CM.so.1 -o $@ $(GLES_SRC) \
 		$(GUESTLIBS)/libc.so.0
 	@echo "built $@"
+	@$(MAKE) --no-print-directory check-undefined LIB=$@
+
+# NOTHING MAY BE LEFT UNDEFINED EXCEPT libc AND THE ARM EABI HELPERS.
+#
+# -shared does not object to an undefined symbol, so a function that is declared
+# and called but never DEFINED links perfectly and then fails in the guest — at
+# LOAD time, killing the title outright, with a message about our library rather
+# than about the missing helper:
+#     AppManager: can't resolve symbol 'tad_gl_fatal'
+# That is the same failure the whole gen-gl-stubs.py machinery exists to prevent
+# for GL entry points, and it applies just as much to our own internals. This
+# caught exactly that: a rewrite dropped tad_gl_fatal's body while leaving two
+# calls to it, and the build said nothing.
+#
+# --no-undefined cannot be used instead: __aeabi_uidiv and __aeabi_idivmod come
+# from the guest's libgcc at runtime and are legitimately unresolved here.
+.PHONY: check-undefined
+check-undefined:
+	@readelf --dyn-syms -W $(LIB) | awk '$$7=="UND"{print $$8}' \
+	  | sed 's/@.*//' | sort -u > /tmp/tad-und.$$$$; \
+	readelf --dyn-syms -W $(GUESTLIBS)/libc.so.0 \
+	  | awk '$$7!="UND" && $$8!=""{print $$8}' | sed 's/@.*//' | sort -u \
+	  > /tmp/tad-libc.$$$$; \
+	bad=$$(comm -23 /tmp/tad-und.$$$$ /tmp/tad-libc.$$$$ | grep -v '^__aeabi_'); \
+	rm -f /tmp/tad-und.$$$$ /tmp/tad-libc.$$$$; \
+	if [ -n "$$bad" ]; then \
+	  echo "ERROR: $(LIB) references symbols nothing provides:" >&2; \
+	  echo "$$bad" | sed 's/^/  /' >&2; \
+	  echo "  (the guest loader treats each of these as fatal at load time)" >&2; \
+	  exit 1; \
+	fi
+	@echo "  undefined symbols: libc + __aeabi_* only  OK"
 
 # THE ALIAS NAMES ARE A SEPARATE, ALWAYS-CHECKED TARGET.
 #

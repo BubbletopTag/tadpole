@@ -120,6 +120,25 @@ enum tadgl_op {
 	 * Appended last so existing opcode numbers are unchanged. */
 	TADGL_RESET,
 
+	/* GL_TEXTURE_ENV_COLOR — four floats, which TADGL_TEXENV cannot carry: its
+	 * payload is a single i32 because every other TexEnv parameter is an enum.
+	 * Only reached by glTexEnvfv/glTexEnvxv with that one pname. Appended after
+	 * TADGL_RESET for the same reason RESET was appended after everything else:
+	 * existing opcode numbers must not move, or a viewer and a shim built at
+	 * different times disagree about what every packet means. */
+	TADGL_TEXENVCOLOR,      /* float r,g,b,a */
+
+	/* ---- per-fragment and per-primitive state -------------------------
+	 * All appended, never inserted — see the note on TADGL_RESET. Each of
+	 * these was a no-op stub the installed titles import in numbers:
+	 * glScissor 23 titles, glPolygonOffsetx 20, glPointSizex 19,
+	 * glLineWidthx 32, glColorMask 12 (tools/gl-demand.py). */
+	TADGL_SCISSOR,          /* i32 x, y, w, h */
+	TADGL_COLORMASK,        /* u32 r, g, b, a  (each 0 or 1) */
+	TADGL_LINEWIDTH,        /* float w */
+	TADGL_POINTSIZE,        /* float s */
+	TADGL_POLYGONOFFSET,    /* float factor, units */
+
 	TADGL_OP_COUNT
 };
 
