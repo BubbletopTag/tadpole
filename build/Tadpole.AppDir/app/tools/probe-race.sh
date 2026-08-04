@@ -182,6 +182,23 @@ while read -r verb rest; do
     esac
     n=$((n+1))
     case "$verb" in
+        taptil) # tap until a marker appears: X Y REGEX
+               set -- $rest
+               _x="$1"; _y="$2"; shift 2; _re="$*"
+               echo "  [$n] taptil $_x $_y until /$_re/"
+               # A SINGLE TAP IS NOT RELIABLE. Whether the Connect nag appears
+               # shifts the picker's timing by seconds, so a tap can land during
+               # an animation and be swallowed — the run then continues past a
+               # launch that never happened and every later step is nonsense.
+               for _try in 1 2 3 4 5; do
+                   "$HERE/tap.py" "$_x" "$_y" >/dev/null 2>&1
+                   for _i in $(seq 1 12); do
+                       sleep 1
+                       grep -qaE "$_re" "$LOG" && break 2
+                   done
+                   echo "      retry $_try"
+               done
+               shoot "taptil-$_x-$_y" ;;
         tap)   set -- $rest
                echo "  [$n] tap $1 $2"
                "$HERE/tap.py" "$1" "$2" >/dev/null 2>&1

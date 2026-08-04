@@ -1982,6 +1982,7 @@ static u32 hle_max_index(const void *indices, GLsizei count, GLenum type)
 static mat4  g_palette[MAX_PALETTE];
 static u32   g_cur_palette;
 static int   g_palette_on;
+static u32   g_palette_loads;   /* did the app ever fill the palette? */
 
 void glMatrixIndexPointerOES(GLint size, GLenum type, GLsizei stride, const void *p)
 { tr2("glMatrixIndexPointerOES size/type", size, (int)type);
@@ -2002,7 +2003,8 @@ void glCurrentPaletteMatrixOES(GLuint idx)
  * repeats for each bone. */
 void glLoadPaletteFromModelViewMatrixOES(void)
 { tr2("glLoadPaletteFromModelViewMatrixOES", (int)g_cur_palette, 0);
-  if (g_cur_palette < MAX_PALETTE) g_palette[g_cur_palette] = g_mv[g_mv_sp]; }
+  if (g_cur_palette < MAX_PALETTE) { g_palette[g_cur_palette] = g_mv[g_mv_sp];
+      g_palette_loads++; } }
 
 /* Bone INDICES must not be normalised. fetch() divides GL_UNSIGNED_BYTE by 255
  * because that is right for colours; an index of 7 would arrive as 0.027 and
@@ -2054,6 +2056,7 @@ static const float *skin_vertices(u32 nverts)
 	{ static int said; if (!said) { said = 1;
 		warn2("SKINNING a draw: bones, verts",
 		      g_midx.size < g_wgt.size ? g_midx.size : g_wgt.size, (int)nverts); } }
+
 
 	if (g_skin_cap < nverts * 3) {
 		if (g_skin) free(g_skin);

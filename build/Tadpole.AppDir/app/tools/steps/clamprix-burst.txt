@@ -6,9 +6,8 @@
 #
 # NOTE: for `wait`, the whole rest of the line is the regex — no quotes.
 
-tap 160 130
+taptil 160 130 LoadNewApp path = /LF/Bulk/ProgramFiles/LST3-0x00180025
 waitsecs 120
-wait LoadNewApp path = /LF/Bulk/ProgramFiles/LST3-0x00180025
 wait CGameViewFrame::Enter
 sleep 20
 key a
