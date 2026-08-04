@@ -8,6 +8,7 @@ runtime/libs/
 runtime/shimlibs/
 runtime/shimlibs-z/
 reference/device-capture/
+reference/
 
 # Build products
 tadpole/viewer/tadpole-view
@@ -18,3 +19,7 @@ runtime/tone
 *.raw
 *.core
 shots/*.wav
+
+# erase-firmware.sh moves the old install here rather than deleting it.
+# Hundreds of megabytes of recovered firmware — never commit it.
+.erased-*/
