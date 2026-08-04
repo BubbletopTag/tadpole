@@ -170,6 +170,55 @@ static const char *tadgl_opname(unsigned int op)
 	return op < TADGL_OP_COUNT ? g_opnames[op] : "?";
 }
 
+/* ---- the scissor box has TWO owners, and that is the whole problem --------
+ *
+ * The layer window comes first. GL renders into /dev/fb1, which is one plane of
+ * a three-layer compositor, and the guest tells us the rectangle that plane
+ * occupies. Everything outside it must stay untouched or the 3D layer paints
+ * over the 2D frame the title drew around it. TADGL_VIEWPORT has always
+ * enforced that with glScissor — the scissor box was never the title's, it was
+ * ours.
+ *
+ * Then glScissor stopped being a stub. The title's own scissor box started
+ * arriving and OVERWROTE the layer clip, in the guest's top-left coordinates
+ * rather than GL's bottom-left, and Pet Pals 2's 3D plane moved. Two rectangles
+ * with one register.
+ *
+ * So compose them instead: the effective box is the layer window, narrowed by
+ * the title's box when the title has scissoring on. The intersection is done in
+ * the guest's top-left space, where both rectangles are expressed, and flipped
+ * once at the end.
+ *
+ * GL_SCISSOR_TEST IS THEREFORE ALWAYS ON HERE, and glEnable/glDisable of it are
+ * consumed rather than forwarded. A title that disables scissoring is asking to
+ * stop clipping to ITS box; it is not — and has no way of knowing it could be —
+ * asking to escape the layer window. Forwarding the disable is what let a title
+ * paint outside its plane, which is the "renders in the wrong position" that
+ * Mr. Pencil's video tutorials and Digging for Dinosaurs have always shown.
+ */
+static int g_sc_on;            /* the TITLE's GL_SCISSOR_TEST */
+static int g_sc[4];            /* the TITLE's box, guest top-left coords */
+
+static void apply_scissor(void)
+{
+	int x = g_vx, y = g_vy, w = g_vw, h = g_vh;
+
+	if (g_sc_on) {
+		int x0 = g_sc[0] > x ? g_sc[0] : x;
+		int y0 = g_sc[1] > y ? g_sc[1] : y;
+		int x1 = g_sc[0] + g_sc[2];
+		int y1 = g_sc[1] + g_sc[3];
+		if (x1 > x + w) x1 = x + w;
+		if (y1 > y + h) y1 = y + h;
+		x = x0; y = y0;
+		w = x1 - x0; h = y1 - y0;
+		if (w < 0) w = 0;
+		if (h < 0) h = 0;   /* disjoint: draw nothing, which is correct */
+	}
+	glScissor(x, g_h - y - h, w, h);
+	glEnable(GL_SCISSOR_TEST);
+}
+
 static void check_gl(const char *where)
 {
 	GLenum e = glGetError();
@@ -610,9 +659,8 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			int v[4]; ring_get(v, 16);
 			/* The guest's y is measured from the top; GL's is from the bottom. */
 			glViewport(v[0], g_h - v[1] - v[3], v[2], v[3]);
-			glScissor(v[0], g_h - v[1] - v[3], v[2], v[3]);
-			glEnable(GL_SCISSOR_TEST);
 			g_vx = v[0]; g_vy = v[1]; g_vw = v[2]; g_vh = v[3];
+			apply_scissor();
 			break;
 		}
 		/* MATCH THE REFERENCE RENDERER, do not out-implement it.
@@ -660,6 +708,11 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 					        c == 0x0B50 ? "Light" : "Fog");
 				break;
 			}
+			/* CONSUMED, NOT FORWARDED — see apply_scissor(). The host's
+			 * scissor register belongs to the layer window; the title's box
+			 * only narrows it. */
+			if (c == 0x0C11 /* GL_SCISSOR_TEST */) {
+				g_sc_on = 1; apply_scissor(); break; }
 			if (c == 0x0DE1 /* GL_TEXTURE_2D */) g_tex_enabled = 1;
 			glEnable(c);
 			break;
@@ -667,6 +720,8 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		case TADGL_DISABLE: {
 			unsigned int c;
 			ring_get(&c, 4);
+			if (c == 0x0C11 /* GL_SCISSOR_TEST */) {
+				g_sc_on = 0; apply_scissor(); break; }
 			if (c == 0x0DE1 /* GL_TEXTURE_2D */) g_tex_enabled = 0;
 			glDisable(c);
 			break;
@@ -719,7 +774,8 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		case TADGL_SCISSOR: {
 			int v[4];
 			ring_get(v, 16);
-			glScissor(v[0], v[1], (GLsizei)v[2], (GLsizei)v[3]);
+			g_sc[0] = v[0]; g_sc[1] = v[1]; g_sc[2] = v[2]; g_sc[3] = v[3];
+			apply_scissor();
 			break;
 		}
 		case TADGL_COLORMASK: {
@@ -952,6 +1008,12 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			}
 			g_bound_name = 0;
 			g_tex_enabled = 0;
+			/* The next title starts with no scissor box of its own. Leaving
+			 * the previous one set would clip the new title to a rectangle it
+			 * never asked for — the same class of cross-title leak as the
+			 * texture mirrors above, and just as hard to attribute. */
+			g_sc_on = 0;
+			apply_scissor();
 			if (g_verbose)
 				fprintf(stderr, "hle: context reset — mirrors dropped\n");
 			break;
