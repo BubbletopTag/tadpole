@@ -1,0 +1,209 @@
+#!/bin/bash
+# Tadpole — drive a title to a chosen screen and capture what happens.
+#
+#   ./tools/probe-race.sh steps/clamprix-drivingschool.txt [outdir]
+#   ./tools/probe-race.sh --calibrate            boot, sign in, shoot, stop
+#
+# WHY THIS EXISTS. Reaching Clam Prix's Driving School by hand is a boot, a
+# sign-in, a nag to dismiss, a tile tap and four menu taps — two minutes of
+# clicking before a single frame of 3D exists, repeated for every one-line
+# change to the GL shim. Worse, the interesting evidence (`hle:` diagnostics)
+# goes to STDERR from the VIEWER process, so it is easy to run the whole thing
+# and end up with a log that does not contain the one thing being looked for.
+#
+# THE STEP FILE. One instruction per line, so a route can be edited without
+# touching this script:
+#
+#     tap X Y             touch the framebuffer point (X,Y), 0.8s hold
+#     wait REGEX [SECS]   wait for REGEX in the log (default 60s)
+#     sleep SECS          unconditional pause
+#     shot NAME           write NAME.png from the shared framebuffer
+#     burst -n N -i SECS  sample rapidly, report how much frames differ
+#     key NAME            send a button (a, b, l, r, home, back)
+#
+# Blank lines and # comments are ignored. Every step also gets an automatic
+# screenshot, numbered, because a route that goes wrong is only debuggable if
+# you can see WHERE it went wrong.
+#
+# TAP COORDINATES ARE FRAMEBUFFER COORDINATES, not window coordinates: taps go
+# straight into the shim's event FIFO via tap.py, bypassing the viewer's window
+# mapping entirely. The panel is 480x272 and portrait, so on-screen text in a
+# Leapster title reads sideways.
+
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJ="$(dirname "$HERE")"
+# Which INSTALL to drive. The project tree has the code but only the stock
+# widgets; the AppImage's data directory has the firmware, the profile and the
+# actual games. TADPOLE_ROOT points the run at whichever has the content, while
+# the helper tools (tap.py, key.py, fbshot.py) still come from this checkout.
+ROOT="${TADPOLE_ROOT:-$PROJ}"
+STEPS="${1:-}"
+OUT="${2:-/tmp/tadpole-race}"
+# A RUNTIME DIR PER RUN. Sharing one between runs means the EXIT trap of a
+# finishing run reaps the guests of a starting one — two consecutive runs then
+# fail in two different ways and it reads as emulator instability rather than
+# as the harness attacking itself.
+export TADPOLE_DIR="${TADPOLE_DIR:-/tmp/tadpole-race-$$}"
+# The whole point is the hle: diagnostics; turning them on here means a capture
+# can never be missing them because someone forgot the variable.
+export TADPOLE_HLE_DEBUG="${TADPOLE_HLE_DEBUG:-1}"
+# HLE IS OPT-IN. Without this the viewer starts, announces "HLE replay on ...",
+# and then sits idle while the guest quietly software-rasterises — a run that
+# looks like it exercised the GPU path and did not. Nothing in the log says so
+# except the ABSENCE of `[hle] encoding to host GPU`.
+export TADPOLE_GL_HLE="${TADPOLE_GL_HLE:-1}"
+
+CALIBRATE=0
+[ "$STEPS" = "--calibrate" ] && { CALIBRATE=1; STEPS=""; }
+
+mkdir -p "$OUT"
+LOG="$OUT/run.log"
+: > "$LOG"
+
+# ---- reaping ---------------------------------------------------------------
+# tadpole.sh execs qemu as a GRANDCHILD, so killing the launcher leaves
+# AppManager and VideoDaemon alive holding the event FIFO. Two readers split the
+# event stream between them and every tap appears to be ignored at random.
+#
+# EXCLUDE OUR OWN ANCESTORS. `pgrep -f "$TADPOLE_DIR"` matches the shell that
+# invoked this script too, and killing a parent kills the pipeline — a run that
+# dies with no output and no explanation.
+is_ancestor() {
+    local p=$$
+    while [ "${p:-0}" -gt 1 ]; do
+        [ "$p" = "$1" ] && return 0
+        p=$(awk '{print $4}' "/proc/$p/stat" 2>/dev/null) || return 1
+    done
+    return 1
+}
+reap() {
+    local pid
+    for pid in $(pgrep -f "TADPOLE_DIR=$TADPOLE_DIR" 2>/dev/null); do
+        is_ancestor "$pid" && continue
+        kill -9 "$pid" 2>/dev/null
+    done
+}
+
+shot_n=0
+shoot() {                      # $1 = label
+    shot_n=$((shot_n+1))
+    local f
+    f="$(printf '%s/%02d-%s.png' "$OUT" "$shot_n" "$1")"
+    "$HERE/fbshot.py" "$f" >/dev/null 2>&1 && echo "    shot $f"
+}
+
+waitfor() {                    # $1 = regex  $2 = seconds
+    local i n="${2:-60}"
+    for i in $(seq 1 "$n"); do
+        grep -qaE "$1" "$LOG" && return 0
+        sleep 1
+    done
+    echo "    TIMEOUT waiting for: $1" >&2
+    return 1
+}
+
+reap
+rm -rf "$TADPOLE_DIR"
+trap 'reap' EXIT INT TERM
+
+echo "==> booting (log: $LOG)"
+# WITH THE VIEWER BY DEFAULT, even though this is an automated run and opens a
+# window. HLE replay happens INSIDE the viewer, so --no-viewer does not merely
+# hide the picture: it silently switches the guest to the software rasteriser
+# and the `hle:` diagnostics this script exists to collect are never produced at
+# all. A headless run is still useful — it isolates whether a fault is in the
+# shared GL core or only in the replay — so TADPOLE_NO_VIEWER=1 asks for it
+# explicitly.
+if [ "${TADPOLE_NO_VIEWER:-0}" = 1 ]; then
+    echo "    (headless: software rasteriser, no hle: diagnostics)"
+    "$ROOT/tadpole.sh" --no-viewer --boot >> "$LOG" 2>&1 &
+else
+    "$ROOT/tadpole.sh" --boot >> "$LOG" 2>&1 &
+fi
+
+waitfor 'onLoadInit\( _level0.mcContent.SignIn_mc \)' 150 || {
+    echo "never reached sign-in — see $LOG" >&2; exit 1; }
+sleep 10
+shoot signin
+
+echo "==> signing in"
+for try in 1 2 3; do
+    "$HERE/tap.py" 355 57 >/dev/null 2>&1
+    for i in $(seq 1 15); do
+        sleep 1
+        grep -qaE 'PushState-+ ConnectNag\.swf|ReplaceTopState-+ HomePicker\.swf' \
+             "$LOG" && break 2
+    done
+done
+
+if grep -qa ConnectNag "$LOG"; then
+    echo "==> dismissing the Connect nag"
+    waitfor 'onLoadInit\( _level0.mcContent.ConnectNag_mc \)' 40
+    sleep 8
+    for try in 1 2 3; do
+        "$HERE/tap.py" 85 228 >/dev/null 2>&1
+        for i in $(seq 1 12); do
+            sleep 1
+            grep -qa 'UIPetLPAD::EnableButtons' "$LOG" && break 2
+        done
+    done
+fi
+
+# PushState is logged long before the movie has pixels, so waiting on it shows a
+# half-drawn screen. The icon load is the last thing the picker does.
+waitfor 'LoadIconImage' 40
+sleep 6
+shoot home
+
+if [ "$CALIBRATE" = 1 ]; then
+    echo
+    echo "Calibration stop. The home screen is in $OUT."
+    echo "Read tile positions off it, then write a step file:"
+    echo "    tap X Y"
+    echo "    wait 'SomeLogMarker'"
+    echo "    shot after-launch"
+    exit 0
+fi
+
+[ -n "$STEPS" ] && [ -f "$STEPS" ] || {
+    echo "usage: $0 <stepfile> [outdir]   (or --calibrate)" >&2; exit 2; }
+
+echo "==> running $STEPS"
+n=0
+waitsecs=90
+# READ THE VERB AND THE WHOLE REMAINDER. Splitting into fixed fields breaks
+# every pattern containing a space — `wait LoadNewApp path = ...` arrived as
+# three fragments and waited for a regex that could never match, then timed out
+# ninety seconds later looking exactly like the guest had hung.
+while read -r verb rest; do
+    case "$verb" in
+        ''|'#'*) continue ;;
+    esac
+    n=$((n+1))
+    case "$verb" in
+        tap)   set -- $rest
+               echo "  [$n] tap $1 $2"
+               "$HERE/tap.py" "$1" "$2" >/dev/null 2>&1
+               sleep 2; shoot "tap-$1-$2" ;;
+        key)   echo "  [$n] key $rest"
+               "$HERE/key.py" $rest >/dev/null 2>&1
+               sleep 2; shoot "key-$(echo "$rest" | tr ' ' '-')" ;;
+        wait)  echo "  [$n] wait /$rest/ (${waitsecs}s)"
+               waitfor "$rest" "$waitsecs" || true
+               shoot "wait" ;;
+        waitsecs) waitsecs="$rest"; echo "  [$n] timeout now ${waitsecs}s" ;;
+        sleep) echo "  [$n] sleep $rest"; sleep "$rest" ;;
+        shot)  echo "  [$n] shot $rest";  shoot "$rest" ;;
+        burst) echo "  [$n] burst $rest"
+               # Standing still, consecutive frames should barely differ. This
+               # is the measurable form of "the textures look like they roll".
+               "$HERE/burst.py" $rest -d "$TADPOLE_DIR" | tee "$OUT/burst-$n.txt" ;;
+        *)     echo "  [$n] unknown verb '$verb'" >&2 ;;
+    esac
+done < "$STEPS"
+
+echo
+echo "==> done. Frames and log in $OUT"
+echo "    hle diagnostics:"
+grep -aE 'hle: (frame|GL error|drawelements)' "$LOG" | tail -12
