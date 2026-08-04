@@ -4417,3 +4417,64 @@ silent:
 `hle_deletetexture()` had existed in the encoder and been declared in the core
 all along. It was simply never called — the same shape of bug as
 `libopengles_lite.so`: the mechanism was built and never wired up.
+
+## NEXT: why the player character does not render
+
+State on stopping: Clam Prix races render — track, banners, kart, perspective,
+culling, texture matrix all correct. The PLAYER character (SpongeBob) is absent.
+Squidward and other AI drivers reportedly DO render, which is the single most
+useful fact available: the CPU skinning path works, so this is an ordinary bug
+in our code and not the missing GL_OES_matrix_palette extension.
+
+### 1. Look at the palette entries the draw ACTUALLY uses  (do this first)
+
+The measurement that produced "the matrix is corrupt" printed `g_palette[0]`
+and `g_palette[1]`. The skinned draw uses bones **3 and 2**. Those are different
+matrices and were never examined. The whole "float bits in a fixed-point entry
+point" line of inquiry rests on entries the character does not reference, and
+may be a red herring end to end.
+
+Print, at the first skinned draw: `g_palette[3]` and `g_palette[2]`, and the
+skinned OUTPUT of vertex 0 beside its input. Input was 0.317, -0.323, 1.449; if
+the output is a similar magnitude the blend is fine and the problem is
+elsewhere, and if it is enormous or zero the matrices are the problem.
+
+### 2. Diff a working character against the broken one
+
+Squidward renders and SpongeBob does not, in the same frame, through the same
+code. Log every skinned draw with vertex count, bone count and the range of
+palette indices touched, then compare. A player-only difference — more bones, a
+higher palette index, a second UV set — falls straight out.
+
+Reaching an AI driver needs a proper race rather than Driving School; the route
+file will need a different menu path.
+
+### 3. Verify the modelview at the moment that matters
+
+`glLoadPaletteFromModelViewMatrixOES` copies `g_mv[g_mv_sp]`. A correct load was
+observed at stack level 0 and the snapshot read level 7. Confirm the app really
+is at depth 7 when it snapshots, by logging push/pop depth around the palette
+loads. If our depth has drifted from the app's — a dropped push past
+STACK_DEPTH, an unbalanced pop — we are copying the wrong matrix and everything
+downstream is noise. STACK_DEPTH is 16 and `g_push_drop`/`g_pop_under` already
+count violations but are never reported; print them.
+
+### What NOT to repeat
+
+* `pgrep -f <pattern>` matches the shell whose command line CONTAINS the
+  pattern. It killed this session's own background jobs twice, silently. Match
+  on a process NAME (`pgrep -x tadpole-view`) or let probe-race.sh do the
+  reaping — it has the ancestor guard.
+* The device's `glLoadMatrixx` and `glLoadMatrixf` are at different addresses,
+  so the driver genuinely converts fixed-point. Do not "fix" our conversion.
+* `glGetIntegerv` capability queries: answered now, and Clam Prix never asks.
+  Ruled out.
+
+### Other open threads, in rough priority order
+
+* `GL error 0x0500 from TEXPARAM` — the last remaining GL error in a race.
+* 108 GL entry points are still no-op stubs. Lighting and fog are the visible
+  ones and are also why the host still filters GL_LIGHTING and GL_FOG.
+* A segfault where tadpole_crash.c did NOT produce a report. A crash handler
+  that silently fails is worse than none; find out why before trusting it.
+* Matrix-palette skinning is implemented but unverified against hardware.
