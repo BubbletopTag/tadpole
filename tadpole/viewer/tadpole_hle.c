@@ -197,13 +197,50 @@ static const char *tadgl_opname(unsigned int op)
  * Mr. Pencil's video tutorials and Digging for Dinosaurs have always shown.
  */
 static int g_sc_on;            /* the TITLE's GL_SCISSOR_TEST */
-static int g_sc[4];            /* the TITLE's box, guest top-left coords */
+static int g_sc[4];            /* the TITLE's box, as it sent it */
+static int g_sc_honour = -1;   /* TADPOLE_GL_SCISSOR — off by default */
+static unsigned int g_sc_logged;
 
+/* THE TITLE'S BOX IS NOT HONOURED BY DEFAULT, AND THAT IS NOT LAZINESS.
+ *
+ * Composing the two rectangles requires knowing what frame the title's box is
+ * expressed in, and we do not:
+ *
+ *   - TADGL_VIEWPORT does not carry the title's glViewport. The guest's
+ *     glViewport is a no-op that only traces; what crosses the wire is the
+ *     LAYER rectangle, read from the compositor state in state.bin, in
+ *     framebuffer coordinates with y from the TOP.
+ *   - The title's glScissor is an ordinary GL call, so its box is in window
+ *     coordinates with y from the BOTTOM, relative to whatever surface the
+ *     title believes it has — and since its glViewport is discarded, we do not
+ *     know what size that is.
+ *
+ * Intersecting them directly moved Pet Pals 2's 3D plane; flipping one of them
+ * moved the error from the top edge to the bottom. Both attempts were guesses,
+ * and guessing is what the rest of this session exists to stop doing.
+ *
+ * So the default is exactly the behaviour that worked: clip to the layer window
+ * and ignore the title's box. TADPOLE_GL_SCISSOR=1 enables the composition, and
+ * TADPOLE_GL_DEBUG=1 prints both rectangles so the mapping can be derived from
+ * real numbers rather than reasoned about. Once a title's box and the layer
+ * rectangle have been seen side by side, this becomes a five-line fix.
+ */
 static void apply_scissor(void)
 {
 	int x = g_vx, y = g_vy, w = g_vw, h = g_vh;
 
-	if (g_sc_on) {
+	if (g_sc_honour < 0)
+		g_sc_honour = getenv("TADPOLE_GL_SCISSOR") != NULL;
+
+	if (g_level >= 1 && g_sc_on && g_sc_logged < 12) {
+		g_sc_logged++;
+		fprintf(stderr, "hle: scissor — layer(top-left) %d,%d %dx%d   title(raw)"
+		        " %d,%d %dx%d   honoured=%d\n",
+		        g_vx, g_vy, g_vw, g_vh,
+		        g_sc[0], g_sc[1], g_sc[2], g_sc[3], g_sc_honour);
+	}
+
+	if (g_sc_honour && g_sc_on) {
 		int x0 = g_sc[0] > x ? g_sc[0] : x;
 		int y0 = g_sc[1] > y ? g_sc[1] : y;
 		int x1 = g_sc[0] + g_sc[2];
