@@ -137,18 +137,24 @@ for try in 1 2 3; do
     done
 done
 
-if grep -qa ConnectNag "$LOG"; then
-    echo "==> dismissing the Connect nag"
-    waitfor 'onLoadInit\( _level0.mcContent.ConnectNag_mc \)' 40
-    sleep 8
-    for try in 1 2 3; do
-        "$HERE/tap.py" 85 228 >/dev/null 2>&1
-        for i in $(seq 1 12); do
-            sleep 1
-            grep -qa 'UIPetLPAD::EnableButtons' "$LOG" && break 2
-        done
-    done
-fi
+# GET TO A DRAWN HOME SCREEN, however many obstacles are in the way.
+#
+# The Connect nag appears on some boots and not others, and waiting on its
+# onLoadInit is unreliable — when that wait timed out the script tapped anyway,
+# every later tap landed on a screen still covered by the nag, and the run
+# failed in a way that looked like the emulator ignoring input. Rather than
+# model the sequence, drive toward the OBSERVABLE END STATE: the picker loading
+# its icons. Tap the nag's dismiss button, check, repeat.
+echo "==> reaching the home screen"
+for attempt in 1 2 3 4 5 6; do
+    grep -qa 'LoadIconImage' "$LOG" && break
+    "$HERE/tap.py" 85 228 >/dev/null 2>&1     # Connect nag: "not now"
+    sleep 4
+    grep -qa 'LoadIconImage' "$LOG" && break
+    "$HERE/tap.py" 355 57 >/dev/null 2>&1     # or still on sign-in
+    sleep 4
+    echo "    attempt $attempt"
+done
 
 # PushState is logged long before the movie has pixels, so waiting on it shows a
 # half-drawn screen. The icon load is the last thing the picker does.

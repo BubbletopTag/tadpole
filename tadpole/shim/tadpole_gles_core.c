@@ -140,6 +140,8 @@ static void tr2(const char *msg, int a, int b)
 #define GL_FLOAT            0x1406
 #define GL_FIXED            0x140C
 #define GL_MATRIX_PALETTE_OES     0x8840
+#define GL_MAX_PALETTE_MATRICES_OES 0x8842
+#define GL_MAX_VERTEX_UNITS_OES     0x86A4
 #define GL_MATRIX_INDEX_ARRAY_OES 0x8844
 #define GL_WEIGHT_ARRAY_OES       0x86AD
 #define GL_MODELVIEW        0x1700
@@ -2688,6 +2690,14 @@ void glGetIntegerv(GLenum p, GLint *v)
 	case GL_ARRAY_BUFFER_BINDING:         *v = (GLint)g_bound_array; break;
 	case GL_ELEMENT_ARRAY_BUFFER_BINDING: *v = (GLint)g_bound_elem; break;
 	case GL_MAX_MODELVIEW_STACK_DEPTH:    *v = 16; break;
+	/* SKINNING CAPABILITIES. Unanswered, these fell to the default below and
+	 * reported ZERO — telling a title that no palette matrices and no bones per
+	 * vertex exist. A model that asks before setting up skinning is then
+	 * entitled to skip it. Clam Prix turns out not to ask, but answering 0 to a
+	 * capability query is wrong regardless: the caller reads it as "this
+	 * feature has zero capacity" and silently disables what depended on it. */
+	case GL_MAX_PALETTE_MATRICES_OES:     *v = MAX_PALETTE; break;
+	case GL_MAX_VERTEX_UNITS_OES:         *v = 4; break;
 	case GL_MAX_PROJECTION_STACK_DEPTH:   *v = 16; break;
 	case GL_MAX_LIGHTS:                   *v = 8; break;
 	case GL_DEPTH_BITS:                   *v = 16; break;
@@ -2698,7 +2708,12 @@ void glGetIntegerv(GLenum p, GLint *v)
 		v[0] = g_vx; v[1] = g_vy; v[2] = g_vw; v[3] = g_vh;
 		break;
 	default:
+		/* Say so once. A silent 0 here is indistinguishable from a real answer
+		 * and disables features in the caller without explanation. */
 		tr2("glGetIntegerv UNHANDLED pname", (int)p, 0);
+		{ static int said; if (!said) { said = 1;
+			warn2("glGetIntegerv UNHANDLED pname (answering 0 — this can"
+			      " disable a feature in the title)", (int)p, 0); } }
 		*v = 0;
 		break;
 	}
