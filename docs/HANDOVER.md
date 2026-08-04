@@ -4494,13 +4494,14 @@ a wrong answer to a query, it is a smaller stack. A title nesting past 16 had
 its 17th `glPushMatrix` silently dropped here while it succeeded on the device,
 and every matrix from that point on diverged.
 
-**This is a live suspect for the player-character bug below.** The open question
-there is whether our modelview depth has drifted from the app's at the moment
-`glLoadPaletteFromModelViewMatrixOES` snapshots it — the note asks to "confirm
-the app really is at depth 7 when it snapshots". A stack that overflows 16 push
-levels early does exactly that, and until now overflowing was silent:
-`g_push_drop` counted it and nothing ever printed the count. It raises
-`GL_STACK_OVERFLOW` now.
+This was suspected of being the player-character bug and **it was not** —
+recorded here because the suspicion was reasonable and someone will have it
+again. Measured over a full race with the counters finally printed: maximum
+modelview depth reached is **6**, and dropped pushes are **0**. Clam Prix never
+came close to overflowing even the old 16-deep stack, so the palette snapshot
+was never reading a drifted matrix. The fix is still correct — the device
+really does have 32 — it simply was not this bug. See the section below for
+what was.
 
 Also corrected, all measured rather than chosen: `MAX_TEXTURE_SIZE` 1024 -> 4096,
 `MAX_TEXTURE_UNITS` 4 -> 2 (we were advertising our own array size, not the
@@ -4588,7 +4589,49 @@ Both were silent and both had been there a while:
   at all without a built library, which is exactly the state that failure leaves
   you in. Both fixed; the fallback says what it is giving up.
 
-## NEXT: why the player character does not render
+## SOLVED: the player character did not render because glGetFixedv was a stub
+
+Three sessions looked at the skinning code. The bug was not in it.
+
+**Clam Prix reads the modelview matrix back 7210 times per race**, through
+`glGetFixedv(GL_MODELVIEW_MATRIX)`. While that was a no-op stub it never touched
+the caller's buffer at all — a stub getter does not return a wrong answer, it
+returns nothing and leaves whatever was already there. So the title built its
+bone transforms out of uninitialised stack memory, and the skinned character
+drew at nonsense coordinates while the unskinned kart beside it was fine.
+
+That also explains the asymmetry that made this so hard to read: AI drivers
+rendering while the player did not is the same code path with different data,
+and the data was garbage.
+
+**Proven, not inferred.** One run with `glGetFixedv` re-stubbed behind an env
+flag, everything else identical: SpongeBob vanishes. Flag off: he is back.
+
+### What actually found it
+
+Not reading the skinning code — that is where the previous three attempts
+looked, and the matrix really was corrupt, so the evidence kept pointing there.
+What found it was one `tr2` line printing the pname on an entry point nobody had
+reason to suspect, because a silent stub looks exactly like a call that never
+happened. The query table it produced is the whole diagnosis:
+
+    glGetFixedv         GL_MODELVIEW_MATRIX   7210 calls
+    glGetFixedv         GL_CURRENT_COLOR      8021 calls
+    glGetTexEnvxv       GL_TEXTURE_ENV_MODE   8021 calls
+    glGetTexParameteriv MIN_FILTER/MAG_FILTER 7212 each
+
+Every one of those was reading uninitialised memory before this session.
+
+### The general lesson, worth keeping
+
+A stubbed GETTER is far more dangerous than a stubbed setter. A setter that does
+nothing loses an effect the title asked for, which is visible and attributable.
+A getter that does nothing hands the title garbage and lets it compute with it,
+so the damage surfaces somewhere else entirely — in this case as "our skinning
+implementation is broken", which it never was. When triaging a rendering bug,
+check what the title is asking us for before checking what we are doing with it.
+
+## Superseded: the earlier plan for the player-character bug
 
 State on stopping: Clam Prix races render — track, banners, kart, perspective,
 culling, texture matrix all correct. The PLAYER character (SpongeBob) is absent.

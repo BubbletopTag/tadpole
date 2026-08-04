@@ -3904,6 +3904,13 @@ void glGetFixedv(GLenum p, GLfixed *v)
 	float f[16];
 	int n, i;
 	if (!v) return;
+	/* THIS ENTRY POINT WAS THE PLAYER-CHARACTER BUG. Clam Prix reads the
+	 * modelview matrix back 7210 times per race, and while this was a stub it
+	 * never touched the caller's buffer — so the title built its bone
+	 * transforms out of whatever was on its own stack, and the skinned
+	 * character drew at nonsense coordinates while the unskinned kart beside it
+	 * was fine. Proven by re-stubbing it for one run: SpongeBob vanishes and
+	 * comes back. See HANDOVER. */
 	tr2("glGetFixedv pname", (int)p, 0);
 	n = state_floats(p, f);
 	if (n) { for (i = 0; i < n; i++) v[i] = f2fx(f[i]); return; }
