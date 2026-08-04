@@ -1,0 +1,23 @@
+# Clam Prix -> a race, then hold still and measure frame-to-frame instability.
+#
+# No input is sent during the burst, so the camera is stationary. A correct
+# renderer changes very little between frames; large sustained change means the
+# frame is being rebuilt differently each time.
+#
+# NOTE: for `wait`, the whole rest of the line is the regex — no quotes.
+
+taptil 160 130 LoadNewApp path = /LF/Bulk/ProgramFiles/LST3-0x00180025
+waitsecs 120
+wait CGameViewFrame::Enter
+sleep 20
+key a
+sleep 8
+key a
+sleep 8
+key a
+sleep 15
+shot race-start
+burst -n 14 -i 0.3
+sleep 5
+shot race-after-burst
+burst -n 14 -i 0.3
