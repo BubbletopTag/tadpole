@@ -780,26 +780,54 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		case TADGL_TEXENV: {
 			unsigned int v[3];
 			ring_get(v, 12);
-			/* STILL A WHITELIST, just a wider one. Forwarding whatever arrived
-			 * is a guaranteed GL_INVALID_ENUM the moment a title passes
-			 * something that is not a mode, and one rejected call leaves the
-			 * error flag set for everything after it.
+			/* STILL A WHITELIST, because forwarding whatever arrives is a
+			 * guaranteed GL_INVALID_ENUM the moment a title passes something
+			 * that is not a mode, and one rejected call leaves the error flag
+			 * set for everything after it. But it is now the whole of GLES 1.1
+			 * TexEnv, GL_COMBINE included.
 			 *
-			 * DECAL, BLEND and ADD are new here: the guest now tracks the full
-			 * TexEnv state, all four are ordinary desktop GL enums, and
-			 * dropping them made every non-MODULATE surface composite as if it
-			 * were MODULATE. COMBINE is deliberately still dropped — desktop GL
-			 * accepts the enum but would then use combiner state the guest does
-			 * not forward, which renders differently rather than not at all. */
-			if (v[1] == 0x2200 /* GL_TEXTURE_ENV_MODE */ &&
-			    (v[2] == 0x2100 /* MODULATE */ || v[2] == 0x1E01 /* REPLACE */ ||
-			     v[2] == 0x2101 /* DECAL */    || v[2] == 0x0BE2 /* BLEND */ ||
-			     v[2] == 0x0104 /* ADD */))
-				glTexEnvi(0x2300 /* GL_TEXTURE_ENV */, 0x2200, (GLint)v[2]);
-			else if (g_level >= 1 && g_texenv_logged < 8) {
-				g_texenv_logged++;
-				fprintf(stderr, "hle: dropping glTexEnv(pname=0x%04X"
-				        " value=0x%04X) — not forwarded\n", v[1], v[2]);
+			 * COMBINE WAS DROPPED AND IT MATTERED. With the drops logged, one
+			 * Clam Prix race showed exactly what it was asking for:
+			 *
+			 *   ENV_MODE=COMBINE  COMBINE_RGB=MODULATE  COMBINE_ALPHA=MODULATE
+			 *   SRC0_RGB=TEXTURE  SRC1_RGB=CONSTANT
+			 *   SRC0_ALPHA=TEXTURE SRC1_ALPHA=CONSTANT  OPERAND0_ALPHA=SRC_ALPHA
+			 *
+			 * — texture times the constant colour, in both colour and alpha.
+			 * That is a per-object tint and fade. Dropping it left those
+			 * surfaces modulating against the primary colour instead: wrong
+			 * tint, and no fade at all.
+			 *
+			 * It was dropped originally because the combiner SOURCES were not
+			 * forwarded, so honouring the mode would have used stale operands.
+			 * They are all forwarded now, which is what makes this safe. Every
+			 * enum here is core desktop GL 1.3 with the same value. */
+			if (v[1] == 0x2200 /* GL_TEXTURE_ENV_MODE */) {
+				switch (v[2]) {
+				case 0x2100: case 0x1E01: case 0x2101:   /* MODULATE REPLACE DECAL */
+				case 0x0BE2: case 0x0104: case 0x8570:   /* BLEND ADD COMBINE */
+					glTexEnvi(0x2300, 0x2200, (GLint)v[2]);
+					break;
+				default: goto texenv_dropped;
+				}
+			} else if (v[1] == 0x8573 /* RGB_SCALE */ ||
+			           v[1] == 0x0D1C /* ALPHA_SCALE */) {
+				/* Sent as an integer because GLES allows only 1, 2 or 4 —
+				 * see the guest side. Back to float here, where GL wants it. */
+				glTexEnvf(0x2300, v[1], (GLfloat)(GLint)v[2]);
+			} else if ((v[1] >= 0x8571 && v[1] <= 0x8572) ||  /* COMBINE_RGB/ALPHA */
+			           (v[1] >= 0x8580 && v[1] <= 0x8582) ||  /* SRC0..2_RGB */
+			           (v[1] >= 0x8588 && v[1] <= 0x858A) ||  /* SRC0..2_ALPHA */
+			           (v[1] >= 0x8590 && v[1] <= 0x8592) ||  /* OPERAND0..2_RGB */
+			           (v[1] >= 0x8598 && v[1] <= 0x859A)) {  /* OPERAND0..2_ALPHA */
+				glTexEnvi(0x2300, v[1], (GLint)v[2]);
+			} else {
+texenv_dropped:
+				if (g_level >= 1 && g_texenv_logged < 8) {
+					g_texenv_logged++;
+					fprintf(stderr, "hle: dropping glTexEnv(pname=0x%04X"
+					        " value=0x%04X) — not forwarded\n", v[1], v[2]);
+				}
 			}
 			break;
 		}

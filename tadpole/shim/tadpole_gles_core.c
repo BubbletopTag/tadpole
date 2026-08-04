@@ -1131,8 +1131,17 @@ static void texenv_set(GLenum tgt, GLenum pname, const float *v)
 		if (hle_ready()) hle_texenvcolor(e->color);
 		return;
 	}
-	if (pname == GL_RGB_SCALE_)   { e->rgb_scale = v[0];   return; }
-	if (pname == GL_ALPHA_SCALE_) { e->alpha_scale = v[0]; return; }
+	/* FORWARDED AS AN INTEGER, AND THAT IS LOSSLESS HERE. GLES 1.1 §3.7.12
+	 * allows GL_RGB_SCALE and GL_ALPHA_SCALE to be 1.0, 2.0 or 4.0 and nothing
+	 * else, so the cast cannot lose anything a legal value carries — which is
+	 * what lets these ride the existing integer TEXENV opcode instead of
+	 * needing a float one. The host converts back. */
+	if (pname == GL_RGB_SCALE_ || pname == GL_ALPHA_SCALE_) {
+		if (pname == GL_RGB_SCALE_) e->rgb_scale = v[0];
+		else                        e->alpha_scale = v[0];
+		if (hle_ready()) hle_texenv(tgt, pname, (int)v[0]);
+		return;
+	}
 
 	{
 		GLenum val = (GLenum)v[0];
