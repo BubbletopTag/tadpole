@@ -2339,7 +2339,36 @@ static u32 hle_max_index(const void *indices, GLsizei count, GLenum type)
  * rasteriser.
  */
 #define MAX_PALETTE 32
+/* THE PALETTE STARTS AS IDENTITY, NOT AS ZEROS.
+ *
+ * This array is static, so without help every entry begins as sixteen zero
+ * floats — and a zero matrix does not leave a vertex alone, it maps EVERY
+ * vertex to the origin. Any vertex weighted to a bone the title has not loaded
+ * yet is therefore dragged toward a single point in proportion to its weight,
+ * which is why Pet Pals 2's dogs grew long spikes stretched between where the
+ * geometry belongs and (0,0,0), and why it got dramatically worse the moment
+ * they animated: a stationary model sits near its bind pose and the error is
+ * small, while a moving one pulls the loaded bones away and leaves the unloaded
+ * ones anchored at the origin.
+ *
+ * GL_OES_matrix_palette specifies identity as the initial value, which is the
+ * benign version of the same situation: an unloaded bone leaves its vertices at
+ * their bind-pose position, visibly wrong but attached to the model rather than
+ * flung across the scene.
+ *
+ * mat_init_once() does exactly this for g_mv, g_proj and g_texm. The palette
+ * was simply never added to it. */
 static mat4  g_palette[MAX_PALETTE];
+static int   g_palette_inited;
+
+static void palette_init_once(void)
+{
+	int i;
+	if (g_palette_inited) return;
+	g_palette_inited = 1;
+	for (i = 0; i < MAX_PALETTE; i++)
+		mat_identity(&g_palette[i]);
+}
 static u32   g_cur_palette;
 static int   g_palette_on;
 static u32   g_palette_loads;   /* did the app ever fill the palette? */
@@ -2371,6 +2400,7 @@ static u8 g_palette_set[MAX_PALETTE];
 
 void glLoadPaletteFromModelViewMatrixOES(void)
 { tr2("glLoadPaletteFromModelViewMatrixOES", (int)g_cur_palette, 0);
+  palette_init_once();
   if (g_cur_palette < MAX_PALETTE) { g_palette[g_cur_palette] = g_mv[g_mv_sp];
       g_palette_set[g_cur_palette] = 1;
       g_palette_loads++; } }
@@ -2422,6 +2452,7 @@ static const float *skin_vertices(u32 nverts)
 		return 0;
 	}
 	if (!nverts) return 0;
+	palette_init_once();
 	{ static int said; if (!said) { said = 1;
 		warn2("SKINNING a draw: bones, verts",
 		      g_midx.size < g_wgt.size ? g_midx.size : g_wgt.size, (int)nverts); } }
@@ -2444,7 +2475,11 @@ static const float *skin_vertices(u32 nverts)
 	 * because it happens exactly once, and it names the cause instead of
 	 * narrowing it.
 	 */
-	if (tad_gl_level() >= 1) {
+	/* NOT GATED ON TADPOLE_GL_DEBUG. It was, and it therefore did not run in
+	 * the one capture that mattered — the whole point of warn2 is that the
+	 * evidence is in an ordinary log without anyone having had to predict they
+	 * would need it. This is a single pass over a single draw, once per title. */
+	{
 		static int audited;
 		if (!audited) {
 			u32 seen = 0, unset = 0, oor = 0, j;
@@ -4192,6 +4227,14 @@ void tad_gl_context_reset(void)
 	g_texenv_init = 0;
 	g_tex_default_init = 0;
 	g_tex_env = GL_MODULATE;
+	/* The bone palette is per-title too. Carrying the previous game's poses
+	 * into the next one is the same cross-title leak as the texture mirrors,
+	 * and on a title that loads only some slots it would skin with another
+	 * game's skeleton. */
+	g_palette_inited = 0;
+	{ int k; for (k = 0; k < MAX_PALETTE; k++) g_palette_set[k] = 0; }
+	g_palette_loads = 0;
+	g_cur_palette = 0;
 
 	/* Drop the host's mirrors too, then force a fresh sync — otherwise the
 	 * host keeps the old title's images under names the next one reuses. */
