@@ -804,11 +804,77 @@ static void mat_init_once(void)
 	g_mat_inited = 1;
 }
 
+#define MAX_PALETTE 32
+/* THE PALETTE STARTS AS IDENTITY, NOT AS ZEROS.
+ *
+ * This array is static, so without help every entry begins as sixteen zero
+ * floats — and a zero matrix does not leave a vertex alone, it maps EVERY
+ * vertex to the origin. Any vertex weighted to a bone the title has not loaded
+ * yet is therefore dragged toward a single point in proportion to its weight,
+ * which is why Pet Pals 2's dogs grew long spikes stretched between where the
+ * geometry belongs and (0,0,0), and why it got dramatically worse the moment
+ * they animated: a stationary model sits near its bind pose and the error is
+ * small, while a moving one pulls the loaded bones away and leaves the unloaded
+ * ones anchored at the origin.
+ *
+ * GL_OES_matrix_palette specifies identity as the initial value, which is the
+ * benign version of the same situation: an unloaded bone leaves its vertices at
+ * their bind-pose position, visibly wrong but attached to the model rather than
+ * flung across the scene.
+ *
+ * mat_init_once() does exactly this for g_mv, g_proj and g_texm. The palette
+ * was simply never added to it. */
+static mat4  g_palette[MAX_PALETTE];
+static int   g_palette_inited;
+
+static void palette_init_once(void)
+{
+	int i;
+	if (g_palette_inited) return;
+	g_palette_inited = 1;
+	for (i = 0; i < MAX_PALETTE; i++)
+		mat_identity(&g_palette[i]);
+}
+static u32   g_cur_palette;
+
+/* MATRIX WORK IN PALETTE MODE NEVER REACHES THE HOST.
+ *
+ * GL_MATRIX_PALETTE_OES is an extension no desktop driver has. Forwarding the
+ * mode itself produced a real, logged GL_INVALID_ENUM —
+ *
+ *     hle: GL error 0x0500 from MATRIXMODE (op 15) at frame 698
+ *
+ * — on exactly the frame Pet Pals 2 starts skinning. The host then REJECTED the
+ * mode change and stayed on whatever stack it was already using, so every
+ * matrix call the title made while posing its bones landed on the host's real
+ * modelview instead. The bones were being written into the scene's transform.
+ *
+ * glEnable already documents this exact trap for the same enum. The matrix mode
+ * needed the same treatment and did not have it.
+ *
+ * So: in palette mode the guest keeps the state, the host hears nothing, and
+ * skin_vertices() applies the result on this side — which is where all the
+ * palette work happens anyway. */
+static int mat_forward(void)
+{
+	return hle_ready() && g_matrix_mode != GL_MATRIX_PALETTE_OES;
+}
+
 static mat4 *cur_top(void)
 {
 	mat_init_once();
 	if (g_matrix_mode == GL_PROJECTION) return &g_proj[g_proj_sp];
 	if (g_matrix_mode == GL_TEXTURE_)   return &g_texm[g_texm_sp];
+	/* GLES 1.1 + OES_matrix_palette §2.10.2: in palette mode the matrix
+	 * operations target the CURRENT PALETTE MATRIX, not the modelview. This
+	 * fell through to the modelview, so a title that poses bones by loading
+	 * them directly — rather than through
+	 * glLoadPaletteFromModelViewMatrixOES — corrupted the scene transform and
+	 * left the palette entry untouched. */
+	if (g_matrix_mode == GL_MATRIX_PALETTE_OES) {
+		palette_init_once();
+		return &g_palette[g_cur_palette < MAX_PALETTE ? g_cur_palette : 0];
+	}
 	return &g_mv[g_mv_sp];
 }
 
@@ -841,9 +907,9 @@ void glMatrixMode(GLenum mode) { tr2("glMatrixMode", (int)mode, 0);
      * title thought it was building quietly modified the view instead. */
     tad_gl_error(TAD_GL_INVALID_ENUM, "glMatrixMode"); return; }
   g_matrix_mode = mode;
-  if (hle_ready()) hle_matrixmode(mode); }
+  if (mat_forward()) hle_matrixmode(mode); }
 void glLoadIdentity(void)      { mat_identity(cur_top());
-  if (hle_ready()) hle_loadidentity(); }
+  if (mat_forward()) hle_loadidentity(); }
 
 static int g_push_drop, g_pop_under, g_max_mv, g_max_pj;
 
@@ -867,7 +933,7 @@ void glPushMatrix(void)
 	 * matrix and the U translation grew without bound — measured running from
 	 * -377 to -579 texture-widths in eight reports, accelerating. Every
 	 * textured surface slid, fast, forever. */
-	if (hle_ready()) hle_pushmatrix();
+	if (mat_forward()) hle_pushmatrix();
 }
 void glPopMatrix(void)
 {
@@ -880,7 +946,7 @@ void glPopMatrix(void)
 	}
 	if (g_mv_sp > g_max_mv) g_max_mv = g_mv_sp;
 	if (g_proj_sp > g_max_pj) g_max_pj = g_proj_sp;
-	if (hle_ready()) hle_popmatrix();
+	if (mat_forward()) hle_popmatrix();
 }
 
 static void ortho_f(float l, float r, float b, float t, float n, float f)
@@ -894,10 +960,10 @@ static void ortho_f(float l, float r, float b, float t, float n, float f)
 }
 void glOrthox(GLfixed l, GLfixed r, GLfixed b, GLfixed t, GLfixed n, GLfixed f)
 { ortho_f(fx2f(l), fx2f(r), fx2f(b), fx2f(t), fx2f(n), fx2f(f));
-  if (hle_ready()) hle_ortho(fx2f(l), fx2f(r), fx2f(b), fx2f(t), fx2f(n), fx2f(f)); }
+  if (mat_forward()) hle_ortho(fx2f(l), fx2f(r), fx2f(b), fx2f(t), fx2f(n), fx2f(f)); }
 void glOrthof(GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f)
 { ortho_f(l, r, b, t, n, f);
-  if (hle_ready()) hle_ortho(l, r, b, t, n, f); }
+  if (mat_forward()) hle_ortho(l, r, b, t, n, f); }
 
 /* PERSPECTIVE. Both entry points were no-op stubs, which is why a race rendered
  * as a thin horizontal band: with no projection the transform stays orthographic
@@ -925,30 +991,30 @@ static void frustum_f(float l, float r, float b, float t, float n, float f)
 }
 void glFrustumx(GLfixed l, GLfixed r, GLfixed b, GLfixed t, GLfixed n, GLfixed f)
 { frustum_f(fx2f(l), fx2f(r), fx2f(b), fx2f(t), fx2f(n), fx2f(f));
-  if (hle_ready()) hle_frustum(fx2f(l), fx2f(r), fx2f(b), fx2f(t), fx2f(n), fx2f(f)); }
+  if (mat_forward()) hle_frustum(fx2f(l), fx2f(r), fx2f(b), fx2f(t), fx2f(n), fx2f(f)); }
 void glFrustumf(GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f)
 { frustum_f(l, r, b, t, n, f);
-  if (hle_ready()) hle_frustum(l, r, b, t, n, f); }
+  if (mat_forward()) hle_frustum(l, r, b, t, n, f); }
 /* The OES spelling is the same function; titles link whichever their SDK
  * emitted, and a stub here would silently flatten the scene exactly as the
  * missing glFrustumx did. */
 void glFrustumfOES(GLfloat l, GLfloat r, GLfloat b, GLfloat t, GLfloat n, GLfloat f)
 { frustum_f(l, r, b, t, n, f);
-  if (hle_ready()) hle_frustum(l, r, b, t, n, f); }
+  if (mat_forward()) hle_frustum(l, r, b, t, n, f); }
 
 static void translate_f(float x, float y, float z)
 { mat4 m; mat_identity(&m); m.m[12]=x; m.m[13]=y; m.m[14]=z; mat_apply(&m); }
 void glTranslatex(GLfixed x, GLfixed y, GLfixed z) { translate_f(fx2f(x), fx2f(y), fx2f(z));
-  if (hle_ready()) hle_translate(fx2f(x), fx2f(y), fx2f(z)); }
+  if (mat_forward()) hle_translate(fx2f(x), fx2f(y), fx2f(z)); }
 void glTranslatef(GLfloat x, GLfloat y, GLfloat z) { translate_f(x, y, z);
-  if (hle_ready()) hle_translate(x, y, z); }
+  if (mat_forward()) hle_translate(x, y, z); }
 
 static void scale_f(float x, float y, float z)
 { mat4 m; mat_identity(&m); m.m[0]=x; m.m[5]=y; m.m[10]=z; mat_apply(&m); }
 void glScalex(GLfixed x, GLfixed y, GLfixed z) { scale_f(fx2f(x), fx2f(y), fx2f(z));
-  if (hle_ready()) hle_scale(fx2f(x), fx2f(y), fx2f(z)); }
+  if (mat_forward()) hle_scale(fx2f(x), fx2f(y), fx2f(z)); }
 void glScalef(GLfloat x, GLfloat y, GLfloat z) { scale_f(x, y, z);
-  if (hle_ready()) hle_scale(x, y, z); }
+  if (mat_forward()) hle_scale(x, y, z); }
 
 /* sin/cos without libm — this is a -nostdlib shared object. Bhaskara-style
  * approximation, |err| < 2e-3 over a full turn, which is far below one pixel
@@ -986,9 +1052,9 @@ static void rotate_f(float deg, float x, float y, float z)
 }
 void glRotatex(GLfixed a, GLfixed x, GLfixed y, GLfixed z)
 { rotate_f(fx2f(a), fx2f(x), fx2f(y), fx2f(z));
-  if (hle_ready()) hle_rotate(fx2f(a), fx2f(x), fx2f(y), fx2f(z)); }
+  if (mat_forward()) hle_rotate(fx2f(a), fx2f(x), fx2f(y), fx2f(z)); }
 void glRotatef(GLfloat a, GLfloat x, GLfloat y, GLfloat z) { rotate_f(a, x, y, z);
-  if (hle_ready()) hle_rotate(a, x, y, z); }
+  if (mat_forward()) hle_rotate(a, x, y, z); }
 
 /* Direct matrix load/multiply. THESE ARE NOT OPTIONAL.
  *
@@ -1017,9 +1083,9 @@ static void mult_matrix_f(const float *m)
 }
 
 void glLoadMatrixf(const GLfloat *m) { load_matrix_f(m);
-  if (hle_ready()) hle_loadmatrix(m); }
+  if (mat_forward()) hle_loadmatrix(m); }
 void glMultMatrixf(const GLfloat *m) { mult_matrix_f(m);
-  if (hle_ready()) hle_multmatrix(m); }
+  if (mat_forward()) hle_multmatrix(m); }
 
 /* ---- glTexEnv* / glGetTexEnv* -------------------------------------------
  *
@@ -1317,7 +1383,7 @@ void glLoadMatrixx(const GLfixed *m)
 	if (!m) return;
 	for (i = 0; i < 16; i++) f[i] = fx2f(m[i]);
 	load_matrix_f(f);
-	if (hle_ready()) hle_loadmatrix(f);
+	if (mat_forward()) hle_loadmatrix(f);
 }
 void glMultMatrixx(const GLfixed *m)
 {
@@ -1326,7 +1392,7 @@ void glMultMatrixx(const GLfixed *m)
 	if (!m) return;
 	for (i = 0; i < 16; i++) f[i] = fx2f(m[i]);
 	mult_matrix_f(f);
-	if (hle_ready()) hle_multmatrix(f);
+	if (mat_forward()) hle_multmatrix(f);
 }
 
 /* ---- clear --------------------------------------------------------------- */
@@ -2338,38 +2404,6 @@ static u32 hle_max_index(const void *indices, GLsizei count, GLenum type)
  * sent, which needs no host capability and works identically for the software
  * rasteriser.
  */
-#define MAX_PALETTE 32
-/* THE PALETTE STARTS AS IDENTITY, NOT AS ZEROS.
- *
- * This array is static, so without help every entry begins as sixteen zero
- * floats — and a zero matrix does not leave a vertex alone, it maps EVERY
- * vertex to the origin. Any vertex weighted to a bone the title has not loaded
- * yet is therefore dragged toward a single point in proportion to its weight,
- * which is why Pet Pals 2's dogs grew long spikes stretched between where the
- * geometry belongs and (0,0,0), and why it got dramatically worse the moment
- * they animated: a stationary model sits near its bind pose and the error is
- * small, while a moving one pulls the loaded bones away and leaves the unloaded
- * ones anchored at the origin.
- *
- * GL_OES_matrix_palette specifies identity as the initial value, which is the
- * benign version of the same situation: an unloaded bone leaves its vertices at
- * their bind-pose position, visibly wrong but attached to the model rather than
- * flung across the scene.
- *
- * mat_init_once() does exactly this for g_mv, g_proj and g_texm. The palette
- * was simply never added to it. */
-static mat4  g_palette[MAX_PALETTE];
-static int   g_palette_inited;
-
-static void palette_init_once(void)
-{
-	int i;
-	if (g_palette_inited) return;
-	g_palette_inited = 1;
-	for (i = 0; i < MAX_PALETTE; i++)
-		mat_identity(&g_palette[i]);
-}
-static u32   g_cur_palette;
 static int   g_palette_on;
 static u32   g_palette_loads;   /* did the app ever fill the palette? */
 
