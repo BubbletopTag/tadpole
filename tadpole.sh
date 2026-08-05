@@ -55,6 +55,24 @@ fi
 : "${TADPOLE_GL:=1}"
 export TADPOLE_GL
 
+# HLE — HOST-GPU REPLAY — ON BY DEFAULT, read from the same config file.
+#
+# This used to be opt-in, and the only thing that set it was tools/probe-race.sh.
+# A normal launch therefore started the viewer, announced HLE, and then quietly
+# software-rasterised instead. The two are not close: the software path draws
+# simple screens correctly, visibly mangles busy ones, and is far slower — so
+# every "how does this title look" judgement made from a plain launch was
+# judging the fallback. Same trap as TADPOLE_GL above, same fix.
+#
+# TADPOLE_GL_HLE=0 forces the software rasteriser, which is still how you tell
+# whether a rendering fault is in the shared GL core or only in the replay. The
+# shim tests for the variable's PRESENCE, so "off" has to mean unset, not 0.
+if [ -z "${TADPOLE_GL_HLE:-}" ] && [ -r "$UICFG" ]; then
+    TADPOLE_GL_HLE="$(awk '$1=="gl_hle"{print $2}' "$UICFG" | tail -1)"
+fi
+: "${TADPOLE_GL_HLE:=1}"
+if [ "$TADPOLE_GL_HLE" = 0 ]; then unset TADPOLE_GL_HLE; else export TADPOLE_GL_HLE; fi
+
 LIBS="$HERE/runtime/shimlibs-z:$HERE/runtime/shimlibs:$HERE/runtime/libs"
 [ "$TADPOLE_GL" != 0 ] && LIBS="$HERE/runtime/shimlibs-gl:$LIBS"
 VIEWER="$HERE/tadpole/viewer/tadpole-view"

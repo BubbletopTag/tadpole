@@ -69,13 +69,42 @@ static SDL_Texture   *g_logo;
 static int            g_logo_w, g_logo_h;
 static Uint32        *g_logo_px;   /* kept for SDL_SetWindowIcon */
 static char           g_proj[PATHMAX];
+/* DESIGNATED INITIALISERS, because the positional list had silently rotted.
+ *
+ * `gl_hle` was added as the SECOND field of struct ui_settings and this list was
+ * never updated — its comment still read "gl, gl_debug, dumpframe, dumptex,
+ * shim_debug", naming five fields for what by then were six. Ten values for
+ * eleven fields, so everything after gl_hle was off by one and the defaults
+ * actually shipped were not the ones written here:
+ *
+ *     rotate           2     (not a rotation; the field holds 0/90/180/270)
+ *     scale            0
+ *     touch_debug      1
+ *     audio_on         260
+ *     audio_latency_ms 0     <- the cap on how far ahead of the speaker we run
+ *
+ * Anyone without a ~/.config/tadpole/ui.cfg ran with those. Naming each field
+ * makes the next insertion harmless.
+ *
+ * GL ON by default: without it every native Brio title asserts in the stock
+ * libEGL and exits. See the note in tadpole.sh.
+ *
+ * HLE ON by default as well, as of the first title to render a full 2D UI
+ * through it. The software rasteriser is the fallback, not the reference — it
+ * draws simple screens correctly and visibly mangles busy ones, and it is far
+ * slower. This only decides who rasterises; nothing about the guest changes. */
 static struct ui_settings g_cfg = {
-	/* GL ON by default: without it every native Brio title asserts in the
-	 * stock libEGL and exits. See the note in tadpole.sh. It is no longer
-	 * experimental — it is how titles render. HLE is the experiment now. */
-	1, 0, 0, 0, 0,        /* gl, gl_debug, dumpframe, dumptex, shim_debug */
-	0, 2, 0,              /* rotate, scale, touch_debug */
-	1, 260                /* audio_on, latency */
+	.gl               = 1,
+	.gl_hle           = 1,
+	.gl_debug         = 0,
+	.gl_dumpframe     = 0,
+	.gl_dumptex       = 0,
+	.shim_debug       = 0,
+	.rotate           = 0,
+	.scale            = 2,
+	.touch_debug      = 0,
+	.audio_on         = 1,
+	.audio_latency_ms = 260,
 };
 static enum ui_action g_action;
 static char           g_action_path[PATHMAX];
@@ -968,7 +997,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		char buf[32];
 		row_check(r, &d, 0, "Enable OpenGL", g_cfg.gl,
 		          row_hit(&d, 0, g_mx, g_my));
-		row_check(r, &d, 1, "Host GPU replay (EXPERIMENTAL)", g_cfg.gl_hle,
+		row_check(r, &d, 1, "Host GPU replay (HLE)", g_cfg.gl_hle,
 		          row_hit(&d, 1, g_mx, g_my));
 		row_check(r, &d, 2, "GL debug logging", g_cfg.gl_debug,
 		          row_hit(&d, 2, g_mx, g_my));
