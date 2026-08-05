@@ -2513,6 +2513,38 @@ static const float *skin_vertices(u32 nverts)
 			      lo_w, hi_w);
 			warn2("SKIN AUDIT indices out of range / bones per vertex",
 			      (int)oor, nbb);
+			/* WHAT THE TITLE ACTUALLY DECLARED.
+			 *
+			 * nb is min(index.size, weight.size), so a weight sum that lands
+			 * short has two very different explanations and these lines are
+			 * what separate them:
+			 *
+			 *   - the two sizes DIFFER, and the min is throwing away
+			 *     influences the model really has. Then the missing weight is
+			 *     sitting in components we never read, and the fix is ours.
+			 *   - the sizes AGREE, and the title's own weights genuinely do
+			 *     not sum to 1. Then real hardware renders the same shrunken
+			 *     vertex and the fix is not to "correct" it.
+			 *
+			 * The types matter for the same reason: GL_UNSIGNED_BYTE weights
+			 * are normalised by 255 and GL_FIXED are 16.16, and reading one as
+			 * the other yields a plausible-looking number rather than an
+			 * obviously broken one. */
+			warn2("SKIN AUDIT weight array: size / type",
+			      g_wgt.size, (int)g_wgt.type);
+			warn2("SKIN AUDIT index array: size / type",
+			      g_midx.size, (int)g_midx.type);
+			warn2("SKIN AUDIT strides: weight / index",
+			      (int)g_wgt.stride, (int)g_midx.stride);
+			/* Vertex 0's raw components, past the declared size, in
+			 * thousandths. If components 2 and 3 hold the missing weight, the
+			 * min above is the bug and this is the proof. */
+			warn2("SKIN AUDIT v0 weights x1000: [0] / [1]",
+			      (int)(fetch(&g_wgt, 0, 0) * 1000.0f),
+			      (int)(fetch(&g_wgt, 0, 1) * 1000.0f));
+			warn2("SKIN AUDIT v0 weights x1000: [2] / [3]",
+			      (int)(fetch(&g_wgt, 0, 2) * 1000.0f),
+			      (int)(fetch(&g_wgt, 0, 3) * 1000.0f));
 		}
 	}
 
