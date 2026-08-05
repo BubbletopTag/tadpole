@@ -178,6 +178,7 @@ static u32 g_bpp = 32;
 static int  g_ready;
 static int  g_debug;
 static char g_dir[256];
+static long g_io_delay_us;   /* see io_pace() — artificial NAND latency */
 
 /* qemu-user's -L only redirects paths that ALREADY EXIST in the sysroot.
  * Creating a new file therefore falls through to the host path and fails
@@ -328,6 +329,14 @@ static void init(void)
 		 * One boot produced 2.1 MILLION log lines and never finished. */
 		const char *d = getenv("TADPOLE_DEBUG");
 		g_debug = (d && d[0] && d[0] != '0');
+	}
+	{
+		/* Microseconds of artificial latency on guest .png opens — see io_pace.
+		 * Parsed by hand; the shim has no strtol. */
+		const char *d = getenv("TADPOLE_IO_DELAY_US");
+		long v = 0;
+		if (d) { while (*d >= '0' && *d <= '9') v = v * 10 + (*d++ - '0'); }
+		g_io_delay_us = v;
 	}
 	{
 		/* TADPOLE_HZ=0 restores the old uncapped behaviour, for measuring
@@ -503,6 +512,46 @@ static void vsync_wait(void)
 	nanosleep(&req, 0);
 }
 
+/* ---- pretending to be NAND -------------------------------------------------
+ *
+ * TADPOLE_IO_DELAY_US=<n> sleeps n microseconds on every open of a guest .png.
+ *
+ * WHY THAT IS A REASONABLE THING TO WANT. The home picker loads one image per
+ * installed title — meta.inf's Icon="GAMS/BaseImage.png" — asynchronously, and
+ * its ActionScript polls for the result, logging "waiting for load of the
+ * image" while it waits. On the device that wait is real: the file comes off
+ * NAND. Here it comes off the host page cache on an NVMe SSD, so a load can
+ * complete within the same script frame that asked for it, which on hardware it
+ * never could. Code that assumes "the answer is never ready this soon" then
+ * reads a state that does not exist on a real LeapPad, and the crash we see is
+ * an undefined value dereferenced inside libflashlite's interpreter.
+ *
+ * This is a MEASUREMENT, not a fix: if slowing the icon reads changes the crash
+ * rate, the race is real and the fix belongs wherever the timing assumption is,
+ * not in a sleep. Off unless the variable is set.
+ *
+ * Only .png, and only guest paths, so a boot does not crawl: the picker's icons
+ * are the reads under suspicion, and nothing else needs to be slowed to test
+ * them. */
+static int ends_with_png(const char *path)
+{
+	size_t n = path ? strlen(path) : 0;
+	if (n < 4) return 0;
+	return (path[n-4] == '.' &&
+	        (path[n-3] == 'p' || path[n-3] == 'P') &&
+	        (path[n-2] == 'n' || path[n-2] == 'N') &&
+	        (path[n-1] == 'g' || path[n-1] == 'G'));
+}
+
+static void io_pace(const char *path)
+{
+	struct tad_timespec req;
+	if (g_io_delay_us <= 0 || !ends_with_png(path)) return;
+	req.tv_sec  = g_io_delay_us / 1000000L;
+	req.tv_nsec = (g_io_delay_us % 1000000L) * 1000L;
+	nanosleep(&req, 0);
+}
+
 /* Is this the emulator's OWN runtime directory rather than a guest path? The
  * viewer opens TADPOLE_DIR by its literal host name, so it must never be
  * rewritten into the sysroot. */
@@ -576,10 +625,15 @@ static int open_common(const char *path, int flags, int mode)
 		fd = real_open(full, flags, mode);
 		if (fd >= 0) {
 			if (g_debug) { dbg("[tadpole] open(sysroot) "); dbg(path); dbg("\n"); }
+			io_pace(path);
 			return fd;
 		}
 	}
-	return real_open(path, flags, mode);
+	{
+		int fd = real_open(path, flags, mode);
+		if (fd >= 0) io_pace(path);
+		return fd;
+	}
 }
 
 /* uClibc's stdio calls its own open through a hidden alias that never goes

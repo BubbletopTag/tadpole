@@ -1549,10 +1549,41 @@ int main(int argc, char **argv)
 		 * so repeating it is harmless — unlike KEY_POWER, which must never be
 		 * sent unless a shutdown is actually wanted.
 		 */
-		if (g_evfd[EV_POWER] >= 0 && power_announced < 30) {
+		/* THREE, CLOSE TOGETHER — NOT THIRTY SPREAD OVER FIFTEEN SECONDS.
+		 *
+		 * "Repeating it is harmless" above was wrong, and it cost the home
+		 * screen. Every one of these makes the guest log
+		 *
+		 *     kPowerExternal event = user switched to external power
+		 *
+		 * and dispatch it libEvent -> LeapFrogPlugin -> ACTIONSCRIPT. Thirty at
+		 * half-second intervals is thirty re-entries into the interpreter spread
+		 * across the first fifteen seconds — exactly the window in which the
+		 * picker sweeps its icons, loading each asynchronously and polling for
+		 * it ("waiting for load of the image"). An event landing between the
+		 * request and the load completing left a reference undefined, and
+		 * libflashlite dereferenced it:
+		 *
+		 *     pc  libflashlite.so+0x000dda14    ldr r6, [r3, #0x8]   with r3 = 0
+		 *     stack: libEvent.so -> LeapFrogPlugin.so -> libflashlite.so
+		 *
+		 * Four captured crashes, all inside that sweep, at icon 21/24/32/36 —
+		 * the index is random because the collision is a matter of timing. About
+		 * one boot in two, and two of the four reports have the kPowerExternal
+		 * line printed at the fault itself.
+		 *
+		 * The repeats only ever existed because the FIFO may not be open when we
+		 * first want to send: the shim creates it, so on a cold start there is
+		 * nothing to write to yet. That is a startup race, not a reason to keep
+		 * talking for fifteen seconds. The guard already requires the fd, so
+		 * once a write has gone out the message has landed; two more in quick
+		 * succession cover a guest that had not yet installed its handler, and
+		 * all three are done long before the picker exists. AppManager's
+		 * 12-second shutdown timer is still beaten with room to spare. */
+		if (g_evfd[EV_POWER] >= 0 && power_announced < 3) {
 			static Uint32 last_power;
 			Uint32 now3 = SDL_GetTicks();
-			if (!power_announced || now3 - last_power >= 500) {
+			if (!power_announced || now3 - last_power >= 250) {
 				send_key(EV_POWER, KEY_UP_, 1);
 				send_key(EV_POWER, KEY_UP_, 0);
 				last_power = now3;
