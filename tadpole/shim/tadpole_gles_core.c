@@ -2610,6 +2610,78 @@ static const float *skin_vertices(u32 nverts)
 		g_skin[i*3+1] = acc[1];
 		g_skin[i*3+2] = acc[2];
 	}
+
+	/* ---- WHICH BONE SENDS GEOMETRY FLYING -----------------------------
+	 *
+	 * Every measurement so far has been elimination: not unloaded slots, not
+	 * out-of-range indices, not a declared-size mismatch, and normalising the
+	 * weights changes the shape without fixing it. One thing has been invariant
+	 * through all of it — the ears sit detached in roughly the same place no
+	 * matter what changes.
+	 *
+	 * So stop asking what is wrong with the inputs and ask which bone produces
+	 * the outliers. Take the mean squared radius of the SKINNED output as the
+	 * model's own scale and report the bone indices used by anything far
+	 * outside it. One index dominating that list names the bone whose matrix is
+	 * wrong, which is a question about the palette LOAD rather than about the
+	 * weights — and it is the first measurement here that looks at the output
+	 * instead of the inputs.
+	 *
+	 * This has to run AFTER the loop above, which is why it is not with the
+	 * rest of the audit: there, it would read g_skin before a single vertex had
+	 * been written into it.
+	 */
+	{
+		static int audited_out;
+		if (!audited_out && nverts > 8) {
+			float cx = 0, cy = 0, cz = 0, dsum = 0, far_lim;
+			u32 j, nfar = 0, top = 0, topn = 0, b;
+			static u32 bonehist[MAX_PALETTE];
+
+			audited_out = 1;
+			for (b = 0; b < MAX_PALETTE; b++) bonehist[b] = 0;
+			for (j = 0; j < nverts; j++)
+			{ cx += g_skin[j*3]; cy += g_skin[j*3+1]; cz += g_skin[j*3+2]; }
+			cx /= (float)nverts; cy /= (float)nverts; cz /= (float)nverts;
+			for (j = 0; j < nverts; j++) {
+				float dx = g_skin[j*3]-cx, dy = g_skin[j*3+1]-cy,
+				      dz = g_skin[j*3+2]-cz;
+				dsum += dx*dx + dy*dy + dz*dz;
+			}
+			/* 25x the mean squared radius: a genuine flyer, not a long limb. */
+			far_lim = (dsum / (float)nverts) * 25.0f;
+			for (j = 0; j < nverts; j++) {
+				float dx = g_skin[j*3]-cx, dy = g_skin[j*3+1]-cy,
+				      dz = g_skin[j*3+2]-cz;
+				int c;
+				if (dx*dx + dy*dy + dz*dz <= far_lim) continue;
+				nfar++;
+				for (c = 0; c < nb; c++) {
+					u32 mi = fetch_index(&g_midx, j, c);
+					if (fetch(&g_wgt, j, c) > 0.0f && mi < MAX_PALETTE)
+						bonehist[mi]++;
+				}
+			}
+			for (b = 0; b < MAX_PALETTE; b++)
+				if (bonehist[b] > topn) { topn = bonehist[b]; top = b; }
+
+			warn2("SKIN AUDIT vertices far outside the model / of how many",
+			      (int)nfar, (int)nverts);
+			warn2("SKIN AUDIT worst bone index / how many flyers use it",
+			      nfar ? (int)top : -1, (int)topn);
+			if (nfar) {
+				/* Its translation column. A bone the app never posed reads as
+				 * the identity's 0,0,0; one posed from a garbage matrix reads
+				 * as something enormous. */
+				warn2("SKIN AUDIT worst bone translate x1000: x / y",
+				      (int)(g_palette[top].m[12] * 1000.0f),
+				      (int)(g_palette[top].m[13] * 1000.0f));
+				warn2("SKIN AUDIT worst bone translate x1000: z / was-loaded",
+				      (int)(g_palette[top].m[14] * 1000.0f),
+				      (int)g_palette_set[top]);
+			}
+		}
+	}
 	return g_skin;
 }
 
