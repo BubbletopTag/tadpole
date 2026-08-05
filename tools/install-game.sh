@@ -3,6 +3,9 @@
 #
 #   ./tools/install-game.sh games/FOF.tar [more.tar ...]
 #   ./tools/install-game.sh games/*.tar
+#   ./tools/install-game.sh --fix-saves          create missing save directories
+#                                                (NOT yet cleared library-wide —
+#                                                 see HANDOVER before using it)
 #
 # Installing a game as an APPLICATION is the approach that actually works, and
 # it is what LFManager does on real hardware. Emulating an inserted cartridge
@@ -65,6 +68,35 @@ install_one() {                     # $1=tar  $2=meta.inf path inside it
     if [ "$type" = Application ] && ! grep -q '^ProfileAccess=' "$dest/meta.inf" 2>/dev/null; then
         printf 'ProfileAccess=-1,0,1,2,3\n' >> "$dest/meta.inf"
     fi
+
+    # THE SAVE AREA HAS TO EXIST BEFORE FIRST LAUNCH, and nothing creates it.
+    #
+    # A title's documents live in Bulk/Data/Local/<profile>/<PackageID>/, which
+    # AppManager announces as "Set doc base to:" and then assumes is there. It
+    # is NOT created on demand: measured, with mkdir interception working in the
+    # shim and a full launch traced, the guest never calls mkdir for this path
+    # at all. On hardware it already exists; the three titles here that have one
+    # got it from the transplanted /LF/Bulk, not from anything we did.
+    #
+    # WHAT ITS ABSENCE COSTS is a whole title, silently. Cooking! Recipes on the
+    # Road logs one line —
+    #     fopenAtomic(.../SAVE.DAT): mkstemp failed us!
+    # — and then calls dslib::PanicScreen::showDirect(msg, true), whose
+    # terminate() is an unconditional spin loop. The title hangs at 100% CPU on
+    # a white screen, having drawn nothing, with no crash and no message,
+    # because this build compiles the panic screen's own addDirect() down to
+    # `bx lr` and the text is never rendered.
+    #
+    # Per EXISTING profile, not a fixed list: the profiles are whatever
+    # Bulk/Data/Local already holds, and inventing 0..3 would litter the tree
+    # with directories for accounts that do not exist.
+    if [ "$type" = Application ]; then
+        local prof
+        for prof in "$BULK"/Data/Local/*/; do
+            [ -d "$prof" ] || continue
+            mkdir -p "$prof$pid"
+        done
+    fi
     printf "  %-12s %-26s %s\n" "$type" "$pid" "$name"
 
     local dep
@@ -72,6 +104,25 @@ install_one() {                     # $1=tar  $2=meta.inf path inside it
     [ -n "$dep" ] && echo "      needs: $dep"
     return 0
 }
+
+# BACKFILL FOR TITLES ALREADY ON DISK. The save-area fix above only runs at
+# install time, so without this every title installed before it stays broken and
+# the only remedy is reinstalling the whole library.
+if [ "${1:-}" = "--fix-saves" ]; then
+    made=0
+    for d in "$BULK"/ProgramFiles/*/; do
+        [ -f "$d/meta.inf" ] || continue
+        grep -q '^Type="\?Application' "$d/meta.inf" 2>/dev/null || continue
+        id="$(basename "$d")"
+        for prof in "$BULK"/Data/Local/*/; do
+            [ -d "$prof" ] || continue
+            [ -d "$prof$id" ] && continue
+            mkdir -p "$prof$id" && made=$((made+1))
+        done
+    done
+    echo "created $made missing save directories under $BULK/Data/Local"
+    exit 0
+fi
 
 for tar in "$@"; do
     [ -f "$tar" ] || { echo "no such file: $tar" >&2; continue; }

@@ -1,0 +1,61 @@
+# Cooking! Recipes on the Road — boot to the first drawn frame.
+#
+# Tile confirmed by matching the picker grid against the package's own icon,
+# GAMS/GAMS/PopUpIcon.png (a chef's hat over crossed utensils, on orange): page
+# 4 of the picker, row 1, column 3. Columns x=160/245/335, rows y=45/130/215;
+# the blue arrow at (30,230) pages down.
+#
+# EVERY STEP HERE WAITS FOR THE PICKER TO SAY IT MOVED, rather than sleeping a
+# guess. A fixed `sleep 4` per page turn worked on a quiet machine and failed on
+# a busy one: the page taps went into a screen that was still being bitmapped,
+# the run ended up on the wrong page, and the tile tap then landed on empty grid
+# — a TIMEOUT that reads exactly like a launch bug in the emulator.
+#
+# ChangePage IS THE MARKER, AND ITS ARGUMENT IS NOT THE PAGE. The picker logs
+# `ChangePage( 1 )` for every downward turn — 1 is the DIRECTION — so all three
+# turns look identical in the log and `wait` would match the first one three
+# times over. taptil counts from the start of its own step and requires a NEW
+# line, which is what makes a repeated marker usable; it also re-taps, which
+# matters because the buttons stay disabled until the icons are re-bitmapped and
+# a tap sent before then is simply dropped.
+#
+# WHAT TO LOOK FOR IN THE LOG, beyond the screenshots:
+#
+#   CGraphics2D::init Initialization Error
+#       Lightning2D's own assert, raised when glGetError() is non-zero at the
+#       end of engine startup. It fired while glGetIntegerv rejected
+#       GL_NUM_COMPRESSED_TEXTURE_FORMATS / GL_COMPRESSED_TEXTURE_FORMATS, which
+#       is the pair CGraphics2D::init queries. Its ABSENCE is the regression test
+#       for that fix.
+#
+#   Warning: Unsupported compressed tex image format %x, depalettizing
+#       the engine falling back to a CPU depalettise because the format was not
+#       in the list we advertised. Expected NEVER for the paletted formats now
+#       that the list is answered; every one of them is one texture uploaded
+#       the slow way.
+#
+#   fopenAtomic(/LF/Bulk/Data/Local/0/MULT-0x0018004C-000000/SAVE.DAT):
+#   mkstemp failed us!
+#       THE ONE THAT COSTS THE WHOLE TITLE. The save directory is created by the
+#       guest on first launch, and guest mkdir() only started working when the
+#       shim began intercepting it — see tadpole_shim.c. Without it the title
+#       calls dslib::PanicScreen::showDirect(msg, true), whose terminate() is an
+#       unconditional spin, and hangs at 100% CPU on a white screen having drawn
+#       nothing. There is no crash and no message, because this build compiles
+#       PanicScreen::addDirect down to `bx lr` and the panic text is never
+#       rendered. If the screen is white, sample the guest before blaming the
+#       renderer:  kill -QUIT <tid of the RUNNING thread of AppManager>.
+
+taptil 30 230 HomePickerState::ChangePage
+taptil 30 230 HomePickerState::ChangePage
+taptil 30 230 HomePickerState::ChangePage
+sleep 4
+shot picker-page4
+taptil 335 45 LoadNewApp path = /LF/Bulk/ProgramFiles/MULT-0x0018004C
+sleep 25
+shot 1-splash
+sleep 20
+shot 2-title
+key a
+sleep 10
+shot 3-after-a

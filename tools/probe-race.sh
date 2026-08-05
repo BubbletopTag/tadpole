@@ -122,8 +122,15 @@ else
     "$ROOT/tadpole.sh" --boot >> "$LOG" 2>&1 &
 fi
 
-waitfor 'onLoadInit\( _level0.mcContent.SignIn_mc \)' 150 || {
-    echo "never reached sign-in — see $LOG" >&2; exit 1; }
+# SIGN-IN IS NOT GUARANTEED TO HAPPEN. Some boots go straight to the home
+# picker with the profile already chosen — measured: 0 SignIn_mc, 104
+# LoadIconImage — and gating only on sign-in aborted a boot that had in fact
+# succeeded, with "never reached sign-in" on a log that shows the picker fully
+# drawn. Accept either, for the same reason the nag loop below drives toward an
+# observable end state rather than modelling the sequence: the loops that follow
+# already exit immediately when the picker is up.
+waitfor 'onLoadInit\( _level0.mcContent.SignIn_mc \)|LoadIconImage' 150 || {
+    echo "never reached sign-in OR the home picker — see $LOG" >&2; exit 1; }
 sleep 10
 shoot signin
 
@@ -188,10 +195,25 @@ while read -r verb rest; do
     esac
     n=$((n+1))
     case "$verb" in
-        taptil) # tap until a marker appears: X Y REGEX
+        taptil) # tap until a NEW match appears: X Y REGEX
                set -- $rest
                _x="$1"; _y="$2"; shift 2; _re="$*"
-               echo "  [$n] taptil $_x $_y until /$_re/"
+               # A NEW OCCURRENCE, NOT ANY OCCURRENCE.
+               #
+               # `wait` and the old taptil both asked "does the log contain
+               # this?", which is only a usable question for markers that fire
+               # once. The home picker logs `ChangePage( 1 )` for every page
+               # turn — the argument is the DIRECTION, not the page — so the
+               # second page-down matched the first one's line, returned
+               # instantly, and the route carried on one page short. It then
+               # tapped an empty grid slot and timed out waiting for a launch,
+               # which reads exactly like the emulator ignoring input.
+               #
+               # Counting from the step's own start makes a repeated marker as
+               # usable as a unique one, and changes nothing for unique ones:
+               # they start at zero either way.
+               _seen=$(grep -caE "$_re" "$LOG" 2>/dev/null)
+               echo "  [$n] taptil $_x $_y until /$_re/ (seen $_seen so far)"
                # A SINGLE TAP IS NOT RELIABLE. Whether the Connect nag appears
                # shifts the picker's timing by seconds, so a tap can land during
                # an animation and be swallowed — the run then continues past a
@@ -200,7 +222,8 @@ while read -r verb rest; do
                    "$HERE/tap.py" "$_x" "$_y" >/dev/null 2>&1
                    for _i in $(seq 1 12); do
                        sleep 1
-                       grep -qaE "$_re" "$LOG" && break 2
+                       [ "$(grep -caE "$_re" "$LOG" 2>/dev/null)" \
+                         -gt "$_seen" ] && break 2
                    done
                    echo "      retry $_try"
                done
