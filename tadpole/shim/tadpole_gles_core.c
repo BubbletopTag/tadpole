@@ -2397,6 +2397,7 @@ void glCurrentPaletteMatrixOES(GLuint idx)
  * than like a matrix being subtly wrong. Nothing distinguishes that from a
  * correctly-posed bone without recording it. */
 static u8 g_palette_set[MAX_PALETTE];
+static int g_skin_normalize;
 
 void glLoadPaletteFromModelViewMatrixOES(void)
 { tr2("glLoadPaletteFromModelViewMatrixOES", (int)g_cur_palette, 0);
@@ -2559,8 +2560,31 @@ static const float *skin_vertices(u32 nverts)
 	nb = g_midx.size < g_wgt.size ? g_midx.size : g_wgt.size;
 	if (nb > 4) nb = 4;
 
+	/* WEIGHTS THAT DO NOT SUM TO 1 SHRINK THE VERTEX toward the origin by
+	 * exactly the deficit, because the blend is a weighted sum and nothing
+	 * makes up the difference. Pet Pals 2's audit reports sums from 0.750 to
+	 * 0.996 with two declared influences, so its models are pulled inward by up
+	 * to a quarter — which is what a collapsed muzzle and a pinched head look
+	 * like.
+	 *
+	 * WHETHER TO CORRECT THAT IS NOT OBVIOUS, which is why it is a switch and
+	 * not a change. If the device normalises, matching it fixes the models. If
+	 * the device does not, the real LeapPad2 draws the same shrunken geometry
+	 * and normalising here would invent shapes the hardware never shows —
+	 * making Tadpole prettier and less correct at the same time.
+	 *
+	 * TADPOLE_GL_SKIN_NORMALIZE=1 turns it on so the two can be compared
+	 * side by side. Settle it against hardware before making either the
+	 * default: tools/glconform is the mechanism, and this is exactly the kind
+	 * of question it exists to answer. */
+	{
+		static int norm = -1;
+		if (norm < 0) norm = getenv("TADPOLE_GL_SKIN_NORMALIZE") ? 1 : 0;
+		g_skin_normalize = norm;
+	}
+
 	for (i = 0; i < nverts; i++) {
-		float pos[4], acc[3];
+		float pos[4], acc[3], wsum = 0.0f;
 		acc[0] = acc[1] = acc[2] = 0.0f;
 		pos[0] = fetch(&g_vtx, i, 0);
 		pos[1] = fetch(&g_vtx, i, 1);
@@ -2574,6 +2598,13 @@ static const float *skin_vertices(u32 nverts)
 			if (mi >= MAX_PALETTE) continue;
 			vec_xform(&g_palette[mi], pos, t);
 			acc[0] += w * t[0]; acc[1] += w * t[1]; acc[2] += w * t[2];
+			wsum += w;
+		}
+		/* Guarded against a zero sum: a vertex with no live influence must be
+		 * left where the blend put it (the origin) rather than divided by 0. */
+		if (g_skin_normalize && wsum > 0.0001f && wsum < 0.9999f) {
+			float inv = 1.0f / wsum;
+			acc[0] *= inv; acc[1] *= inv; acc[2] *= inv;
 		}
 		g_skin[i*3+0] = acc[0];
 		g_skin[i*3+1] = acc[1];
@@ -2605,6 +2636,18 @@ static const float *skin_vertices(u32 nverts)
  * for exactly this and the title can ask for it. If a title turns out to need
  * it and not ask, this is where to add it.
  */
+/* Newton's method, three iterations from a crude seed. libm is not linked into
+ * the shim and pulling it in for one call would add a dependency the guest
+ * loader has to satisfy at startup. Accurate to well under a normal's needs. */
+static float sqrt_approx(float v)
+{
+	float x = v > 1.0f ? v * 0.5f : 1.0f;
+	int i;
+	if (v <= 0.0f) return 0.0f;
+	for (i = 0; i < 6; i++) x = 0.5f * (x + v / x);
+	return x;
+}
+
 static float *g_skin_n;
 static u32    g_skin_n_cap;
 
@@ -2643,6 +2686,16 @@ static const float *skin_normals(u32 nverts)
 			acc[0] += w * (m->m[0]*n[0] + m->m[4]*n[1] + m->m[8]*n[2]);
 			acc[1] += w * (m->m[1]*n[0] + m->m[5]*n[1] + m->m[9]*n[2]);
 			acc[2] += w * (m->m[2]*n[0] + m->m[6]*n[1] + m->m[10]*n[2]);
+		}
+		if (g_skin_normalize) {
+			/* Direction only, so normalise to UNIT length rather than by the
+			 * weight sum — the deficit that shrinks a position is meaningless
+			 * for a normal, but the blend still leaves it short. */
+			float len2 = acc[0]*acc[0] + acc[1]*acc[1] + acc[2]*acc[2];
+			if (len2 > 0.000001f) {
+				float inv = 1.0f / sqrt_approx(len2);
+				acc[0] *= inv; acc[1] *= inv; acc[2] *= inv;
+			}
 		}
 		g_skin_n[i*3+0] = acc[0];
 		g_skin_n[i*3+1] = acc[1];
