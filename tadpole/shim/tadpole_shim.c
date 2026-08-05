@@ -58,6 +58,9 @@ extern int nanosleep(const struct tad_timespec *req, struct tad_timespec *rem);
  * names the faulting library and offset, then re-raises so qemu still cores. */
 extern void tad_crash_install(const char *dir,
                               int (*real_open)(const char *, int, ...));
+/* Returns the guest's previous handler, or (void(*)(int))-1 for a signal the
+ * crash reporter does not manage — in which case signal() falls through. */
+extern void (*tad_crash_take_signal(int sig, void (*h)(int)))(int);
 
 #define RTLD_NEXT ((void *)-1L)
 
@@ -266,6 +269,11 @@ static int  (*real_rename)(const char *, const char *);
 static int  (*real_unlink)(const char *);
 static int  (*real_chdir)(const char *);
 static int  (*real_mkdir)(const char *, u32);
+static void (*(*real_signal)(int, void (*)(int)))(int);
+static int  (*real_stat)(const char *, void *);
+static int  (*real_stat64)(const char *, void *);
+static int  (*real_lstat)(const char *, void *);
+static int  (*real_access)(const char *, int);
 static long (*real_read)(int, void *, size_t);
 static void *(*real_fopen)(const char *, const char *);
 static void *(*real_fopen64)(const char *, const char *);
@@ -300,6 +308,11 @@ static void init(void)
 	real_mkstemps = dlsym(RTLD_NEXT, "mkstemps");
 	real_unlink = dlsym(RTLD_NEXT, "unlink");
 	real_mkdir  = dlsym(RTLD_NEXT, "mkdir");
+	real_signal = dlsym(RTLD_NEXT, "signal");
+	real_stat   = dlsym(RTLD_NEXT, "stat");
+	real_stat64 = dlsym(RTLD_NEXT, "stat64");
+	real_lstat  = dlsym(RTLD_NEXT, "lstat");
+	real_access = dlsym(RTLD_NEXT, "access");
 	real_fopen  = dlsym(RTLD_NEXT, "fopen");
 	real_fopen64= dlsym(RTLD_NEXT, "fopen64");
 
@@ -340,7 +353,12 @@ static void init(void)
 
 	e = getenv("TADPOLE_DIR");
 	snprintf(g_dir, sizeof(g_dir), "%s", e ? e : "/tmp/tadpole");
-	mkdir(g_dir, 0777);
+	/* real_mkdir, NOT our own wrapper below. TADPOLE_DIR is a HOST path that the
+	 * viewer also opens by that exact name; sending it through the sysroot-first
+	 * rule would try to create it under the guest tree, and on a sysroot that
+	 * happens to have a /tmp it would SUCCEED there — leaving the guest and the
+	 * viewer looking at two different runtime directories. */
+	real_mkdir(g_dir, 0777);
 
 	/* Installed EARLY and unconditionally, not behind TADPOLE_DEBUG: a crash is
 	 * always worth a report, and most of them happen during an app's own
@@ -485,6 +503,16 @@ static void vsync_wait(void)
 	nanosleep(&req, 0);
 }
 
+/* Is this the emulator's OWN runtime directory rather than a guest path? The
+ * viewer opens TADPOLE_DIR by its literal host name, so it must never be
+ * rewritten into the sysroot. */
+static int under_gdir(const char *path)
+{
+	unsigned dlen = (unsigned)strlen(g_dir);
+	return dlen && path && strncmp(path, g_dir, dlen) == 0 &&
+	       (path[dlen] == '\0' || path[dlen] == '/');
+}
+
 static int open_common(const char *path, int flags, int mode)
 {
 	char real[320];
@@ -514,16 +542,40 @@ static int open_common(const char *path, int flags, int mode)
 		return fd;
 	}
 
-	/* See the note on g_sysroot: qemu will not create files inside -L. */
-	if ((flags & O_CREAT) && path && path[0] == '/' && g_sysroot[0]) {
+	/* SYSROOT FIRST FOR EVERY ABSOLUTE PATH, not only for creating opens.
+	 *
+	 * This was gated on O_CREAT because the symptom that prompted it was "qemu
+	 * will not create files inside -L". The gate is too narrow, and the reason
+	 * is the same qemu behaviour seen from the other end: `-L` is a SNAPSHOT.
+	 * init_paths() walks the sysroot once at startup and every later lookup is
+	 * answered from that tree, so a file the guest creates during the run is
+	 * invisible to translation for the rest of the run — and reading it back
+	 * resolves against the HOST root and fails with ENOENT.
+	 *
+	 * Creating a file and then opening it again is not an exotic sequence. It
+	 * is what Cooking! Recipes on the Road does on its very first launch, and
+	 * it cost the whole title:
+	 *
+	 *     clearInit()          creates SAVE.DAT (O_CREAT -> translated, fine)
+	 *     DSLIBI_OpenFile()    open(SAVE.DAT, O_RDONLY) -> NOT translated
+	 *                          -> ENOENT -> returns 0
+	 *     Backup::read()       -> errorCallback -> PanicScreen -> spin forever
+	 *
+	 * So the title could only ever have worked on its SECOND run, once the card
+	 * was old enough to be in the snapshot. Answering every absolute path from
+	 * the sysroot first, and falling back to the literal path, removes the whole
+	 * class — stat/lstat/access carry the identical rule for the identical
+	 * reason.
+	 *
+	 * TADPOLE_DIR is excluded: it is a host path shared with the viewer, and the
+	 * framebuffer and event nodes above already resolve into it by name. */
+	if (path && path[0] == '/' && g_sysroot[0] && !under_gdir(path)) {
 		char full[512];
 		int fd;
 		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
-		if (g_debug) { dbg("[tadpole] create-try "); dbg(full); dbg("\n"); }
 		fd = real_open(full, flags, mode);
-		if (fd < 0 && g_debug) dbg("[tadpole] create-FAILED\n");
 		if (fd >= 0) {
-			if (g_debug) { dbg("[tadpole] create "); dbg(full); dbg("\n"); }
+			if (g_debug) { dbg("[tadpole] open(sysroot) "); dbg(path); dbg("\n"); }
 			return fd;
 		}
 	}
@@ -538,7 +590,7 @@ static void *fopen_common(const char *path, const char *mode,
 {
 	init();
 	if (real && path && path[0] == '/' && g_sysroot[0] && mode &&
-	    (mode[0] == 'w' || mode[0] == 'a')) {
+	    !under_gdir(path)) {
 		char full[512];
 		void *f;
 		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
@@ -691,6 +743,141 @@ int unlink(const char *path)
 			return 0;
 	}
 	return real_unlink(path);
+}
+
+/* stat() AND FRIENDS — "does this file exist?" asked about a file WE created.
+ *
+ * qemu-user's -L is not a live view of the sysroot: init_paths() walks the tree
+ * ONCE at startup and every later lookup is answered from that snapshot. So a
+ * path the guest creates during the run stays invisible to translation for the
+ * rest of the run, and a plain stat() of it resolves against the HOST root and
+ * reports ENOENT for a file that is plainly there.
+ *
+ * THIS IS WHAT KEPT COOKING! FROM STARTING, and it is a far better disguise
+ * than the missing save directory was. dslib creates the save card on first
+ * launch and then immediately asks about it again:
+ *
+ *     clearInit():          stat(SAVE.DAT) -> missing, so create it:
+ *                           fopenAtomic + fwrite(1024 zero bytes) + fcloseAtomic
+ *     DSLIBI_InitFileInfo:  stat(SAVE.DAT) -> STILL "missing", because the
+ *                           snapshot predates the file, so it returns 0
+ *     Backup::read:         -> errorCallback(1, 0)
+ *                           -> PanicScreen::showDirect(msg, true)
+ *                           -> terminate(): spin forever, on a white screen
+ *
+ * So the title fails on its FIRST run specifically, and could only ever have
+ * worked on a later one once the card was old enough to be in the snapshot.
+ * All of that reads as "the save system is broken" and none of it is.
+ *
+ * open() and fopen() have carried this workaround for a long time; stat, lstat
+ * and access were never given it, and they are how code ASKS about a file
+ * rather than uses one. Sysroot first, literal second, as everywhere else.
+ */
+#define STAT_WRAPPER(name, realfn, argtype)                                   \
+	int name(const char *path, argtype buf)                                   \
+	{                                                                         \
+		char f[512];                                                          \
+		unsigned dlen;                                                        \
+		init();                                                               \
+		if (!realfn) return -1;                                               \
+		dlen = (unsigned)strlen(g_dir);                                       \
+		if (path && path[0] == '/' && g_sysroot[0] &&                         \
+		    !(dlen && strncmp(path, g_dir, dlen) == 0)) {                     \
+			sysrootify(f, sizeof(f), path);                                   \
+			if (realfn(f, buf) == 0)                                          \
+				return 0;                                                     \
+		}                                                                     \
+		return realfn(path, buf);                                             \
+	}
+
+STAT_WRAPPER(stat,   real_stat,   void *)
+STAT_WRAPPER(stat64, real_stat64, void *)
+STAT_WRAPPER(lstat,  real_lstat,  void *)
+STAT_WRAPPER(access, real_access, int)
+
+/* signal() — DO NOT LET THE GUEST UNINSTALL THE CRASH REPORTER.
+ *
+ * AppManager installs its own handlers through this (libLightningBase.so
+ * imports `signal`; the boot log's "AppManager signal handler installed" is the
+ * call), and signal() REPLACES rather than chains. From that line onward the
+ * shim's SIGSEGV handler was gone, which is why a real crash produced no report
+ * while everything about the reporter itself worked — see tadpole_crash.c.
+ *
+ * The guest's request is honoured, just not by unregistering us: the handler is
+ * recorded and called from ours, after the report. Signals the reporter does
+ * not manage are none of our business and fall through untouched.
+ */
+void (*signal(int sig, void (*h)(int)))(int)
+{
+	void (*prev)(int);
+	init();
+	prev = tad_crash_take_signal(sig, h);
+	if (prev != (void (*)(int))-1) {
+		if (g_debug) { dbg("[tadpole] signal() kept the crash reporter\n"); }
+		return prev;
+	}
+	return real_signal ? real_signal(sig, h) : (void (*)(int))-1;
+}
+
+/* mkdir() — THE GUEST COULD NOT CREATE A DIRECTORY AT ALL.
+ *
+ * `real_mkdir` has been resolved since the shim was written but nothing ever
+ * called it, so guest mkdir()s went straight to qemu — and this is the same
+ * trap open(O_CREAT) and mkstemp() are already worked around for above: `-L`
+ * only rewrites a path that ALREADY EXISTS in the sysroot, and the whole point
+ * of mkdir is that its target does not. The guest string was therefore
+ * attempted against the HOST root, where /LF does not exist and could not be
+ * written to anyway, and every directory a title tried to make silently failed.
+ *
+ * WHAT THAT COSTS, because "no new directories" sounds cosmetic and is not.
+ * A title's save area is /LF/Bulk/Data/Local/<profile>/<PackageID>/, and it is
+ * created on first launch. Without it:
+ *
+ *     fopenAtomic(/LF/Bulk/Data/Local/0/MULT-0x0018004C-000000/SAVE.DAT):
+ *         mkstemp failed us!
+ *
+ * and Cooking! Recipes on the Road answers that by calling
+ * dslib::PanicScreen::showDirect(msg, true) — whose terminate(bool) is an
+ * unconditional `while (flag) ;` spin. The title hangs forever at 100% CPU on
+ * a white screen, having drawn nothing, with no crash and no message: the
+ * panic screen's own addDirect() is compiled out to `bx lr` in this build, so
+ * the text is never rendered. That is a softlock which looks exactly like a
+ * renderer bug, and three sessions read it as one.
+ *
+ * The three titles that DO have save directories have them because HANDOVER's
+ * "transplanting real /LF/Bulk" brought them in from hardware, not because
+ * anything here ever created one.
+ *
+ * Sysroot first, literal second, as chdir/rename/unlink already do — so the
+ * shim's own runtime directory under /tmp keeps working.
+ */
+int mkdir(const char *path, u32 mode)
+{
+	char f[512];
+	unsigned dlen;
+	init();
+	if (!real_mkdir)
+		return -1;
+	/* TADPOLE_DIR IS A HOST PATH, AND IT IS THE ONE ABSOLUTE PATH HERE THAT IS
+	 * NOT THE GUEST'S. Everything else the guest names — /LF, /var, /tmp — it
+	 * means in its own namespace, but the runtime directory is a rendezvous with
+	 * the VIEWER, which opens it by that literal name from the host side. Sending
+	 * it through the sysroot rule quietly created <sysroot>/tmp/tadpole-<run>
+	 * instead: measured, on the first boot after this interception was added.
+	 * Nothing failed loudly — the guest and the viewer simply had two different
+	 * runtime directories, which is the framebuffer never appearing. */
+	dlen = (unsigned)strlen(g_dir);
+	if (path && dlen && strncmp(path, g_dir, dlen) == 0 &&
+	    (path[dlen] == '\0' || path[dlen] == '/'))
+		return real_mkdir(path, mode);
+	if (path && path[0] == '/' && g_sysroot[0]) {
+		sysrootify(f, sizeof(f), path);
+		if (real_mkdir(f, mode) == 0) {
+			if (g_debug) { dbg("[tadpole] mkdir "); dbg(path); dbg("\n"); }
+			return 0;
+		}
+	}
+	return real_mkdir(path, mode);
 }
 
 long read(int fd, void *buf, size_t n)
