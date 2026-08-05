@@ -1366,10 +1366,50 @@ void glActiveTexture(GLenum t)
 {
 	GLenum u = t - 0x84C0;                    /* GL_TEXTURE0 */
 	tr2("glActiveTexture unit", (int)u, 0);
+	if (u != 0) {
+		/* The companion to the glClientActiveTexture note below. This one IS
+		 * forwarded and the host does bind per unit, so a second unit's
+		 * TEXTURE is handled; what is missing is its texcoord ARRAY. Saying so
+		 * separately keeps "the title multitextures" and "we drop its UVs"
+		 * distinguishable in a log. */
+		static int said;
+		if (!said) { said = 1;
+			warn2("MULTITEXTURE: title selected texture unit != 0 (unit, of max)",
+			      (int)u, MAX_TEXUNITS); }
+	}
 	if (u < MAX_TEXUNITS) g_active_tex = u;
 	if (hle_ready()) hle_activetexture(u);
 }
-void glClientActiveTexture(GLenum t) { tr2("glClientActiveTexture unit", (int)t - 0x84C0, 0); }
+/* THIS IS A NO-OP AND IT SHOULD NOT BE.
+ *
+ * glClientActiveTexture selects which texture unit the NEXT glTexCoordPointer
+ * applies to. We keep exactly one texcoord array (g_tex), so a title that does
+ *
+ *     glClientActiveTexture(GL_TEXTURE0); glTexCoordPointer(uv0);
+ *     glClientActiveTexture(GL_TEXTURE1); glTexCoordPointer(uv1);
+ *
+ * has its second array silently overwrite its first, and unit 0 then samples
+ * with unit 1's coordinates. On a model where a small mesh carries its own UV
+ * set — an eye, a tongue — that draws a patch of some unrelated part of the
+ * atlas, which is what a pink blotch where an eye belongs looks like.
+ *
+ * The device reports MAX_TEXTURE_UNITS = 2, so this is real capability that
+ * titles may use. Implementing it properly means per-unit texcoord arrays
+ * through the draw path and the wire protocol, which is a real chunk of work —
+ * so FIRST establish whether any title actually asks. One line, always on,
+ * once per unit, and the answer arrives in an ordinary log. */
+void glClientActiveTexture(GLenum t)
+{
+	GLenum u = t - 0x84C0;                    /* GL_TEXTURE0 */
+	tr2("glClientActiveTexture unit", (int)u, 0);
+	if (u != 0) {
+		static int said;
+		if (!said) { said = 1;
+			warn2("MULTITEXTURE: glClientActiveTexture selected unit != 0, and"
+			      " we keep only ONE texcoord array — its UVs will overwrite"
+			      " unit 0's (unit)", (int)u, 0); }
+	}
+}
 
 void glViewport(GLint x, GLint y, GLsizei w, GLsizei h)
 { tr2("glViewport xy", x, y); tr2("glViewport wh", (int)w, (int)h); }
