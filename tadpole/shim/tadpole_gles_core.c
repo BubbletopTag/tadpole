@@ -2607,13 +2607,23 @@ static const float *skin_vertices(u32 nverts)
 	 * and normalising here would invent shapes the hardware never shows —
 	 * making Tadpole prettier and less correct at the same time.
 	 *
-	 * TADPOLE_GL_SKIN_NORMALIZE=1 turns it on so the two can be compared
-	 * side by side. Settle it against hardware before making either the
-	 * default: tools/glconform is the mechanism, and this is exactly the kind
-	 * of question it exists to answer. */
+	 * ON BY DEFAULT, and that is a judgement call rather than a measurement.
+	 * The argument for it: a weighted blend that sums to 0.75 shrinks the
+	 * vertex 25% toward the model origin, and the parts furthest from that
+	 * origin move furthest — which is why Pet Pals 2's dogs have good bodies
+	 * and collapsed muzzles. No plausible authoring pipeline intends that.
+	 *
+	 * The argument against, which has not been retired: if the VR5 does not
+	 * normalise, a real LeapPad2 draws the same collapsed muzzle and we are now
+	 * prettier than the hardware rather than equal to it.
+	 *
+	 * TADPOLE_GL_SKIN_RAW=1 restores the unnormalised blend for A/B. Settle it
+	 * properly with tools/glconform against the device — set two known bones,
+	 * weight a vertex 0.5/0.25, read back where it lands. That is a five-minute
+	 * test and it replaces this whole comment with a fact. */
 	{
 		static int norm = -1;
-		if (norm < 0) norm = getenv("TADPOLE_GL_SKIN_NORMALIZE") ? 1 : 0;
+		if (norm < 0) norm = getenv("TADPOLE_GL_SKIN_RAW") ? 0 : 1;
 		g_skin_normalize = norm;
 	}
 
