@@ -28,10 +28,27 @@
  * /proc/self/maps in a handler is not strictly sanctioned, but the process is
  * already dying and the alternative is a report with no symbols in it.
  *
- * WHAT THIS DOES NOT CATCH. White-screen softlocks and "freezes but does not
- * die" raise no signal at all. SIGABRT covers failed assertions, which is the
- * common "asserts at startup" case, but a genuine hang needs a watchdog and is
- * a separate problem.
+ * HANGS: ASK FOR THE REPORT INSTEAD OF WAITING FOR A SIGNAL.
+ *
+ * A white-screen softlock raises nothing, so there is no crash to catch — and
+ * the host-side tools cannot fill the gap either. qemu-user translates guest
+ * code into its own TCG buffer, so a host PC says nothing about where the GUEST
+ * is, and yama's ptrace_scope keeps a separate gdb from attaching to a running
+ * emulator at all. qemu's own gdbstub works but must be armed with -g before
+ * boot, and its default sysroot pulls every guest .so back through the remote
+ * protocol one packet at a time — measured: the boot had not reached the sign-in
+ * screen after four minutes.
+ *
+ * The process that is spinning already knows the answer, so ask it:
+ *
+ *     kill -QUIT <host tid of the spinning thread>
+ *
+ * SIGQUIT prints exactly the same pc/lr/stack report and RETURNS, so the guest
+ * carries on and can be sampled repeatedly — two dumps a few seconds apart is
+ * the difference between "stuck at one instruction" and "looping over a range".
+ * Signalling the THREAD (kill -QUIT on the tid, not the pid) matters: qemu maps
+ * guest threads to host threads one-to-one, and a process-directed signal lands
+ * on whichever thread has it unblocked, which is rarely the one spinning.
  */
 
 typedef unsigned int   u32;
@@ -274,6 +291,7 @@ static void say_addr(ulong addr, int exec_only)
 static const char *signame(int sig)
 {
 	switch (sig) {
+	case 3:  return "SIGQUIT";
 	case 4:  return "SIGILL";
 	case 6:  return "SIGABRT";
 	case 7:  return "SIGBUS";
@@ -283,15 +301,17 @@ static const char *signame(int sig)
 	}
 }
 
-/* ---- the handler ------------------------------------------------------- */
-static void on_crash(int sig, void *info, void *ucv)
+/* ---- the report -------------------------------------------------------- */
+/* ONE BODY FOR BOTH CALLERS. A crash report and a hang dump differ in the
+ * heading and in what happens afterwards, not in their content — and the
+ * content is the part worth keeping identical, so that a hang can be compared
+ * against a crash from the same title without allowing for two formats. */
+static void report(int sig, void *ucv, const char *what)
 {
 	struct tad_ucontext *uc = (struct tad_ucontext *)ucv;
 	char cwd[256];
 	ulong pc = 0, lr = 0, sp = 0, fault = 0;
 	int found = 0;
-
-	(void)info;
 
 	/* The log is opened before the first line is written, so the file captures
 	 * the whole report rather than everything after the header — the signal
@@ -299,7 +319,9 @@ static void on_crash(int sig, void *info, void *ucv)
 	if (g_logpath[0] && g_logfd < 0 && g_open)
 		g_logfd = g_open(g_logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
 
-	say("\n=== tadpole: guest crashed ===\n");
+	say("\n=== tadpole: guest ");
+	say(what);
+	say(" ===\n");
 	say("  signal   ");
 	say(signame(sig));
 	say(" (");
@@ -377,11 +399,72 @@ static void on_crash(int sig, void *info, void *ucv)
 		close(g_logfd);
 		g_logfd = -1;
 	}
+}
 
+/* ---- the guest's own handlers ------------------------------------------
+ *
+ * WHY THE REPORT NEVER APPEARED FOR A REAL CRASH.
+ *
+ * `libLightningBase.so` imports `signal`, and AppManager uses it — the boot log
+ * says so in as many words, "AppManager signal handler installed". signal()
+ * REPLACES a handler outright, so from that line onward the shim's SIGSEGV
+ * handler is simply no longer registered, and every crash after it is somebody
+ * else's to report. That is the whole of the long-standing "a segfault where
+ * tadpole_crash.c did NOT produce a report" mystery: the handler was not
+ * failing, it was not installed any more. The `qemu: uncaught target signal 11`
+ * that accompanies those crashes is the matching evidence — qemu prints it when
+ * the GUEST has no handler, which is exactly what AppManager's own handler
+ * leaves behind once it restores SIG_DFL to get its core.
+ *
+ * So keep ours registered and remember theirs. We report first — the report is
+ * the reason this file exists — and then hand the signal on unchanged, because
+ * whatever AppManager does with a crash (its relaunch logic lives on the other
+ * side of it) is not ours to cancel.
+ */
+#define MAXSIG 32
+static void (*g_guest[MAXSIG])(int);
+
+static int ours(int sig)
+{
+	return sig == 3 || sig == 4 || sig == 6 || sig == 7 || sig == 8 || sig == 11;
+}
+
+/* -> the handler the guest had previously installed, signal()'s return value. */
+void (*tad_crash_take_signal(int sig, void (*h)(int)))(int)
+{
+	void (*prev)(int);
+	if (sig <= 0 || sig >= MAXSIG || !ours(sig))
+		return (void (*)(int))-1;      /* not ours: caller falls through */
+	prev = g_guest[sig];
+	g_guest[sig] = h;
+	return prev;
+}
+
+/* ---- the handlers ------------------------------------------------------ */
+static void on_crash(int sig, void *info, void *ucv)
+{
+	void (*guest)(int) = (sig > 0 && sig < MAXSIG) ? g_guest[sig] : 0;
+	(void)info;
+	report(sig, ucv, "crashed");
+	/* SIG_DFL(0) and SIG_IGN(1) are not addresses to call. */
+	if (guest && guest != (void (*)(int))1) {
+		guest(sig);
+		/* It returned, so it did not want the process gone. Neither do we. */
+		return;
+	}
 	/* Re-raise so the default action still runs and qemu still writes its core.
 	 * SA_RESETHAND already restored SIG_DFL, and SA_NODEFER means this is
 	 * delivered rather than held pending. */
 	kill(getpid(), sig);
+}
+
+/* ON DEMAND, AND SURVIVABLE. Installed without SA_RESETHAND and returning
+ * normally, because the whole point is to sample a process that is still
+ * running: the guest resumes its spin and can be asked again. */
+static void on_dump(int sig, void *info, void *ucv)
+{
+	(void)info;
+	report(sig, ucv, "stack dump");
 }
 
 /* ---- installation ------------------------------------------------------ */
@@ -410,4 +493,15 @@ void tad_crash_install(const char *dir, int (*real_open)(const char *, int, ...)
 	 * own sigset_t; anything else fails with EINVAL. */
 	for (i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
 		syscall(__NR_rt_sigaction, (long)sigs[i], (long)&sa, 0L, 8L);
+
+	/* SIGQUIT: the same report, on demand, for a guest that is not dying.
+	 * NEITHER RESETHAND NOR NODEFER here. RESETHAND would make the first dump
+	 * the only one, which defeats sampling a spin twice to see whether the PC
+	 * moves; NODEFER only exists above to let the deliberate re-raise through,
+	 * and this handler does not re-raise. SIGQUIT's default action would dump
+	 * core and kill the guest, so an unhandled one is not a harmless thing to
+	 * send — installing this is what makes the tool safe to use. */
+	sa.handler = on_dump;
+	sa.flags = SA_SIGINFO;
+	syscall(__NR_rt_sigaction, 3L, (long)&sa, 0L, 8L);
 }
