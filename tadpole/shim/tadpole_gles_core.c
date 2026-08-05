@@ -2361,9 +2361,18 @@ void glCurrentPaletteMatrixOES(GLuint idx)
 /* The palette entry becomes a COPY of the current modelview. That is the whole
  * mechanism: the app poses a bone into the modelview, snapshots it here, and
  * repeats for each bone. */
+/* WHICH SLOTS HAVE EVER BEEN WRITTEN. A palette entry that no
+ * glLoadPaletteFromModelViewMatrixOES ever reached is still the identity, and a
+ * vertex weighted to it lands at its raw bind-pose position instead of its posed
+ * one — which looks like a body part detaching and hanging in the air rather
+ * than like a matrix being subtly wrong. Nothing distinguishes that from a
+ * correctly-posed bone without recording it. */
+static u8 g_palette_set[MAX_PALETTE];
+
 void glLoadPaletteFromModelViewMatrixOES(void)
 { tr2("glLoadPaletteFromModelViewMatrixOES", (int)g_cur_palette, 0);
   if (g_cur_palette < MAX_PALETTE) { g_palette[g_cur_palette] = g_mv[g_mv_sp];
+      g_palette_set[g_cur_palette] = 1;
       g_palette_loads++; } }
 
 /* Bone INDICES must not be normalised. fetch() divides GL_UNSIGNED_BYTE by 255
@@ -2416,6 +2425,61 @@ static const float *skin_vertices(u32 nverts)
 	{ static int said; if (!said) { said = 1;
 		warn2("SKINNING a draw: bones, verts",
 		      g_midx.size < g_wgt.size ? g_midx.size : g_wgt.size, (int)nverts); } }
+
+	/* ---- ONE-SHOT SKINNING AUDIT ----------------------------------------
+	 *
+	 * Pet Pals 2 poses its dogs' bodies correctly and leaves their ears and
+	 * muzzles hanging in the air, stationary while the rest animates. Three
+	 * different causes produce that same picture and nothing in the output
+	 * tells them apart:
+	 *
+	 *   1. the vertex references a palette slot nothing ever loaded, so its
+	 *      bone is still the identity;
+	 *   2. the index array is being read wrong, so it references the wrong
+	 *      slot — a real slot, holding a real matrix, for a different bone;
+	 *   3. the weights do not sum to 1, so the vertex is scaled toward or
+	 *      away from the origin.
+	 *
+	 * So measure all three, once, on the first skinned draw of a title. Cheap
+	 * because it happens exactly once, and it names the cause instead of
+	 * narrowing it.
+	 */
+	if (tad_gl_level() >= 1) {
+		static int audited;
+		if (!audited) {
+			u32 seen = 0, unset = 0, oor = 0, j;
+			int lo_w = 1000000, hi_w = -1000000, maxidx = -1;
+			int nbb = g_midx.size < g_wgt.size ? g_midx.size : g_wgt.size;
+			if (nbb > 4) nbb = 4;
+			audited = 1;
+			for (j = 0; j < nverts; j++) {
+				float sum = 0.0f;
+				int c;
+				for (c = 0; c < nbb; c++) {
+					u32 mi = fetch_index(&g_midx, j, c);
+					float w = fetch(&g_wgt, j, c);
+					sum += w;
+					if (mi >= MAX_PALETTE) { oor++; continue; }
+					if (mi < 32 && !(seen & (1u << mi))) {
+						seen |= 1u << mi;
+						if (!g_palette_set[mi]) unset++;
+					}
+					if ((int)mi > maxidx) maxidx = (int)mi;
+				}
+				{ int s = (int)(sum * 1000.0f);
+				  if (s < lo_w) lo_w = s;
+				  if (s > hi_w) hi_w = s; }
+			}
+			warn2("SKIN AUDIT distinct-slots-used / of-those-NEVER-loaded",
+			      (int)__builtin_popcount(seen), (int)unset);
+			warn2("SKIN AUDIT highest index used / palette loads so far",
+			      maxidx, (int)g_palette_loads);
+			warn2("SKIN AUDIT weight sum x1000: min / max (want 1000/1000)",
+			      lo_w, hi_w);
+			warn2("SKIN AUDIT indices out of range / bones per vertex",
+			      (int)oor, nbb);
+		}
+	}
 
 
 	if (g_skin_cap < nverts * 3) {
