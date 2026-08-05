@@ -52,6 +52,7 @@ typedef void           GLvoid;
 
 /* ---- libc (the real one, chained exactly like tone_test.c) -------------- */
 extern int  printf(const char *fmt, ...);
+extern int  snprintf(char *buf, unsigned long size, const char *fmt, ...);
 extern void exit(int code);
 extern void *memset(void *s, int c, unsigned long n);
 
@@ -159,6 +160,8 @@ extern void glGetClipPlanef(GLenum plane, GLfloat *eqn);
 #define GL_MAX_LIGHTS                   0x0D31
 #define GL_MAX_MODELVIEW_STACK_DEPTH    0x0D36
 #define GL_MAX_TEXTURE_SIZE             0x0D33
+#define GL_NUM_COMPRESSED_TEXTURE_FORMATS 0x86A2
+#define GL_COMPRESSED_TEXTURE_FORMATS     0x86A3
 
 #define EGL_NONE   0x3038
 #define EGL_VENDOR 0x3053
@@ -447,6 +450,97 @@ static void t_limits(void)
 	}
 }
 
+/* THE QUERY PAIR A REAL TITLE MAKES, IN THE ORDER IT MAKES IT.
+ *
+ * This is not a generic limit probe — it is a transcription of
+ * CGraphics2D::init in LF/Base/lib/libLightning2D.so, the 2D engine every
+ * Lightning title links, disassembled:
+ *
+ *     glGetIntegerv(0x86A2, &this->count);      NUM_COMPRESSED_TEXTURE_FORMATS
+ *     this->list = new int[this->count];
+ *     glGetIntegerv(0x86A3, this->list);        COMPRESSED_TEXTURE_FORMATS
+ *     BaseUtils::Assert(gl_checkError() == 0, "CGraphics2D.cpp", 162,
+ *                       "CGraphics2D::init Initialization Error");
+ *
+ * Three separate things are therefore being measured here, and the assert is
+ * the reason the first one is the pass condition rather than a detail:
+ *
+ *   1. THE ERROR. An implementation that rejects these two pnames trips that
+ *      assert during engine startup. Answering "0 formats" quietly is a
+ *      different bug from raising GL_INVALID_ENUM, and only the second one
+ *      reaches a title's own error handling.
+ *   2. THE COUNT, which decides how big that `new int[]` is.
+ *   3. HOW MANY THE SECOND QUERY ACTUALLY WROTE, counted by poisoning the
+ *      buffer first. This is the one a pass/fail check cannot see: writing more
+ *      entries than the count promised is a heap overflow in the caller, and
+ *      writing fewer leaves it reading uninitialised memory as texture formats.
+ *
+ * The list is sorted before printing. The two sides are free to enumerate in
+ * different orders — the SET is the answer — and an unsorted diff would report
+ * that permutation as a divergence.
+ */
+static void t_compressed_formats(void)
+{
+	enum { CAP = 64 };
+	const GLint poison = 0x7F7F7F7F;
+	GLint n = -1, got[CAP];
+	GLenum e_count, e_list;
+	char detail[512];
+	int wrote = 0, i, j, len;
+
+	drain();
+	glGetIntegerv(GL_NUM_COMPRESSED_TEXTURE_FORMATS, &n);
+	e_count = drain();
+	if (e_count != GL_NO_ERROR || n < 0) {
+		/* REJECTED, or no answer at all. Do not print `n` — a rejected glGet
+		 * leaves the destination untouched, so it holds this harness's poison
+		 * on one side and anything at all on the other (README: never report
+		 * the output of a rejected query). The error code IS the result. */
+		printf("RESULT compressed.formats FAIL err=0x%04x detail=\"NUM_COMPRESSED"
+		       "_TEXTURE_FORMATS not answered; Lightning2D asserts on this\"\n",
+		       (unsigned)e_count);
+		g_fail++;
+		return;
+	}
+
+	for (i = 0; i < CAP; i++) got[i] = poison;
+	glGetIntegerv(GL_COMPRESSED_TEXTURE_FORMATS, got);
+	e_list = drain();
+	for (i = 0; i < CAP; i++)
+		if (got[i] != poison) wrote++;
+
+	if (e_list != GL_NO_ERROR) {
+		printf("RESULT compressed.formats FAIL err=0x%04x detail=\"count=%d but"
+		       " COMPRESSED_TEXTURE_FORMATS was rejected\"\n",
+		       (unsigned)e_list, (int)n);
+		g_fail++;
+		return;
+	}
+
+	/* Insertion sort over what was actually written, not over `n`: if the two
+	 * disagree that is the finding, and sorting past the written entries would
+	 * drag poison into the middle of the list. */
+	for (i = 1; i < wrote && i < CAP; i++) {
+		GLint v = got[i];
+		for (j = i - 1; j >= 0 && got[j] > v; j--) got[j + 1] = got[j];
+		got[j + 1] = v;
+	}
+
+	len = snprintf(detail, sizeof detail, "count=%d wrote=%d formats=", (int)n, wrote);
+	for (i = 0; i < wrote && i < CAP && len > 0 && len < (int)sizeof detail; i++)
+		len += snprintf(detail + len, sizeof detail - (unsigned)len,
+		                "%s0x%x", i ? "," : "", (unsigned)got[i]);
+	if (wrote == 0 && len > 0 && len < (int)sizeof detail)
+		snprintf(detail + len, sizeof detail - (unsigned)len, "none");
+
+	/* PASS = the pair answered cleanly and agreed with itself. The contents are
+	 * the device's business, not ours to assert — they get compared across the
+	 * two logs, which is what this harness is for. */
+	printf("RESULT compressed.formats %s err=0x0000 detail=\"%s\"\n",
+	       wrote == n ? "OK" : "FAIL", detail);
+	if (wrote == n) g_ok++; else g_fail++;
+}
+
 static void t_state_setters(void)
 {
 	drain();
@@ -605,6 +699,7 @@ static int glconform_main(void)
 	t_error_sticky();
 
 	t_limits();
+	t_compressed_formats();
 	t_matrix_readback();
 	t_matrix_overflow();
 

@@ -3334,6 +3334,37 @@ static void palette_entry_kind(GLenum ifmt, GLenum *fmt, GLenum *type, u32 *byte
 	}
 }
 
+/* WHAT WE ADVERTISE, DERIVED FROM WHAT WE DECODE.
+ *
+ * glGetIntegerv(GL_COMPRESSED_TEXTURE_FORMATS) answers from this, and every
+ * candidate is run past palette_bits() — the same gate glCompressedTexImage2D
+ * below uses to accept or reject an upload. So the list cannot promise a format
+ * the decoder would then refuse, which is the failure mode that matters: a
+ * title picks a format BECAUSE we listed it, and gets GL_INVALID_ENUM back on
+ * the upload with its texture left white.
+ *
+ * -> count. Fills out[] when non-NULL, which must then have room for all of
+ * them; the caller learns how many by asking with NULL first, exactly as the
+ * NUM_COMPRESSED_TEXTURE_FORMATS / COMPRESSED_TEXTURE_FORMATS pair does. */
+#define MAX_COMPRESSED_FORMATS 10
+
+static u32 compressed_formats(GLint *out)
+{
+	static const GLenum all[MAX_COMPRESSED_FORMATS] = {
+		GL_PALETTE4_RGB8_OES,  GL_PALETTE4_RGBA8_OES, GL_PALETTE4_R5_G6_B5_OES,
+		GL_PALETTE4_RGBA4_OES, GL_PALETTE4_RGB5_A1_OES,
+		GL_PALETTE8_RGB8_OES,  GL_PALETTE8_RGBA8_OES, GL_PALETTE8_R5_G6_B5_OES,
+		GL_PALETTE8_RGBA4_OES, GL_PALETTE8_RGB5_A1_OES,
+	};
+	u32 i, n = 0;
+	for (i = 0; i < MAX_COMPRESSED_FORMATS; i++) {
+		if (!palette_bits(all[i])) continue;
+		if (out) out[n] = (GLint)all[i];
+		n++;
+	}
+	return n;
+}
+
 void glCompressedTexImage2D(GLenum tgt, GLint lvl, GLenum ifmt,
                             GLsizei w, GLsizei h, GLint brd,
                             GLsizei imgsz, const void *data)
@@ -4149,6 +4180,14 @@ const u8 *glGetString(GLenum n) { (void)n; return (const u8 *)"Tadpole GLES 1.1"
 #define GL_STENCIL_BITS                  0x0D57
 #define GL_NORMAL_ARRAY                  0x8075
 #define GL_CULL_FACE                     0x0B44
+#define GL_NUM_COMPRESSED_TEXTURE_FORMATS 0x86A2
+#define GL_COMPRESSED_TEXTURE_FORMATS     0x86A3
+
+/* Widest answer any pname below produces, in GLint components — the compressed
+ * format list, at ten. glGetFloatv/Fixedv/Booleanv size their scratch buffer by
+ * this, because they fall through to the integer query for anything that is not
+ * float-typed state. */
+#define QUERY_MAX_COMPONENTS 16
 
 /* EVERY CONSTANT BELOW WAS READ OFF THE DEVICE, not chosen to look plausible.
  * tools/glconform's limit.* tests query all of them through the same binary on
@@ -4163,9 +4202,17 @@ const u8 *glGetString(GLenum n) { (void)n; return (const u8 *)"Tadpole GLES 1.1"
  * the two units the hardware actually has. A limit reported too SMALL is the
  * dangerous direction — a title that respects it produces different geometry
  * here than on the device, and nothing raises an error to say so. */
-void glGetIntegerv(GLenum p, GLint *v)
+/* -> HOW MANY GLint COMPONENTS WERE WRITTEN, which is not decoration.
+ *
+ * glGetFloatv, glGetFixedv and glGetBooleanv all fall through to here for
+ * integer-typed state, and each used to copy a fixed FOUR components out of a
+ * four-element scratch buffer regardless of the pname's real width. That was
+ * three words of the caller's memory overwritten on every one-component query,
+ * and it becomes an overflow of this file's own stack the moment a query
+ * answers with more than four — which GL_COMPRESSED_TEXTURE_FORMATS, at ten,
+ * does. Returning the count is what lets all three copy exactly what exists. */
+static int get_integers(GLenum p, GLint *v)
 {
-	if (!v) return;
 	switch (p) {
 	case GL_MAX_TEXTURE_SIZE:             *v = 4096; break;
 	/* Our arrays hold MAX_TEXUNITS (4); the DEVICE has 2, and that is the
@@ -4202,7 +4249,38 @@ void glGetIntegerv(GLenum p, GLint *v)
 	case GL_VIEWPORT:
 		view_init();
 		v[0] = g_vx; v[1] = g_vy; v[2] = g_vw; v[3] = g_vh;
+		return 4;
+	/* THE PAIR THAT KEPT COOKING! RECIPES ON THE ROAD OFF THE SCREEN.
+	 *
+	 * Answering these two badly is not a texture bug, it is a STARTUP bug, and
+	 * that is why it costs a whole title rather than a few white quads.
+	 * CGraphics2D::init in LF/Base/lib/libLightning2D.so — the 2D engine every
+	 * Lightning title links, disassembled — does exactly this:
+	 *
+	 *     glGetIntegerv(0x86A2, &count);      // how many are there
+	 *     list = new int[count];              // sized from OUR answer
+	 *     glGetIntegerv(0x86A3, list);        // name them
+	 *     BaseUtils::Assert(gl_checkError() == 0, "CGraphics2D.cpp", 162,
+	 *                       "CGraphics2D::init Initialization Error");
+	 *
+	 * Unhandled, both queries took the default branch below and raised
+	 * GL_INVALID_ENUM, so the engine asserted before drawing anything. The
+	 * assert is not itself fatal — Brio's CDebugMPI::Assert only throws when
+	 * EnableThrowOnAssert is set — but init reports a critical error and every
+	 * paletted texture afterwards took the CPU depalettising path, because
+	 * CGraphics2D::IsSupportedCompressedTexFormat searches a list that our
+	 * count said was empty.
+	 *
+	 * THE COUNT SIZES THE CALLER'S ARRAY, so the two answers must agree. The
+	 * default branch's "write 0 anyway" policy is wrong here specifically: the
+	 * caller allocated new int[0] on the strength of our zero, and the second
+	 * query then wrote one element into it. Answer both from one function so
+	 * they cannot disagree. */
+	case GL_NUM_COMPRESSED_TEXTURE_FORMATS:
+		*v = (GLint)compressed_formats(NULL);
 		break;
+	case GL_COMPRESSED_TEXTURE_FORMATS:
+		return (int)compressed_formats(v);
 	default:
 		/* SAY SO, AND RAISE THE ERROR THE DEVICE RAISES.
 		 *
@@ -4240,6 +4318,13 @@ void glGetIntegerv(GLenum p, GLint *v)
 		*v = 0;
 		break;
 	}
+	return 1;
+}
+
+void glGetIntegerv(GLenum p, GLint *v)
+{
+	if (!v) return;
+	(void)get_integers(p, v);
 }
 
 /* ---- glGetFloatv / glGetFixedv / glGetBooleanv ---------------------------
@@ -4329,9 +4414,9 @@ void glGetFloatv(GLenum p, GLfloat *v)
 	tr2("glGetFloatv pname", (int)p, 0);
 	n = state_floats(p, f);
 	if (n) { for (i = 0; i < n; i++) v[i] = f[i]; return; }
-	{ GLint iv[4] = { 0, 0, 0, 0 };
-	  glGetIntegerv(p, iv);
-	  for (i = 0; i < 4; i++) v[i] = (GLfloat)iv[i]; }
+	{ GLint iv[QUERY_MAX_COMPONENTS];
+	  n = get_integers(p, iv);
+	  for (i = 0; i < n; i++) v[i] = (GLfloat)iv[i]; }
 }
 
 void glGetFixedv(GLenum p, GLfixed *v)
@@ -4353,9 +4438,9 @@ void glGetFixedv(GLenum p, GLfixed *v)
 	 * already an integer — a limit, a binding, a bit count — is returned as-is
 	 * by glGetFixedv, NOT converted to 16.16. Multiplying MAX_TEXTURE_SIZE by
 	 * 65536 would hand the caller 268435456. */
-	{ GLint iv[4] = { 0, 0, 0, 0 };
-	  glGetIntegerv(p, iv);
-	  for (i = 0; i < 4; i++) v[i] = (GLfixed)iv[i]; }
+	{ GLint iv[QUERY_MAX_COMPONENTS];
+	  n = get_integers(p, iv);
+	  for (i = 0; i < n; i++) v[i] = (GLfixed)iv[i]; }
 }
 
 void glGetBooleanv(GLenum p, GLboolean *v)
@@ -4373,9 +4458,9 @@ void glGetBooleanv(GLenum p, GLboolean *v)
 	 * it, glGetBooleanv(GL_MAX_LIGHTS) would take the capability path and log a
 	 * spurious "UNHANDLED cap" for something that was never a cap. */
 	if (cap_valid(p)) { v[0] = glIsEnabled(p) ? 1 : 0; return; }
-	{ GLint iv[4] = { 0, 0, 0, 0 };
-	  glGetIntegerv(p, iv);
-	  for (i = 0; i < 4; i++) v[i] = iv[i] != 0; }
+	{ GLint iv[QUERY_MAX_COMPONENTS];
+	  n = get_integers(p, iv);
+	  for (i = 0; i < n; i++) v[i] = iv[i] != 0; }
 }
 
 GLboolean glIsEnabled(GLenum c)
