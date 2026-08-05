@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""fetch-firmware.py — pull LeapPad2 packages straight from LeapFrog's CDN.
+
+    ./tools/fetch-firmware.py --probe            what is downloadable, no writes
+    ./tools/fetch-firmware.py --get update,repair   fetch by package TYPE
+    ./tools/fetch-firmware.py --get all -o /tmp/fw
+
+WHY THIS EXISTS. Installing has meant feeding the emulator a firmware dump taken
+off somebody's hardware over a flaky USB cable. The packages are served
+publicly, and LFConnect finds them the same way this does: the device's package
+list names the IDs, and the CDN lays them out by ID.
+
+    https://digitalcontent.leapfrog.com/packages/<middle>/<PackageID>.lf2
+
+`<middle>` is the middle field of the ID, so PADS-0x001E000F-000001 lives at
+packages/0x001E000F/PADS-0x001E000F-000001.lf2. The ID list is not discoverable
+from the CDN — it comes from tools/packagelists/EnglishLeapPad2.xml, which is
+the list LFConnect itself uses, with the <Package type="..."> attribute saying
+what each one is for (update, repair, optional, content, ...).
+
+THE BUCKET LISTING IS A DEAD END, so do not spend another session on it. The
+root URL answers with an S3 ListBucket XML, but the host in front of it does not
+forward query strings: `marker`, `prefix` and `max-keys` are all ignored, so
+every request returns the same first 1000 keys. Paging appears to work — you get
+a fresh 1000 keys each time — and they are the SAME 1000 keys. The only reliable
+question is "does this exact object exist", asked with HEAD.
+"""
+import argparse, os, sys, urllib.request, urllib.error
+import xml.etree.ElementTree as ET
+
+BASE = "https://digitalcontent.leapfrog.com/packages"
+HERE = os.path.dirname(os.path.abspath(__file__))
+XML = os.path.join(HERE, "packagelists", "EnglishLeapPad2.xml")
+EXTS = ("lf2", "lf3", "lfp")
+
+
+def packages(xml_path):
+    """-> [(id, description, types)], in document order, de-duplicated.
+
+    Parsed as XML rather than by regex: the file is hand-maintained and its
+    attribute spacing is not uniform — one entry reads `description= "My Books"`
+    with a space after the equals, which a pattern keyed on the exact spelling
+    silently drops."""
+    root = ET.parse(xml_path).getroot()
+    out, seen = [], set()
+    for el in root.iter():
+        if el.tag.lower() != "package":
+            continue
+        pid = el.get("id")
+        if not pid or pid in seen:
+            continue
+        seen.add(pid)
+        types = set(t.strip() for t in (el.get("type") or "").split(",") if t.strip())
+        out.append((pid, (el.get("description") or "").strip(), types))
+    return out
+
+
+# THE DIRECTORY IS NOT ALWAYS THE ID'S MIDDLE FIELD.
+#
+# Content packages live at packages/<middle>/<id>.lf2, which is the shape the
+# example URL everyone passes around has. The FIRMWARE does not: OpenLFConnect's
+# leappad2.cfg gives the whole answer —
+#
+#     [names]    LF_URL:PADFW
+#     [packages] FIRMWARE:PAD2-0x00220004-000000.lfp
+#
+# so the directory is a per-DEVICE name and the extension is .lfp. Probing the
+# firmware ID under its own middle field 404s in every extension, which is why
+# "the firmware is not on the CDN" is an easy and wrong conclusion to reach.
+DEVICE_DIR = "PADFW"          # LeapPad2; other devices have their own LF_URL
+
+
+def candidates(pid):
+    """-> URLs to try, most likely first."""
+    mid = pid.split("-")[1]
+    for ext in EXTS:
+        yield f"{BASE}/{mid}/{pid}.{ext}"
+    yield f"{BASE}/{DEVICE_DIR}/{pid}.lfp"
+
+
+def head(url, timeout=20):
+    """-> size in bytes, or None if it is not there."""
+    req = urllib.request.Request(url, method="HEAD")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return int(r.headers.get("content-length", 0))
+    except urllib.error.HTTPError:
+        return None
+    except OSError as e:
+        print(f"  ! {url}: {e}", file=sys.stderr)
+        return None
+
+
+def locate(pid):
+    """-> (url, size, ext) for whichever candidate exists, else None."""
+    for u in candidates(pid):
+        n = head(u)
+        if n is not None:
+            return u, n, u.rsplit(".", 1)[1]
+    return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--probe", action="store_true", help="report availability, download nothing")
+    ap.add_argument("--get", metavar="TYPES", help="comma-separated types, or 'all'")
+    ap.add_argument("-o", "--out", default="firmware", help="output directory")
+    ap.add_argument("--xml", default=XML)
+    a = ap.parse_args()
+    if not a.probe and not a.get:
+        ap.error("one of --probe or --get is required")
+
+    pkgs = packages(a.xml)
+    sel = (a.get or "").strip()
+    want = None if sel in ("", "all") else set(
+        t.strip() for t in sel.split(",") if t.strip())
+
+    found = missing = 0
+    total = 0
+    for pid, desc, types in pkgs:
+        if want is not None and not (types & want):
+            continue
+        hit = locate(pid)
+        if hit is None:
+            missing += 1
+            print(f"  --   {pid:28s} {desc}")
+            continue
+        url, size, ext = hit
+        found += 1
+        total += size
+        print(f"  OK   {pid:28s} {size:>12,}  {desc}")
+        if a.probe:
+            continue
+        os.makedirs(a.out, exist_ok=True)
+        dest = os.path.join(a.out, f"{pid}.{ext}")
+        if os.path.exists(dest) and os.path.getsize(dest) == size:
+            continue
+        with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
+            while True:
+                chunk = r.read(1 << 16)
+                if not chunk:
+                    break
+                f.write(chunk)
+
+    print(f"\n{found} available, {missing} not on the CDN, {total:,} bytes total")
+    if not a.probe and found:
+        print(f"downloaded into {a.out}")
+
+
+if __name__ == "__main__":
+    main()

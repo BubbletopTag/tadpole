@@ -1,0 +1,223 @@
+<PackageListCollection>
+	<PackageList device="LeapPad2" locale="en_us" mandatoryVersion="4.6.0.784">
+	
+		<!-- Firmware -->
+		<Package type="magic,update,repair,surgeon"	 id="PAD2-0x00220003-000000" description="Surgeon"/>
+		
+		<!-- Required for Repair/Reset and Update -->
+		<Package type="update,repair"	id="PADS-0x001E000F-000000" description="Language Pack"/>
+		<Package type="update,repair"	id="PADS-0x001E000F-000001" description="Language Pack EN"/>
+		
+		<!-- Optional Packages -->
+		
+		<!-- Pet App -->
+		<Package type="optional,repair,noSurgeon,hidden"	id="PAD2-0x001F0005-000000" description="Pet Pad App"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x001F0005-DA0000" description="Pet Pad App DA"/>
+		
+		<!-- Music Player -->
+		<Package type="optional,repair,noSurgeon"	id="MULT-0x001B00B9-000000" description="Music Player"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x001B00B9-DA0000" description="Music Player DA"/>
+		
+		<!-- Trailers -->
+		<Package type="optional,repair,noSurgeon"	id="PAD2-0x001E0010-900000" description="Trailer Order"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD2-0x001E0010-000010" description="Trailer 1"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD2-0x001E0010-000011" description="Trailer 2"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD2-0x001E0010-000012" description="Trailer 3"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD2-0x001E0010-000013" description="Trailer 4"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD2-0x001E0010-000014" description="Trailer 5"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD2-0x001E0010-000015" description="Trailer 6"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD2-0x001E0010-000016" description="Trailer 7"/>
+
+		<!-- Widgets -->
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0003-000002" description="Camera Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0003-000005" description="Gallery Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0003-000001" description="Keyboard Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0003-000003" description="Microphone Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0003-000006" description="Paint Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0003-000031" description="Photo Editor"/>
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0003-000008" description="Story Gallery Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0010-000000" description="Sneak Peak Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0003-000004" description="Video Widget"/>
+
+		
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x00210008-200000" description="Lucy Compatibility Data"/>
+		
+		<!-- Base Apps -->
+
+		<Package type="optional,noSurgeon"	id="PAD2-0x001E000C-100000" description="Connect Message Unlocker"/>
+		<Package type="optional,noSurgeon"	id="PAD2-0x001E0010-000007" description="Connect Movie"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x001F0006-000000" description="Camera App"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x001F0006-DA0000" description="Camera App Device Asset"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x001F0007-000000" description="Gallery App/My Stuff"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x001F0007-DA0000" description="Gallery App/My Stuff Device Asset"/>
+		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0013-000000" description= "My Books"/>
+
+		<!-- UI Themes -->
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-200001" description="UI Theme 1"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-200002" description="UI Theme 2"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-200003" description="UI Theme 3"/>
+		
+		<!-- Patch Files -->
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300000" description="Patch List"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300001" description="Patch 1"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300002" description="Patch 2"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300003" description="Patch 3"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300004" description="Patch 4"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300005" description="Patch 5"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300006" description="Patch 6"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300007" description="Pet Pals Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300008" description="French Pet Pals Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300011" description="UEB Launcher Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300012" description="PONY Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300013" description="LFE Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300015" description="HKT Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300016" description="fMIP French Mr Pencil Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="MULT-0x0022000A-PP2000" description="Pet Pals Patch Libs"/>
+		
+		<!-- Content Packages -->
+		<Package type="content,landing"			id="LFCC-0x001A0001-100010" description="Landing Page SWF"/>
+		<Package type="content,expandables"		id="LFCC-0x001A0003-100003" description="Expandables"/>
+		<Package type="content,deviceManagement" id="LFCC-0x001A0007-100001" description="Device Management" />
+		<Package type="content"	id="LFCC-0x001A0002-100006" description="Required Pkgs List"/>
+		
+		<!-- Allowed packages -->
+		<Package type="update,repair,noSurgeon,hidden"	id="MULT-0x001B00E2-000000" description="LeapFrog Learning Songs"/>
+		<Package type="allowed"	id="MULT-0x001B00E2-777777" description="LeapFrog Learning Songs Info"/>
+		
+	</PackageList>
+	
+	<!-- Model 1 is a default product variant. -->
+	<PackageList device="LeapPad2" model="1" locale="en_us" mandatoryVersion="4.6.0.784">
+	</PackageList>
+
+	<!-- Disney Bundle. PV=2 -->
+	<PackageList device="LeapPad2" model="2" locale="en_us" mandatoryVersion="4.6.0.784">
+		<Package type="allowed"	id="PADS-0x1F1E0002-200015" description="Disney Theme Set"/>
+		<Package type="allowed"	id="PADS-0x1F1E0002-200000" description="Default Theme Info"/>
+	</PackageList>
+	
+	<!-- Model 4 gets Kidz Bop from the App Center starter games. -->
+	<PackageList device="LeapPad2" model="4" locale="en_us" mandatoryVersion="4.6.0.784">
+	</PackageList>
+	
+	<!-- PV = 5 -->
+	<PackageList device="LeapPad2" model="5" locale="en_us" mandatoryVersion="4.6.0.784">
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000C-000000" description="The NOTEPAD"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000C-DA0000" description="Notepad DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000D-000000" description="The CALCULATOR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000D-DA0000" description="Calculator DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000E-000000" description="A CLOCK"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000E-DA0000" description="Clock DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000F-000000" description="A CALENDAR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000F-DA0000" description="Calendar DA"/>
+	</PackageList>
+
+	<!-- PV = 6 -->
+	<PackageList device="LeapPad2" model="6" locale="en_us" mandatoryVersion="4.6.0.784">
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000C-000000" description="The NOTEPAD"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000C-DA0000" description="Notepad DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000D-000000" description="The CALCULATOR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000D-DA0000" description="Calculator DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000E-000000" description="A CLOCK"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000E-DA0000" description="Clock DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000F-000000" description="A CALENDAR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000F-DA0000" description="Calendar DA"/>
+	</PackageList>
+	
+	<!-- PV = 7 Monsters -->
+	<PackageList device="LeapPad2" model="7" locale="en_us" mandatoryVersion="4.6.0.784">
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000C-000000" description="The NOTEPAD"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000C-DA0000" description="Notepad DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000D-000000" description="The CALCULATOR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000D-DA0000" description="Calculator DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000E-000000" description="A CLOCK"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000E-DA0000" description="Clock DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000F-000000" description="A CALENDAR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000F-DA0000" description="Calendar DA"/>
+	<Package type="allowed"	id="PADS-0x1F1E0002-200100" description="Monsters Theme Set"/>
+	<Package type="allowed"	id="PADS-0x1F1E0002-200101" description="Monsters Theme Info"/>
+	</PackageList>
+	
+	<!-- PV = 8 Barbie-->
+	<PackageList device="LeapPad2" model="8" locale="en_us" mandatoryVersion="4.6.0.784">
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000C-000000" description="The NOTEPAD"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000C-DA0000" description="Notepad DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000D-000000" description="The CALCULATOR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000D-DA0000" description="Calculator DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000E-000000" description="A CLOCK"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000E-DA0000" description="Clock DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000F-000000" description="A CALENDAR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000F-DA0000" description="Calendar DA"/>
+	<Package type="allowed"	id="PADS-0x1F1E0002-200401" description="Barbie Theme Set"/>
+	<Package type="allowed"	id="PADS-0x1F1E0002-200400" description="Barbie Theme Info"/>
+	</PackageList>
+	
+	<!-- PV = 9 Sofia-->
+	<PackageList device="LeapPad2" model="9" locale="en_us" mandatoryVersion="4.6.0.784">
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000C-000000" description="The NOTEPAD"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000C-DA0000" description="Notepad DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000D-000000" description="The CALCULATOR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000D-DA0000" description="Calculator DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000E-000000" description="A CLOCK"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000E-DA0000" description="Clock DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000F-000000" description="A CALENDAR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000F-DA0000" description="Calendar DA"/>
+	<Package type="allowed"	id="PADS-0x1F1E0002-200301" description="Sofia Theme Set"/>
+	<Package type="allowed"	id="PADS-0x1F1E0002-200300" description="Sofia Theme Info"/>
+	</PackageList>
+	
+	<!-- PV = 10 Princess-->
+	<PackageList device="LeapPad2" model="10" locale="en_us" mandatoryVersion="4.6.0.784">
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000C-000000" description="The NOTEPAD"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000C-DA0000" description="Notepad DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000D-000000" description="The CALCULATOR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000D-DA0000" description="Calculator DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000E-000000" description="A CLOCK"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000E-DA0000" description="Clock DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000F-000000" description="A CALENDAR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000F-DA0000" description="Calendar DA"/>
+	<Package type="allowed"	id="PADS-0x1F1E0002-200201" description="Disney Princess Theme Set"/>
+	<Package type="allowed"	id="PADS-0x1F1E0002-200200" description="Disney Princess Theme Info"/>
+	</PackageList>
+		
+    <!-- PV = 11 McStuffins-->
+	<PackageList device="LeapPad2" model="11" locale="en_us" mandatoryVersion="4.6.0.784">
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000C-000000" description="The NOTEPAD"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000C-DA0000" description="Notepad DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000D-000000" description="The CALCULATOR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000D-DA0000" description="Calculator DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000E-000000" description="A CLOCK"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000E-DA0000" description="Clock DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000F-000000" description="A CALENDAR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000F-DA0000" description="Calendar DA"/>
+    <Package type="allowed" id="PADS-0x1F1E0002-200501" description="McStuffins Theme Set"/>
+    <Package type="allowed" id="PADS-0x1F1E0002-200500" description="McStuffins Theme Info"/>
+    </PackageList>
+	
+	<!-- PV = 12 Custom LPAD2 -->
+	<PackageList device="LeapPad2" model="12" locale="en_us" mandatoryVersion="4.6.0.784">
+	<Package type="allowed"	id="PADS-0x1F1E0002-200601" description="Custom Theme Set"/>
+	<Package type="allowed"	id="PADS-0x1F1E0002-200600" description="Custom Theme Info"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000C-000000" description="The NOTEPAD"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000C-DA0000" description="Notepad DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000D-000000" description="The CALCULATOR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000D-DA0000" description="Calculator DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000E-000000" description="A CLOCK"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000E-DA0000" description="Clock DA"/>
+	<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x0028000F-000000" description="A CALENDAR"/>
+	<Package type="update,repair,noSurgeon"	id="PADS-0x0028000F-DA0000" description="Calendar DA"/>
+	</PackageList>
+
+	<!-- Micron -->
+	<packageList device="LeapPad2" locale="en_us" eraseSize="1048576" writeSize="4096">
+		<Package type="magic,update,repair,firmware" id="PAD2-0x00220004-000000" description="Firmware Base"/>
+		<Package type="magic,repair,bulkEmpty"		 id="PAD2-0x00220004-000002" description="Firmware Bulk Empty"/>
+	</packageList>
+	
+	<!-- Samsung -->
+	<packageList device="LeapPad2" locale="en_us" eraseSize="1048576" writeSize="8192">
+		<Package type="magic,update,repair,firmware" id="PAD2-0x00220004-001000" description="Firmware Base"/>
+		<Package type="magic,repair,bulkEmpty"		 id="PAD2-0x00220004-001002" description="Firmware Bulk Empty"/>
+	</packageList>
+	
+</PackageListCollection>
