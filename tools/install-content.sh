@@ -200,6 +200,33 @@ fi
 # Runtime bits the firmware expects to already exist (see docs/device-deps.md:
 # BaseUtils::CreateFile recurses forever on a missing deep path).
 mkdir -p "$BULK/Data/Uploads/0" "$BULK/Data/Downloads" "$BULK/Data/Settings"
+
+# THE PROFILE DIRECTORIES. THIS IS THE "MY PROFILE WILL NOT SAVE" BUG.
+#
+# Data/Local/<profile>/ is where a player's identity lives, and NOTHING creates
+# it. The firmware does not ship it and the guest never calls mkdir for it — it
+# simply writes into it and fails, silently as far as the UI is concerned:
+#
+#     PlayerProfilePlugin::setName, name = Tp          <- accepted, in memory
+#     fopenAtomic(/LF/Bulk/Data/Local/0/./profile.dsc): mkstemp failed us!
+#     CFileIO::Write() - failed opening .../profile.dsc for writing.
+#
+# So the name is taken, the home screen shows no name because there is nothing
+# to read back, and the next boot returns to CREATE PROFILE. Reported by many
+# people on fresh firmware, and "fixed" until now by transplanting an entire
+# /LF/Bulk off real hardware — which worked only because a real device has
+# these directories already.
+#
+# PAD2-0x1F1E0002-100000 is the second half of it: the per-profile UI store,
+# where UIData.json holds the wallpaper choice. Without it the wallpaper reverts
+# to the default on every boot, which is the other half of the same report.
+#
+# The remaining three match what a real device carries per profile, and are the
+# system apps that keep per-player state. Verified end to end: with these in
+# place, a name set in About Me survives a reboot and the home screen shows it.
+for _p in 0 1 2 3 All; do
+    mkdir -p "$BULK/Data/Local/$_p"/{PAD2-0x1F1E0002-100000,PAD2-0x001F0005-000000,PAD2-0x001E0010-000000,Pets,Photos}
+done
 # settings.cfg, verbatim shape from the live device
 [ -e "$BULK/settings.cfg" ] || cat > "$BULK/settings.cfg" <<'EOF'
 Locale=en-us
