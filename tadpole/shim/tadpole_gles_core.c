@@ -2838,7 +2838,24 @@ static void skin_end(int active)
 {
 	if (!active) return;
 	hle_popmatrix();
-	hle_matrixmode(g_matrix_mode);   /* hand the mode back to the app's choice */
+	/* HAND BACK A MODE THE HOST CAN ACCEPT, which is not always the app's.
+	 *
+	 * This called hle_matrixmode(g_matrix_mode) unconditionally, and during a
+	 * skinned draw g_matrix_mode is GL_MATRIX_PALETTE_OES by definition — that
+	 * is why skinning is running at all. So it forwarded 0x8840 to the host on
+	 * every skinned draw, and desktop GL has no such matrix mode:
+	 *
+	 *     hle: GL error 0x0500 from MATRIXMODE (op 15) at frame 698
+	 *
+	 * It bypassed mat_forward() because it is a direct encoder call rather than
+	 * an entry point, which is exactly how a rule gets applied everywhere
+	 * except the one place that needed it. The host stays on MODELVIEW while
+	 * the app is in palette mode; nothing the app does there is forwarded, so
+	 * there is nothing for the host's mode to be wrong about. */
+	if (g_matrix_mode == GL_MATRIX_PALETTE_OES)
+		hle_matrixmode(GL_MODELVIEW);
+	else
+		hle_matrixmode(g_matrix_mode);
 }
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count)
