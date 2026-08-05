@@ -2451,6 +2451,75 @@ static const float *skin_vertices(u32 nverts)
 	return g_skin;
 }
 
+/* ---- normals have to be skinned TOO, and by the same matrices ------------
+ *
+ * skin_begin() loads IDENTITY on the host, because the vertices it sends are
+ * already transformed into eye space here. So anything else the draw supplies
+ * has to be in eye space as well — and a normal array sent straight from the
+ * title is in BIND-POSE MODEL space.
+ *
+ * Sending them unskinned is what turned Pet Pals 2's dogs almost black the
+ * moment lighting started working: the geometry was posed and lit against
+ * normals pointing wherever the model happened to face before it was animated,
+ * so most of the surface faced away from every light. The background, which is
+ * not skinned, lit correctly the whole time — which is the tell.
+ *
+ * TRANSLATION IS EXCLUDED, deliberately. A normal is a direction: it must be
+ * rotated by the bone but never moved by it, so only the upper 3x3 applies.
+ * Running a normal through vec_xform() with w=1 would add the bone's world
+ * position to it and produce a "normal" of length several hundred.
+ *
+ * Not renormalised here. The blend of two unit normals is slightly short, and
+ * correcting it costs a square root per vertex inside qemu; GL_NORMALIZE exists
+ * for exactly this and the title can ask for it. If a title turns out to need
+ * it and not ask, this is where to add it.
+ */
+static float *g_skin_n;
+static u32    g_skin_n_cap;
+
+static const float *skin_normals(u32 nverts)
+{
+	u32 i;
+	int k, nb;
+
+	if (!g_nrm.on || !array_base(&g_nrm) || !nverts) return 0;
+
+	if (g_skin_n_cap < nverts * 3) {
+		if (g_skin_n) free(g_skin_n);
+		g_skin_n = malloc(nverts * 3 * (u32)sizeof(float));
+		g_skin_n_cap = g_skin_n ? nverts * 3 : 0;
+	}
+	if (!g_skin_n) return 0;
+
+	nb = g_midx.size < g_wgt.size ? g_midx.size : g_wgt.size;
+	if (nb > 4) nb = 4;
+
+	for (i = 0; i < nverts; i++) {
+		float n[3], acc[3];
+		acc[0] = acc[1] = acc[2] = 0.0f;
+		n[0] = fetch(&g_nrm, i, 0);
+		n[1] = fetch(&g_nrm, i, 1);
+		n[2] = fetch(&g_nrm, i, 2);
+		for (k = 0; k < nb; k++) {
+			float w = fetch(&g_wgt, i, k);
+			const mat4 *m;
+			u32 mi;
+			if (w == 0.0f) continue;
+			mi = fetch_index(&g_midx, i, k);
+			if (mi >= MAX_PALETTE) continue;
+			m = &g_palette[mi];
+			/* Upper 3x3 only — column-major, same layout as vec_xform. */
+			acc[0] += w * (m->m[0]*n[0] + m->m[4]*n[1] + m->m[8]*n[2]);
+			acc[1] += w * (m->m[1]*n[0] + m->m[5]*n[1] + m->m[9]*n[2]);
+			acc[2] += w * (m->m[2]*n[0] + m->m[6]*n[1] + m->m[10]*n[2]);
+		}
+		g_skin_n[i*3+0] = acc[0];
+		g_skin_n[i*3+1] = acc[1];
+		g_skin_n[i*3+2] = acc[2];
+	}
+	return g_skin_n;
+}
+
 /* Send skinned positions and neutralise the modelview for the draw.
  * The palette matrices ALREADY contain the modelview — that is what
  * glLoadPaletteFromModelViewMatrixOES copied — so leaving it applied would
@@ -2465,6 +2534,13 @@ static int skin_begin(u32 nverts)
 	hle_loadidentity();
 	hle_bufferdata(HLE_CLIENT_VTX, nverts * 3 * (u32)sizeof(float), sk);
 	hle_arraypointer(0, HLE_CLIENT_VTX, 3, GL_FLOAT, 0, 0);
+	{
+		const float *sn = skin_normals(nverts);
+		if (sn) {
+			hle_bufferdata(HLE_CLIENT_NRM, nverts * 3 * (u32)sizeof(float), sn);
+			hle_arraypointer(3, HLE_CLIENT_NRM, 3, GL_FLOAT, 0, 0);
+		}
+	}
 	return 1;
 }
 
@@ -2491,10 +2567,11 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 		if (!sk) hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
 		hle_send_array(&g_col, 1, nv, HLE_CLIENT_COL);
 		hle_send_array(&g_tex, 2, nv, HLE_CLIENT_TEX);
-		/* Normals travel like every other array. Only sent when the title
-		 * actually enabled GL_NORMAL_ARRAY — hle_send_array() checks `on`,
-		 * so a title that never lights anything pays nothing. */
-		hle_send_array(&g_nrm, 3, nv, HLE_CLIENT_NRM);
+		/* ONLY WHEN THE DRAW IS NOT SKINNED. A skinned draw's normals are
+		 * sent by skin_begin(), already transformed by the same bone matrices
+		 * as its vertices; sending the raw bind-pose array as well would
+		 * overwrite them with normals that no longer match the geometry. */
+		if (!sk) hle_send_array(&g_nrm, 3, nv, HLE_CLIENT_NRM);
 		hle_drawarrays(mode, first, count);
 		skin_end(sk);
 		return;
@@ -2540,10 +2617,11 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
 		if (!sk) hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
 		hle_send_array(&g_col, 1, nv, HLE_CLIENT_COL);
 		hle_send_array(&g_tex, 2, nv, HLE_CLIENT_TEX);
-		/* Normals travel like every other array. Only sent when the title
-		 * actually enabled GL_NORMAL_ARRAY — hle_send_array() checks `on`,
-		 * so a title that never lights anything pays nothing. */
-		hle_send_array(&g_nrm, 3, nv, HLE_CLIENT_NRM);
+		/* ONLY WHEN THE DRAW IS NOT SKINNED. A skinned draw's normals are
+		 * sent by skin_begin(), already transformed by the same bone matrices
+		 * as its vertices; sending the raw bind-pose array as well would
+		 * overwrite them with normals that no longer match the geometry. */
+		if (!sk) hle_send_array(&g_nrm, 3, nv, HLE_CLIENT_NRM);
 		if (!ebuf && indices) {         /* client-side indices too */
 			u32 isz = (type == GL_UNSIGNED_SHORT) ? 2u : 1u;
 			hle_bufferdata(HLE_CLIENT_IDX, (u32)count * isz, indices);
