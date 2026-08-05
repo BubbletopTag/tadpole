@@ -5038,3 +5038,65 @@ that is a plausible way to expose a latent race in the AS interpreter.
 is open, and is how the Cooking! result above was obtained. Next step is to
 confirm the correlation deliberately — say five viewer boots against five
 headless — rather than resting on the ~5 vs ~8 that fell out of other work.
+
+## SOLVED: "my profile will not save" — the profile directories never existed
+
+Reported by many people on fresh firmware, and worked around until now by
+transplanting an entire /LF/Bulk off real hardware. That worked for a reason
+that has nothing to do with the firmware being incomplete: a real device already
+has the directories, and a fresh install does not create them.
+
+Reproduced here by moving Data/Local aside to imitate a fresh install, then
+setting a name in About Me:
+
+    [0x200] PlayerProfilePlugin::setName, name = Tp        <- accepted, in memory
+    [0xf]   fopenAtomic(/LF/Bulk/Data/Local/0/./profile.dsc): mkstemp failed us!
+    [0x400] CFileIO::Write() - failed opening .../profile.dsc for writing.
+
+The name is taken, nothing is written, the home screen shows no name because
+there is nothing to read back, and the next boot returns to CREATE PROFILE.
+Exactly the reported symptom, all three parts of it.
+
+**This is NOT the mkdir interception** added the same day. The guest never asks
+to create this directory — it writes into it and fails. No amount of fixing
+mkdir helps; the directory has to exist before first boot, which is the same
+conclusion device-deps.md already reached for Data/Uploads/0 and the
+BaseUtils::CreateFile recursion.
+
+install-content.sh now creates, per profile 0/1/2/3/All:
+
+    PAD2-0x1F1E0002-100000   the per-profile UI store; UIData.json lives here
+                             and holds the wallpaper, which is why the wallpaper
+                             also reverted on every boot — the second symptom
+    PAD2-0x001F0005-000000   Pet Pad
+    PAD2-0x001E0010-000000   Sneak Peek
+    Pets, Photos
+
+VERIFIED end to end: with them present, zero fopenAtomic failures, `Name=Tp`
+written to profile.dsc, and after a full restart the home screen displays Tp
+(`BaseTextButton::SetTextField----- Tp`).
+
+The one useful diagnostic if this ever recurs: libLightningJSON.so owns profiles
+and carries its own failure strings — "shared profile.dsc cannot be created!"
+and "profile_private.dsc cannot be created!" — so grep for "cannot be created"
+before theorising.
+
+## Firmware can be downloaded from LeapFrog directly
+
+`tools/fetch-firmware.py`, and see its header. 46 of the 82 packages the
+LeapPad2 list names, 129 MB, including both firmware bases, the Surgeon and the
+language packs. Two traps, both already paid for:
+
+* **The firmware is not under its ID's middle field.** Content is at
+  `packages/<middle>/<id>.lf2`; the firmware is at `packages/PADFW/<id>.lfp`,
+  where PADFW is the per-DEVICE `LF_URL` from OpenLFConnect's leappad2.cfg.
+  Probed the obvious way it 404s in every extension.
+* **The bucket listing cannot be paged.** The host does not forward query
+  strings, so marker/prefix/max-keys are ignored and every request returns the
+  same first 1000 keys. 575,000 collected here deduplicated to 1000. Ask about
+  one exact object with HEAD instead.
+
+The 36 that are absent are all PAD2- content (widgets, trailers, Pet Pad, My
+Books) and the LFCC- content packages; every PADS- and MULT- package resolves.
+Whether those live under another per-device directory is not yet known — PADFW
+and their own middle field were both tried.
