@@ -4706,3 +4706,335 @@ contributing factor; it is not the whole cause.
 The `glNormalPointer` finding above is the new lead: the title supplies a normal
 array 262 times per race, we ignore all of them, and it is skinning at the same
 time.
+
+## SOLVED: Cooking!'s white screen is a PANIC SCREEN, not a renderer bug
+
+The title draws two 64x64 textures, uploads nine 48-byte vertex buffers, and
+then hangs at 100% CPU with a white panel. Three things about that are worth
+holding onto, because each one sent a previous session in the wrong direction.
+
+**It never blocked on us.** `AppManager`'s main thread sits in state `R` with 65
+seconds of user time and 0.2 seconds of system time — a spin in userspace making
+no syscalls at all. Not the HLE ring, not a file, not audio. The one `hle: STALL`
+line in the log is the viewer reporting its own 764 ms gap and is unrelated.
+
+**The spin is in the title's own binary, at one instruction:**
+
+    pc  0x467a0a00  App.so+0x0014da00      identical across samples 4s apart
+    lr  0x4678db20  App.so+0x0013ab20
+
+which App.so's own symbols name:
+
+    0014d9f0 <_ZN5dslib11PanicScreen9terminateEb>:
+      14da00: ldrb r3, [r2]
+      14da04: cmp  r3, #0
+      14da08: bne  0x14da00          <- deliberate, unconditional spin
+
+The title hit a fatal error, put up its panic screen, and hung ITSELF on
+purpose. **The screen is white because `dslib::PanicScreen::addDirect` — the
+function that would print the message — is compiled down to a bare `bx lr` in
+this build.** So the panic renders nothing, says nothing, and leaves no crash:
+the most convincing possible impression of a renderer that stopped drawing.
+
+**What it panicked about**, from the caller:
+
+    0013aac4 <_ZN5dslib11Persistence8loadGameEv>:
+      13aac8: ldrb r5, [r0, #0x4e]        error flag on `this`
+      13aad0: cmp  r5, #0
+      13aae0: beq  <normal path>
+      13ab10: bl   dslib::Strings::get("gamestrings", "..._ERROR_TEXT", ...)
+      13ab1c: bl   dslib::PanicScreen::showDirect(msg, true)
+
+A save-data error. Which the log had been saying all along, once per boot:
+
+    fopenAtomic(/LF/Bulk/Data/Local/0/MULT-0x0018004C-000000/SAVE.DAT):
+        mkstemp failed us!
+
+That directory did not exist. Create it and the title writes a 1024-byte
+SAVE.DAT, `loadGame` stops panicking, and the hang moves to a DIFFERENT panic —
+see the open thread below.
+
+### What this was NOT, all of it checked
+
+* **Not the compressed-texture-format fix.** That fix is correct and stays:
+  `CGraphics2D::init()` completes with no `Initialization Error` and no
+  depalettise warnings. But an Aug 3 log from BEFORE it shows the title reaching
+  the identical point — `PICKER STARTED`, the font, the two missing PNGs, two
+  listeners — and stopping. Same wall on both sides of the change.
+* **Not a missing GL entry point.** Everything App.so imports is implemented,
+  and so is everything libLightning2D.so imports. Zero stubs between them.
+* **Not the two `CTexturePNG::LoadPNG() failed` lines.** `images/titleBar.png`
+  and `images/bg.png` are absent from the shipped .tar as well — 0 of 1894
+  entries under `images/`. The engine's `missingAsset.png` fallback is what the
+  package expects; hardware does the same.
+
+## The guest will tell you where it is spinning: `kill -QUIT`
+
+`tadpole_crash.c` had a note saying a hang "needs a watchdog and is a separate
+problem". It does not: the process that is spinning already knows the answer.
+SIGQUIT now prints the same pc/lr/stack report as a crash and RETURNS, so the
+guest carries on and can be sampled again — two samples a few seconds apart is
+the difference between "stuck at one instruction" and "looping over a range".
+
+    kill -QUIT <host tid of the RUNNING thread of AppManager>
+
+Signal the THREAD, not the process: qemu maps guest threads to host threads
+one-to-one, and a process-directed signal lands on whichever thread has it
+unblocked, which is rarely the one spinning. Find it with:
+
+    for t in /proc/$pid/task/*; do
+      awk '{print $3, $14+$15}' $t/stat; done     # state R, largest CPU
+
+This produced the whole diagnosis above in one run, having cost one signal.
+
+### Do not reach for gdb first — three dead ends, in order
+
+1. **A separate gdb cannot attach.** yama `ptrace_scope=1` allows only
+   descendants, and each shell invocation is a sibling of the emulator.
+2. **qemu's gdbstub must be armed before boot** (`-g`), which means wrapping
+   `qemu-arm` on PATH to give the stub to AppManager alone — VideoDaemon and the
+   boot-logo imager must start normally or the boot blocks. That part works.
+3. **But gdb's default sysroot is `target:`**, so every guest `dlopen` pulls the
+   whole .so back through the remote protocol a packet at a time. Measured: the
+   boot had not left `ButtonPowerUSBTask` after four minutes. `set auto-solib-add
+   off` does NOT stop it; pointing `set sysroot` at a local symlink view of the
+   guest tree does.
+4. And do not probe the stub's port by connecting to it. `echo > /dev/tcp/...`
+   IS a gdb client as far as qemu is concerned; the real gdb then gets a
+   corrupted handshake (`Remote replied unexpectedly to 'vMustReplyEmpty'`).
+   Test for LISTEN state in `/proc/net/tcp` instead.
+
+## The guest could not create a directory — at all
+
+`real_mkdir` had been resolved in `tadpole_shim.c` since the shim was written
+and nothing ever called it, so guest `mkdir()`s went straight to qemu. That is
+the same trap `open(O_CREAT)` and `mkstemp()` already have workarounds for: `-L`
+only rewrites a path that ALREADY EXISTS in the sysroot, and the entire point of
+mkdir is that its target does not. Every directory a title tried to create was
+attempted against the HOST root and failed. Now intercepted, sysroot-first.
+
+**TADPOLE_DIR is the one absolute path here that is not the guest's**, and it
+caught this out immediately: the first boot after the interception landed the
+runtime directory at `<sysroot>/tmp/tadpole-<run>` while the viewer kept opening
+the host path. Nothing failed loudly — the two sides simply had different
+runtime directories. Paths under `g_dir` now bypass the sysroot rule explicitly.
+
+## A title's save area must exist BEFORE first launch
+
+Measured, with mkdir interception working and a full launch traced: **the guest
+never calls mkdir for `Bulk/Data/Local/<profile>/<PackageID>/` at all.** It is
+not created on demand. AppManager announces "Set doc base to:" and then assumes
+the directory is there, because on hardware it is. The three titles here that
+had one got it from the transplanted `/LF/Bulk`, not from anything we did — so
+"only 3 of 112 titles have a save directory" was never a coincidence.
+
+`tools/install-game.sh` now creates it per existing profile at install time, and
+`--fix-saves` backfills a library that was installed before this. On this
+install that was **553 missing directories across 112 titles and 5 profiles** —
+every one of them a title that could not persist anything, and, for any title
+that panics like Cooking! does, a title that could not start.
+
+## Harness: two traps in probe-race.sh, both fixed
+
+* **`wait` greps the WHOLE log, so a repeated marker matches an old line.** The
+  home picker logs `ChangePage( 1 )` for every page-down — the argument is the
+  DIRECTION, not the page — so waiting for "page 2" matched page 1's line and
+  returned instantly. The route then sat one page short, tapped empty grid, and
+  timed out waiting for a launch: an emulator-input bug, to look at. `taptil`
+  now counts matches from the start of its own step and requires a NEW one,
+  which costs nothing for unique markers (they start at zero either way).
+* **A trailing timeout in a `wait` line becomes part of the regex.** `wait FOO
+  120` waits for the pattern "FOO 120". `waitsecs` is the verb for the timeout.
+
+`tools/steps/cooking.txt` reaches the title unattended in about four minutes,
+and is now written entirely in `taptil` for that reason.
+
+### Open: the SECOND panic, once the save directory exists
+
+Same `PanicScreen::terminate` spin, different caller — `App.so+0x001330b4`, in
+`dslib::Backup::errorCallback(unsigned, bool)`, reached from
+`dslib::Backup::read(unsigned offset, void*, unsigned len)`:
+
+    1330f0..133130: DSLIBI_InitFileInfo / DSLIBI_OpenFile, error if either is 0
+    133134: ldr r3, [sp, #0x404]      the file size from the file info
+    133138: cmp r3, r6                against the requested OFFSET
+    13313c: blo <error>               size < offset -> errorCallback(1, 0)
+
+`dslib` is DS-heritage — `Backup` is the save-chip abstraction — so the title
+very likely expects SAVE.DAT to be a fixed CHIP-SIZED image, and ours is 1024
+bytes because that is all the first write produced. Read `Backup::write` next
+and find the size the format path intends; a short read is handled (it
+zero-fills), so this is specifically the size check or an open failure. The
+`kill -QUIT` sample tells you which caller in one shot.
+
+### Verified, and one thing left UNRESOLVED about the backfill
+
+With the save directory present the first panic is gone, reproducibly:
+`mkstemp failed us!` count 0, a 1024-byte SAVE.DAT written, and the `kill -QUIT`
+sample now lands on `lr = App.so+0x001330b4` — `Backup::errorCallback`, the
+second panic — instead of `+0x0013ab20`. That is the whole of the first fix
+demonstrated end to end.
+
+**But `--fix-saves` across the WHOLE library is not yet cleared.** Creating 553
+directories at once correlated with a home-picker SIGSEGV in 2 of 2 route runs
+(once at `SetCategoryLabelFieldName icon2`, once while paging), where ~8 runs
+before it and 1 run after reverting it were clean. That is a correlation on
+tiny numbers and the crash is ALREADY a known open thread — "a segfault where
+tadpole_crash.c did NOT produce a report" — and a plain boot with all 553 in
+place loaded 104 icons without complaint. So it may well be a coincidence.
+
+It is not worth guessing. The backfill was REVERTED here (empty directories
+only, via rmdir, so no real save area could be lost); only Cooking!'s own
+directory was kept. The per-title creation at install time stays on, because
+that is one directory per profile for the title being installed and matches the
+on-device state. Before recommending `--fix-saves` to anyone, run the picker
+three times with it applied and three without; the crash handler not firing on
+that SIGSEGV is worth fixing first, since it would answer this in one run.
+
+## SOLVED: why tadpole_crash.c never reported the home-screen segfault
+
+It was not failing. **It was not installed any more.**
+
+`libLightningBase.so` imports `signal`, and AppManager calls it during startup —
+the boot log says so in as many words, one line after the shim has finished its
+own installation:
+
+    [0x280] AppManager signal handler installed
+
+`signal()` REPLACES a handler rather than chaining, so from that line onward the
+shim's SIGSEGV handler is gone and every later crash belongs to AppManager's
+handler. The `qemu: uncaught target signal 11 (Segmentation fault) - core
+dumped` that accompanies these crashes is the confirming evidence, not a
+contradiction: qemu prints that only when the GUEST has no handler registered,
+which is exactly what AppManager's own handler leaves behind once it restores
+SIG_DFL to get its core. Two independent facts, one explanation.
+
+`signal()` is now intercepted in `tadpole_shim.c`. The guest's request is
+honoured — its handler is recorded and invoked from ours, after the report —
+but it can no longer unregister the reporter. Verified: `TADPOLE_DEBUG=1` shows
+five `signal() kept the crash reporter` lines per boot against AppManager's one
+"signal handler installed".
+
+**This means every crash report in the project's history came from a title, and
+none from the front end.** The home-screen segfault has never once been
+symbolised, which is why it has stayed "annoying and unexplained" for so long.
+The next occurrence will name its library and offset.
+
+### What is NOT yet known, and how not to waste a run on it
+
+The CAUSE of the home-screen segfault is still open. Do not try to force it with
+an injected signal: `kill -SEGV` on the qemu process is handled by QEMU's own
+host-side SIGSEGV handler, which decides the fault is not guest memory and dies
+on the host — qemu never reports it to the guest, so the guest handler is not
+exercised and the test proves nothing. (`kill -QUIT` IS forwarded, which is why
+the hang-dump tool works; the two are not interchangeable.) The same applies to
+injected SIGABRT. Wait for a real one, or find a deterministic guest fault —
+`TADPOLE_GL_DEBUG=2` makes the first GL stub hit or GL error fatal by way of
+`abort()` and a null write, but a plain front-end boot never trips it, because
+the Flash UI touches no unimplemented entry point.
+
+Guest cores are no help either: qemu writes `PT_NOTE` with **p_filesz 0**, so
+there is no NT_PRSTATUS and no registers in them at all — the 273 PT_LOAD
+headers are the entire content. That is a second reason, beyond the missing
+NT_FILE noted earlier, that post-mortem symbolisation cannot work here and the
+in-process report is the only route.
+
+### The first symbolised home-screen crash, caught on the very next run
+
+    === tadpole: guest crashed ===
+      signal   SIGSEGV (11)
+      fault    0x00000000
+      pc       0x457e6a14  libflashlite.so+0x000dda14
+      lr       0x457e306c  libflashlite.so+0x000da06c
+      r0 0x44f654c4  r1 0x00000000  r2 0x00000001  r3 0x00000000
+      stack:   libflashlite.so +0x83e00 +0x119190 +0xfe60c +0x83174 +0x119b1c
+                               +0xe13c8 +0x790e8 +0x78030 +0x79110
+
+**A null-pointer dereference inside `libflashlite.so`, with every frame in
+libflashlite**, while the picker is loading its icon bitmaps — the trace either
+side is `MODE_LOAD_ICONS`, `SetIconLabelText icon8/9/10`, `LoadIconImage
+icon10`, "waiting for load of the image". `fault 0x0` with r1 and r3 both zero
+says a pointer that should have been an image or bitmap object was NULL and was
+used without a check.
+
+That is the whole of what the report gives, and it is far more than existed
+before. The next step is to find which icon: the picker was on icon10 of the
+page when it died, so log the package each icon index maps to and see whether it
+is always the same title, or always the same POSITION. A title whose art fails
+to load is the obvious suspect given "waiting for load of the image" is the last
+thing the picker says.
+
+## SOLVED: Cooking! runs. qemu's `-L` is a SNAPSHOT, and open() only translated CREATES
+
+The save directory was real but it was not the whole story. The rest, and the
+larger bug:
+
+**`-L` is not a live view of the sysroot.** qemu-user's init_paths() walks the
+tree ONCE at startup and answers every later lookup from that snapshot. A file
+the guest creates during the run is therefore invisible to path translation for
+the remainder of that run, and reading it back resolves against the HOST root
+and fails with ENOENT.
+
+`open_common()` had carried a workaround for half of this for a long time —
+but only under `if (flags & O_CREAT)`, because the symptom that prompted it was
+"qemu will not create files inside -L". `fopen_common()` was gated the same way
+on mode `w`/`a`. So the guest could CREATE a file and then not open it again.
+
+That is exactly what dslib does on a first launch, and it cost the whole title:
+
+    clearInit()           stat(SAVE.DAT) -> missing, so create it
+                          fopenAtomic + fwrite(1024 zero bytes)   [translated]
+    DSLIBI_InitFileInfo   stat(SAVE.DAT)      -> "missing"        [NOT translated]
+    DSLIBI_OpenFile       open(SAVE.DAT, RD)  -> ENOENT           [NOT translated]
+    Backup::read          -> errorCallback(1, 0)
+                          -> PanicScreen::showDirect(msg, true)
+                          -> terminate(): spin forever, white screen
+
+**The title could only ever have failed on its FIRST run**, and would have
+worked on a second one once the card was old enough to be in the snapshot —
+which no run here had ever reached, because the first run hangs.
+
+Now: every absolute path is answered sysroot-first with a literal fallback, in
+`open`/`open64`/`fopen`/`fopen64` and in the newly intercepted
+`stat`/`stat64`/`lstat`/`access`. `TADPOLE_DIR` is excluded from the rule
+everywhere, being a host path shared with the viewer.
+
+**Verified end to end**, from a genuinely empty save directory: SAVE.DAT is
+created, grows past its initial 1024 bytes to 1596 as the game formats and
+writes its card, the spin sample no longer lands in PanicScreen, and the title
+draws its title screen — logo, Play button, menu icons, the truck-and-parrot
+art. `shots/` equivalent: scratchpad `cooking-live.png`.
+
+`stat` and `access` had never been intercepted at all, so this class of failure
+was available to every title that writes then re-reads within one run. It is
+worth re-testing anything previously dismissed as "saves do not work".
+
+## The home-screen segfault correlates with the VIEWER, not with the picker
+
+Now that crashes report (see the signal() section), three were captured:
+
+    pc  libflashlite.so+0x000dda14   (twice)   r1=0 r3=0
+    pc  libflashlite.so+0x000d57cc   (once)
+
+and the repeated one disassembles to:
+
+    dda0c: ldr   r3, [r10]        r3 = *r10  -> NULL
+    dda14: ldr   r6, [r3, #0x8]   <- faults
+
+inside `CorePlayer::DoActions2(int, bool)` — Flash's ACTIONSCRIPT INTERPRETER,
+not the image decoder. The picker is mid icon-sweep each time ("MODE_LOAD_ICONS",
+"waiting for load of the image"), but at a different index every run — icon9,
+icon26, icon47 — and no image load ever reports a failure. So it is not one bad
+package; it is timing.
+
+**The strong correlation is the viewer.** Every crash has been in a viewer run;
+repeated `--no-viewer` boots complete the full 104-icon sweep cleanly, as does a
+headless route run all the way into a title. libflashlite imports zero GL, so
+the viewer cannot be corrupting it directly — but HLE makes the guest block in
+hle_present waiting for the host pump, which changes thread interleaving, and
+that is a plausible way to expose a latent race in the AS interpreter.
+
+`TADPOLE_NO_VIEWER=1` is therefore the reliable way to drive a title while this
+is open, and is how the Cooking! result above was obtained. Next step is to
+confirm the correlation deliberately — say five viewer boots against five
+headless — rather than resting on the ~5 vs ~8 that fell out of other work.
