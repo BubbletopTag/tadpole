@@ -277,6 +277,29 @@ static void audio_poll_fmt(void)
 }
 
 /* Move whatever the guest has written into the ring. Called once per frame. */
+/* SOMEONE HAS TO READ THE FIFO EVEN WHEN NOBODY IS LISTENING.
+ *
+ * audio_pump is the only reader of the guest's audio FIFO, and it used to run
+ * only when audio was enabled. Switch audio off and the FIFO fills; the
+ * guest's audio thread then blocks in write() forever, and any title that
+ * waits for a sound to finish before moving on simply stops.
+ *
+ * That is not a quiet degradation — it is a hang. Clam Prix sits on its title
+ * screen and never reaches the menu, with the renderer still running at 60 fps
+ * so everything looks alive. Read and throw the bytes away instead.
+ */
+static void audio_discard(void)
+{
+	uint8_t tmp[16384];
+	int rounds;
+
+	if (g_afd < 0)
+		return;
+	for (rounds = 0; rounds < 8; rounds++)
+		if (read(g_afd, tmp, sizeof tmp) <= 0)
+			return;
+}
+
 static void audio_pump(void)
 {
 	uint8_t tmp[16384];
@@ -1863,6 +1886,9 @@ int main(int argc, char **argv)
 				last_fmt_poll = now;
 				audio_poll_fmt();
 			}
+		} else {
+			/* Audio off still means the guest's FIFO must be emptied. */
+			audio_discard();
 		}
 		g_adepth_max_ms    = ui_cfg()->audio_latency_ms;
 		g_adepth_target_ms = ui_cfg()->audio_latency_ms / 2;
