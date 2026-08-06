@@ -39,6 +39,31 @@ ROOTFS_DIR="$PROJ/rootfs"
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "  $*"; }
 
+# Bundled qemu / Python / ubi_reader when they are there, the host's when they
+# are not. See tools/lib-deps.sh.
+. "$HERE/lib-deps.sh"
+PY="$(tad_python_with_ubireader || true)"
+
+# Reading and unpacking a package: unzip and bzcat if the machine has them,
+# otherwise pkgtool.py, which does the same with Python's stdlib. Both paths
+# are exercised — the bundle has no unzip, and a source checkout usually does.
+pkg_meta() {                        # $1=archive -> meta.inf on stdout
+    case "$1" in
+        *.lfp) command -v unzip >/dev/null && { unzip -p "$1" '*meta.inf' 2>/dev/null; return; } ;;
+        *.lf2) command -v bzcat >/dev/null && { bzcat "$1" 2>/dev/null | tar xO --wildcards '*meta.inf' 2>/dev/null; return; } ;;
+    esac
+    [ -n "$PY" ] && "$PY" "$HERE/pkgtool.py" meta "$1" 2>/dev/null
+}
+pkg_extract() {                     # $1=archive $2=dir
+    mkdir -p "$2"
+    case "$1" in
+        *.lfp|*.zip) command -v unzip >/dev/null && { unzip -q -o "$1" -d "$2"; return; } ;;
+        *.lf2)       command -v bzcat >/dev/null && { bzcat "$1" | tar x -C "$2"; return; } ;;
+    esac
+    [ -n "$PY" ] || die "no unzip/bzcat and no bundled Python: cannot unpack $(basename "$1")"
+    "$PY" "$HERE/pkgtool.py" extract "$1" "$2"
+}
+
 [ -n "$SRC" ] || die "usage: $0 <LFC_Downloads dir | .lfp | .lf2 | .zip>"
 [ -e "$SRC" ] || die "no such path: $SRC"
 
@@ -57,9 +82,8 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/pkgs"
 case "$SRC" in
     *.zip)
-        command -v unzip >/dev/null || die "need 'unzip' for a .zip"
         echo "==> unpacking $SRC"
-        unzip -q -o "$SRC" -d "$STAGE/outer" || die "unzip failed"
+        pkg_extract "$SRC" "$STAGE/outer" || die "could not unpack $SRC"
         find "$STAGE/outer" -type f \( -iname '*.lf2' -o -iname '*.lfp' \) \
              -exec cp {} "$STAGE/pkgs/" \; ;;
     *.lf2|*.lfp)
@@ -78,12 +102,7 @@ count=$(find "$STAGE/pkgs" -type f | wc -l)
 [ "$count" -gt 0 ] || die "no .lf2 or .lfp packages found in $SRC"
 echo "==> $count package(s) to inspect"
 
-read_meta() {                       # $1=archive -> meta.inf on stdout
-    case "$1" in
-        *.lfp) unzip -p "$1" '*meta.inf' 2>/dev/null ;;
-        *.lf2) bzcat "$1" 2>/dev/null | tar xO --wildcards '*meta.inf' 2>/dev/null ;;
-    esac
-}
+read_meta() { pkg_meta "$1"; }
 # Anchored at line start: an unanchored "Version=" also matches MetaVersion="1.0",
 # which is how this first reported the firmware as version 1.0.
 field() { grep -oE "^$2=\"[^\"]*\"" <<<"$1" | head -1 | cut -d'"' -f2; }
@@ -113,10 +132,7 @@ echo "==> Firmware-Base version $FWVER"
 
 # ---- 3. extract it, and find the root filesystem ------------------------
 mkdir -p "$STAGE/fw"
-case "$FW" in
-    *.lfp) unzip -q -o "$FW" -d "$STAGE/fw" ;;
-    *.lf2) bzcat "$FW" | tar x -C "$STAGE/fw" ;;
-esac
+pkg_extract "$FW" "$STAGE/fw" || die "could not unpack $(basename "$FW")"
 
 UBI="$(find "$STAGE/fw" -type f -iname '*erootfs*.ubi' | head -1)"
 [ -n "$UBI" ] || UBI="$(find "$STAGE/fw" -type f -iname '*.ubi' | head -1)"
@@ -132,38 +148,60 @@ if [ -d "$DEST/ubi_rfs" ] && [ -n "$(ls -A "$DEST/ubi_rfs" 2>/dev/null)" ]; then
     echo "    (delete it first if you want to re-extract)"
 else
     # ---- 4. UBIFS -> a directory tree ----------------------------------
-    EXTRACT=""
-    for t in ubireader_extract_files ubidump; do
-        command -v "$t" >/dev/null && { EXTRACT="$t"; break; }
-    done
+    #
+    # Three ways to reach ubi_reader, in decreasing order of how much the user
+    # had to do to get it:
+    #
+    #   the bundled Python           tools/fetch-deps.sh staged it; nothing to
+    #                                install, and it is what the AppImage uses
+    #   a host python3 that has it   a source checkout that installed it
+    #   ubireader_extract_files      the console script on the PATH
+    #
+    # Tadpole still does not VENDOR a UBIFS reader — it is a substantial piece
+    # of software that already exists, and a half-working copy would fail in
+    # ways that look like emulator bugs. It ships the real one.
+    EXTRACT=""; EXTRACT_KIND=""
+    if [ -n "$PY" ]; then
+        EXTRACT="$PY"; EXTRACT_KIND=python
+    else
+        for t in ubireader_extract_files ubidump; do
+            command -v "$t" >/dev/null && { EXTRACT="$t"; EXTRACT_KIND=cmd; break; }
+        done
+    fi
     if [ -z "$EXTRACT" ]; then
         cat >&2 <<'MSG'
 
-The root filesystem is a UBIFS volume and no extractor is installed.
+The root filesystem is a UBIFS volume and no extractor is available.
 
-Install ONE of these, then run this script again:
+The simplest fix, which installs nothing on your system:
+
+    ./tools/fetch-deps.sh
+
+That stages a private Python with ubi_reader into build/deps/ — the same one
+the AppImage carries. Failing that, install ubi_reader yourself:
 
     pipx install ubi_reader           # recommended, isolated
-    pip install --user ubi_reader     # if pip is available
+    pip install --user ubi_reader
     # Arch:   yay -S python-ubi-reader
     # Debian: apt install python3-ubi-reader
-
-Tadpole does not vendor a UBIFS reader: it is a substantial piece of software
-that already exists, and shipping a half-working copy would fail in ways that
-look like emulator bugs.
 MSG
         die "cannot extract $(basename "$UBI") without ubi_reader"
     fi
 
-    echo "==> extracting the root filesystem with $EXTRACT"
+    echo "==> extracting the root filesystem with $(basename "$EXTRACT")"
     echo "    (a 53 MB volume — this takes a minute or two)"
     mkdir -p "$STAGE/rfs"
     # KEEP THE TOOL'S OWN ERROR. Swallowing it behind a generic "failed" hid a
     # real one: ubi_reader installed WITHOUT its LZO backend fails with
     # "ModuleNotFoundError: No module named 'lzallright'", which is a one-line
     # fix — but invisible if stderr goes to /dev/null.
-    if ! ( cd "$STAGE/rfs" && "$EXTRACT" -o out "$UBI" ) >"$STAGE/ex.log" 2>&1; then
-        echo "$EXTRACT failed. Its output:" >&2
+    if [ "$EXTRACT_KIND" = python ]; then
+        run_extract() { ( cd "$STAGE/rfs" && "$EXTRACT" "$HERE/pkgtool.py" ubi "$UBI" out ); }
+    else
+        run_extract() { ( cd "$STAGE/rfs" && "$EXTRACT" -o out "$UBI" ); }
+    fi
+    if ! run_extract >"$STAGE/ex.log" 2>&1; then
+        echo "extraction failed. Its output:" >&2
         sed 's/^/    /' "$STAGE/ex.log" >&2 | tail -20
         if grep -q "lzallright\|No module named" "$STAGE/ex.log"; then
             cat >&2 <<'MSG'

@@ -5100,3 +5100,97 @@ The 36 that are absent are all PAD2- content (widgets, trailers, Pet Pad, My
 Books) and the LFCC- content packages; every PADS- and MULT- package resolves.
 Whether those live under another per-device directory is not yet known — PADFW
 and their own middle field were both tried.
+
+## Setup, and why it stopped being the hard part
+
+Everything below is about the FIRST twenty minutes of using Tadpole, which
+until now were the worst twenty minutes: install six packages, two of them from
+the AUR, then pick a `.tar` out of a file list of eighty-seven whose names are
+whatever the person who dumped the cartridge typed.
+
+### The dependencies ship with it
+
+`tools/fetch-deps.sh` stages two things into `build/deps/`, and
+`tools/build-appimage.sh` puts them in the image:
+
+* **qemu-arm**, from Ubuntu's `qemu-user-static` 8.2.2 — the last widely
+  published build that is genuinely static (`static-pie linked`, 4.1 MB).
+  Debian 13 and Ubuntu 25.04 turned that package into a transitional one whose
+  "binaries" are symlinks to the dynamic build; their `.deb` is 70 KB, which is
+  how you can tell without downloading it.
+* **CPython** from python-build-standalone, with `ubi_reader` installed into
+  it. The interpreter comes too, rather than just the wheels, because
+  `ubireader.ubifs.misc` imports `lzallright`, `zstandard` AND `cryptography`
+  at module scope and `zstandard` publishes no abi3 wheel — a wheel chosen at
+  build time would only import on a host running the same Python minor version.
+
+  126 MB as fetched, 63 MB after pruning the test suite, Tcl/Tk, and the second
+  copy of the interpreter (`bin/python3.12` links libpython statically; the
+  29 MB `lib/libpython3.12.so` is only for programs that EMBED Python, and
+  nothing here does). The whole AppImage is 22 MB.
+
+Resolution order is in `tools/lib-deps.sh` and is the same everywhere:
+`TADPOLE_QEMU`/`TADPOLE_PYTHON`, then `$TADPOLE_DEPS` or `build/deps`, then the
+PATH. A source checkout with the system packages installed keeps working
+exactly as before.
+
+Verified by hiding the host's tools: with a PATH containing no `qemu-arm` and
+no `python3`, the extracted AppImage boots AppManager (433 lines of serial log)
+and scans 87 game backups.
+
+`tools/pkgtool.py` reads `.lfp` (ZIP) and `.lf2` (bzip2 tar) with Python's
+stdlib, so `unzip` and `bzip2` are no longer required either. Checked against
+the real packages: meta.inf output, member listings and full extractions are
+byte-identical to `unzip`/`bzcat`. The bundled `ubi_reader` extracted the real
+4.6.0.784 volume to a tree identical to the one the host tool produced — 1611
+files, no additions, no omissions, sampled contents equal.
+
+### The game library
+
+`tools/scan-games.py` reads each `.tar`'s Application `meta.inf` (the
+shallowest one that names an Icon — the others are widgets and library packs),
+decodes the icon, and writes `~/.cache/tadpole/games/{index.tsv,i/*.tpi}`,
+cached against each archive's size and mtime. 87 titles in 11 seconds cold,
+0.26 s warm.
+
+Two things that cost icons on the first attempt and are worth not rediscovering:
+
+* **Icons are not all PNG, and not all PNGs are RGBA.** Of 87 titles: 8-bit
+  RGBA, 8-bit RGB, and two Disney titles whose manifest names `icon64.swf`. The
+  Flash-era titles (Letter Factory, Pet Pals, Up!, the Star Wars readers) name
+  a `.swf` and ship the artwork beside it as `PopUpIcon.png` or `BaseIcon.png`.
+  The fallback chain — exact entry, same stem with `.png`, known icon names,
+  any name containing "icon", a top-level `preview.png` — finds 86 of 87. The
+  last one has no PNG in the archive at all.
+* **Match on the tidied path, extract with the original.** Some backups list
+  members as `./LPAD/Icon.png` and some as `LPAD/Icon.png`. Normalising for
+  comparison and then passing the normalised name back to `extractfile()`
+  raises KeyError, which the `except` turned into a missing icon rather than an
+  error — two titles lost their art that way, silently.
+
+The decoding is deliberately in Python and not in the viewer, which reads a
+four-field raw format (`TPI1`, u16 w, u16 h, RGBA) it cannot get wrong.
+
+### Debug level
+
+One dial (Options -> Debug Settings), expanded in `guest_setenv()`:
+
+| level | what | measured |
+|---|---|---|
+| 0 | guest output to /dev/null | no log at all |
+| 1 | AppManager's serial log | 444 lines to the home screen |
+| 2 | + shim and GL tracing | 2654 lines |
+| 3 | + `qemu -strace` | every syscall |
+
+With "Write a log file" on it also goes to `~/.local/state/tadpole/tadpole.log`,
+previous boot kept as `.1`. That exists because a desktop launch has no
+terminal, and the guest's output was simply discarded there.
+
+Two bugs found while testing that, both older than this work:
+
+* `cfg_path()` hardcoded `$HOME/.config` while `tadpole.sh` read
+  `${XDG_CONFIG_HOME:-$HOME/.config}`. On a machine that sets the variable they
+  are different files, so the Graphics checkboxes silently did nothing.
+* A single `mkdir()` cannot create `~/.local/state/tadpole` on an account where
+  `~/.local/state` does not exist yet, and the failure was invisible: no log
+  file, no message.

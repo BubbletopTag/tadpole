@@ -30,22 +30,65 @@ software. Both are capped at the panel's real 60 Hz.
 
 ---
 
+## Quick start
+
+```sh
+chmod +x Tadpole-x86_64.AppImage
+./Tadpole-x86_64.AppImage
+```
+
+One file, no install step, no dependencies to hunt down — a static `qemu-arm`
+and the firmware toolchain ride along inside it. The setup wizard opens on the
+first run and asks for the two things Tadpole cannot ship: your device's system
+files, and your cartridge backups.
+
+To build that file yourself:
+
+```sh
+./tools/fetch-deps.sh          # stage qemu and the firmware tools (~70 MB)
+cd tadpole && make && cd ..    # the shim and the viewer
+./tools/build-appimage.sh      # -> build/Tadpole-x86_64.AppImage, ~22 MB
+```
+
+---
+
 ## Requirements
 
-Run this first — it checks everything at once and prints the exact command for
-your distribution:
+**If you have the AppImage, there are none.** It carries a static `qemu-arm` and
+a private Python with `ubi_reader`, so there is nothing to install and nothing
+to look up for your distribution. Download it, `chmod +x`, run it.
+
+Everything below is for building from source.
+
+Run this first — it checks everything at once, says which pieces Tadpole already
+carries, and prints the exact command for anything left:
 
 ```sh
 ./tools/check-deps.sh
 ```
 
-### The full list
+### Let Tadpole fetch its own dependencies
+
+```sh
+./tools/fetch-deps.sh
+```
+
+This downloads a static `qemu-arm` and a relocatable Python with `ubi_reader`
+into `build/deps/`, installing **nothing** system-wide. Everything afterwards —
+`./tadpole.sh`, the firmware installer, the AppImage build — finds them there.
+It is the shortest path from a clone to a running emulator.
+
+Roughly 70 MB, pinned by SHA-256, re-fetchable at any time
+(`./tools/fetch-deps.sh --clean`). What it fetched is recorded in
+`build/deps/manifest.txt`.
+
+### Or install them yourself
 
 **To run:**
 
 | | Arch | Debian / Ubuntu | Why |
 |---|---|---|---|
-| qemu-arm | `qemu-user` | `qemu-user` | runs the guest's 32-bit ARM code |
+| qemu-arm | `qemu-user` | `qemu-user` | runs the guest's 32-bit ARM code — *or bundled* |
 | SDL2 | `sdl2` | `libsdl2-dev` | window, input, audio |
 | OpenGL | `mesa` | `libgl1-mesa-dev` | host-GPU rendering (HLE) |
 | zlib | `zlib` | `zlib1g-dev` | the viewer decodes its own icon |
@@ -59,20 +102,20 @@ your distribution:
 | make | `make` | `make` | |
 | python3 | `python` | `python3` | build and analysis tooling |
 
-**To install firmware** (once):
+**To install firmware** (once) — all of this is bundled by `fetch-deps.sh`:
 
 | | Arch | Debian / Ubuntu | Why |
 |---|---|---|---|
-| unzip | `unzip` | `unzip` | `.lfp` packages are ZIP |
-| bzip2 | `bzip2` | `bzip2` | `.lf2` packages are bzip2 tar |
 | ubi_reader | `python-ubi-reader` (AUR) | `python3-ubi-reader` | reads the UBIFS root filesystem |
 | lzallright | `python-lzallright` (AUR) | pip | ubi_reader's LZO backend |
 | cryptography | `python-cryptography` | `python3-cryptography` | ubi_reader imports it unconditionally |
-| zstandard | `python-zstandard` | `python3-zstandard` | ubi_reader's zstd backend |
+| zstandard | `python-zstandard` | `python3-zstandard` | ubi_reader imports it unconditionally |
+| unzip, bzip2 | `unzip bzip2` | `unzip bzip2` | optional — `tools/pkgtool.py` reads both formats with Python's stdlib |
 
-**ubi_reader's three dependencies are not optional.** It imports them lazily, so
-a missing one fails minutes into an extraction rather than at startup — and only
-one at a time. `check-deps.sh` tests all of them up front, and
+**ubi_reader's three dependencies are not optional.** It imports them at module
+scope, so a missing one fails the whole extraction — and reports only one at a
+time. `check-deps.sh` asks the one question that matters (*can the Python that
+would actually be used import `ubireader.ubifs.misc`?*), and
 `install-firmware.sh` runs that check before doing any work.
 
 ### Arch
@@ -147,18 +190,31 @@ The pieces, if you want to know what it is doing:
 
 ## Getting games
 
-Games are `.tar` backups of your own cartridges, made with **LFManager**. Install
-them with:
+Games are `.tar` backups of your own cartridges, made with **LFManager**.
+
+**File → Game Library**, point it at the folder holding them, and you get the
+list you would expect: each title's own icon and name, read out of the backup,
+with the ones you have already installed marked. Tick what you want and press
+Install. The wizard's Games page opens the same window.
+
+The first read of a folder takes a few seconds per gigabyte — the icon lives
+inside a 20-120 MB archive — and is cached against each file's size and
+modification time, so opening the library again is instant. The cache lives in
+`~/.cache/tadpole/games`.
+
+From the shell:
 
 ```sh
-./tools/install-game.sh games/YourGame.tar
+./tools/scan-games.sh /path/to/backups     # build the icon-and-name index
+./tools/install-game.sh games/YourGame.tar # install one
+./tools/install-game.sh --from-list list   # or a file of paths, one per line
 ```
-
-or **File → Install Package** in the application.
 
 Backups come in three shapes and the installer handles all of them: a flat
 archive with `meta.inf` at the top, one wrapped in a directory, and one that
-bundles a shared library package alongside the game.
+bundles a shared library package alongside the game. The scanner copes with the
+same variety in icons — RGB and RGBA PNG, and the Flash-era titles whose
+manifest names a `.swf` and ships the artwork beside it as `PopUpIcon.png`.
 
 ---
 
@@ -196,7 +252,33 @@ device, so its axes sit a quarter turn from the hardware's; Tadpole corrects for
 that automatically. If the directions still feel wrong in your orientation, set
 `TADPOLE_DPAD_SHIFT=0..3`.
 
+### Settings
+
+Everything in **Options** is saved to `~/.config/tadpole/ui.cfg` and applied to
+the next boot. Graphics, Audio and Controller are what they sound like; the two
+worth describing are:
+
+**Debug level** (Options → Debug Settings) — one dial instead of a row of
+switches:
+
+| | |
+|---|---|
+| 0 — silent | the guest's output goes nowhere |
+| 1 — normal | AppManager's serial log, exactly what the device prints (~430 lines to reach the home screen) |
+| 2 — verbose | adds the shim's file and audio tracing, and every GL stub and error (~2400 lines) |
+| 3 — trace | adds every guest syscall. Enormous and slow, and the only thing that answers "did it even try to open that file" |
+
+With **Write a log file** on, the whole lot also goes to
+`~/.local/state/tadpole/tadpole.log`, with the previous boot kept as
+`tadpole.log.1`. That matters when Tadpole is launched from a desktop icon and
+there is no terminal to print to.
+
+**System Settings** holds "Boot the system menu at startup" and the remembered
+games folder.
+
 ### Useful environment variables
+
+Anything set here wins over the saved settings.
 
 | | |
 |---|---|
@@ -205,7 +287,10 @@ that automatically. If the directions still feel wrong in your orientation, set
 | `TADPOLE_HLE_STRICT=1` | crash rather than silently fall back to software |
 | `TADPOLE_HZ=n` | frame cap (default 60; `0` uncaps) |
 | `TADPOLE_DIR=path` | where the shared framebuffers and FIFOs live |
-| `TADPOLE_DEBUG=1` | verbose shim logging |
+| `TADPOLE_DEBUG=1` | verbose shim logging (what debug level 2 sets) |
+| `TADPOLE_STRACE=1` | every guest syscall (what debug level 3 sets) |
+| `TADPOLE_QEMU=path` | a specific qemu-arm, instead of the bundled or installed one |
+| `TADPOLE_DEPS=dir` | where the bundled qemu and Python live (the AppImage sets this) |
 
 ---
 

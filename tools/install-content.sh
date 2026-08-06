@@ -30,17 +30,26 @@ CACHE="${2:-$PROJ/sources/nxp320/LFC_full/LFC_Downloads/cache}"
 [ -d "$CACHE" ] || { echo "no cache at $CACHE" >&2; exit 1; }
 mkdir -p "$BULK"
 
+# unzip and bzcat when the machine has them, tools/pkgtool.py (Python stdlib)
+# when it does not — the AppImage's bundle carries a Python and no unzip. See
+# tools/lib-deps.sh.
+. "$HERE/lib-deps.sh"
+PY="$(tad_python || true)"
+pytool() { [ -n "$PY" ] && "$PY" "$HERE/pkgtool.py" "$@" 2>/dev/null; }
+
 read_meta() {                      # $1=archive -> meta.inf on stdout
     case "$1" in
-        *.lfp) unzip -p "$1" '*meta.inf' 2>/dev/null ;;
-        *.lf2) bzcat "$1" 2>/dev/null | tar xO --wildcards '*meta.inf' 2>/dev/null ;;
+        *.lfp) command -v unzip >/dev/null && { unzip -p "$1" '*meta.inf' 2>/dev/null; return; } ;;
+        *.lf2) command -v bzcat >/dev/null && { bzcat "$1" 2>/dev/null | tar xO --wildcards '*meta.inf' 2>/dev/null; return; } ;;
     esac
+    pytool meta "$1"
 }
 list_archive() {                   # $1=archive -> member paths on stdout
     case "$1" in
-        *.lfp) unzip -Z1 "$1" 2>/dev/null ;;
-        *.lf2) bzcat "$1" 2>/dev/null | tar tf - 2>/dev/null ;;
+        *.lfp) command -v unzip >/dev/null && { unzip -Z1 "$1" 2>/dev/null; return; } ;;
+        *.lf2) command -v bzcat >/dev/null && { bzcat "$1" 2>/dev/null | tar tf - 2>/dev/null; return; } ;;
     esac
+    pytool list "$1"
 }
 
 # Some packages are FLAT (meta.inf at the top) and some SELF-WRAP in a single
@@ -58,9 +67,10 @@ self_wraps() {                     # $1=archive
 extract_to() {                     # $1=archive $2=destdir
     mkdir -p "$2"
     case "$1" in
-        *.lfp) unzip -qo "$1" -d "$2" 2>/dev/null ;;
-        *.lf2) bzcat "$1" 2>/dev/null | tar x -C "$2" 2>/dev/null ;;
+        *.lfp) command -v unzip >/dev/null && { unzip -qo "$1" -d "$2" 2>/dev/null; return; } ;;
+        *.lf2) command -v bzcat >/dev/null && { bzcat "$1" 2>/dev/null | tar x -C "$2" 2>/dev/null; return; } ;;
     esac
+    pytool extract "$1" "$2"
 }
 
 # Extract so that $2 ends up being the package directory itself, whether the

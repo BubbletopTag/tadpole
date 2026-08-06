@@ -96,15 +96,22 @@ static char           g_proj[PATHMAX];
 static struct ui_settings g_cfg = {
 	.gl               = 1,
 	.gl_hle           = 1,
-	.gl_debug         = 0,
+	.debug_level      = 1,      /* the device's own serial log, nothing more */
+	.log_to_file      = 1,
 	.gl_dumpframe     = 0,
 	.gl_dumptex       = 0,
-	.shim_debug       = 0,
 	.rotate           = 0,
 	.scale            = 2,
 	.touch_debug      = 0,
 	.audio_on         = 1,
 	.audio_latency_ms = 260,
+	.audio_pace       = 1,
+	.frame_cap        = 60,
+	.hle_strict       = 0,
+	.io_delay_us      = 0,
+	.tslib            = 0,
+	.boot_on_start    = 0,
+	.games_dir        = "",
 };
 static enum ui_action g_action;
 static char           g_action_path[PATHMAX];
@@ -117,8 +124,8 @@ static int  g_open_menu = -1;         /* index into MENUS, -1 = closed */
 static int  g_hot_item  = -1;
 
 /* modal */
-enum modal_kind { M_NONE = 0, M_ABOUT, M_GFX, M_AUDIO, M_PAD, M_FILES, M_MSG,
-                  M_WIZARD, M_PROGRESS };
+enum modal_kind { M_NONE = 0, M_ABOUT, M_GFX, M_AUDIO, M_PAD, M_DEBUG, M_SYSTEM,
+                  M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES };
 static enum modal_kind g_modal;
 static char  g_msg_title[64], g_msg_body[512];
 /* Non-zero when M_MSG is a yes/no rather than an acknowledgement. */
@@ -236,6 +243,24 @@ static int inside(int px, int py, int x, int y, int w, int h)
 	return px >= x && py >= y && px < x + w && py < y + h;
 }
 
+/* mkdir -p. The directories we create live under XDG paths that are NOT
+ * guaranteed to exist — ~/.local/state in particular is absent on a fresh
+ * account — and a single mkdir() of a two-deep path fails with ENOENT, which
+ * is how the first log file quietly went nowhere. */
+static void mkdir_p(const char *path)
+{
+	char tmp[PATHMAX];
+	char *p;
+	snprintf(tmp, sizeof(tmp), "%s", path);
+	for (p = tmp + 1; *p; p++) {
+		if (*p != '/') continue;
+		*p = 0;
+		mkdir(tmp, 0755);
+		*p = '/';
+	}
+	mkdir(tmp, 0755);
+}
+
 /* dst = a + "/" + b, always NUL-terminated, never warns about truncation
  * because the length is checked rather than left to snprintf. */
 static void path_join(char *dst, size_t n, const char *a, const char *b)
@@ -274,10 +299,22 @@ static void path_tail(char *dst, size_t n, const char *src)
  * Every page re-tests real state rather than remembering that it ran, so this
  * doubles as a repair tool: reopen it and it shows exactly what is missing.
  */
-enum { WIZ_WELCOME = 0, WIZ_LEGAL, WIZ_SYSTEM, WIZ_GAMES, WIZ_DONE, WIZ_PAGES };
+enum { WIZ_WELCOME = 0, WIZ_SYSTEM, WIZ_GAMES, WIZ_DONE, WIZ_PAGES };
 static int g_wiz_page;
 
-struct prereq { int rootfs, sysroot, games, qemu; };
+/* WHAT THE WIZARD DROPPED, AND WHY.
+ *
+ * It used to have a page of its own headed "What you need", listing qemu-arm,
+ * SDL2 and "firmware tools: run ./tools/check-deps.sh". That page was written
+ * when those were the user's problem. They are not any more — the AppImage
+ * carries a static qemu and a Python with ubi_reader — so a whole page of the
+ * setup flow existed to explain a shopping list that is now usually empty.
+ *
+ * It is folded into the welcome page as one line, which says "everything is
+ * here" when it is, and names the missing piece when it is not. Four pages
+ * instead of five, and none of them is a lecture.
+ */
+struct prereq { int rootfs, sysroot, games, qemu, qemu_bundled, fwtools; };
 
 static int dir_has_entries(const char *path)
 {
@@ -289,6 +326,29 @@ static int dir_has_entries(const char *path)
 		if (e->d_name[0] != '.') { n = 1; break; }
 	closedir(d);
 	return n;
+}
+
+/* Is <name> anywhere on PATH? A dozen access() calls, which is cheap enough to
+ * do while drawing — spawning a shell to ask `command -v` would not be. */
+static int which_exists(const char *name)
+{
+	const char *path = getenv("PATH");
+	char buf[PATHMAX];
+	const char *p, *e;
+	if (!path) path = "/usr/bin:/bin:/usr/local/bin";
+	for (p = path; *p; p = e + (*e == ':')) {
+		size_t n;
+		e = strchr(p, ':');
+		if (!e) e = p + strlen(p);
+		n = (size_t)(e - p);
+		if (!n || n + strlen(name) + 2 > sizeof(buf)) { if (!*e) break; continue; }
+		memcpy(buf, p, n);
+		buf[n] = '/';
+		snprintf(buf + n + 1, sizeof(buf) - n - 1, "%s", name);
+		if (access(buf, X_OK) == 0) return 1;
+		if (!*e) break;
+	}
+	return 0;
 }
 
 static void prereq_check(struct prereq *p)
@@ -327,8 +387,33 @@ static void prereq_check(struct prereq *p)
 	p->sysroot = dir_has_entries(path);
 	path_join(path, sizeof(path), g_proj, "runtime/sysroot/LF/Bulk/ProgramFiles");
 	p->games = dir_has_entries(path);
-	p->qemu = access("/usr/bin/qemu-arm", X_OK) == 0 ||
-	          access("/usr/local/bin/qemu-arm", X_OK) == 0;
+
+	/* The bundle first, then the host — the same order tools/lib-deps.sh uses,
+	 * so the wizard never says "missing" about something Tadpole brought with
+	 * it. TADPOLE_DEPS is set by the AppImage's AppRun; build/deps is where
+	 * tools/fetch-deps.sh puts things in a source checkout. */
+	{
+		const char *deps = getenv("TADPOLE_DEPS");
+		char cand[PATHMAX * 2];
+		if (deps && *deps) {
+			snprintf(cand, sizeof(cand), "%s/bin/qemu-arm", deps);
+			if (access(cand, X_OK) == 0) { p->qemu = 1; p->qemu_bundled = 1; }
+			snprintf(cand, sizeof(cand), "%s/python/bin/python3", deps);
+			if (access(cand, X_OK) == 0) p->fwtools = 1;
+		}
+		if (!p->qemu) {
+			snprintf(cand, sizeof(cand), "%s/build/deps/bin/qemu-arm", g_proj);
+			if (access(cand, X_OK) == 0) { p->qemu = 1; p->qemu_bundled = 1; }
+		}
+		if (!p->fwtools) {
+			snprintf(cand, sizeof(cand), "%s/build/deps/python/bin/python3", g_proj);
+			if (access(cand, X_OK) == 0) p->fwtools = 1;
+		}
+	}
+	if (!p->qemu)
+		p->qemu = which_exists("qemu-arm");
+	if (!p->fwtools)
+		p->fwtools = which_exists("ubireader_extract_files");
 }
 
 /* ---- font atlas ---------------------------------------------------------- */
@@ -451,54 +536,322 @@ done:
 	free(file); free(idat); free(raw); free(px);
 }
 
-/* ---- settings persistence ------------------------------------------------ */
+/* ---- the game library ----------------------------------------------------
+ *
+ * tools/scan-games.sh reads a folder of .tar backups and writes an index plus
+ * one decoded icon per title into ~/.cache/tadpole/games. This is the model
+ * over that index: names, icons, and — the part that turns a list into a
+ * library — whether each title is already installed.
+ *
+ * WHY AN INDEX AND NOT A DIRECT READ. Each backup is 20-120 MB and the icon
+ * lives inside it, so building this view costs about eleven seconds for the
+ * eighty-seven titles here. Doing that inside the viewer would freeze the
+ * window; doing it every time the picker opens would be eleven seconds each
+ * time. The scanner runs as a tool, its output goes to the progress panel, and
+ * the result is cached against each archive's size and mtime.
+ */
+struct gentry {
+	char  name[128];
+	char  pid[64];
+	char  ver[32];
+	char  icon[32];          /* cache key, "" when the archive has no artwork */
+	char  path[PATHMAX];
+	long long bytes;
+	int   installed;
+	int   checked;
+	SDL_Texture *tex;        /* loaded on first draw, freed with the UI */
+	int   tw, th;
+	int   tried;             /* do not re-open an icon that failed */
+};
+static struct gentry *g_gm;
+static int  g_gm_n, g_gm_sel, g_gm_top, g_gm_rows = 8;
+static char g_gm_dir[PATHMAX];     /* the folder these came from */
+static int  g_gm_scanned;          /* an index has been read at least once */
+static enum modal_kind g_gm_return;   /* where Close goes: wizard, or nowhere */
 
-static void cfg_path(char *out, size_t n)
+static void games_cache_dir(char *out, size_t n)
 {
+	const char *x = getenv("XDG_CACHE_HOME");
 	const char *home = getenv("HOME");
 	if (!home) {
 		struct passwd *pw = getpwuid(getuid());
 		home = pw ? pw->pw_dir : "/tmp";
 	}
-	snprintf(out, n, "%s/.config/tadpole", home);
-	mkdir(out, 0755);
-	snprintf(out, n, "%s/.config/tadpole/ui.cfg", home);
+	if (x && *x) snprintf(out, n, "%s/tadpole/games", x);
+	else         snprintf(out, n, "%s/.cache/tadpole/games", home);
 }
 
+/* Installed means "a package directory with this PackageID exists in the
+ * sysroot" — the same test the home screen effectively makes. */
+static int game_installed(const char *pid)
+{
+	char p[PATHMAX * 2];
+	struct stat st;
+	if (!pid || !*pid) return 0;
+	snprintf(p, sizeof(p), "%s/runtime/sysroot/LF/Bulk/ProgramFiles/%s",
+	         g_proj, pid);
+	return stat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+static void games_free(void)
+{
+	int i;
+	for (i = 0; i < g_gm_n; i++)
+		if (g_gm[i].tex) SDL_DestroyTexture(g_gm[i].tex);
+	free(g_gm);
+	g_gm = NULL; g_gm_n = 0; g_gm_sel = 0; g_gm_top = 0;
+}
+
+/* One line of index.tsv: name, package, version, bytes, icon key, path. */
+static int game_parse(char *line, struct gentry *e)
+{
+	char *f[6], *p = line;
+	int i;
+	for (i = 0; i < 6; i++) {
+		f[i] = p;
+		if (i < 5) {
+			p = strchr(p, '\t');
+			if (!p) return 0;
+			*p++ = 0;
+		}
+	}
+	{
+		size_t n = strlen(f[5]);
+		while (n && (f[5][n-1] == '\n' || f[5][n-1] == '\r')) f[5][--n] = 0;
+	}
+	memset(e, 0, sizeof *e);
+	snprintf(e->name, sizeof(e->name), "%s", f[0]);
+	snprintf(e->pid,  sizeof(e->pid),  "%s", f[1]);
+	snprintf(e->ver,  sizeof(e->ver),  "%s", f[2]);
+	e->bytes = atoll(f[3]);
+	snprintf(e->icon, sizeof(e->icon), "%s", f[4]);
+	snprintf(e->path, sizeof(e->path), "%s", f[5]);
+	e->installed = game_installed(e->pid);
+	return e->name[0] && e->path[0];
+}
+
+void ui_games_reload(void)
+{
+	char p[PATHMAX], line[PATHMAX + 256];
+	FILE *f;
+	int cap = 32;
+
+	games_free();
+	games_cache_dir(p, sizeof(p));
+	strncat(p, "/index.tsv", sizeof(p) - strlen(p) - 1);
+	if (!(f = fopen(p, "r"))) return;
+	g_gm = malloc(sizeof(*g_gm) * (size_t)cap);
+	if (!g_gm) { fclose(f); return; }
+	while (fgets(line, sizeof(line), f)) {
+		struct gentry e;
+		if (line[0] == '#') continue;
+		if (!game_parse(line, &e)) continue;
+		if (g_gm_n == cap) {
+			struct gentry *t = realloc(g_gm, sizeof(*t) * (size_t)(cap * 2));
+			if (!t) break;
+			g_gm = t; cap *= 2;
+		}
+		g_gm[g_gm_n++] = e;
+	}
+	fclose(f);
+	g_gm_scanned = 1;
+
+	/* WHERE THESE CAME FROM, even on the first run of a new build. The folder
+	 * is normally remembered in ui.cfg, but an index can outlive that (a
+	 * settings file from before games_dir existed, or a cache shared between
+	 * checkouts) and a library headed "(no folder chosen)" while listing
+	 * eighty-seven games is a plain contradiction. Every entry carries its
+	 * archive's full path, so the answer is already here. */
+	if (!g_gm_dir[0] && g_gm_n) {
+		char *slash;
+		snprintf(g_gm_dir, sizeof(g_gm_dir), "%s", g_gm[0].path);
+		slash = strrchr(g_gm_dir, '/');
+		if (slash && slash != g_gm_dir) *slash = 0;
+		else g_gm_dir[0] = 0;
+	}
+}
+
+/* ---- .tpi icons ----------------------------------------------------------
+ * 'TPI1', u16 w, u16 h, then w*h RGBA bytes — written by scan-games.py, which
+ * does all the PNG work. Deliberately the dullest format that could work: the
+ * viewer should not be in the business of decoding whatever a 2012 content
+ * pipeline produced.
+ */
+static SDL_Texture *icon_load(SDL_Renderer *r, const char *key, int *w, int *h)
+{
+	char p[PATHMAX];
+	unsigned char hdr[8];
+	FILE *f;
+	Uint32 *px;
+	SDL_Texture *t = NULL;
+	int iw, ih, i, n;
+
+	games_cache_dir(p, sizeof(p));
+	{
+		size_t l = strlen(p);
+		snprintf(p + l, sizeof(p) - l, "/i/%s.tpi", key);
+	}
+	if (!(f = fopen(p, "rb"))) return NULL;
+	if (fread(hdr, 1, 8, f) != 8 || memcmp(hdr, "TPI1", 4)) { fclose(f); return NULL; }
+	iw = hdr[4] | (hdr[5] << 8);
+	ih = hdr[6] | (hdr[7] << 8);
+	n = iw * ih;
+	if (iw <= 0 || ih <= 0 || n > 512 * 512) { fclose(f); return NULL; }
+	px = malloc((size_t)n * 4);
+	if (!px) { fclose(f); return NULL; }
+	if (fread(px, 4, (size_t)n, f) != (size_t)n) { free(px); fclose(f); return NULL; }
+	fclose(f);
+	/* File order is R,G,B,A; SDL wants ARGB8888 in native order. */
+	for (i = 0; i < n; i++) {
+		unsigned char *b = (unsigned char *)&px[i];
+		px[i] = ((Uint32)b[3] << 24) | ((Uint32)b[0] << 16) |
+		        ((Uint32)b[1] << 8)  | b[2];
+	}
+	t = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888,
+	                      SDL_TEXTUREACCESS_STATIC, iw, ih);
+	if (t) {
+		SDL_UpdateTexture(t, NULL, px, iw * 4);
+		SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+		*w = iw; *h = ih;
+	}
+	free(px);
+	return t;
+}
+
+static void game_icon(SDL_Renderer *r, struct gentry *e)
+{
+	if (e->tex || e->tried || !e->icon[0]) return;
+	e->tried = 1;                       /* one attempt, however it goes */
+	e->tex = icon_load(r, e->icon, &e->tw, &e->th);
+}
+
+static int games_checked(void)
+{
+	int i, n = 0;
+	for (i = 0; i < g_gm_n; i++) n += g_gm[i].checked ? 1 : 0;
+	return n;
+}
+
+/* The checked titles, one path per line, for install-game.sh --from-list.
+ * An argv would do for three games and not for thirty; a file has no limit and
+ * leaves something to look at when an install goes wrong. */
+static int games_write_list(char *out, size_t n)
+{
+	FILE *f;
+	int i, wrote = 0;
+	games_cache_dir(out, n);
+	strncat(out, "/install-list.txt", n - strlen(out) - 1);
+	if (!(f = fopen(out, "w"))) return 0;
+	for (i = 0; i < g_gm_n; i++)
+		if (g_gm[i].checked) { fprintf(f, "%s\n", g_gm[i].path); wrote++; }
+	fclose(f);
+	return wrote;
+}
+
+/* ---- settings persistence ------------------------------------------------ */
+
+/* XDG_CONFIG_HOME, THEN $HOME/.config — the same order tadpole.sh uses.
+ *
+ * The script has always read
+ *     ${XDG_CONFIG_HOME:-$HOME/.config}/tadpole/ui.cfg
+ * and this function used to hardcode $HOME/.config. On a machine that sets
+ * XDG_CONFIG_HOME they are different files: the viewer would save a setting to
+ * one and tadpole.sh would go on reading the other, so the Graphics
+ * checkboxes appeared to do nothing at all. */
+static void cfg_path(char *out, size_t n)
+{
+	const char *x = getenv("XDG_CONFIG_HOME");
+	const char *home = getenv("HOME");
+	if (!home) {
+		struct passwd *pw = getpwuid(getuid());
+		home = pw ? pw->pw_dir : "/tmp";
+	}
+	if (x && *x) snprintf(out, n, "%s/tadpole", x);
+	else         snprintf(out, n, "%s/.config/tadpole", home);
+	mkdir_p(out);
+	{
+		size_t l = strlen(out);
+		snprintf(out + l, n - l, "/ui.cfg");
+	}
+}
+
+/* tadpole.sh reads this file too (`awk '$1=="gl"{print $2}'`), so the format
+ * stays "one key, a space, one value" — no sections, no quoting. */
 void ui_cfg_save(void)
 {
 	char p[PATHMAX];
 	FILE *f;
 	cfg_path(p, sizeof(p));
 	if (!(f = fopen(p, "w"))) return;
-	fprintf(f, "gl %d\ngl_hle %d\ngl_debug %d\ngl_dumpframe %d\ngl_dumptex %d\n"
-	           "shim_debug %d\nrotate %d\nscale %d\ntouch_debug %d\n"
-	           "audio_on %d\naudio_latency_ms %d\n",
-	        g_cfg.gl, g_cfg.gl_hle, g_cfg.gl_debug, g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
-	        g_cfg.shim_debug, g_cfg.rotate, g_cfg.scale, g_cfg.touch_debug,
-	        g_cfg.audio_on, g_cfg.audio_latency_ms);
+	fprintf(f, "gl %d\ngl_hle %d\ndebug_level %d\nlog_to_file %d\n"
+	           "gl_dumpframe %d\ngl_dumptex %d\n"
+	           "rotate %d\nscale %d\ntouch_debug %d\n"
+	           "audio_on %d\naudio_latency_ms %d\naudio_pace %d\n"
+	           "frame_cap %d\nhle_strict %d\nio_delay_us %d\ntslib %d\n"
+	           "boot_on_start %d\n",
+	        g_cfg.gl, g_cfg.gl_hle, g_cfg.debug_level, g_cfg.log_to_file,
+	        g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
+	        g_cfg.rotate, g_cfg.scale, g_cfg.touch_debug,
+	        g_cfg.audio_on, g_cfg.audio_latency_ms, g_cfg.audio_pace,
+	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.io_delay_us, g_cfg.tslib,
+	        g_cfg.boot_on_start);
+	/* Last, and only if set: it is the one value that can contain spaces. */
+	if (g_cfg.games_dir[0])
+		fprintf(f, "games_dir %s\n", g_cfg.games_dir);
 	fclose(f);
 }
 
 static void cfg_load(void)
 {
-	char p[PATHMAX], k[64];
-	int v;
+	char p[PATHMAX], line[PATHMAX + 64];
 	FILE *f;
 	cfg_path(p, sizeof(p));
 	if (!(f = fopen(p, "r"))) return;
-	while (fscanf(f, "%63s %d", k, &v) == 2) {
-		if      (!strcmp(k, "gl"))               g_cfg.gl = v;
-		else if (!strcmp(k, "gl_hle"))           g_cfg.gl_hle = v;
-		else if (!strcmp(k, "gl_debug"))         g_cfg.gl_debug = v;
-		else if (!strcmp(k, "gl_dumpframe"))     g_cfg.gl_dumpframe = v;
-		else if (!strcmp(k, "gl_dumptex"))       g_cfg.gl_dumptex = v;
-		else if (!strcmp(k, "shim_debug"))       g_cfg.shim_debug = v;
-		else if (!strcmp(k, "rotate"))           g_cfg.rotate = v;
-		else if (!strcmp(k, "scale"))            g_cfg.scale = v;
-		else if (!strcmp(k, "touch_debug"))      g_cfg.touch_debug = v;
-		else if (!strcmp(k, "audio_on"))         g_cfg.audio_on = v;
-		else if (!strcmp(k, "audio_latency_ms")) g_cfg.audio_latency_ms = v;
+	/* LINE AT A TIME, not fscanf("%s %d").
+	 *
+	 * The old scanner read a word and an integer, which worked right up until
+	 * a setting had a PATH for a value: games_dir made fscanf fail, and a
+	 * failed fscanf ends the loop — so one folder name with a space in it
+	 * silently discarded every setting that came after it. */
+	while (fgets(line, sizeof(line), f)) {
+		char *k = line, *v;
+		size_t n;
+		while (*k == ' ' || *k == '\t') k++;
+		v = strchr(k, ' ');
+		if (!v) continue;
+		*v++ = 0;
+		n = strlen(v);
+		while (n && (v[n-1] == '\n' || v[n-1] == '\r' || v[n-1] == ' '))
+			v[--n] = 0;
+		if (!strcmp(k, "games_dir")) {
+			snprintf(g_cfg.games_dir, sizeof(g_cfg.games_dir), "%s", v);
+			continue;
+		}
+		{
+			int val = atoi(v);
+			if      (!strcmp(k, "gl"))               g_cfg.gl = val;
+			else if (!strcmp(k, "gl_hle"))           g_cfg.gl_hle = val;
+			else if (!strcmp(k, "debug_level"))      g_cfg.debug_level = val;
+			else if (!strcmp(k, "log_to_file"))      g_cfg.log_to_file = val;
+			else if (!strcmp(k, "gl_dumpframe"))     g_cfg.gl_dumpframe = val;
+			else if (!strcmp(k, "gl_dumptex"))       g_cfg.gl_dumptex = val;
+			else if (!strcmp(k, "rotate"))           g_cfg.rotate = val;
+			else if (!strcmp(k, "scale"))            g_cfg.scale = val;
+			else if (!strcmp(k, "touch_debug"))      g_cfg.touch_debug = val;
+			else if (!strcmp(k, "audio_on"))         g_cfg.audio_on = val;
+			else if (!strcmp(k, "audio_latency_ms")) g_cfg.audio_latency_ms = val;
+			else if (!strcmp(k, "audio_pace"))       g_cfg.audio_pace = val;
+			else if (!strcmp(k, "frame_cap"))        g_cfg.frame_cap = val;
+			else if (!strcmp(k, "hle_strict"))       g_cfg.hle_strict = val;
+			else if (!strcmp(k, "io_delay_us"))      g_cfg.io_delay_us = val;
+			else if (!strcmp(k, "tslib"))            g_cfg.tslib = val;
+			else if (!strcmp(k, "boot_on_start"))    g_cfg.boot_on_start = val;
+			/* Older files carried these two; the debug level replaced them.
+			 * Honour them once so an existing install does not silently lose
+			 * the logging it was set up with. */
+			else if (!strcmp(k, "gl_debug") && val)   g_cfg.debug_level = 2;
+			else if (!strcmp(k, "shim_debug") && val) g_cfg.debug_level = 2;
+		}
 	}
 	fclose(f);
 }
@@ -515,7 +868,8 @@ struct mitem {
 
 enum {
 	IT_RUN_UI = 1, IT_SWF, IT_PKG, IT_FW, IT_STOP, IT_QUIT,
-	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE
+	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE,
+	IT_GAMES, IT_DEBUG, IT_SYSTEM
 };
 
 static const struct mitem FILE_ITEMS[] = {
@@ -525,7 +879,12 @@ static const struct mitem FILE_ITEMS[] = {
 	{ "Run System Menu",        IT_RUN_UI, 0, 1, 1 },
 	{ "Launch .swf...",         IT_SWF,    0, 1, 1 },
 	{ "",                       0,         0, 0, 0 },
-	{ "Install Package...",     IT_PKG,    0, 0, 0 },
+	/* FIRST, and named after what it is for. Picking a .tar out of a file list
+	 * is still there underneath, but it is not how anyone should have to meet
+	 * their own game collection. */
+	{ "Game Library...",        IT_GAMES,  0, 0, 0 },
+	{ "Install .tar directly...", IT_PKG,  0, 0, 0 },
+	{ "",                       0,         0, 0, 0 },
 	{ "Setup System Firmware...", IT_FW,   0, 0, 0 },
 	{ "Erase System Firmware",  IT_ERASE,  0, 1, 1 },
 	{ "",                       0,         0, 0, 0 },
@@ -533,9 +892,11 @@ static const struct mitem FILE_ITEMS[] = {
 	{ "Quit",                   IT_QUIT,   0, 0, 0 },
 };
 static const struct mitem OPT_ITEMS[] = {
-	{ "Audio Settings...",      IT_AUDIO,  0, 0, 0 },
 	{ "Graphics Settings...",   IT_GFX,    0, 0, 0 },
+	{ "Audio Settings...",      IT_AUDIO,  0, 0, 0 },
 	{ "Controller Settings...", IT_PAD,    0, 0, 0 },
+	{ "Debug Settings...",      IT_DEBUG,  0, 0, 0 },
+	{ "System Settings...",     IT_SYSTEM, 0, 0, 0 },
 };
 static const struct mitem HELP_ITEMS[] = {
 	{ "Setup Wizard...",        IT_WIZARD, 0, 0, 0 },
@@ -661,7 +1022,10 @@ static void fb_open(const char *title, const char *start, const char *ext,
 	path_join(g_fb_dir, sizeof(g_fb_dir), start, "");
 	snprintf(g_fb_filter, sizeof(g_fb_filter), "%s", ext ? ext : "");
 	g_fb_action = act;
-	g_fb_return = (g_modal == M_WIZARD) ? M_WIZARD : M_NONE;
+	/* Come back to whatever sent us here. Without this, choosing a file left
+	 * NO modal at all and the wizard — or the library — appeared to vanish
+	 * mid-task. */
+	g_fb_return = (g_modal == M_WIZARD || g_modal == M_GAMES) ? g_modal : M_NONE;
 	g_modal = M_FILES;
 	fb_scan();
 }
@@ -686,6 +1050,36 @@ static void fb_enter(void)
 	          g_fb_list[g_fb_sel].name);
 	g_action = g_fb_action;
 	g_modal = M_NONE;
+}
+
+/* ---- opening the library ------------------------------------------------- */
+
+static void games_choose_folder(void)
+{
+	char start[PATHMAX];
+	if (g_gm_dir[0])            snprintf(start, sizeof(start), "%s", g_gm_dir);
+	else if (g_cfg.games_dir[0]) snprintf(start, sizeof(start), "%s", g_cfg.games_dir);
+	else                        path_join(start, sizeof(start), g_proj, "games");
+	if (access(start, R_OK) != 0)
+		path_join(start, sizeof(start), g_proj, "");
+	/* No extension filter, so the browser offers "Use folder" — picking the
+	 * folder is the whole point here, not picking a file inside it. */
+	fb_open("Games folder", start, "", UI_ACT_SCAN_GAMES);
+}
+
+static void games_open(void)
+{
+	g_gm_return = (g_modal == M_WIZARD) ? M_WIZARD : M_NONE;
+	if (!g_gm_scanned) {
+		ui_games_reload();
+		if (!g_gm_dir[0] && g_cfg.games_dir[0])
+			snprintf(g_gm_dir, sizeof(g_gm_dir), "%s", g_cfg.games_dir);
+	}
+	g_modal = M_GAMES;
+	/* Never open on an empty box with no hint of what to do: with nothing
+	 * scanned yet, go straight to choosing the folder. */
+	if (g_gm_n == 0 && !g_gm_dir[0])
+		games_choose_folder();
 }
 
 /* ---- public -------------------------------------------------------------- */
@@ -722,6 +1116,7 @@ void ui_shutdown(void)
 {
 	if (g_font) SDL_DestroyTexture(g_font);
 	if (g_logo) SDL_DestroyTexture(g_logo);
+	games_free();                 /* one texture per icon we ever drew */
 	free(g_fb_list);
 	free(g_logo_px);
 	g_font = NULL; g_logo = NULL; g_fb_list = NULL; g_logo_px = NULL;
@@ -781,7 +1176,10 @@ static void activate(int id)
 		fb_open("Launch .swf", start, ".swf", UI_ACT_RUN_SWF);
 		break;
 	case IT_PKG:
-		path_join(start, sizeof(start), g_proj, "games");
+		if (g_cfg.games_dir[0])
+			snprintf(start, sizeof(start), "%s", g_cfg.games_dir);
+		else
+			path_join(start, sizeof(start), g_proj, "games");
 		if (access(start, R_OK) != 0)
 			path_join(start, sizeof(start), g_proj, "");
 		fb_open("Install Package", start, ".tar", UI_ACT_INSTALL_PKG);
@@ -793,11 +1191,15 @@ static void activate(int id)
 	case IT_AUDIO: g_modal = M_AUDIO; break;
 	case IT_GFX:   g_modal = M_GFX;   break;
 	case IT_PAD:   g_modal = M_PAD;   break;
+	case IT_DEBUG: g_modal = M_DEBUG; break;
+	case IT_SYSTEM: g_modal = M_SYSTEM; break;
 	case IT_ABOUT: g_modal = M_ABOUT; break;
+	case IT_GAMES: games_open(); break;
 	case IT_WIZARD: g_wiz_page = 0; g_modal = M_WIZARD; break;
 	case IT_ERASE:
 		/* Confirm first: this is the one menu item that throws work away. */
 		g_confirm = IT_ERASE;
+		g_fb_return = M_NONE;      /* not opened from the wizard */
 		msg("Erase System Firmware",
 		    "Remove the installed system files?");
 		break;
@@ -821,20 +1223,47 @@ static struct dlg dlg_rect(int lw, int lh, int w, int h)
 	return d;
 }
 
+/* A dialog that asks for a size but never wider or taller than the window.
+ *
+ * Rotating to portrait makes the logical space 272 wide, and the fixed sizes
+ * below are up to 350 — so the file browser and the progress panel used to
+ * hang off both edges of a rotated window, with their buttons off-screen. */
+static struct dlg dlg_fit(int lw, int lh, int w, int h)
+{
+	if (w > lw - 8) w = lw - 8;
+	if (h > lh - UI_BAR_H - 6) h = lh - UI_BAR_H - 6;
+	if (w < 120) w = 120;
+	if (h < 90)  h = 90;
+	return dlg_rect(lw, lh, w, h);
+}
+
 static struct dlg cur_dlg(int lw, int lh)
 {
 	switch (g_modal) {
-	case M_ABOUT: return dlg_rect(lw, lh, 210, 132);
-	case M_GFX:   return dlg_rect(lw, lh, 250, 164);
-	case M_AUDIO: return dlg_rect(lw, lh, 230, 108);
-	case M_PAD:   return dlg_rect(lw, lh, 240, 140);
-	case M_FILES: return dlg_rect(lw, lh, 300, 172);
-	case M_WIZARD: return dlg_rect(lw, lh, 340, 196);
-	case M_PROGRESS: return dlg_rect(lw, lh, 350, 150);
-	case M_MSG:   return dlg_rect(lw, lh, 250, 92);
+	case M_ABOUT: return dlg_fit(lw, lh, 210, 132);
+	case M_GFX:   return dlg_fit(lw, lh, 250, 178);
+	case M_AUDIO: return dlg_fit(lw, lh, 230, 122);
+	case M_PAD:   return dlg_fit(lw, lh, 240, 140);
+	case M_DEBUG: return dlg_fit(lw, lh, 268, 200);
+	case M_SYSTEM: return dlg_fit(lw, lh, 268, 150);
+	case M_FILES: return dlg_fit(lw, lh, 300, 172);
+	case M_WIZARD: return dlg_fit(lw, lh, 340, 196);
+	case M_PROGRESS: return dlg_fit(lw, lh, 350, 150);
+	case M_MSG:   return dlg_fit(lw, lh, 250, 92);
+	/* The library wants every pixel it can have: it is a list of eighty-odd
+	 * names next to a picture. */
+	case M_GAMES: return dlg_fit(lw, lh, 460, 260);
 	default:      { struct dlg z = {0,0,0,0}; return z; }
 	}
 }
+
+/* Does the library have room for the preview panel on the right? In portrait
+ * it does not, and the list gets the whole width instead. */
+#define GM_PANEL_W 104
+#define GM_ROW_H   15
+static int gm_panel(const struct dlg *d) { return d->w >= 300 ? GM_PANEL_W : 0; }
+static int gm_list_w(const struct dlg *d) { return d->w - 12 - gm_panel(d); }
+static int gm_list_h(const struct dlg *d) { return d->h - 26 - 22; }
 
 /* Rows inside settings dialogs are uniform, so one helper does hit-testing
  * and drawing from the same numbers. */
@@ -962,6 +1391,9 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_GFX:   title = "Graphics Settings"; break;
 	case M_AUDIO: title = "Audio Settings"; break;
 	case M_PAD:   title = "Controller Settings"; break;
+	case M_DEBUG: title = "Debug Settings"; break;
+	case M_SYSTEM: title = "System Settings"; break;
+	case M_GAMES: title = "Game Library"; break;
 	case M_FILES: title = g_fb_title; break;
 	case M_PROGRESS: title = g_prog_title; break;
 	case M_MSG:   title = g_msg_title; break;
@@ -999,18 +1431,17 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		          row_hit(&d, 0, g_mx, g_my));
 		row_check(r, &d, 1, "Host GPU replay (HLE)", g_cfg.gl_hle,
 		          row_hit(&d, 1, g_mx, g_my));
-		row_check(r, &d, 2, "GL debug logging", g_cfg.gl_debug,
+		row_check(r, &d, 2, "Stop if HLE falls back", g_cfg.hle_strict,
 		          row_hit(&d, 2, g_mx, g_my));
-		row_check(r, &d, 3, "Dump GL frames", g_cfg.gl_dumpframe,
-		          row_hit(&d, 3, g_mx, g_my));
-		row_check(r, &d, 4, "Dump GL textures", g_cfg.gl_dumptex,
-		          row_hit(&d, 4, g_mx, g_my));
-		row_check(r, &d, 5, "Touch debug overlay", g_cfg.touch_debug,
-		          row_hit(&d, 5, g_mx, g_my));
+		if (g_cfg.frame_cap) snprintf(buf, sizeof(buf), "%d fps", g_cfg.frame_cap);
+		else                 snprintf(buf, sizeof(buf), "uncapped");
+		row_value(r, &d, 3, "Frame cap", buf, row_hit(&d, 3, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%d deg", g_cfg.rotate);
-		row_value(r, &d, 6, "Orientation", buf, row_hit(&d, 6, g_mx, g_my));
+		row_value(r, &d, 4, "Orientation", buf, row_hit(&d, 4, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%dx", g_cfg.scale);
-		row_value(r, &d, 7, "Window scale", buf, row_hit(&d, 7, g_mx, g_my));
+		row_value(r, &d, 5, "Window scale", buf, row_hit(&d, 5, g_mx, g_my));
+		row_check(r, &d, 6, "Touch debug overlay", g_cfg.touch_debug,
+		          row_hit(&d, 6, g_mx, g_my));
 		text(r, d.x + 10, d.y + d.h - 30,
 		     g_running ? "GL: reboot to apply."
 		               : "GL applies at next boot.",
@@ -1023,8 +1454,80 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		          row_hit(&d, 0, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%d ms", g_cfg.audio_latency_ms);
 		row_value(r, &d, 1, "Max latency", buf, row_hit(&d, 1, g_mx, g_my));
-		text(r, d.x + 10, d.y + 58, "Lower = tighter sync,", C_TEXT_DIM);
-		text(r, d.x + 10, d.y + 68, "higher = fewer dropouts.", C_TEXT_DIM);
+		row_check(r, &d, 2, "Hold guest to realtime", g_cfg.audio_pace,
+		          row_hit(&d, 2, g_mx, g_my));
+		text(r, d.x + 10, d.y + 72, "Lower latency = tighter sync,", C_TEXT_DIM);
+		text(r, d.x + 10, d.y + 82, "higher = fewer dropouts.", C_TEXT_DIM);
+		break;
+	}
+	case M_DEBUG: {
+		/* THE LEVEL IS THE POINT OF THIS PANEL. Everything below it writes
+		 * files or changes behaviour; the level alone decides how much the
+		 * emulator says. */
+		static const char *LV[4] = { "0 - silent", "1 - normal",
+		                             "2 - verbose", "3 - trace" };
+		static const char *WHAT[4] = {
+			"Nothing is logged.",
+			"AppManager's serial log,",
+			"+ shim tracing and every GL",
+			"+ every guest syscall. Huge,",
+		};
+		static const char *WHAT2[4] = {
+			"",
+			"as the device prints it.",
+			"stub and error.",
+			"and slow. For one question.",
+		};
+		int lv = g_cfg.debug_level;
+		char buf[32];
+		if (lv < 0) lv = 0; if (lv > 3) lv = 3;
+		row_value(r, &d, 0, "Debug level", LV[lv], row_hit(&d, 0, g_mx, g_my));
+		/* The two explanation lines take a whole row of their own. They used
+		 * to be drawn into row 1 at +8, which put the second line straight
+		 * through the checkbox on row 2. */
+		text(r, d.x + 14, row_y(&d, 1) - 2, WHAT[lv],  C_TEXT_DIM);
+		text(r, d.x + 14, row_y(&d, 1) + 8, WHAT2[lv], C_TEXT_DIM);
+		row_check(r, &d, 3, "Write a log file", g_cfg.log_to_file,
+		          row_hit(&d, 3, g_mx, g_my));
+		row_check(r, &d, 4, "Dump GL frames", g_cfg.gl_dumpframe,
+		          row_hit(&d, 4, g_mx, g_my));
+		row_check(r, &d, 5, "Dump GL textures", g_cfg.gl_dumptex,
+		          row_hit(&d, 5, g_mx, g_my));
+		row_check(r, &d, 6, "Use the device's tslib", g_cfg.tslib,
+		          row_hit(&d, 6, g_mx, g_my));
+		if (g_cfg.io_delay_us) snprintf(buf, sizeof(buf), "%d us", g_cfg.io_delay_us);
+		else                   snprintf(buf, sizeof(buf), "off");
+		row_value(r, &d, 7, "Fake NAND read delay", buf, row_hit(&d, 7, g_mx, g_my));
+		text(r, d.x + 10, d.y + d.h - 30,
+		     g_cfg.log_to_file ? "Log: ~/.local/state/tadpole/" : "",
+		     C_TEXT_DIM);
+		break;
+	}
+	case M_SYSTEM: {
+		char buf[48];
+		row_check(r, &d, 0, "Boot the system menu at startup",
+		          g_cfg.boot_on_start, row_hit(&d, 0, g_mx, g_my));
+		text(r, d.x + 10, row_y(&d, 1) + 2, "Games folder:", C_TEXT);
+		path_tail(buf, sizeof(buf),
+		          g_cfg.games_dir[0] ? g_cfg.games_dir : "(not chosen yet)");
+		text(r, d.x + 14, row_y(&d, 1) + 12, buf,
+		     g_cfg.games_dir[0] ? C_ACCENT : C_TEXT_DIM);
+		{
+			SDL_Rect b = { d.x + 10, row_y(&d, 3) + 2, 76, 13 };
+			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+			bevel(r, b.x, b.y, b.w, b.h, 1);
+			text_c(r, b.x, b.w, b.y + 3, "Game Library",
+			       hot ? C_ACCENT : C_TEXT);
+		}
+		{
+			SDL_Rect b = { d.x + 94, row_y(&d, 3) + 2, 96, 13 };
+			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+			bevel(r, b.x, b.y, b.w, b.h, 1);
+			text_c(r, b.x, b.w, b.y + 3, "Setup Wizard",
+			       hot ? C_ACCENT : C_TEXT);
+		}
 		break;
 	}
 	case M_PAD: {
@@ -1093,8 +1596,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		struct prereq pq;
 		int bx = d.x + 62, by = d.y + 20, i2;
 		static const char *TITLES[WIZ_PAGES] = {
-			"Welcome to Tadpole", "What you need", "System files",
-			"Games", "Ready"
+			"Welcome to Tadpole", "System files", "Games", "Ready"
 		};
 		prereq_check(&pq);
 
@@ -1117,29 +1619,23 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		switch (g_wiz_page) {
 		case WIZ_WELCOME:
 			text(r, bx, by,      "A LeapPad2 emulator.", C_TEXT);
-			text(r, bx, by + 12, "Tadpole contains NO LeapFrog code.", C_TEXT);
+			text(r, bx, by + 14, "Tadpole contains NO LeapFrog code.", C_TEXT);
 			text(r, bx, by + 24, "You supply the system files and", C_TEXT_DIM);
 			text(r, bx, by + 34, "games, from hardware you own.", C_TEXT_DIM);
-			text(r, bx, by + 50, "This wizard checks what is missing", C_TEXT_DIM);
-			text(r, bx, by + 60, "and helps you install it.", C_TEXT_DIM);
-			break;
-		case WIZ_LEGAL:
-			text(r, bx, by,      "Dependencies:", C_ACCENT);
-			text(r, bx, by + 11, pq.qemu ? GL_CHECK_1 " qemu-arm" : GL_CHECK_0 " qemu-arm  MISSING",
-			     pq.qemu ? C_TEXT : C_ACCENT);
-			text(r, bx, by + 21, GL_CHECK_1 " SDL2  (already running)", C_TEXT);
-			/* ubi_reader needs lzallright, cryptography and zstandard, and it
-			 * imports them lazily — so "is ubi_reader installed" is not the
-			 * question. tools/check-deps.sh tests the whole set at once. */
-			text(r, bx, by + 31, "  firmware tools: run", C_TEXT_DIM);
-			text(r, bx, by + 41, "  ./tools/check-deps.sh", C_ACCENT);
-			/* Glyphs are 7px tall, so rows need 10 and a SECTION break needs
-			 * more. This heading was 6px below the line above it and the two
-			 * overlapped into an unreadable smear. */
-			text(r, bx, by + 60, "System files and games:", C_ACCENT);
-			text(r, bx, by + 72, "Tadpole ships none. It uses the", C_TEXT_DIM);
-			text(r, bx, by + 82, "files from your own device --", C_TEXT_DIM);
-			text(r, bx, by + 92, "see README.md. No warranty.", C_TEXT_DIM);
+			text(r, bx, by + 50, "Two steps, and this wizard does", C_TEXT_DIM);
+			text(r, bx, by + 60, "both: system files, then games.", C_TEXT_DIM);
+			/* The whole former "What you need" page, as one honest line. */
+			if (pq.qemu && pq.fwtools)
+				text(r, bx, by + 78,
+				     pq.qemu_bundled ? GL_CHECK_1 " Everything else is built in."
+				                     : GL_CHECK_1 " Your system has what it needs.",
+				     C_TEXT);
+			else if (!pq.qemu)
+				text(r, bx, by + 78, GL_CHECK_0 " qemu-arm is missing.", C_ACCENT);
+			else
+				text(r, bx, by + 78, GL_CHECK_0 " No firmware extractor.", C_ACCENT);
+			if (!pq.qemu || !pq.fwtools)
+				text(r, bx, by + 88, "  Run ./tools/fetch-deps.sh", C_TEXT_DIM);
 			break;
 		case WIZ_SYSTEM:
 			text(r, bx, by, pq.rootfs ? GL_CHECK_1 " Firmware installed"
@@ -1148,8 +1644,8 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			text(r, bx, by + 11, pq.sysroot ? GL_CHECK_1 " Sysroot built"
 			                                : GL_CHECK_0 " Sysroot not built",
 			     pq.sysroot ? C_TEXT : C_ACCENT);
-			text(r, bx, by + 27, "Point this at your LFConnect", C_TEXT_DIM);
-			text(r, bx, by + 37, "downloads folder (it holds the", C_TEXT_DIM);
+			text(r, bx, by + 27, "From a folder: point Tadpole at", C_TEXT_DIM);
+			text(r, bx, by + 37, "your LFConnect downloads (the", C_TEXT_DIM);
 			text(r, bx, by + 47, ".lf2 / .lfp packages).", C_TEXT_DIM);
 			{
 				SDL_Rect b = { bx, by + 60, 76, 13 };
@@ -1170,28 +1666,48 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				text_c(r, b.x, b.w, b.y + 3, "Build sysroot",
 				       hot ? C_ACCENT : C_TEXT);
 			}
+			/* ---- Online System Update: ANNOUNCED, NOT BUILT ----
+			 *
+			 * It goes here because this is where someone stands when they
+			 * discover they need firmware and have no idea where to get it,
+			 * and the answer will eventually be "press this". Drawn disabled
+			 * and labelled, so it reads as a promise rather than a bug. */
+			text(r, bx, by + 80, "Or, soon, without any of that:", C_TEXT_DIM);
+			{
+				SDL_Rect b = { bx, by + 92, 128, 13 };
+				fill(r, b.x, b.y, b.w, b.h, C_PANEL);
+				bevel(r, b.x, b.y, b.w, b.h, 0);
+				text_c(r, b.x, b.w, b.y + 3, "Online System Update", C_TEXT_DIM);
+				text(r, b.x + b.w + 6, b.y + 3, "soon", C_TEXT_DIM);
+			}
 			break;
 		case WIZ_GAMES:
 			text(r, bx, by, pq.games ? GL_CHECK_1 " Games installed"
 			                         : GL_CHECK_0 " No games yet",
 			     pq.games ? C_TEXT : C_ACCENT);
-			text(r, bx, by + 16, "Games are .tar backups made with", C_TEXT_DIM);
-			text(r, bx, by + 26, "LFManager from cartridges you own.", C_TEXT_DIM);
-			text(r, bx, by + 42, "You can add more later from", C_TEXT_DIM);
-			text(r, bx, by + 52, "File " GL_SUB " Install Package.", C_TEXT_DIM);
+			text(r, bx, by + 16, "Point Tadpole at the folder of", C_TEXT_DIM);
+			text(r, bx, by + 26, ".tar backups you made from your", C_TEXT_DIM);
+			text(r, bx, by + 36, "own cartridges, and pick from a", C_TEXT_DIM);
+			text(r, bx, by + 46, "list of covers and names.", C_TEXT_DIM);
 			{
-				SDL_Rect b = { bx, by + 66, 76, 13 };
+				SDL_Rect b = { bx, by + 62, 96, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
 				bevel(r, b.x, b.y, b.w, b.h, 1);
-				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
+				text_c(r, b.x, b.w, b.y + 3, "Open Library",
+				       hot ? C_ACCENT : C_TEXT);
 			}
+			text(r, bx, by + 80, "Later: File " GL_SUB " Game Library.", C_TEXT_DIM);
 			break;
 		case WIZ_DONE:
 			if (pq.rootfs && pq.sysroot) {
 				text(r, bx, by, "Everything needed is in place.", C_TEXT);
 				text(r, bx, by + 16, "Finish, then use", C_TEXT_DIM);
 				text(r, bx, by + 26, "File " GL_SUB " Run System Menu.", C_ACCENT);
+				if (!pq.games) {
+					text(r, bx, by + 44, "No games yet, but the system", C_TEXT_DIM);
+					text(r, bx, by + 54, "menu will still start.", C_TEXT_DIM);
+				}
 			} else {
 				text(r, bx, by, "Still missing:", C_ACCENT);
 				if (!pq.rootfs)  text(r, bx, by + 12, "  firmware (system files)", C_TEXT);
@@ -1215,6 +1731,170 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				bevel(r, b.x, b.y, b.w, b.h, 1);
 				text_c(r, b.x, b.w, b.y + 3, lab,
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
+			}
+		}
+		break;
+	}
+	case M_GAMES: {
+		int pw = gm_panel(&d), lw2 = gm_list_w(&d), lh2 = gm_list_h(&d);
+		int lx = d.x + 6, ly = d.y + 26, i2;
+		char buf[64];
+
+		g_gm_rows = lh2 / GM_ROW_H;
+		if (g_gm_rows < 1) g_gm_rows = 1;
+
+		/* Where these came from, and how many there are. */
+		{
+			char shown[40];
+			path_tail(shown, sizeof(shown), g_gm_dir[0] ? g_gm_dir : "(no folder chosen)");
+			text(r, d.x + 6, d.y + 15, shown, C_TEXT_DIM);
+			snprintf(buf, sizeof(buf), "%d", g_gm_n);
+			text(r, d.x + d.w - 8 - text_w(buf), d.y + 15, buf, C_TEXT_DIM);
+		}
+
+		fill(r, lx, ly, lw2, lh2, C_VOID);
+		bevel(r, lx, ly, lw2, lh2, 0);
+
+		if (g_gm_n == 0) {
+			/* THREE DIFFERENT NOTHINGS, and they need different advice. */
+			const char *a = !g_gm_scanned ? "Choose the folder holding your"
+			              : g_gm_dir[0]   ? "No game backups in that folder."
+			                              : "No games found.";
+			const char *b = !g_gm_scanned ? "game backups, below."
+			              : g_gm_dir[0]   ? "They are .tar files made with"
+			                              : "";
+			const char *c = (!g_gm_scanned || !g_gm_dir[0]) ? ""
+			              : "LFManager from your cartridges.";
+			text(r, lx + 8, ly + 12, a, C_TEXT);
+			text(r, lx + 8, ly + 24, b, C_TEXT_DIM);
+			text(r, lx + 8, ly + 34, c, C_TEXT_DIM);
+		}
+
+		for (i2 = 0; i2 < g_gm_rows && g_gm_top + i2 < g_gm_n; i2++) {
+			int k = g_gm_top + i2;
+			struct gentry *e = &g_gm[k];
+			int ry = ly + 2 + i2 * GM_ROW_H;
+			int tx = lx + 4;
+			char nm[64];
+			unsigned col = C_TEXT;
+
+			if (k == g_gm_sel) fill(r, lx + 1, ry - 1, lw2 - 2, GM_ROW_H, C_PANEL_HI);
+
+			/* tick box, so a batch install is one obvious gesture */
+			text(r, tx, ry + 3, e->checked ? GL_CHECK_1 : GL_CHECK_0,
+			     e->checked ? C_ACCENT : C_TEXT_DIM);
+			tx += 12;
+
+			/* the icon, at 13px — small, but it is the thing people recognise */
+			game_icon(r, e);
+			if (e->tex) {
+				SDL_Rect dst = { tx, ry, 13, 13 };
+				SDL_RenderCopy(r, e->tex, NULL, &dst);
+			} else {
+				fill(r, tx, ry, 13, 13, C_PANEL);
+				bevel(r, tx, ry, 13, 13, 0);
+			}
+			tx += 17;
+
+			if (e->installed) col = C_TEXT_DIM;      /* already here */
+			{
+				int room = (lx + lw2 - 6 - tx) / GLYPH_ADV;
+				if (room > (int)sizeof(nm) - 1) room = (int)sizeof(nm) - 1;
+				if (room < 1) room = 1;
+				snprintf(nm, (size_t)room + 1, "%s", e->name);
+				text(r, tx, ry + 3, nm, col);
+			}
+			if (e->installed)
+				text(r, lx + lw2 - 8 - text_w(GL_CHECK_1), ry + 3,
+				     GL_CHECK_1, C_ACCENT);
+		}
+
+		/* scrollbar: with eighty-seven titles, "where am I" is a real question */
+		if (g_gm_n > g_gm_rows) {
+			int track = lh2 - 4;
+			int knob = track * g_gm_rows / g_gm_n;
+			int pos  = track * g_gm_top / g_gm_n;
+			if (knob < 6) knob = 6;
+			fill(r, lx + lw2 - 4, ly + 2, 3, track, C_VOID);
+			fill(r, lx + lw2 - 4, ly + 2 + pos, 3, knob, C_EDGE_LT);
+		}
+
+		/* ---- the preview panel ---- */
+		if (pw && g_gm_n && g_gm_sel >= 0 && g_gm_sel < g_gm_n) {
+			struct gentry *e = &g_gm[g_gm_sel];
+			int px = d.x + 6 + lw2 + 4, py = ly;
+			int side = pw - 10;
+			game_icon(r, e);
+			fill(r, px, py, pw - 4, lh2, C_VOID);
+			bevel(r, px, py, pw - 4, lh2, 0);
+			if (e->tex) {
+				/* Fit, do not stretch: these are 83x91 and 90x77 and so on,
+				 * and a squashed icon looks like a decoding fault. */
+				int iw = e->tw, ih = e->th, dw, dh;
+				if (iw * side / (ih ? ih : 1) <= side) { dh = side; dw = iw * side / (ih ? ih : 1); }
+				else                                   { dw = side; dh = ih * side / (iw ? iw : 1); }
+				{
+					SDL_Rect dst = { px + 2 + (side - dw) / 2, py + 4, dw, dh };
+					SDL_RenderCopy(r, e->tex, NULL, &dst);
+				}
+			} else {
+				text_c(r, px, pw - 4, py + side / 2, "no icon", C_TEXT_DIM);
+			}
+			{
+				int ty = py + side + 8, cols = (pw - 12) / GLYPH_ADV, w2;
+				const char *s = e->name;
+				/* wrap the name over up to three lines, breaking on spaces */
+				for (w2 = 0; w2 < 3 && *s; w2++) {
+					char part[40];
+					int take = cols, j;
+					if ((int)strlen(s) > take) {
+						for (j = take; j > 4; j--)
+							if (s[j] == ' ' || s[j] == ':') { take = j; break; }
+					} else {
+						take = (int)strlen(s);
+					}
+					if (take > (int)sizeof(part) - 1) take = (int)sizeof(part) - 1;
+					memcpy(part, s, (size_t)take); part[take] = 0;
+					text(r, px + 4, ty + w2 * 9, part, C_TEXT);
+					s += take;
+					while (*s == ' ') s++;
+				}
+				ty += w2 * 9 + 4;
+				if (e->ver[0]) {
+					snprintf(buf, sizeof(buf), "v%s", e->ver);
+					text(r, px + 4, ty, buf, C_TEXT_DIM); ty += 9;
+				}
+				snprintf(buf, sizeof(buf), "%lld MB", (e->bytes + 524288) / 1048576);
+				text(r, px + 4, ty, buf, C_TEXT_DIM); ty += 9;
+				if (e->installed)
+					text(r, px + 4, ty, "installed", C_ACCENT);
+			}
+		}
+
+		/* ---- buttons ---- */
+		{
+			int by = d.y + d.h - 18, i3;
+			static const char *L[4] = { "Folder...", "Rescan", "", "" };
+			int xs[2] = { d.x + 6, d.x + 6 + 56 };
+			int ws[2] = { 52, 44 };
+			for (i3 = 0; i3 < 2; i3++) {
+				int hot = inside(g_mx, g_my, xs[i3], by, ws[i3], 13);
+				int on = (i3 == 0) || g_gm_dir[0];
+				fill(r, xs[i3], by, ws[i3], 13, hot && on ? C_BAR_HI : C_PANEL);
+				bevel(r, xs[i3], by, ws[i3], 13, 1);
+				text_c(r, xs[i3], ws[i3], by + 3, L[i3],
+				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
+			}
+			{
+				int n = games_checked();
+				SDL_Rect b = { d.x + d.w - 8 - 48 - 62, by, 62, 13 };
+				int hot = n && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+				if (n) snprintf(buf, sizeof(buf), "Install %d", n);
+				else   snprintf(buf, sizeof(buf), "Install");
+				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+				bevel(r, b.x, b.y, b.w, b.h, 1);
+				text_c(r, b.x, b.w, b.y + 3, buf,
+				       !n ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
 		}
 		break;
@@ -1268,11 +1948,16 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		fill(r, ok.x, ok.y, ok.w, ok.h, hot ? C_BAR_HI : C_PANEL);
 		bevel(r, ok.x, ok.y, ok.w, ok.h, 1);
 		text_c(r, ok.x, ok.w, ok.y + 3, "Open", hot ? C_ACCENT : C_TEXT);
-		/* Firmware can be a DIRECTORY (an LFC_Downloads folder) as well as an
-		 * archive, and install-firmware.sh takes either — but a browser that
-		 * only ever opens directories cannot express "I mean this one". No
-		 * filter means we are picking firmware, so offer it. */
-		if (!*g_fb_filter) {
+		/* Some things ARE the folder: an LFC_Downloads directory of firmware
+		 * packages, or a folder of game backups. A browser that can only open
+		 * directories cannot express "I mean this one", so those two get a
+		 * button that says it.
+		 *
+		 * Keyed on the ACTION, not on "there is no filter": the games chooser
+		 * filters to .tar so you can see the backups sitting there and know
+		 * you are in the right place, and it needs this button most of all. */
+		if (g_fb_action == UI_ACT_SETUP_FIRMWARE ||
+		    g_fb_action == UI_ACT_SCAN_GAMES) {
 			SDL_Rect uf = { ok.x - 74, ok.y, 70, 13 };
 			int h2 = inside(g_mx, g_my, uf.x, uf.y, uf.w, uf.h);
 			fill(r, uf.x, uf.y, uf.w, uf.h, h2 ? C_BAR_HI : C_PANEL);
@@ -1332,7 +2017,18 @@ void ui_debug_state(const char *spec)
 	else if (!strcmp(name, "gfx"))     g_modal = M_GFX;
 	else if (!strcmp(name, "audio"))   g_modal = M_AUDIO;
 	else if (!strcmp(name, "pad"))     g_modal = M_PAD;
+	else if (!strcmp(name, "debug"))   g_modal = M_DEBUG;
+	else if (!strcmp(name, "system"))  g_modal = M_SYSTEM;
 	else if (!strcmp(name, "about"))   g_modal = M_ABOUT;
+	else if (!strcmp(name, "games")) {
+		ui_games_reload();
+		if (!g_gm_dir[0] && g_cfg.games_dir[0])
+			snprintf(g_gm_dir, sizeof(g_gm_dir), "%s", g_cfg.games_dir);
+		/* Tick a couple, so a screenshot shows what selection looks like. */
+		if (g_gm_n > 2) { g_gm[1].checked = 1; g_gm[2].checked = 1; }
+		g_gm_sel = (g_gm_n > 1) ? 1 : 0;
+		g_modal = M_GAMES;
+	}
 	else if (!strcmp(name, "files"))   activate(IT_SWF);
 	else if (!strcmp(name, "pkg"))     activate(IT_PKG);
 	else if (!strcmp(name, "running")) { g_running = 1; ui_status("running"); }
@@ -1406,12 +2102,18 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			        UI_ACT_SETUP_FIRMWARE);
 			return 1;
 		}
+		/* "Online System Update", which does not exist yet. Say so plainly
+		 * rather than letting a dead button look like a broken one. */
+		if (g_wiz_page == WIZ_SYSTEM &&
+		    inside(mx, my, d.x + 62, d.y + 130, 128, 13)) {
+			g_confirm = 0;
+			g_fb_return = M_WIZARD;      /* Close comes back to the wizard */
+			msg("Online System Update", "Not built yet.");
+			return 1;
+		}
 		if (g_wiz_page == WIZ_GAMES &&
-		    inside(mx, my, d.x + 62, d.y + 104, 76, 13)) {
-			path_join(start, sizeof(start), g_proj, "games");
-			if (access(start, R_OK) != 0)
-				path_join(start, sizeof(start), g_proj, "");
-			fb_open("Game .tar backup", start, ".tar", UI_ACT_INSTALL_PKG);
+		    inside(mx, my, d.x + 62, d.y + 100, 96, 13)) {
+			games_open();          /* remembers that it must come back here */
 			return 1;
 		}
 		return 1;
@@ -1429,27 +2131,84 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		if (g_modal == M_PROGRESS && g_prog_running)
 			return 1;                 /* cannot dismiss mid-install */
 		g_confirm = 0;
-		/* Back to the wizard if that is where we came from, so a Cancel or a
-		 * finished install returns the user to setup rather than an empty
-		 * screen. */
-		if ((g_modal == M_FILES || g_modal == M_PROGRESS) &&
-		    g_fb_return == M_WIZARD) {
-			g_modal = M_WIZARD;
+		/* Back to whatever we came from, so a Cancel or a finished install
+		 * returns the user to setup — or to the library — rather than to an
+		 * empty screen. */
+		if ((g_modal == M_FILES || g_modal == M_PROGRESS || g_modal == M_MSG) &&
+		    (g_fb_return == M_WIZARD || g_fb_return == M_GAMES)) {
+			g_modal = g_fb_return;
 			g_fb_return = M_NONE;
+		} else if (g_modal == M_GAMES) {
+			g_modal = g_gm_return;
+			g_gm_return = M_NONE;
 		} else {
 			g_modal = M_NONE;
 		}
 		ui_cfg_save();
 		return 1;
 	}
+	if (g_modal == M_GAMES) {
+		int pw = gm_panel(&d), lw2 = gm_list_w(&d), lh2 = gm_list_h(&d);
+		int lx = d.x + 6, ly = d.y + 26, i;
+		int by = d.y + d.h - 18;
+		(void)pw;
+
+		if (inside(mx, my, d.x + 6, by, 52, 13)) {      /* Folder... */
+			games_choose_folder();
+			return 1;
+		}
+		if (inside(mx, my, d.x + 62, by, 44, 13)) {     /* Rescan */
+			if (g_gm_dir[0]) {
+				snprintf(g_action_path, sizeof(g_action_path), "%s", g_gm_dir);
+				g_action = UI_ACT_SCAN_GAMES;
+				g_fb_return = M_GAMES;   /* the progress panel comes back here */
+			}
+			return 1;
+		}
+		{                                               /* Install N */
+			SDL_Rect b = { d.x + d.w - 8 - 48 - 62, by, 62, 13 };
+			if (inside(mx, my, b.x, b.y, b.w, b.h)) {
+				if (games_checked() &&
+				    games_write_list(g_action_path, sizeof(g_action_path))) {
+					g_action = UI_ACT_INSTALL_GAMES;
+					g_fb_return = M_GAMES;
+				}
+				return 1;
+			}
+		}
+		for (i = 0; i < g_gm_rows && g_gm_top + i < g_gm_n; i++) {
+			if (inside(mx, my, lx + 1, ly + 1 + i * GM_ROW_H, lw2 - 2, GM_ROW_H)) {
+				int k = g_gm_top + i;
+				/* One click does both jobs: it selects the row, so the panel
+				 * on the right describes it, and it ticks it, so Install knows
+				 * what to install. Anything subtler needs explaining. */
+				g_gm_sel = k;
+				g_gm[k].checked = !g_gm[k].checked;
+				return 1;
+			}
+		}
+		(void)lh2;
+		return 1;    /* inside the dialog, but not on anything */
+	}
 	if (g_modal == M_FILES) {
 		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
 		int ly = d.y + 16, i;
-		if (!*g_fb_filter) {
+		if (g_fb_action == UI_ACT_SETUP_FIRMWARE ||
+		    g_fb_action == UI_ACT_SCAN_GAMES) {
 			SDL_Rect uf = { ok.x - 74, ok.y, 70, 13 };
 			if (inside(mx, my, uf.x, uf.y, uf.w, uf.h)) {
 				path_join(g_action_path, sizeof(g_action_path), g_fb_dir, "");
 				g_action = g_fb_action;
+				if (g_fb_action == UI_ACT_SCAN_GAMES) {
+					/* Remember it now, not when the scan finishes: the folder
+					 * is what the user chose, and it should still be their
+					 * folder even if the scan finds nothing in it. */
+					snprintf(g_gm_dir, sizeof(g_gm_dir), "%s", g_action_path);
+					snprintf(g_cfg.games_dir, sizeof(g_cfg.games_dir), "%s",
+					         g_action_path);
+					ui_cfg_save();
+					g_fb_return = M_GAMES;
+				}
 				g_modal = M_NONE;      /* the progress panel takes over */
 				return 1;
 			}
@@ -1476,15 +2235,20 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			if (g_running)
 				ui_status("HLE %s on reboot", g_cfg.gl_hle ? "on" : "off");
 		}
-		else if (row_hit(&d, 2, mx, my)) g_cfg.gl_debug = !g_cfg.gl_debug;
-		else if (row_hit(&d, 3, mx, my)) g_cfg.gl_dumpframe = !g_cfg.gl_dumpframe;
-		else if (row_hit(&d, 4, mx, my)) g_cfg.gl_dumptex = !g_cfg.gl_dumptex;
-		else if (row_hit(&d, 5, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
-		else if (row_hit(&d, 6, mx, my)) cycle_rotate();
-		else if (row_hit(&d, 7, mx, my)) {
+		else if (row_hit(&d, 2, mx, my)) g_cfg.hle_strict = !g_cfg.hle_strict;
+		else if (row_hit(&d, 3, mx, my)) {
+			static const int hz[] = { 60, 30, 0 };   /* 0 = uncapped */
+			int i, k = 0;
+			for (i = 0; i < 3; i++)
+				if (hz[i] == g_cfg.frame_cap) k = (i + 1) % 3;
+			g_cfg.frame_cap = hz[k];
+		}
+		else if (row_hit(&d, 4, mx, my)) cycle_rotate();
+		else if (row_hit(&d, 5, mx, my)) {
 			g_cfg.scale = g_cfg.scale % 4 + 1;
 			g_action = UI_ACT_RELAYOUT;
 		}
+		else if (row_hit(&d, 6, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
 		ui_cfg_save();
 		return 1;
 	}
@@ -1496,6 +2260,40 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			for (i = 0; i < 6; i++)
 				if (steps[i] == g_cfg.audio_latency_ms) k = (i + 1) % 6;
 			g_cfg.audio_latency_ms = steps[k];
+		}
+		else if (row_hit(&d, 2, mx, my)) g_cfg.audio_pace = !g_cfg.audio_pace;
+		ui_cfg_save();
+		return 1;
+	}
+	if (g_modal == M_DEBUG) {
+		if (row_hit(&d, 0, mx, my))
+			g_cfg.debug_level = (g_cfg.debug_level + 1) % 4;
+		else if (row_hit(&d, 3, mx, my)) g_cfg.log_to_file = !g_cfg.log_to_file;
+		else if (row_hit(&d, 4, mx, my)) g_cfg.gl_dumpframe = !g_cfg.gl_dumpframe;
+		else if (row_hit(&d, 5, mx, my)) g_cfg.gl_dumptex = !g_cfg.gl_dumptex;
+		else if (row_hit(&d, 6, mx, my)) g_cfg.tslib = !g_cfg.tslib;
+		else if (row_hit(&d, 7, mx, my)) {
+			static const int us[] = { 0, 200, 1000, 5000 };
+			int i, k = 0;
+			for (i = 0; i < 4; i++)
+				if (us[i] == g_cfg.io_delay_us) k = (i + 1) % 4;
+			g_cfg.io_delay_us = us[k];
+		}
+		ui_cfg_save();
+		return 1;
+	}
+	if (g_modal == M_SYSTEM) {
+		if (row_hit(&d, 0, mx, my)) g_cfg.boot_on_start = !g_cfg.boot_on_start;
+		else if (inside(mx, my, d.x + 10, row_y(&d, 3) + 2, 76, 13)) {
+			ui_cfg_save();
+			games_open();
+			return 1;
+		}
+		else if (inside(mx, my, d.x + 94, row_y(&d, 3) + 2, 96, 13)) {
+			ui_cfg_save();
+			g_wiz_page = 0;
+			g_modal = M_WIZARD;
+			return 1;
 		}
 		ui_cfg_save();
 		return 1;
@@ -1572,9 +2370,50 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 			if (g_fb_top < 0) g_fb_top = 0;
 			return 1;
 		}
+		if (g_modal == M_GAMES) {
+			g_gm_top -= e->wheel.y * 2;
+			if (g_gm_top > g_gm_n - g_gm_rows) g_gm_top = g_gm_n - g_gm_rows;
+			if (g_gm_top < 0) g_gm_top = 0;
+			return 1;
+		}
 		return g_modal != M_NONE;
 
 	case SDL_KEYDOWN:
+		if (g_modal == M_GAMES) {
+			switch (e->key.keysym.sym) {
+			case SDLK_ESCAPE:
+				g_modal = g_gm_return; g_gm_return = M_NONE; return 1;
+			case SDLK_SPACE:
+				if (g_gm_sel >= 0 && g_gm_sel < g_gm_n)
+					g_gm[g_gm_sel].checked = !g_gm[g_gm_sel].checked;
+				return 1;
+			case SDLK_RETURN:
+				/* Enter installs whatever is ticked, and if nothing is, the
+				 * one under the cursor — pressing Return on a highlighted game
+				 * should not quietly do nothing. */
+				if (!games_checked() && g_gm_sel >= 0 && g_gm_sel < g_gm_n)
+					g_gm[g_gm_sel].checked = 1;
+				if (games_checked() &&
+				    games_write_list(g_action_path, sizeof(g_action_path))) {
+					g_action = UI_ACT_INSTALL_GAMES;
+					g_fb_return = M_GAMES;
+				}
+				return 1;
+			case SDLK_UP:       if (g_gm_sel > 0) g_gm_sel--; break;
+			case SDLK_DOWN:     if (g_gm_sel < g_gm_n - 1) g_gm_sel++; break;
+			case SDLK_PAGEUP:   g_gm_sel -= g_gm_rows; break;
+			case SDLK_PAGEDOWN: g_gm_sel += g_gm_rows; break;
+			case SDLK_HOME:     g_gm_sel = 0; break;
+			case SDLK_END:      g_gm_sel = g_gm_n - 1; break;
+			default: return 1;
+			}
+			if (g_gm_sel < 0) g_gm_sel = 0;
+			if (g_gm_sel > g_gm_n - 1) g_gm_sel = g_gm_n - 1;
+			if (g_gm_sel < g_gm_top) g_gm_top = g_gm_sel;
+			if (g_gm_sel >= g_gm_top + g_gm_rows)
+				g_gm_top = g_gm_sel - g_gm_rows + 1;
+			return 1;
+		}
 		if (g_modal == M_FILES) {
 			switch (e->key.keysym.sym) {
 			case SDLK_ESCAPE: g_modal = M_NONE; return 1;

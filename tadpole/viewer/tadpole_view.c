@@ -921,15 +921,127 @@ static void find_project_dir(const char *argv0)
 	snprintf(g_projdir, sizeof(g_projdir), "%s", buf);
 }
 
+/* qemu-user hands the guest OUR environment and then applies its own -E
+ * overrides on top, so exporting a variable here is enough to reach the shim
+ * inside the guest — tadpole.sh does not have to forward each one by hand.
+ *
+ * THE DEBUG LEVEL EXPANDS HERE, in one place, so that "level 2" has exactly
+ * one meaning. See the table in tadpole_ui.h.
+ */
 static void guest_setenv(const struct ui_settings *c)
 {
+	char buf[32];
+	int lv = c->debug_level;
+
 	if (c->gl)           setenv("TADPOLE_GL", "1", 1);          else unsetenv("TADPOLE_GL");
 	if (c->gl_hle)       setenv("TADPOLE_GL_HLE", "1", 1);      else unsetenv("TADPOLE_GL_HLE");
-	if (c->gl_debug)     setenv("TADPOLE_GL_DEBUG", "1", 1);    else unsetenv("TADPOLE_GL_DEBUG");
 	if (c->gl_dumpframe) setenv("TADPOLE_GL_DUMPFRAME", "1", 1);else unsetenv("TADPOLE_GL_DUMPFRAME");
 	if (c->gl_dumptex)   setenv("TADPOLE_GL_DUMPTEX", "1", 1);  else unsetenv("TADPOLE_GL_DUMPTEX");
 	if (c->touch_debug)  setenv("TADPOLE_TOUCH_DEBUG", "1", 1); else unsetenv("TADPOLE_TOUCH_DEBUG");
+	if (c->hle_strict)   setenv("TADPOLE_HLE_STRICT", "1", 1);  else unsetenv("TADPOLE_HLE_STRICT");
+	if (c->tslib)        setenv("TADPOLE_TSLIB", "1", 1);       else unsetenv("TADPOLE_TSLIB");
+
+	/* Level 2 turns on the shim's own tracing and the GL layer's; level 3 adds
+	 * every guest syscall, which tadpole.sh turns into qemu -strace. */
+	if (lv >= 2) { setenv("TADPOLE_DEBUG", "1", 1); setenv("TADPOLE_GL_DEBUG", "1", 1); }
+	else         { unsetenv("TADPOLE_DEBUG"); unsetenv("TADPOLE_GL_DEBUG"); }
+	if (lv >= 3) setenv("TADPOLE_STRACE", "1", 1); else unsetenv("TADPOLE_STRACE");
+
+	/* The shim reads TADPOLE_HZ's PRESENCE as "the user has an opinion", so an
+	 * explicit 0 is how you ask for uncapped and unset is the 60 Hz default.
+	 * Always write it: leaving it unset would let a stale value from whatever
+	 * shell launched the viewer decide the frame rate. */
+	snprintf(buf, sizeof(buf), "%d", c->frame_cap);
+	setenv("TADPOLE_HZ", buf, 1);
+
+	if (c->audio_pace) unsetenv("TADPOLE_AUDIO_PACE");
+	else               setenv("TADPOLE_AUDIO_PACE", "0", 1);
+
+	if (c->io_delay_us > 0) {
+		snprintf(buf, sizeof(buf), "%d", c->io_delay_us);
+		setenv("TADPOLE_IO_DELAY_US", buf, 1);
+	} else {
+		unsetenv("TADPOLE_IO_DELAY_US");
+	}
 	setenv("TADPOLE_DIR", g_dir, 1);
+}
+
+/* ---- where the guest's output goes ---------------------------------------
+ *
+ * AppManager is talkative — four hundred lines to reach the home screen — and
+ * until now every one of them went to the viewer's stdout. That is fine when
+ * you started it from a terminal and useless the rest of the time: launched
+ * from a desktop icon there is no terminal at all, so the single most useful
+ * artefact for working out why a title died was simply discarded.
+ *
+ * The guest now writes down a pipe that we pump: to the log file when one is
+ * wanted, and to stdout when there is a terminal to read it. At level 0 there
+ * is no pipe and the output goes to /dev/null, which is the difference between
+ * "quiet" and "hidden".
+ */
+static int   g_glog_fd = -1;
+static FILE *g_glog_file;
+
+static void guest_log_path(char *out, size_t n)
+{
+	const char *x = getenv("XDG_STATE_HOME");
+	const char *home = getenv("HOME");
+	char *p;
+	if (x && *x) snprintf(out, n, "%s/tadpole", x);
+	else         snprintf(out, n, "%s/.local/state/tadpole", home ? home : "/tmp");
+	/* EVERY level of it. ~/.local/state does not exist on a fresh account, and
+	 * one mkdir() of a path whose parent is missing fails with ENOENT — which
+	 * is exactly how the first log file went nowhere, silently, while the
+	 * emulator carried on as though it had been written. */
+	for (p = out + 1; *p; p++) {
+		if (*p != '/') continue;
+		*p = 0;
+		mkdir(out, 0755);
+		*p = '/';
+	}
+	mkdir(out, 0755);
+	{
+		size_t l = strlen(out);
+		snprintf(out + l, n - l, "/tadpole.log");
+	}
+}
+
+static void guest_log_open(void)
+{
+	char p[1100], old[1160];
+	if (g_glog_file) { fclose(g_glog_file); g_glog_file = NULL; }
+	if (!ui_cfg()->log_to_file || ui_cfg()->debug_level < 1) return;
+	guest_log_path(p, sizeof(p));
+	/* Keep exactly one previous run. The log you want is nearly always the one
+	 * from the boot that just went wrong, and starting the next boot would
+	 * otherwise erase it. */
+	snprintf(old, sizeof(old), "%s.1", p);
+	rename(p, old);
+	g_glog_file = fopen(p, "w");
+	if (g_glog_file)
+		setvbuf(g_glog_file, NULL, _IOLBF, 0);
+}
+
+static void guest_log_pump(void)
+{
+	char chunk[1024];
+	ssize_t n;
+	if (g_glog_fd < 0) return;
+	while ((n = read(g_glog_fd, chunk, sizeof chunk)) > 0) {
+		if (g_glog_file) fwrite(chunk, 1, (size_t)n, g_glog_file);
+		if (isatty(1))   fwrite(chunk, 1, (size_t)n, stdout);
+	}
+	if (n == 0) {                       /* the guest closed it */
+		close(g_glog_fd);
+		g_glog_fd = -1;
+	}
+}
+
+static void guest_log_close(void)
+{
+	guest_log_pump();
+	if (g_glog_fd >= 0) { close(g_glog_fd); g_glog_fd = -1; }
+	if (g_glog_file) { fclose(g_glog_file); g_glog_file = NULL; }
 }
 
 /* A guest we did NOT start still counts as running — tadpole.sh writes its pid
@@ -990,7 +1102,7 @@ static void guest_stop(void)
  * nothing to show but a spinner — the progress panel exists to display exactly
  * these lines. */
 static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
-                          int *outfd)
+                          int *outfd, int silent)
 {
 	char path[1100];
 	pid_t pid;
@@ -1010,6 +1122,11 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 			dup2(pfd[1], 1);
 			dup2(pfd[1], 2);
 			close(pfd[1]);
+		} else if (silent) {
+			/* Debug level 0: the guest says nothing. Opened here rather than
+			 * dropped later so the writes never happen at all. */
+			int null = open("/dev/null", O_WRONLY);
+			if (null >= 0) { dup2(null, 1); dup2(null, 2); close(null); }
 		}
 		if (as_guest) guest_setenv(ui_cfg());
 		if (chdir(g_projdir) != 0) _exit(126);
@@ -1029,16 +1146,17 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 static void guest_launch_ui(void)
 {
 	char *av[8];
-	int n = 0;
+	int n = 0, quiet = ui_cfg()->debug_level < 1;
 	av[n++] = (char *)"tadpole.sh";
 	av[n++] = (char *)"--no-viewer";
 	/* --boot because tadpole.sh no longer starts the system on its own: its
 	 * default is now front-end-only, and WE are the front end asking for it. */
 	av[n++] = (char *)"--boot";
-	if (ui_cfg()->shim_debug) av[n++] = (char *)"--debug";
 	av[n] = NULL;
 	guest_stop();
-	g_guest = spawn_script("tadpole.sh", av, 1, NULL);
+	guest_log_close();
+	guest_log_open();
+	g_guest = spawn_script("tadpole.sh", av, 1, quiet ? NULL : &g_glog_fd, quiet);
 	ui_set_running(g_guest > 0);
 	ui_status(g_guest > 0 ? "booting..." : "launch failed");
 }
@@ -1066,7 +1184,13 @@ static void guest_launch_swf(const char *hostpath)
 	av[i++] = (char *)g;
 	av[i] = NULL;
 	guest_stop();
-	g_guest = spawn_script("tadpole.sh", av, 1, NULL);
+	{
+		int quiet = ui_cfg()->debug_level < 1;
+		guest_log_close();
+		guest_log_open();
+		g_guest = spawn_script("tadpole.sh", av, 1,
+		                       quiet ? NULL : &g_glog_fd, quiet);
+	}
 	ui_set_running(g_guest > 0);
 	ui_status(g_guest > 0 ? "running swf" : "launch failed");
 }
@@ -1075,16 +1199,21 @@ static int  g_tool_fd = -1;
 static char g_tool_buf[512];
 static int  g_tool_len;
 
-static void tool_run(const char *what, const char *script, const char *arg)
+/* Up to two arguments, either of which may be NULL — enough for every tool
+ * here, and it keeps the "one argument" callers unchanged. */
+static void tool_run2(const char *what, const char *script,
+                      const char *a1, const char *a2)
 {
 	char *av[4];
-	av[0] = (char *)script;
-	av[1] = (char *)arg;
-	av[2] = NULL;
+	int n = 0;
+	av[n++] = (char *)script;
+	if (a1) av[n++] = (char *)a1;
+	if (a2) av[n++] = (char *)a2;
+	av[n] = NULL;
 	if (g_tool > 0) { ui_status("busy: %s", g_tool_what); return; }
 	snprintf(g_tool_what, sizeof(g_tool_what), "%s", what);
 	g_tool_len = 0;
-	g_tool = spawn_script(script, av, 0, &g_tool_fd);
+	g_tool = spawn_script(script, av, 0, &g_tool_fd, 0);
 	ui_status("%s...", what);
 	if (g_tool > 0) {
 		ui_progress_begin(what);
@@ -1092,6 +1221,11 @@ static void tool_run(const char *what, const char *script, const char *arg)
 	} else {
 		ui_status("%s could not start", what);
 	}
+}
+
+static void tool_run(const char *what, const char *script, const char *arg)
+{
+	tool_run2(what, script, arg, NULL);
 }
 
 /* Drain whatever the tool has written, a line at a time. Called every frame. */
@@ -1128,6 +1262,9 @@ static void tool_poll(void)
 	ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
 	ui_status("%s %s", g_tool_what, ok ? "done" : "FAILED");
 	ui_invalidate_prereqs();      /* it may have installed or erased things */
+	/* A scan writes a new index, and an install changes which titles are
+	 * marked as already there — both are what the library is looking at. */
+	ui_games_reload();
 	ui_progress_done(ok);
 	g_tool = 0;
 }
@@ -1225,6 +1362,13 @@ int main(int argc, char **argv)
 	tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
 	                        SDL_TEXTUREACCESS_STREAMING, w, h);
 	pixels = malloc((size_t)w * h * 4);
+
+	/* "Boot the system menu at startup" — for people who set Tadpole up once
+	 * and afterwards only ever want the LeapPad. Not while the wizard is up:
+	 * with no firmware there is nothing to boot, and starting a doomed guest
+	 * underneath the panel that explains why would be its own puzzle. */
+	if (ui_cfg()->boot_on_start && !ui_modal())
+		guest_launch_ui();
 
 	/* HOST-GPU REPLAY. Brought up before any guest starts, because the guest
 	 * checks for a live host heartbeat when it first decides whether to encode
@@ -1591,8 +1735,10 @@ int main(int argc, char **argv)
 			}
 		}
 		tool_poll();
+		guest_log_pump();
 		if (g_guest > 0 && !guest_alive()) {
 			ui_status("stopped");
+			guest_log_close();     /* flush the tail of a boot that just died */
 		}
 		ui_set_running(g_guest > 0 || guest_external());
 		g_touch_debug = ui_cfg()->touch_debug;
@@ -1627,6 +1773,16 @@ int main(int argc, char **argv)
 		case UI_ACT_QUIT: running = 0; break;
 		case UI_ACT_INSTALL_PKG:
 			tool_run("install", "tools/install-game.sh", actpath);
+			break;
+		case UI_ACT_SCAN_GAMES:
+			tool_run("reading games", "tools/scan-games.sh", actpath);
+			break;
+		case UI_ACT_INSTALL_GAMES:
+			/* actpath is a FILE listing the archives, not an archive: a batch
+			 * of thirty titles is a perfectly ordinary thing to ask for, and
+			 * thirty paths do not belong on a command line. */
+			tool_run2("install", "tools/install-game.sh",
+			          "--from-list", actpath);
 			break;
 		case UI_ACT_SETUP_FIRMWARE:
 			tool_run("firmware", "tools/install-firmware.sh", actpath);
@@ -1664,6 +1820,7 @@ int main(int argc, char **argv)
 	}
 
 	guest_stop();
+	guest_log_close();
 	hle_host_shutdown();
 	ui_shutdown();
 	SDL_DestroyTexture(tex);

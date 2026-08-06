@@ -3,6 +3,7 @@
 #
 #   ./tools/check-deps.sh            everything
 #   ./tools/check-deps.sh firmware   only what install-firmware.sh needs
+#   ./tools/check-deps.sh --quiet    say nothing, just set the exit status
 #
 # WHY THIS EXISTS. Installing firmware failed three times in a row, each time on
 # a different missing Python module, because ubi_reader imports its dependencies
@@ -14,55 +15,92 @@
 #
 # Reporting one missing thing at a time is a poor experience when the whole list
 # is knowable up front. This checks everything and prints one command.
+#
+# MOST OF THE LIST CAN NOW BE ANSWERED WITH "bundled". tools/fetch-deps.sh
+# stages qemu-arm and a Python with ubi_reader into build/deps/, and the
+# AppImage ships them, so on a normal install there is nothing to install. This
+# script's job is to tell those two worlds apart rather than sending someone to
+# the AUR for a package they already have.
 
 set -u
-WHAT="${1:-all}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJ="$(dirname "$HERE")"
+. "$HERE/lib-deps.sh"
+
+WHAT="all"; QUIET=0
+for a in "$@"; do
+    case "$a" in
+        --quiet) QUIET=1 ;;
+        *)       WHAT="$a" ;;
+    esac
+done
+
 DISTRO=""
 command -v pacman  >/dev/null && DISTRO=arch
 command -v apt-get >/dev/null && DISTRO=debian
 command -v dnf     >/dev/null && DISTRO=fedora
 
-missing_pac=""; missing_aur=""; missing_pip=""
+missing_pac=""; missing_aur=""
 ok=0; bad=0
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
-have_py()  { python3 -c "import $1" >/dev/null 2>&1; }
 have_pc()  { pkg-config --exists "$1" 2>/dev/null; }
-
-report() {                      # $1=ok/no  $2=label  $3=why
-    if [ "$1" = ok ]; then
-        printf "  \033[32m+\033[0m %-22s %s\n" "$2" "$3"; ok=$((ok+1))
-    else
-        printf "  \033[31m-\033[0m %-22s %s\n" "$2" "$3"; bad=$((bad+1))
-    fi
+# Ask the Python that would actually be USED, not whichever one is first on the
+# PATH: with the bundle staged those are different interpreters, and asking the
+# wrong one is how a self-contained install reports its own tools missing.
+have_pymod() {
+    local py; py="$(tad_python || true)"
+    [ -n "$py" ] || return 1
+    "$py" -c "import $1" >/dev/null 2>&1
 }
-need() {                        # $1=ok/no $2=label $3=why $4=arch $5=debian $6=aur|pip
+
+say() { [ "$QUIET" = 1 ] || printf '%b' "$*"; }
+
+report() {                      # $1=ok/bundled/no  $2=label  $3=why
+    case "$1" in
+        ok)      say "  \033[32m+\033[0m $(printf '%-22s' "$2") $3\n"; ok=$((ok+1)) ;;
+        bundled) say "  \033[32m+\033[0m $(printf '%-22s' "$2") $3 \033[2m(bundled)\033[0m\n"; ok=$((ok+1)) ;;
+        *)       say "  \033[31m-\033[0m $(printf '%-22s' "$2") $3\n"; bad=$((bad+1)) ;;
+    esac
+}
+need() {                        # $1=state $2=label $3=why $4=arch $5=debian $6=aur
     report "$1" "$2" "$3"
-    [ "$1" = ok ] && return
+    case "$1" in ok|bundled) return ;; esac
     case "$DISTRO" in
         arch)   [ "${6:-}" = aur ] && missing_aur="$missing_aur $4" || missing_pac="$missing_pac $4" ;;
         debian) missing_pac="$missing_pac $5" ;;
         *)      missing_pac="$missing_pac $4" ;;
     esac
-    [ "${6:-}" = pip ] && missing_pip="$missing_pip $2"
 }
 
-echo "Tadpole dependency check"
-echo
+say "Tadpole dependency check\n\n"
+if tad_have_bundle; then
+    say "Bundled runtime in $TADPOLE_DEPS\n"
+    say "  qemu and the firmware tools come with Tadpole; nothing to install.\n\n"
+fi
 
 if [ "$WHAT" = all ]; then
-    echo "To run:"
-    have_cmd qemu-arm && s=ok || s=no
+    say "To run:\n"
+    # The bundled qemu is a static binary that runs anywhere; a host qemu-arm
+    # is just as good. Either satisfies this.
+    if   [ -x "$TADPOLE_DEPS/bin/qemu-arm" ]; then s=bundled
+    elif have_cmd qemu-arm;                   then s=ok
+    else                                           s=no; fi
     need "$s" qemu-arm "runs the guest's ARM code" qemu-user qemu-user
-    have_pc sdl2 || have_cmd sdl2-config; [ $? = 0 ] && s=ok || s=no
+
+    if have_pc sdl2 || have_cmd sdl2-config; then s=ok; else s=no; fi
     need "$s" SDL2 "window, input, audio" sdl2 libsdl2-dev
     have_pc gl && s=ok || s=no
     need "$s" OpenGL "host-GPU rendering" mesa libgl1-mesa-dev
     have_pc zlib && s=ok || s=no
     need "$s" zlib "the viewer decodes its icon" zlib zlib1g-dev
-    echo
+    say "\n"
 
-    echo "To build:"
+    # ONLY IN A SOURCE CHECKOUT. An installed AppImage has no compiler to run
+    # and nothing to compile, so listing clang, lld and python3 there reports
+    # a self-contained install as "1 missing" over a build tool nobody needs.
+    if [ -f "$PROJ/tadpole/Makefile" ]; then
+    say "To build:\n"
     have_cmd clang && s=ok || s=no
     need "$s" clang "cross-compiles the shim to ARM" clang clang
     have_cmd ld.lld && s=ok || s=no
@@ -71,62 +109,65 @@ if [ "$WHAT" = all ]; then
     need "$s" make "" make make
     have_cmd python3 && s=ok || s=no
     need "$s" python3 "build and analysis tooling" python python3
-    echo
+    say "\n"
+    fi
 fi
 
-echo "To install firmware:"
-have_cmd unzip && s=ok || s=no
+say "To install firmware:\n"
+
+# unzip and bzip2 are no longer required: tools/pkgtool.py reads both formats
+# with Python's stdlib. Report them as the shortcut they are, not as a blocker.
+if   have_cmd unzip;             then s=ok
+elif tad_python >/dev/null;      then s=bundled
+else                                  s=no; fi
 need "$s" unzip ".lfp packages are ZIP" unzip unzip
-have_cmd bzcat && s=ok || s=no
+if   have_cmd bzcat;             then s=ok
+elif tad_python >/dev/null;      then s=bundled
+else                                  s=no; fi
 need "$s" bzip2 ".lf2 packages are bzip2 tar" bzip2 bzip2
-have_cmd ubireader_extract_files && s=ok || s=no
+
+# ubi_reader AND its three compression backends, in ONE question. It imports
+# lzallright, zstandard and cryptography at module scope, so "can this Python
+# import ubireader.ubifs.misc" is the only test that means anything — asking
+# about them one at a time reported success on installs that then failed.
+if tad_python_with_ubireader >/dev/null; then
+    [ -x "$TADPOLE_DEPS/python/bin/python3" ] && s=bundled || s=ok
+else
+    s=no
+fi
 need "$s" ubi_reader "reads the UBIFS root filesystem" python-ubi-reader python3-ubi-reader aur
+if [ "$s" = no ]; then
+    # Say WHICH part is missing: "install ubi_reader" is unhelpful advice to
+    # someone who has it and is missing only the LZO backend.
+    for mod in ubireader lzallright cryptography zstandard; do
+        have_pymod "$mod" || say "      missing Python module: $mod\n"
+    done
+fi
 
-# ubi_reader's own dependencies, from its package metadata. It imports these
-# lazily, so a missing one surfaces only when extraction is already running —
-# which is why they are checked here explicitly rather than left to chance.
-# Which of these live in Arch's official repos and which are AUR-only was
-# checked with `pacman -Si`, not assumed — suggesting `yay` for a package in
-# `extra` sends people to the AUR for no reason.
-#   extra: python-cryptography, python-zstandard
-#   AUR:   python-lzallright, python-ubi-reader
-for pair in "lzallright:LZO decompression:aur" \
-            "cryptography:UBIFS encryption support:repo" \
-            "zstandard:zstd decompression:repo"; do
-    mod="${pair%%:*}"; rest="${pair#*:}"
-    why="${rest%%:*}"; src="${rest#*:}"
-    have_py "$mod" && s=ok || s=no
-    if [ "$src" = aur ]; then
-        need "$s" "$mod" "$why (ubi_reader)" "python-$mod" "python3-$mod" aur
-    else
-        need "$s" "$mod" "$why (ubi_reader)" "python-$mod" "python3-$mod"
-    fi
-done
-
-echo
+say "\n"
 if [ "$bad" = 0 ]; then
-    echo "All $ok dependencies present."
+    say "All $ok dependencies present.\n"
     exit 0
 fi
 
-echo "$bad missing. Install with:"
-echo
+say "$bad missing. The simplest fix, which installs nothing system-wide:\n\n"
+say "    ./tools/fetch-deps.sh\n\n"
+say "Or with your package manager:\n\n"
 case "$DISTRO" in
     arch)
-        [ -n "$missing_pac" ] && echo "    sudo pacman -S$missing_pac"
-        [ -n "$missing_aur" ] && echo "    yay -S$missing_aur"
+        [ -n "$missing_pac" ] && say "    sudo pacman -S$missing_pac\n"
+        [ -n "$missing_aur" ] && say "    yay -S$missing_aur\n"
         ;;
     debian)
-        [ -n "$missing_pac" ] && echo "    sudo apt install$missing_pac"
-        echo
-        echo "  If a python3-* package is unavailable, use pip instead:"
-        echo "    pip install --user ubi_reader lzallright cryptography zstandard"
+        [ -n "$missing_pac" ] && say "    sudo apt install$missing_pac\n"
+        say "\n  If a python3-* package is unavailable, use pip instead:\n"
+        say "    pip install --user ubi_reader\n"
         ;;
     fedora)
-        [ -n "$missing_pac" ] && echo "    sudo dnf install$missing_pac"
+        [ -n "$missing_pac" ] && say "    sudo dnf install$missing_pac\n"
         ;;
     *)
-        echo "    packages:$missing_pac$missing_aur"
+        say "    packages:$missing_pac$missing_aur\n"
         ;;
 esac
 exit 1

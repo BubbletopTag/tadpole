@@ -124,9 +124,32 @@ if [ "${1:-}" = "--fix-saves" ]; then
     exit 0
 fi
 
+# A LIST IN A FILE, for the viewer's game library.
+#
+# Ticking twenty titles and pressing Install is an ordinary thing to do there,
+# and twenty paths — each of which may contain spaces, brackets and accented
+# characters — do not belong on a command line. One path per line, no quoting
+# rules to get wrong, and the file is still sitting there afterwards if an
+# install needs explaining.
+if [ "${1:-}" = "--from-list" ]; then
+    LIST="${2:-}"
+    [ -f "$LIST" ] || { echo "no such list: $LIST" >&2; exit 2; }
+    set --
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        set -- "$@" "$line"
+    done < "$LIST"
+    [ $# -gt 0 ] || { echo "nothing listed in $LIST" >&2; exit 2; }
+    echo "installing $# title(s)"
+fi
+
+count=0; total=$#
 for tar in "$@"; do
+    count=$((count+1))
     [ -f "$tar" ] || { echo "no such file: $tar" >&2; continue; }
-    echo "$(basename "$tar"):"
+    # The viewer shows these lines as progress; with a batch of thirty, "which
+    # one is it on" is the only question anyone has.
+    echo "[$count/$total] $(basename "$tar"):"
     # Every meta.inf in the archive is a package. Multi-package backups bundle
     # a shared library pack alongside the game.
     tar tf "$tar" 2>/dev/null | grep -E '(^|/)meta\.inf$' | while read -r m; do

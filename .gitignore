@@ -24,3 +24,19 @@ shots/*.wav
 # Hundreds of megabytes of recovered firmware — never commit it.
 .erased-*/
 tools/glconform/*.log
+
+# EVERYTHING UNDER build/ IS A BUILD PRODUCT, and since the AppImage started
+# carrying its own qemu and Python, a large one: 22 MB for the image and 67 MB
+# of staged dependencies, per build. Releases carry the binary; git carries the
+# source that makes it.
+#
+# It is also the honest place to draw the line for licensing. The AppImage
+# redistributes qemu (GPLv2) and ubi_reader (GPLv3), so shipping it means
+# shipping their source too — a release attaching one image, next to
+# build/deps/manifest.txt naming the exact upstream builds, is a far easier
+# obligation to meet than a repository quietly accumulating vendored binaries.
+build/
+
+# Byte-compiled Python from running the tools in place.
+__pycache__/
+*.pyc

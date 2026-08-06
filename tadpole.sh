@@ -20,6 +20,18 @@
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The bundled qemu-arm if Tadpole has one, the host's otherwise. A user who
+# installed qemu-user themselves keeps working; a user who did nothing at all
+# gets the static copy that ships with the AppImage.
+PROJ="$HERE"
+. "$HERE/tools/lib-deps.sh"
+QEMU="$(tad_qemu || true)"
+if [ -z "$QEMU" ]; then
+    echo "tadpole: no qemu-arm." >&2
+    echo "  ./tools/fetch-deps.sh   stages one into build/deps (installs nothing)" >&2
+    echo "  or install your distribution's qemu-user package" >&2
+    exit 1
+fi
 # DISCOVER the rootfs rather than hardcoding one firmware version. Whatever
 # install-firmware.sh extracted lands under rootfs/<version>/…/ubi_rfs, and the
 # version is whatever the user's own device shipped with.
@@ -259,7 +271,7 @@ guest() {
       # TADPOLE_STRACE=1 prints every GUEST SYSCALL. Needed because the shim
       # only sees open/fopen — stat, access and opendir bypass it, so "the
       # guest never opened X" is NOT a conclusion the shim log can support.
-      exec qemu-arm -s 67108864 -L "$SYSROOT" ${TADPOLE_STRACE:+-strace} \
+      exec "$QEMU" -s 67108864 -L "$SYSROOT" ${TADPOLE_STRACE:+-strace} \
            ${TADPOLE_TSLIB:+-E TSLIB_REAL=1} \
            ${TADPOLE_TSLIB:--E TSLIB_CONFFILE=/nonexistent-ts.conf} \
            -E LD_LIBRARY_PATH="$LIBS" \

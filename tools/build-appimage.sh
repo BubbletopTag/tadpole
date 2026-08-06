@@ -9,7 +9,15 @@
 # WHAT GOES IN, AND WHAT DELIBERATELY DOES NOT
 # --------------------------------------------
 # In:  the viewer, the cross-compiled ARM shim libraries, tadpole.sh, tools/,
-#      and SDL2 (self-contained and version-sensitive).
+#      SDL2 and zlib (self-contained and version-sensitive), and — from
+#      build/deps, staged by tools/fetch-deps.sh — a static qemu-arm and a
+#      private Python carrying ubi_reader.
+#
+#      qemu-arm USED to be left out, on the grounds that it is large and every
+#      distribution packages it. That was true and it was still the wrong call:
+#      it made "install qemu-user, and work out what your distribution calls
+#      it" the first step of using a one-file emulator. The static build is
+#      4 MB and depends on nothing.
 #
 # Out: OpenGL and X11 — bundling those breaks against the user's graphics
 #      driver, and every AppImage relies on the host for them. Also out:
@@ -17,9 +25,11 @@
 #      directory of absolute symlinks into wherever the firmware was extracted,
 #      so shipping it would bake in this machine's paths).
 #
-# Out for a different reason: qemu-arm. It is a large dependency with its own
-# library tail, and every distribution packages it. The AppImage checks for it
-# and says exactly what to install.
+# A LIMIT WORTH KNOWING. The libraries copied off THIS machine (SDL2, zlib)
+# carry this machine's glibc floor with them, so an AppImage built on a
+# bleeding-edge distribution may refuse to start on an older one. The two
+# bundles from fetch-deps.sh are exempt: qemu-arm is static, and the Python is
+# a manylinux build good back to glibc 2.17.
 #
 # WHY THERE IS A DATA DIRECTORY
 # -----------------------------
@@ -51,6 +61,10 @@ cp "$PROJ/tadpole/viewer/tadpole-view" "$APPDIR/usr/bin/"
 cp "$PROJ/tadpole.sh"                  "$APPDIR/app/"
 cp "$PROJ/tadpole.png"                 "$APPDIR/app/"
 cp -r "$PROJ/tools"                    "$APPDIR/app/"
+# Byte-compiled leftovers from running the Python tools in the source tree.
+# They are the WRONG Python's cache once this ships, and they feed the content
+# hash below, so an unchanged Tadpole would look like a new build.
+find "$APPDIR/app/tools" -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
 mkdir -p "$APPDIR/app/runtime" "$APPDIR/app/tadpole/viewer"
 for d in shimlibs shimlibs-gl shimlibs-z; do
     cp -r "$PROJ/runtime/$d" "$APPDIR/app/runtime/"
@@ -62,12 +76,39 @@ cp "$PROJ/tadpole/viewer/tadpole-view" "$APPDIR/app/tadpole/viewer/"
 [ -f "$PROJ/README.md" ] && cp "$PROJ/README.md" "$APPDIR/app/"
 [ -f "$PROJ/LICENSE" ]   && cp "$PROJ/LICENSE"   "$APPDIR/app/"
 
-# ---- 3. bundle SDL2 only ---------------------------------------------------
+# ---- 3. bundle SDL2 and zlib ----------------------------------------------
 # Version-sensitive and self-contained. GL and X11 stay on the host.
-for lib in libSDL2-2.0.so.0; do
+for lib in libSDL2-2.0.so.0 libz.so.1; do
     p="$(ldd "$PROJ/tadpole/viewer/tadpole-view" | awk -v l="$lib" '$1==l {print $3}')"
     [ -n "$p" ] && [ -f "$p" ] && cp -L "$p" "$APPDIR/usr/lib/" && echo "  bundled $lib"
 done
+
+# ---- 3b. the staged runtime dependencies ----------------------------------
+# These are NOT copied into the user's data directory later: they are read-only
+# and large, so AppRun points at them where they sit in the mounted image.
+if [ -d "$PROJ/build/deps/bin" ] || [ -d "$PROJ/build/deps/python" ]; then
+    echo "==> bundling the staged dependencies"
+    mkdir -p "$APPDIR/deps"
+    [ -x "$PROJ/build/deps/bin/qemu-arm" ] && {
+        mkdir -p "$APPDIR/deps/bin"
+        cp -a "$PROJ/build/deps/bin/qemu-arm" "$APPDIR/deps/bin/"
+        echo "  qemu-arm       $("$PROJ/build/deps/bin/qemu-arm" -version | head -1 | awk '{print $3}')"
+    }
+    [ -d "$PROJ/build/deps/python" ] && {
+        cp -a "$PROJ/build/deps/python" "$APPDIR/deps/"
+        echo "  python + ubi_reader ($(du -sh "$PROJ/build/deps/python" | cut -f1))"
+    }
+    [ -f "$PROJ/build/deps/manifest.txt" ] && \
+        cp "$PROJ/build/deps/manifest.txt" "$APPDIR/deps/"
+else
+    cat <<'MSG'
+
+  NOTE: build/deps is empty, so this AppImage will NOT be self-contained —
+        whoever runs it must install qemu-user and ubi_reader themselves.
+        Run ./tools/fetch-deps.sh first to bundle them.
+
+MSG
+fi
 
 # ---- 4. desktop integration ----------------------------------------------
 cat > "$APPDIR/tadpole.desktop" <<'DESKTOP'
@@ -100,11 +141,21 @@ DATA="${XDG_DATA_HOME:-$HOME/.local/share}/tadpole"
 export LD_LIBRARY_PATH="$HERE/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export PATH="$HERE/usr/bin:$PATH"
 
-# qemu-arm is not bundled: it is large, it has its own library tail, and every
-# distribution packages it. Say precisely what to install rather than failing
-# somewhere deeper with a confusing message.
-if ! command -v qemu-arm >/dev/null 2>&1; then
-    MSG="Tadpole needs qemu-arm (package: qemu-user).
+# THE BUNDLE STAYS IN THE IMAGE. It is read-only and about 70 MB; copying it
+# into the user's data directory on every upgrade would waste both the disk and
+# the wait. tools/lib-deps.sh reads TADPOLE_DEPS, so pointing at the mount is
+# all it takes.
+if [ -d "$HERE/deps" ]; then
+    export TADPOLE_DEPS="$HERE/deps"
+fi
+
+# Neither bundled nor installed is the only remaining way to have no qemu, and
+# it should say so in a window as well as a terminal — someone launching from a
+# desktop icon never sees stderr.
+if [ ! -x "${TADPOLE_DEPS:-}/bin/qemu-arm" ] && ! command -v qemu-arm >/dev/null 2>&1; then
+    MSG="This build of Tadpole does not carry qemu-arm, and this machine has none.
+
+Install your distribution's qemu-user package:
 
   Arch:    sudo pacman -S qemu-user
   Debian:  sudo apt install qemu-user

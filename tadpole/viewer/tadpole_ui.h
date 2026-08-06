@@ -26,19 +26,43 @@
 #define UI_BAR_H 13          /* logical pixels; 7px font + padding */
 
 /* Everything the front end can change. Persisted to ~/.config/tadpole/ui.cfg
- * and turned into environment variables when a guest is launched. */
+ * and turned into environment variables when a guest is launched.
+ *
+ * DEBUG IS ONE DIAL, NOT FIVE SWITCHES. It used to be a pair of unrelated
+ * checkboxes — "GL debug logging" and the shim's own --debug — which between
+ * them could not express either thing anyone actually wants: silence, or
+ * everything. The level means:
+ *
+ *   0  quiet     the guest's own output goes nowhere
+ *   1  normal    AppManager's serial log, exactly what the device prints
+ *   2  verbose   + the shim's file/audio tracing, + every GL stub and error
+ *   3  trace     + every guest syscall (qemu -strace). Enormous, and the only
+ *                thing that answers "did it even try to open that file"
+ *
+ * Anything that writes FILES rather than lines stays a separate switch, since
+ * volume is not the question there.
+ */
+#define UI_GAMESDIR_MAX 512
+
 struct ui_settings {
 	int gl;                  /* TADPOLE_GL — the software GLES1 rasteriser */
 	int gl_hle;              /* TADPOLE_GL_HLE — replay on the host GPU */
-	int gl_debug;            /* TADPOLE_GL_DEBUG */
+	int debug_level;         /* 0..3, see above */
+	int log_to_file;         /* also write the guest's output to a log file */
 	int gl_dumpframe;        /* TADPOLE_GL_DUMPFRAME */
 	int gl_dumptex;          /* TADPOLE_GL_DUMPTEX */
-	int shim_debug;          /* tadpole.sh --debug */
 	int rotate;              /* 0/90/180/270, clockwise */
 	int scale;               /* window scale, 1..4 */
 	int touch_debug;         /* TADPOLE_TOUCH_DEBUG */
 	int audio_on;
 	int audio_latency_ms;    /* cap on how far ahead of the speaker we run */
+	int audio_pace;          /* TADPOLE_AUDIO_PACE — hold the guest to realtime */
+	int frame_cap;           /* TADPOLE_HZ; 0 = uncapped */
+	int hle_strict;          /* TADPOLE_HLE_STRICT — die instead of falling back */
+	int io_delay_us;         /* TADPOLE_IO_DELAY_US — pretend to be NAND */
+	int tslib;               /* TADPOLE_TSLIB — the device's own touch library */
+	int boot_on_start;       /* run the system menu as soon as Tadpole opens */
+	char games_dir[UI_GAMESDIR_MAX];   /* the folder the library was read from */
 };
 
 enum ui_action {
@@ -49,6 +73,8 @@ enum ui_action {
 	UI_ACT_SETUP_FIRMWARE,   /* path filled in */
 	UI_ACT_ERASE_FW,         /* wipe the installed system files */
 	UI_ACT_BUILD_SYSROOT,    /* regenerate runtime/sysroot from the rootfs */
+	UI_ACT_SCAN_GAMES,       /* path = folder of .tar backups to read */
+	UI_ACT_INSTALL_GAMES,    /* path = file listing the archives to install */
 	UI_ACT_STOP,
 	UI_ACT_QUIT,
 	UI_ACT_RELAYOUT          /* rotate/scale changed; viewer must resize */
@@ -93,6 +119,10 @@ void  ui_status(const char *fmt, ...);
 /* Re-test whether the system files exist. Call after anything that could
  * have installed or removed them. */
 void  ui_invalidate_prereqs(void);
+
+/* Re-read the game index written by tools/scan-games.sh, and re-test which
+ * titles are installed. Call after a scan or an install finishes. */
+void  ui_games_reload(void);
 
 /* Told by the viewer so the bar can show it and File can offer Stop. */
 void  ui_set_running(int running);
