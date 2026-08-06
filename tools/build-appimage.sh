@@ -42,7 +42,13 @@ set -eu
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(dirname "$HERE")"
 APPDIR="$PROJ/build/Tadpole.AppDir"
-OUT="$PROJ/build/Tadpole-x86_64.AppImage"
+# Overridable, because you cannot write an AppImage that is currently RUNNING:
+# mksquashfs stops with "Could not open regular file for writing as
+# destination: Text file busy", which reads like a corrupt build rather than
+# "close the emulator first".
+#
+#   TADPOLE_APPIMAGE_OUT=build/Tadpole-next.AppImage ./tools/build-appimage.sh
+OUT="${TADPOLE_APPIMAGE_OUT:-$PROJ/build/Tadpole-x86_64.AppImage}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
