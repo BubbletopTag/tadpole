@@ -22,7 +22,8 @@ games — the ones from your own device. See
 | Audio | yes, paced to real time |
 | Touch and buttons | yes |
 | Host-GPU rendering (HLE) | yes — about 5x the software renderer |
-| 3D (race tracks) | **not yet** — geometry renders black |
+| 3D (race tracks) | yes — Clam Prix races render and play |
+| Skinned player character | **not yet** — the kart draws, its rider does not |
 | FMV / video layer | **not yet** |
 
 Frame rate on an AMD FirePro W4100: ~57 fps with GPU replay, against 11.5 fps
