@@ -84,9 +84,50 @@ cp "$PROJ/tadpole/viewer/tadpole-view" "$APPDIR/app/tadpole/viewer/"
 
 # ---- 3. bundle SDL2 and zlib ----------------------------------------------
 # Version-sensitive and self-contained. GL and X11 stay on the host.
+# SDL2 COMES FROM build/deps, NOT FROM THIS MACHINE, when it is staged there.
+# See the note in tools/fetch-deps.sh: on a rolling distribution the host's
+# libSDL2-2.0.so.0 is sdl2-compat, which dlopens SDL3 by name at run time and
+# so takes an invisible dependency with it.
 for lib in libSDL2-2.0.so.0 libz.so.1; do
+    if [ "$lib" = libSDL2-2.0.so.0 ] && [ -f "$PROJ/build/deps/lib/$lib" ]; then
+        cp -L "$PROJ/build/deps/lib/$lib" "$APPDIR/usr/lib/"
+        echo "  bundled $lib (Ubuntu 22.04 build, from build/deps)"
+        continue
+    fi
     p="$(ldd "$PROJ/tadpole/viewer/tadpole-view" | awk -v l="$lib" '$1==l {print $3}')"
     [ -n "$p" ] && [ -f "$p" ] && cp -L "$p" "$APPDIR/usr/lib/" && echo "  bundled $lib"
+done
+
+# ---- 3a. and SDL3, when the SDL2 here is really sdl2-compat ---------------
+#
+# ldd IS NOT THE WHOLE DEPENDENCY LIST, which is what made this so annoying to
+# find. Several distributions — Arch among them — no longer ship SDL2 at all:
+# libSDL2-2.0.so.0 is provided by sdl2-compat, a shim implementing the SDL2 ABI
+# on top of SDL3. It does not LINK SDL3, it dlopen()s "libSDL3.so.0" by name at
+# run time, so it appears in no NEEDED entry and ldd reports nothing missing.
+#
+# Bundling the shim alone therefore produces an AppImage that works perfectly
+# on any machine that happens to have SDL3 installed — every developer's — and
+# aborts on everyone else's with a message that mentions neither Tadpole nor
+# the AppImage:
+#
+#     Failed loading SDL3.so
+#     tadpole.sh: line 412: Aborted (core dumped)
+#
+# So ask the library what it opens, and bring that too.
+for want in $(strings "$APPDIR/usr/lib/libSDL2-2.0.so.0" 2>/dev/null |
+              grep -oE '^libSDL3\.so\.[0-9]+' | sort -u); do
+    p="$(ldconfig -p 2>/dev/null | awk -v l="$want" '$1==l {print $NF; exit}')"
+    [ -n "$p" ] || p="$(ls /usr/lib/$want /usr/lib64/$want \
+                          /usr/lib/x86_64-linux-gnu/$want 2>/dev/null | head -1)"
+    if [ -n "$p" ] && [ -f "$p" ]; then
+        cp -L "$p" "$APPDIR/usr/lib/"
+        echo "  bundled $want (sdl2-compat opens it at run time)"
+    else
+        echo "  WARNING: libSDL2 here is sdl2-compat and needs $want, which is"
+        echo "           not installed. The AppImage will abort with"
+        echo "           'Failed loading SDL3.so' on machines without it."
+    fi
 done
 
 # ---- 3b. the staged runtime dependencies ----------------------------------

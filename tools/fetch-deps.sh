@@ -64,6 +64,29 @@ PY_URL="https://github.com/astral-sh/python-build-standalone/releases/download/2
 PY_SHA="f04a55ae95e8bd352cdff8da11c344fe609ec84795d106fa91b6620366d786fe"
 PY_VER="3.12.13 (python-build-standalone 20260805)"
 
+# SDL2, FROM UBUNTU RATHER THAN FROM THIS MACHINE.
+#
+# Bundling the host's libSDL2-2.0.so.0 is the obvious thing and it is wrong on
+# any modern rolling distribution. Arch — and others — no longer ship SDL2 at
+# all: that file belongs to sdl2-compat, a shim implementing the SDL2 ABI on
+# top of SDL3, which it dlopen()s BY NAME at run time. It appears in no NEEDED
+# entry, so ldd reports a complete dependency list and the AppImage looks fine.
+# It then works on every machine that has SDL3 installed — which is every
+# machine that could have built it — and aborts on everyone else's with:
+#
+#     Failed loading SDL3.so
+#
+# Bundling that SDL3 too does not help either: the one here wants glibc 2.43,
+# newer than any released distribution, so the image would fail to start
+# everywhere instead of just somewhere.
+#
+# Ubuntu 22.04's SDL2 is the real library, needs glibc 2.34, and its remaining
+# dependencies are the ordinary desktop X11/Wayland/audio set that any machine
+# running a graphical session already has.
+SDL2_URL="http://archive.ubuntu.com/ubuntu/pool/main/libs/libsdl2/libsdl2-2.0-0_2.0.20+dfsg-2ubuntu1.22.04.1_amd64.deb"
+SDL2_SHA="ac3cea9ea66df71445541b2cfd5e07f554ba0f83e3ce4a9dacc311c358100c47"
+SDL2_VER="2.0.20 (Ubuntu 22.04)"
+
 # Pinned versions, so two builds of the same Tadpole ship the same extractor.
 #
 # ONLY ubi_reader is pinned by us. Its own metadata pins the three compression
@@ -146,6 +169,27 @@ if [ "$FORCE" = 1 ] || [ ! -x "$DEPS/bin/qemu-arm" ]; then
     "$DEPS/bin/qemu-arm" -version | head -1 | sed 's/^/  /'
 else
     echo "==> qemu-arm already staged"
+fi
+
+# ---- 1b. SDL2 -------------------------------------------------------------
+if [ "$FORCE" = 1 ] || [ ! -f "$DEPS/lib/libSDL2-2.0.so.0" ]; then
+    echo "==> SDL2 $SDL2_VER"
+    fetch "$SDL2_URL" "$SDL2_SHA" "$CACHE/libsdl2.deb"
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/tadpole-sdl.XXXXXX")"
+    trap 'rm -rf "$tmp"' EXIT
+    ( cd "$tmp" && ar x "$CACHE/libsdl2.deb" ) || die "ar failed on the SDL2 .deb"
+    data="$(ls "$tmp"/data.tar.* 2>/dev/null | head -1)"
+    [ -n "$data" ] || die "no data.tar.* inside the SDL2 .deb"
+    tar xf "$data" -C "$tmp" || die "could not unpack the SDL2 .deb"
+    real="$(find "$tmp" -name 'libSDL2-2.0.so.0.*' | head -1)"
+    [ -n "$real" ] || die "no libSDL2 in that package"
+    mkdir -p "$DEPS/lib"
+    cp "$real" "$DEPS/lib/libSDL2-2.0.so.0"
+    rm -rf "$tmp"; trap - EXIT
+    echo "  glibc floor: $(objdump -T "$DEPS/lib/libSDL2-2.0.so.0" 2>/dev/null |
+                           grep -oE 'GLIBC_2\.[0-9]+' | sort -V -u | tail -1)"
+else
+    echo "==> SDL2 already staged"
 fi
 
 # ---- 2. python + the firmware toolchain -----------------------------------
