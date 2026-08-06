@@ -1383,7 +1383,13 @@ int main(int argc, char **argv)
 	if (getenv("TADPOLE_GL_HLE"))
 		ui_cfg()->gl_hle = 1;
 	if (ui_cfg()->gl_hle) {
-		if (!hle_host_init(g_dir, w, h))
+		/* Anti-aliasing costs nothing the guest can see: its own glViewport is
+		 * discarded, so the sample count is ours to pick. TADPOLE_GL_MSAA
+		 * overrides the setting for a one-line comparison run. */
+		int aa = ui_cfg()->msaa;
+		const char *e = getenv("TADPOLE_GL_MSAA");
+		if (e) aa = atoi(e);
+		if (!hle_host_init(g_dir, w, h, aa))
 			ui_status("HLE unavailable; software raster");
 	}
 

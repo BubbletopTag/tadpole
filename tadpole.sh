@@ -371,6 +371,16 @@ case "$mode" in
         # it shows when the system files are missing.
         if [ -n "$viewer_pid" ]; then
             wait "$viewer_pid"
+        elif [ "$use_viewer" = 0 ]; then
+            # --no-viewer WITH NO MODE. The front end is a window and nothing
+            # else, so asking for it without one is a contradiction — and
+            # answering "viewer not built" sent a script hunting for a missing
+            # binary that was sitting right there, built. Say what was actually
+            # asked for.
+            echo "tadpole: --no-viewer needs something to run." >&2
+            echo "  --boot --no-viewer     the system menu, headless" >&2
+            echo "  --run PROG --no-viewer a single guest binary" >&2
+            exit 2
         else
             echo "viewer not built — run: cd tadpole && make viewer" >&2
             exit 1

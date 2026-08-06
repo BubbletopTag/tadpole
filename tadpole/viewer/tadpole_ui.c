@@ -108,6 +108,7 @@ static struct ui_settings g_cfg = {
 	.audio_pace       = 1,
 	.frame_cap        = 60,
 	.hle_strict       = 0,
+	.msaa             = 0,
 	.io_delay_us      = 0,
 	.tslib            = 0,
 	.boot_on_start    = 0,
@@ -787,13 +788,14 @@ void ui_cfg_save(void)
 	           "gl_dumpframe %d\ngl_dumptex %d\n"
 	           "rotate %d\nscale %d\ntouch_debug %d\n"
 	           "audio_on %d\naudio_latency_ms %d\naudio_pace %d\n"
-	           "frame_cap %d\nhle_strict %d\nio_delay_us %d\ntslib %d\n"
+	           "frame_cap %d\nhle_strict %d\nmsaa %d\nio_delay_us %d\ntslib %d\n"
 	           "boot_on_start %d\n",
 	        g_cfg.gl, g_cfg.gl_hle, g_cfg.debug_level, g_cfg.log_to_file,
 	        g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
 	        g_cfg.rotate, g_cfg.scale, g_cfg.touch_debug,
 	        g_cfg.audio_on, g_cfg.audio_latency_ms, g_cfg.audio_pace,
-	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.io_delay_us, g_cfg.tslib,
+	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.msaa, g_cfg.io_delay_us,
+	        g_cfg.tslib,
 	        g_cfg.boot_on_start);
 	/* Last, and only if set: it is the one value that can contain spaces. */
 	if (g_cfg.games_dir[0])
@@ -843,6 +845,7 @@ static void cfg_load(void)
 			else if (!strcmp(k, "audio_pace"))       g_cfg.audio_pace = val;
 			else if (!strcmp(k, "frame_cap"))        g_cfg.frame_cap = val;
 			else if (!strcmp(k, "hle_strict"))       g_cfg.hle_strict = val;
+			else if (!strcmp(k, "msaa"))             g_cfg.msaa = val;
 			else if (!strcmp(k, "io_delay_us"))      g_cfg.io_delay_us = val;
 			else if (!strcmp(k, "tslib"))            g_cfg.tslib = val;
 			else if (!strcmp(k, "boot_on_start"))    g_cfg.boot_on_start = val;
@@ -1431,17 +1434,31 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		          row_hit(&d, 0, g_mx, g_my));
 		row_check(r, &d, 1, "Host GPU replay (HLE)", g_cfg.gl_hle,
 		          row_hit(&d, 1, g_mx, g_my));
-		row_check(r, &d, 2, "Stop if HLE falls back", g_cfg.hle_strict,
-		          row_hit(&d, 2, g_mx, g_my));
+		/* Only meaningful on the host-GPU path: the software rasteriser has
+		 * no samples to average. Shown greyed rather than hidden, so the
+		 * setting does not appear and disappear as HLE is toggled. */
+		if (g_cfg.msaa) snprintf(buf, sizeof(buf), "%dx", g_cfg.msaa);
+		else            snprintf(buf, sizeof(buf), "off");
+		{
+			int y = row_y(&d, 2);
+			int hot = row_hit(&d, 2, g_mx, g_my);
+			if (hot && g_cfg.gl_hle) fill(r, d.x + 6, y - 3, d.w - 12, ROW_H, C_PANEL_HI);
+			text(r, d.x + 10, y, "Anti-aliasing",
+			     g_cfg.gl_hle ? C_TEXT : C_TEXT_DIM);
+			text(r, d.x + d.w - 12 - text_w(buf), y, buf,
+			     g_cfg.gl_hle ? C_ACCENT : C_TEXT_DIM);
+		}
+		row_check(r, &d, 3, "Stop if HLE falls back", g_cfg.hle_strict,
+		          row_hit(&d, 3, g_mx, g_my));
 		if (g_cfg.frame_cap) snprintf(buf, sizeof(buf), "%d fps", g_cfg.frame_cap);
 		else                 snprintf(buf, sizeof(buf), "uncapped");
-		row_value(r, &d, 3, "Frame cap", buf, row_hit(&d, 3, g_mx, g_my));
+		row_value(r, &d, 4, "Frame cap", buf, row_hit(&d, 4, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%d deg", g_cfg.rotate);
-		row_value(r, &d, 4, "Orientation", buf, row_hit(&d, 4, g_mx, g_my));
+		row_value(r, &d, 5, "Orientation", buf, row_hit(&d, 5, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%dx", g_cfg.scale);
-		row_value(r, &d, 5, "Window scale", buf, row_hit(&d, 5, g_mx, g_my));
-		row_check(r, &d, 6, "Touch debug overlay", g_cfg.touch_debug,
-		          row_hit(&d, 6, g_mx, g_my));
+		row_value(r, &d, 6, "Window scale", buf, row_hit(&d, 6, g_mx, g_my));
+		row_check(r, &d, 7, "Touch debug overlay", g_cfg.touch_debug,
+		          row_hit(&d, 7, g_mx, g_my));
 		text(r, d.x + 10, d.y + d.h - 30,
 		     g_running ? "GL: reboot to apply."
 		               : "GL applies at next boot.",
@@ -2235,20 +2252,30 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			if (g_running)
 				ui_status("HLE %s on reboot", g_cfg.gl_hle ? "on" : "off");
 		}
-		else if (row_hit(&d, 2, mx, my)) g_cfg.hle_strict = !g_cfg.hle_strict;
-		else if (row_hit(&d, 3, mx, my)) {
+		else if (row_hit(&d, 2, mx, my) && g_cfg.gl_hle) {
+			static const int s[] = { 0, 2, 4, 8 };
+			int i, k = 0;
+			for (i = 0; i < 4; i++)
+				if (s[i] == g_cfg.msaa) k = (i + 1) % 4;
+			g_cfg.msaa = s[k];
+			/* The render target is built once, when the replayer starts. */
+			ui_status(g_cfg.msaa ? "AA %dx at next launch" : "AA off at next launch",
+			          g_cfg.msaa);
+		}
+		else if (row_hit(&d, 3, mx, my)) g_cfg.hle_strict = !g_cfg.hle_strict;
+		else if (row_hit(&d, 4, mx, my)) {
 			static const int hz[] = { 60, 30, 0 };   /* 0 = uncapped */
 			int i, k = 0;
 			for (i = 0; i < 3; i++)
 				if (hz[i] == g_cfg.frame_cap) k = (i + 1) % 3;
 			g_cfg.frame_cap = hz[k];
 		}
-		else if (row_hit(&d, 4, mx, my)) cycle_rotate();
-		else if (row_hit(&d, 5, mx, my)) {
+		else if (row_hit(&d, 5, mx, my)) cycle_rotate();
+		else if (row_hit(&d, 6, mx, my)) {
 			g_cfg.scale = g_cfg.scale % 4 + 1;
 			g_action = UI_ACT_RELAYOUT;
 		}
-		else if (row_hit(&d, 6, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
+		else if (row_hit(&d, 7, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
 		ui_cfg_save();
 		return 1;
 	}

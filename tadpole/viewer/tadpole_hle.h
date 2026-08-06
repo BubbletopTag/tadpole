@@ -6,7 +6,7 @@
 /* Creates the hidden GL context, the offscreen target and the shared ring.
  * Returns 0 if the host cannot replay, in which case the guest sees no
  * heartbeat and keeps rasterising in software. */
-int  hle_host_init(const char *dir, int w, int h);
+int  hle_host_init(const char *dir, int w, int h, int samples);
 void hle_host_shutdown(void);
 int  hle_host_ready(void);
 

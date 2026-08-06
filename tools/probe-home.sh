@@ -44,7 +44,12 @@ reap
 sleep 1
 
 echo "booting (headless) -> $LOG"
-"$PROJ/tadpole.sh" --no-viewer ${PROBE_DEBUG:+--debug} > "$LOG" 2>&1 &
+# --boot AS WELL AS --no-viewer. tadpole.sh's default became front-end-only —
+# it opens the window and waits rather than starting a guest — so `--no-viewer`
+# on its own now asks for a front end with no front end, and the script says
+# "viewer not built", which is both untrue and a long way from the real
+# problem. The probe wants a guest and no window: that is --boot --no-viewer.
+"$PROJ/tadpole.sh" --boot --no-viewer ${PROBE_DEBUG:+--debug} > "$LOG" 2>&1 &
 BOOT=$!
 trap 'kill $BOOT 2>/dev/null; reap' EXIT
 

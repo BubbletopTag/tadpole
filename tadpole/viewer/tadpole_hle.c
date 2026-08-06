@@ -59,7 +59,27 @@ static struct tadgl_hdr *g_ring;
 static unsigned char    *g_data;
 static SDL_Window       *g_win;
 static SDL_GLContext     g_ctx;
-static GLuint            g_fbo, g_colour, g_depth;
+/* THE RENDER TARGET, AND ITS ANTI-ALIASED VARIANT.
+ *
+ * Without multisampling there is one framebuffer object: g_fbo, with the
+ * texture g_colour attached, and the readback comes straight out of it. That
+ * is the original arrangement and it is still exactly what happens when
+ * anti-aliasing is off — g_resolve is then the same object as g_fbo, and the
+ * blit below is skipped.
+ *
+ * With it, the replay draws into a MULTISAMPLED g_fbo (renderbuffers, because
+ * a multisample texture would need a shader to resolve) and PRESENT blits that
+ * down into the single-sample g_resolve before reading it back. The guest
+ * cannot tell: the pixels it gets are the same 480x272, only with the edges
+ * averaged instead of stepped.
+ *
+ * Why this is worth so little code: the title's own glViewport is discarded —
+ * we set the viewport from the layer rectangle — so the sample count is
+ * entirely ours to choose and nothing in the guest has an opinion about it.
+ */
+static GLuint            g_fbo, g_resolve, g_colour, g_depth;
+static GLuint            g_ms_colour, g_ms_depth;
+static int               g_msaa;      /* samples in use; 0 = off */
 static GLuint            g_tex[MAX_TEX];       /* guest name -> host name */
 /* host_tex() creates an empty GL texture object on demand, so "the object
  * exists" says nothing about whether we ever received its PIXELS. A draw with a
@@ -273,25 +293,105 @@ static unsigned int      g_convn[TADGL_ARR_COUNT];
 
 /* ---- setup -------------------------------------------------------------- */
 
-static int make_target(int w, int h)
+/* The plain single-sample target: a texture for colour, a renderbuffer for
+ * depth. Also the resolve destination when multisampling is on, in which case
+ * it needs no depth — only the colour is ever blitted down. */
+static int make_plain(int w, int h, int want_depth)
 {
-	glGenFramebuffers(1, &g_fbo);
-	glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+	glGenFramebuffers(1, &g_resolve);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_resolve);
 	glGenTextures(1, &g_colour);
 	glBindTexture(GL_TEXTURE_2D, g_colour);
 	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
 	             GL_UNSIGNED_BYTE, NULL);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
 	                       GL_TEXTURE_2D, g_colour, 0);
-	glGenRenderbuffers(1, &g_depth);
-	glBindRenderbuffer(GL_RENDERBUFFER, g_depth);
-	glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, w, h);
-	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-	                          GL_RENDERBUFFER, g_depth);
+	if (want_depth) {
+		glGenRenderbuffers(1, &g_depth);
+		glBindRenderbuffer(GL_RENDERBUFFER, g_depth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, w, h);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+		                          GL_RENDERBUFFER, g_depth);
+	}
 	return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
 }
 
-int hle_host_init(const char *dir, int w, int h)
+static int make_multisample(int w, int h, int samples)
+{
+	glGenFramebuffers(1, &g_fbo);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+	glGenRenderbuffers(1, &g_ms_colour);
+	glBindRenderbuffer(GL_RENDERBUFFER, g_ms_colour);
+	glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples, GL_RGBA8, w, h);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	                          GL_RENDERBUFFER, g_ms_colour);
+	glGenRenderbuffers(1, &g_ms_depth);
+	glBindRenderbuffer(GL_RENDERBUFFER, g_ms_depth);
+	glRenderbufferStorageMultisample(GL_RENDERBUFFER, samples,
+	                                 GL_DEPTH_COMPONENT16, w, h);
+	glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+	                          GL_RENDERBUFFER, g_ms_depth);
+	return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+}
+
+static void drop_multisample(void)
+{
+	if (g_ms_colour) glDeleteRenderbuffers(1, &g_ms_colour);
+	if (g_ms_depth)  glDeleteRenderbuffers(1, &g_ms_depth);
+	if (g_fbo && g_fbo != g_resolve) glDeleteFramebuffers(1, &g_fbo);
+	g_ms_colour = g_ms_depth = 0;
+	g_fbo = g_resolve;
+	g_msaa = 0;
+}
+
+static int make_target(int w, int h, int samples)
+{
+	GLint maxs = 0;
+
+	if (samples > 0) {
+		/* ASK THE DRIVER, do not assume. A request for 8x on hardware that
+		 * offers 4 makes an INCOMPLETE framebuffer, and an incomplete
+		 * framebuffer here means every frame comes out black — which looks
+		 * exactly like the emulator being broken rather than one setting
+		 * being too ambitious. */
+		glGetIntegerv(GL_MAX_SAMPLES, &maxs);
+		if (maxs < 2) {
+			fprintf(stderr, "hle: no multisampling available; AA off\n");
+			samples = 0;
+		} else if (samples > maxs) {
+			fprintf(stderr, "hle: %dx AA requested, %dx is the maximum here\n",
+			        samples, (int)maxs);
+			samples = (int)maxs;
+		}
+	}
+
+	if (!make_plain(w, h, samples == 0))
+		return 0;
+	if (samples == 0) {
+		g_fbo = g_resolve;            /* one object, exactly as before */
+		g_msaa = 0;
+		return 1;
+	}
+	if (!make_multisample(w, h, samples)) {
+		/* Never fail the whole replayer over a cosmetic setting: fall back to
+		 * no anti-aliasing and say so. */
+		fprintf(stderr, "hle: %dx AA target incomplete; falling back to none\n",
+		        samples);
+		drop_multisample();
+		glBindFramebuffer(GL_FRAMEBUFFER, g_resolve);
+		glGenRenderbuffers(1, &g_depth);
+		glBindRenderbuffer(GL_RENDERBUFFER, g_depth);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, w, h);
+		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+		                          GL_RENDERBUFFER, g_depth);
+		return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+	}
+	g_msaa = samples;
+	fprintf(stderr, "hle: %dx anti-aliasing\n", samples);
+	return 1;
+}
+
+int hle_host_init(const char *dir, int w, int h, int samples)
 {
 	char path[600];
 	int fd;
@@ -324,7 +424,7 @@ int hle_host_init(const char *dir, int w, int h)
 	if (!g_ctx) { fprintf(stderr, "hle: no GL context: %s\n", SDL_GetError()); return 0; }
 	SDL_GL_SetSwapInterval(0);
 
-	if (!make_target(w, h)) {
+	if (!make_target(w, h, samples)) {
 		fprintf(stderr, "hle: incomplete framebuffer object\n");
 		return 0;
 	}
@@ -636,11 +736,29 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			int rw = g_vw ? g_vw : g_w, rh = g_vh ? g_vh : g_h;
 			int y;
 			check_gl("frame");
+			/* Resolve the samples down before reading. Only the layer
+			 * rectangle is blitted, for the same reason only it is read back:
+			 * the rest of the panel belongs to other layers, and writing the
+			 * FBO's untouched black over it would hide the video plane
+			 * underneath. GL_NEAREST is required for a multisample source —
+			 * the averaging is the resolve itself, not the filter. */
+			if (g_msaa) {
+				glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
+				glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_resolve);
+				glBlitFramebuffer(rx, g_h - (ry + rh), rx + rw, g_h - ry,
+				                  rx, g_h - (ry + rh), rx + rw, g_h - ry,
+				                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+				glBindFramebuffer(GL_READ_FRAMEBUFFER, g_resolve);
+			}
 			glFinish();
 			for (y = 0; y < rh; y++)
 				glReadPixels(rx, g_h - 1 - (ry + y), rw, 1, GL_BGRA,
 				             GL_UNSIGNED_BYTE,
 				             out + (size_t)(ry + y) * pitch_px + rx);
+			/* Back to the multisampled target: more frames may follow in this
+			 * same pump, and they must not land in the resolve buffer. */
+			if (g_msaa)
+				glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
 			g_frames++;
 			g_ring->frames_done++;
 			presented = 1;

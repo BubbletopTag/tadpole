@@ -59,6 +59,7 @@ struct ui_settings {
 	int audio_pace;          /* TADPOLE_AUDIO_PACE — hold the guest to realtime */
 	int frame_cap;           /* TADPOLE_HZ; 0 = uncapped */
 	int hle_strict;          /* TADPOLE_HLE_STRICT — die instead of falling back */
+	int msaa;                /* host-GPU anti-aliasing: 0 off, or 2/4/8 samples */
 	int io_delay_us;         /* TADPOLE_IO_DELAY_US — pretend to be NAND */
 	int tslib;               /* TADPOLE_TSLIB — the device's own touch library */
 	int boot_on_start;       /* run the system menu as soon as Tadpole opens */

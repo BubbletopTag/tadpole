@@ -99,7 +99,7 @@ int main(void)
 	unlink("/tmp/tadpole-hle-selftest/glcmd.bin");
 
 	/* Host first: the guest refuses to encode without a live heartbeat. */
-	check(hle_host_init(dir, W, H), "host replayer init");
+	check(hle_host_init(dir, W, H, 0), "host replayer init");
 	if (!hle_host_ready()) { printf("FAIL cannot continue\n"); return 1; }
 	check(hle_on(), "guest encoder attaches to the ring");
 	if (!hle_on()) { printf("FAIL cannot continue\n"); return 1; }
