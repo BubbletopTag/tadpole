@@ -1669,7 +1669,23 @@ int main(int argc, char **argv)
 						if (tex_gl && gl_px && hle_host_read_full(gl_px)) {
 							SDL_UpdateTexture(tex_gl, NULL, gl_px, fw * 4);
 							hle_host_rect(&gl_rx, &gl_ry, &gl_rw, &gl_rh);
+							/* SAY WHICH PATH IS DRAWING THE GAME, once.
+							 * "Looks the same" is the expected outcome of a
+							 * resolution change that silently did not happen,
+							 * and the two are otherwise indistinguishable
+							 * from a screenshot. */
+							if (!gl_have)
+								fprintf(stderr, "hle: viewer is drawing the game "
+								        "layer itself, %dx%d into %dx%d at %d,%d\n",
+								        fw, fh, gl_rw, gl_rh, gl_rx, gl_ry);
 							gl_have = 1;
+						} else if (!gl_have) {
+							static int said;
+							if (!said++)
+								fprintf(stderr, "hle: no full-size frame yet "
+								        "(scale %d, %dx%d) — still showing the "
+								        "guest's own layer\n",
+								        hle_host_scale(), fw, fh);
 						}
 					}
 				} else if (gl_have) {
@@ -1747,6 +1763,8 @@ int main(int argc, char **argv)
 				 * so nothing moves — it simply arrives with more detail. */
 				if (gl_have && tex_gl) {
 					SDL_Rect g = { dst.x + gl_rx, dst.y + gl_ry, gl_rw, gl_rh };
+					if (getenv("TADPOLE_GL_TINT"))
+						SDL_SetTextureColorMod(tex_gl, 255, 80, 80);
 					if (rotate)
 						SDL_RenderCopyEx(ren, tex_gl, NULL, &g, (double)rotate,
 						                 NULL, SDL_FLIP_NONE);
@@ -1799,6 +1817,25 @@ int main(int argc, char **argv)
 						        SDL_PIXELFORMAT_RGB24, rgb, ow * 3) == 0)
 							write_png(want, ow, oh, rgb);
 						free(rgb);
+					}
+					/* The game layer as the viewer RECEIVED it, beside the
+					 * window shot. When a resolution change makes no visible
+					 * difference, the first question is whether the detail
+					 * ever arrived — and this answers it without argument. */
+					if (n && gl_have && gl_px && gl_tw > 0 && gl_th > 0) {
+						char gp[600];
+						unsigned char *rgb = malloc((size_t)gl_tw * gl_th * 3);
+						snprintf(gp, sizeof(gp), "%s.layer.png", want);
+						if (rgb) {
+							int i2, np = gl_tw * gl_th;
+							for (i2 = 0; i2 < np; i2++) {
+								rgb[i2*3]     = (gl_px[i2] >> 16) & 0xFF;
+								rgb[i2*3 + 1] = (gl_px[i2] >> 8)  & 0xFF;
+								rgb[i2*3 + 2] =  gl_px[i2]        & 0xFF;
+							}
+							write_png(gp, gl_tw, gl_th, rgb);
+							free(rgb);
+						}
 					}
 				}
 				fclose(rf);

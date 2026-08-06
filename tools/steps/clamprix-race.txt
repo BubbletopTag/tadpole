@@ -21,32 +21,46 @@
 # usable as an A/B reference for a rendering change. Drive off and every later
 # frame differs for reasons that have nothing to do with what you changed.
 
-tap 18 228
-sleep 6
-tap 269 221
-wait LoadNewApp path = /LF/Bulk/ProgramFiles/LST3-0x00180025
+# BOTH TAPS ARE `taptil`, NOT `tap`. A blind tap into the picker is a coin
+# toss: it lands during an animation, gets swallowed, and the run carries on
+# past a page that never turned or a game that never launched — every later
+# step then operating on the wrong screen. Measured, not theorised: with a
+# plain `tap` and six seconds of sleep, the capture taken AT the tile tap still
+# showed page one.
+#
+# Paging the picker loads the new page's icons, so a rise in LoadIconImage is
+# the page having actually turned.
+taptil 18 228 HomePickerState::LoadIconImage
+taptil 269 221 LoadNewApp path = /LF/Bulk/ProgramFiles/LST3-0x00180025
 wait CGameViewFrame::Enter
-sleep 25
+sleep 30
 shot 1-title
 
-# Three A presses reach the Play menu: publisher screen, title screen, and the
-# "press A" prompt.
+# PRESS UNTIL IT MOVES, generously. The number of screens between the title and
+# the Play menu is not fixed — a publisher logo may or may not still be
+# playing, and how long the load takes depends on what else the host is doing.
+# A fixed three presses reached the menu on one run and left the title sitting
+# there on the next, which then made every later step nonsense.
 key a
-sleep 9
+sleep 10
 key a
-sleep 9
+sleep 10
 key a
-sleep 9
+sleep 10
+key a
+sleep 10
+key a
+sleep 10
 shot 2-menu
 
 # Play -> mode -> go.
 key a
-sleep 12
+sleep 14
 shot 3-modes
 key a
-sleep 12
+sleep 14
 key a
-sleep 35
+sleep 40
 shot 4-race
 
 # A second frame ten seconds later. Nothing has been pressed, so if these two
