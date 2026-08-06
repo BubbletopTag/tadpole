@@ -190,6 +190,18 @@ if [ ! -d "$DATA" ] || [ "$(cat "$STAMP" 2>/dev/null || true)" != "$WANT" ]; the
         cp -a "$HERE/app/runtime/$d" "$DATA/runtime/"
     done
     cp -a "$HERE/app/runtime/setup-sysroot.sh" "$DATA/runtime/"
+    # SOMEWHERE TO PUT A KEY. .lf3 packages — LFConnect's digital purchases —
+    # are the one encrypted thing in the set, and Tadpole ships no key for
+    # them. The folder is made empty so the installer's message ("put key in
+    # keys/lf3.keys") names a place that already exists.
+    mkdir -p "$DATA/keys"
+    [ -f "$DATA/keys/README" ] || cat > "$DATA/keys/README" <<'KEYS'
+Put lf3.keys here — one line, 32 hex characters — to install .lf3 packages
+(LFConnect digital purchases) during a firmware install.
+
+Everything else works without it. Firmware, cartridge backups and the emulator
+itself do not use this at all; without a key those files are simply skipped.
+KEYS
     [ -f "$HERE/app/README.md" ] && cp -a "$HERE/app/README.md" "$DATA/"
     chmod +x "$DATA/tadpole.sh" "$DATA/tools/"*.sh 2>/dev/null || true
     echo "$WANT" > "$STAMP"

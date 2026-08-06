@@ -84,16 +84,18 @@ case "$SRC" in
     *.zip)
         echo "==> unpacking $SRC"
         pkg_extract "$SRC" "$STAGE/outer" || die "could not unpack $SRC"
-        find "$STAGE/outer" -type f \( -iname '*.lf2' -o -iname '*.lfp' \) \
+        find "$STAGE/outer" -type f \
+             \( -iname '*.lf2' -o -iname '*.lfp' -o -iname '*.lf3' \) \
              -exec cp {} "$STAGE/pkgs/" \; ;;
-    *.lf2|*.lfp)
+    *.lf2|*.lfp|*.lf3)
         cp "$SRC" "$STAGE/pkgs/" ;;
     *)
         [ -d "$SRC" ] || die "not a directory or a known archive: $SRC"
         # LFConnect keeps downloads in <dir>/cache; accept either level.
         for d in "$SRC/cache" "$SRC"; do
             [ -d "$d" ] || continue
-            find "$d" -maxdepth 1 -type f \( -iname '*.lf2' -o -iname '*.lfp' \) \
+            find "$d" -maxdepth 1 -type f \
+                 \( -iname '*.lf2' -o -iname '*.lfp' -o -iname '*.lf3' \) \
                  -exec cp {} "$STAGE/pkgs/" \; 2>/dev/null
         done ;;
 esac
@@ -264,6 +266,36 @@ if [ -x "$HERE/install-content.sh" ]; then
         echo "  (install-content.sh reported problems; system files are still in place)" >&2
 else
     echo "  install-content.sh missing; skipping content" >&2
+fi
+
+# ---- 7. digital purchases (.lf3) -----------------------------------------
+#
+# These are the titles LFConnect delivered as downloads rather than on a
+# cartridge — including the ones bundled free with the device. They are the
+# only encrypted thing in the whole set, and Tadpole ships no key, so this
+# step is entirely optional: with a key the titles install, without one they
+# are skipped and everything else is exactly as it was.
+#
+# THE MESSAGE IS UNCONDITIONAL. It is the one case where a user has files that
+# plainly contain games and gets no games out of them, and "silently installed
+# fewer things than you had" is a poor way to learn about it. It goes to
+# stdout, so it also appears in the wizard's progress panel.
+LF3_N=$(find "$STAGE/pkgs" -maxdepth 1 -type f -iname '*.lf3' 2>/dev/null | wc -l)
+if [ "$LF3_N" -gt 0 ]; then
+    echo "==> $LF3_N digital purchase(s) (.lf3)"
+    if [ -n "$PY" ] && "$PY" "$HERE/lf3.py" --have-key >/dev/null 2>&1; then
+        mkdir -p "$STAGE/lf3"
+        if "$PY" "$HERE/lf3.py" "$STAGE/pkgs" -o "$STAGE/lf3" 2>&1 | sed 's/^/  /'; then
+            for t in "$STAGE/lf3"/*.tar; do
+                [ -f "$t" ] || continue
+                "$HERE/install-game.sh" "$t" 2>&1 | sed 's/^/  /'
+            done
+        fi
+    else
+        echo "  can't open .lf3 files, decryption key missing."
+        echo "  Put key in keys/lf3.keys"
+        echo "  (everything else installed normally; only these titles were skipped)"
+    fi
 fi
 
 echo

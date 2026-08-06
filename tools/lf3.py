@@ -12,16 +12,18 @@ WHAT AN .lf3 IS. A digital purchase from LFConnect, as opposed to a .lf2 or
     bytes 16..      AES-128-CTR ciphertext of a bzip2 stream, which
                     decompresses to an ordinary tar with meta.inf at the top
 
-THE KEY IS NOT SHIPPED, and this tool is not wired into the installer or the
-AppImage. Everything above is standard cryptography; the key is the one part
-that came from LeapFrog, and a key whose job is to unlock protected content is
-not the same kind of thing as a file format — shipping it in a program other
-people download is a question worth not answering carelessly.
+THE KEY IS NOT SHIPPED. Everything above is standard cryptography; the key is
+the one part that came from LeapFrog, and it lives in keys/lf3.keys — a folder
+that is gitignored and never goes into an AppImage. The AppImage makes the same
+folder in its data directory, so the answer to "where does it go" is one
+sentence wherever Tadpole is running from.
 
-It is not on the device to be recovered, either: searched byte for byte, the
-extracted 4.6.0.784 firmware does not contain it. So there is no "dump it from
-your own hardware" path the way there is for the firmware itself. Supply it
-yourself and it works; see KEY_HELP below.
+It is not on the device to be recovered: searched byte for byte, the extracted
+4.6.0.784 firmware does not contain it. It is a client-side constant from
+LFConnect, the PC software.
+
+install-firmware.sh calls this when it finds .lf3 packages, and says so plainly
+when there is no key rather than installing fewer titles in silence.
 
 WHY THIS EXISTS AT ALL: tools/install-content.sh handles .lf2 and .lfp and
 skips .lf3 entirely, so any title delivered as a digital purchase — including
@@ -67,28 +69,53 @@ It comes from LFConnect, the PC software.
 
 Supply it once and this works:
 
-    tools/lf3.py --key <32 hex characters> ...
-    TADPOLE_LF3_KEY=<32 hex characters> tools/lf3.py ...
-    or put it in ~/.config/tadpole/lf3.key
+    keys/lf3.keys                             (or ~/.local/share/tadpole/keys/)
+    TADPOLE_LF3_KEY=<32 hex characters>
+    tools/lf3.py --key <32 hex characters>
 
 The files it decrypts are already yours; this only reads the envelope."""
 
 
+def key_locations():
+    """Every place a key may sit, in the order they are tried.
+
+    keys/ sits beside the tools in a checkout, and the AppImage makes the same
+    folder in its data directory — so wherever Tadpole is running from, the
+    answer to "where do I put it" is the same sentence.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    proj = os.environ.get("TADPOLE_PROJECT") or os.path.dirname(here)
+    out = [os.path.join(proj, "keys", "lf3.keys"),
+           os.path.join(os.path.dirname(here), "keys", "lf3.keys")]
+    data = os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
+    out.append(os.path.join(data, "tadpole", "keys", "lf3.keys"))
+    cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    out.append(os.path.join(cfg, "tadpole", "lf3.key"))     # the older spelling
+    seen, uniq = set(), []
+    for p in out:
+        if p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return uniq
+
+
 def load_key(explicit=None):
-    """The key, from the argument, the environment, or the config file."""
+    """The key, from the argument, the environment, or keys/lf3.keys."""
+    src = None
     if explicit:
         src = explicit
     elif os.environ.get("TADPOLE_LF3_KEY"):
         src = os.environ["TADPOLE_LF3_KEY"]
     else:
-        cfg = os.path.join(
-            os.environ.get("XDG_CONFIG_HOME") or
-            os.path.expanduser("~/.config"), "tadpole", "lf3.key")
-        try:
-            with open(cfg) as f:
-                src = f.read()
-        except OSError:
-            return None
+        for p in key_locations():
+            try:
+                with open(p) as f:
+                    src = f.read()
+                break
+            except OSError:
+                continue
+    if src is None:
+        return None
     src = "".join(c for c in src if c in "0123456789abcdefABCDEF")
     if len(src) != 32:
         return None
@@ -295,6 +322,10 @@ def main(argv):
             keyarg = argv[i + 1]; i += 2
         elif a == "--optional":
             optional = True; i += 1
+        elif a == "--have-key":
+            # For scripts deciding whether to run this step at all: exit 0 if
+            # a key is configured, 1 if not, and say nothing either way.
+            return 0 if load_key(keyarg) else 1
         else:
             args.append(a); i += 1
     if not args:

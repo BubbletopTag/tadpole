@@ -40,3 +40,6 @@ build/
 # Byte-compiled Python from running the tools in place.
 __pycache__/
 *.pyc
+
+# Keys live on your machine, never in the repository or an AppImage.
+keys/
