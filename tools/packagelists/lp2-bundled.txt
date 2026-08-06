@@ -1,0 +1,29 @@
+# Titles bundled with a LeapPad2, which the firmware package list does not name.
+#
+# EnglishLeapPad2.xml describes the SYSTEM — firmware, widgets, themes, language
+# packs. The titles that come with the device are delivered as ordinary digital
+# purchases, so they appear in an account's download cache and in no manifest
+# that ships with the machine. Every ID below was read out of a real
+# LFC_Downloads cache and then confirmed to exist on the CDN.
+#
+# They are .lf3, which is to say encrypted. Tadpole downloads them anyway: the
+# file being present costs a few megabytes, and the alternative is a user who
+# supplies a key later and has to re-run the whole update to get anything out
+# of it. Without a key they are skipped at install time with a message saying
+# so, and nothing else is affected.
+#
+# A DeviceAsset package accompanies each one, holding the home-screen icon. It
+# is always PADS-<middle>-DA0000.lf2 in the same directory, whatever the game's
+# own system prefix is — MULT-0x00180007-000000 pairs with
+# PADS-0x00180007-DA0000.lf2, not MULT-...-DA0000.lf2, which 404s.
+#
+#   <PackageID>    <description>
+
+MULT-0x00180007-000000   Alphabet Stew
+MULT-0x00230009-000000   Solar Taxi
+MULT-0x0018005E-000000   Cha-Cha Chicken
+MULT-0x00230003-000000   Camera Creations Pack
+MULT-0x001B0165-000000   Coloring with Leap, Tad & Lily
+PADS-0x00240015-000000   Mickey's Birthday
+PADS-0x001B0036-000000   The Book of Super Awesome Stuff
+PADS-0x001F0008-000000   PaintApp

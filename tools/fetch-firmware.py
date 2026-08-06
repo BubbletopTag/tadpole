@@ -31,7 +31,33 @@ import xml.etree.ElementTree as ET
 BASE = "https://digitalcontent.leapfrog.com/packages"
 HERE = os.path.dirname(os.path.abspath(__file__))
 XML = os.path.join(HERE, "packagelists", "EnglishLeapPad2.xml")
+BUNDLED = os.path.join(HERE, "packagelists", "lp2-bundled.txt")
 EXTS = ("lf2", "lf3", "lfp")
+
+
+def bundled(path=BUNDLED):
+    """The titles that come with the device, plus each one's DeviceAsset.
+
+    They are in no manifest the machine ships with — see the note in
+    lp2-bundled.txt — so the IDs are listed there and the icon package is
+    derived: always PADS-<middle>-DA0000.lf2, whatever the game's own prefix.
+    """
+    out = []
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                pid, _, desc = line.partition(" ")
+                mid = pid.split("-")[1] if "-" in pid else ""
+                out.append((pid, desc.strip(), {"bundled"}))
+                if mid:
+                    out.append(("PADS-%s-DA0000" % mid,
+                                (desc.strip() + " DA").strip(), {"bundled"}))
+    except OSError:
+        pass
+    return out
 
 
 def packages(xml_path):
@@ -71,11 +97,33 @@ DEVICE_DIR = "PADFW"          # LeapPad2; other devices have their own LF_URL
 
 
 def candidates(pid):
-    """-> URLs to try, most likely first."""
+    """-> URLs to try, most likely first.
+
+    THREE LAYOUTS, and missing the third cost thirty-six packages — which is
+    to say the entire home screen. Content lives under the middle field of its
+    ID, the firmware under the device directory as .lfp, and the device's own
+    APPS AND WIDGETS under the device directory as .lf2:
+
+        packages/0x0028000C/PADS-0x0028000C-000000.lf2   a content package
+        packages/PADFW/PAD2-0x00220004-000000.lfp        the firmware
+        packages/PADFW/PAD2-0x001E0003-000002.lf2        the camera widget
+
+    Only .lfp was ever tried under the device directory, so every PAD2-*
+    package — Pet Pad, the camera, gallery, keyboard, microphone and paint
+    widgets, the photo editor, sneak peeks — reported "not on the CDN" and the
+    finished install had two tiles on its home screen.
+
+    Some early packages use the four-letter system name as the directory
+    instead (packages/LPAD/LPAD-0x001F002D-000000.lf3), so that is tried too.
+    """
     mid = pid.split("-")[1]
+    sysname = pid.split("-")[0]
     for ext in EXTS:
         yield f"{BASE}/{mid}/{pid}.{ext}"
-    yield f"{BASE}/{DEVICE_DIR}/{pid}.lfp"
+    for ext in ("lfp", "lf2", "lf3"):
+        yield f"{BASE}/{DEVICE_DIR}/{pid}.{ext}"
+    for ext in EXTS:
+        yield f"{BASE}/{sysname}/{pid}.{ext}"
 
 
 def head(url, timeout=20):
@@ -110,7 +158,7 @@ def main():
     if not a.probe and not a.get:
         ap.error("one of --probe or --get is required")
 
-    pkgs = packages(a.xml)
+    pkgs = packages(a.xml) + bundled()
     sel = (a.get or "").strip()
     want = None if sel in ("", "all") else set(
         t.strip() for t in sel.split(",") if t.strip())
