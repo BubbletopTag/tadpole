@@ -3,6 +3,7 @@
 
     lf3.py <file.lf3|dir> [...] [-o OUTDIR]
     lf3.py --list <file.lf3|dir> [...]        just say what they are
+    lf3.py --optional ...                     no key configured is not an error
 
 WHAT AN .lf3 IS. A digital purchase from LFConnect, as opposed to a .lf2 or
 .lfp, which are not encrypted. Measured on a real file rather than assumed:
@@ -52,17 +53,19 @@ import tarfile
 
 CHUNK = 1 << 20
 
-KEY_HELP = """No decryption key.
+KEY_HELP = """No decryption key configured, so .lf3 packages were skipped.
 
-Tadpole does not ship one. The key is the single piece of this that comes from
-LeapFrog rather than from cryptography everyone already has, and a key whose
-purpose is to unlock protected content is not something to bake into a program
-other people download — that is a different question from copyright, and not
-one to answer by assuming.
+NOTHING IS BROKEN. Tadpole does not need this: firmware installs, cartridge
+backups install, and the emulator runs exactly as before. .lf3 is one extra
+source of titles — digital purchases from LFConnect — and without a key those
+files are simply left alone.
 
-It is not on the device either: the extracted firmware does not contain those
-bytes anywhere, so there is nothing to lift from your own dump. Supply it
-yourself, once:
+Tadpole does not ship the key. It is the one LeapFrog-derived ingredient in an
+otherwise standard AES-CTR-over-bzip2 format, and it is not recoverable from
+the device: searched byte for byte, the extracted firmware does not contain it.
+It comes from LFConnect, the PC software.
+
+Supply it once and this works:
 
     tools/lf3.py --key <32 hex characters> ...
     TADPOLE_LF3_KEY=<32 hex characters> tools/lf3.py ...
@@ -280,7 +283,7 @@ def walk(paths):
 
 
 def main(argv):
-    args, outdir, listonly, keyarg = [], None, False, None
+    args, outdir, listonly, keyarg, optional = [], None, False, None, False
     i = 1
     while i < len(argv):
         a = argv[i]
@@ -290,6 +293,8 @@ def main(argv):
             listonly = True; i += 1
         elif a == "--key":
             keyarg = argv[i + 1]; i += 2
+        elif a == "--optional":
+            optional = True; i += 1
         else:
             args.append(a); i += 1
     if not args:
@@ -298,8 +303,14 @@ def main(argv):
 
     key = load_key(keyarg)
     if not key:
+        # OPTIONAL BY DESIGN. Anything that calls this as one step of a larger
+        # install must be able to carry on without it — the firmware installed
+        # perfectly well before .lf3 was readable at all, and a missing key is
+        # a smaller library, not a failure. --optional says the caller knows
+        # that; a direct invocation still reports it as not having done what
+        # was asked.
         sys.stderr.write(KEY_HELP + "\n")
-        return 2
+        return 0 if optional else 2
 
     files = list(walk(args))
     if not files:
