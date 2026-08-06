@@ -53,6 +53,12 @@ export TADPOLE_HLE_DEBUG="${TADPOLE_HLE_DEBUG:-1}"
 # looks like it exercised the GPU path and did not. Nothing in the log says so
 # except the ABSENCE of `[hle] encoding to host GPU`.
 export TADPOLE_GL_HLE="${TADPOLE_GL_HLE:-1}"
+# SILENT BY DEFAULT. A capture run is not something anyone is sitting and
+# watching — it is minutes of a title playing itself while you do something
+# else, in another room, possibly asleep. It has no business making noise, and
+# a guest that outlives its run keeps making it. SDL_AUDIODRIVER=alsa (or
+# anything) overrides this if a run is specifically about audio.
+export SDL_AUDIODRIVER="${SDL_AUDIODRIVER:-dummy}"
 
 CALIBRATE=0
 [ "$STEPS" = "--calibrate" ] && { CALIBRATE=1; STEPS=""; }
