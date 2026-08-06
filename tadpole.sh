@@ -41,7 +41,12 @@ for cand in "$HERE"/rootfs/*/ubi_rfs "$HERE"/rootfs/*/*/ubi_rfs; do
     ROOTFS="$cand"; break
 done
 : "${ROOTFS:=$HERE/rootfs/MISSING/ubi_rfs}"
-SYSROOT="$HERE/runtime/sysroot"
+# WHICH GUEST FILESYSTEM TO RUN. Normally this checkout's own, but an override
+# lets a freshly built viewer drive a DIFFERENT install's content — the games
+# and profile in ~/.local/share/tadpole, say — without copying either into the
+# other. That is exactly what an A/B capture needs: one variable changed, and
+# the thing being measured is the code, not the content.
+SYSROOT="${TADPOLE_SYSROOT:-$HERE/runtime/sysroot}"
 # Two shim variants, because targets link different libraries: AppManager and
 # VideoDaemon pull in libdl.so.0, while the display tools (imager-fb etc.) link
 # libz.so.1 and no libdl at all. Both dirs are on the path; whichever the
