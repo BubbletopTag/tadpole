@@ -222,6 +222,32 @@ find "$APPDIR/app" -type f ! -name .build-id -print0 \
     | sort -z | xargs -0 cat 2>/dev/null | md5sum | cut -c1-16 \
     > "$APPDIR/app/.build-id"
 
+# ---- 5b. what glibc does this image demand? -------------------------------
+#
+# THE ONE THING THAT MAKES AN APPIMAGE NOT RUN ELSEWHERE, and it is invisible
+# on the machine that built it. Every binary copied off this host carries the
+# glibc it was linked against, and the newest requirement across the whole set
+# is the oldest distribution the image can run on.
+#
+# It bit us: built on Arch with a compiler defaulting to C23, four symbols
+# (__isoc23_strtol and friends) pushed the floor to glibc 2.38, so the image
+# refused to start on Linux Mint 21 — and the failure named a library rather
+# than a version, which reads as "SDL is missing" to anyone who has not seen
+# it before. Print it rather than find out from a user.
+if command -v objdump >/dev/null; then
+    FLOOR=$(for f in "$APPDIR/usr/bin/tadpole-view" "$APPDIR/usr/lib/"*.so* \
+                     "$APPDIR/deps/python/bin/python3."*; do
+                [ -f "$f" ] || continue
+                objdump -T "$f" 2>/dev/null | grep -oE 'GLIBC_2\.[0-9]+'
+            done | sort -V -u | tail -1)
+    case "$FLOOR" in
+        GLIBC_2.3[0-4]|GLIBC_2.2*|GLIBC_2.1*) NOTE="Ubuntu 22.04 / Mint 21 and newer" ;;
+        GLIBC_2.3[5-7])                       NOTE="Ubuntu 22.10+ — older Mint will NOT run it" ;;
+        *)                                    NOTE="NEWER THAN Ubuntu 23.04 — most users cannot run this" ;;
+    esac
+    echo "==> needs ${FLOOR:-unknown}: $NOTE"
+fi
+
 echo "==> AppDir ready: $APPDIR"
 echo "    it is runnable as-is:  $APPDIR/AppRun"
 

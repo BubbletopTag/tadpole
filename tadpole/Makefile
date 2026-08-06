@@ -243,11 +243,43 @@ hle-probe: viewer/hle_probe.c
 	      $(shell pkg-config --cflags --libs gl)
 	@echo "built viewer/hle-probe — run it to re-check the HLE assumptions"
 
+# -std=gnu17 IS NOT A STYLE CHOICE — it is what lets this run on a distribution
+# older than the one it was built on.
+#
+# With the compiler's default (gnu23 on GCC 13+), calls to strtol, sscanf and
+# friends bind to glibc 2.38's __isoc23_* variants, because C23 changed how
+# those parse binary literals. Four symbols is all it takes:
+#
+#     __isoc23_fscanf  __isoc23_sscanf  __isoc23_strtoll  __isoc23_strtol
+#
+# and the finished binary then REQUIRES glibc 2.38 — Ubuntu 23.10 or newer.
+# On Linux Mint 21 (glibc 2.35) it does not start, and the failure names a
+# library rather than a version, which reads as "SDL is missing" to anyone who
+# has not seen it before. Building as gnu17 uses the ordinary symbols and drops
+# the floor to 2.34, which is Ubuntu 22.04 and Mint 21.
+#
+# Going below 2.34 needs an older build host; 2.34 is where glibc merged
+# libpthread and every binary built since references __libc_start_main@2.34.
+HOST_STD := -std=gnu17
+#
+# AND _GNU_SOURCE HAS TO GO WITH IT. sdl2.pc puts -D_GNU_SOURCE=1 in its
+# cflags, and glibc re-enables the C23 redirects whenever that is defined,
+# whatever -std says. Measured on a two-line program:
+#
+#     <default>                        2 __isoc23_ symbols
+#     -std=gnu17                       0
+#     -std=gnu17 -D_GNU_SOURCE=1       2      <- what sdl2.pc gives us
+#     -std=c17                         0
+#
+# So the flag is filtered out of SDL's cflags rather than fought with. The
+# viewer uses no GNU extensions; SDL's headers define what they need.
+SDL_CFLAGS_PORTABLE := $(filter-out -D_GNU_SOURCE=1 -D_GNU_SOURCE,$(SDL_CFLAGS))
+
 viewer: $(VIEW_OUT)
 
 $(VIEW_OUT): $(VIEW_SRC) $(VIEW_HDR)
-	$(CC) -O2 -Wall -o $@ $(VIEW_SRC) $(SDL_CFLAGS) $(SDL_LIBS) -lz \
-	      $(shell pkg-config --libs gl)
+	$(CC) -O2 -Wall $(HOST_STD) -o $@ $(VIEW_SRC) $(SDL_CFLAGS_PORTABLE) \
+	      $(SDL_LIBS) -lz $(shell pkg-config --libs gl)
 	@echo "built $@"
 
 # The UI font is generated from ASCII art so the glyphs stay reviewable.
