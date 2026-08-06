@@ -141,6 +141,9 @@ static enum ui_action g_fb_action;    /* what to emit on choose */
 /* Where to go when the browser closes. Without this, choosing a file left NO
  * modal at all and the wizard appeared to vanish mid-setup. */
 static enum modal_kind g_fb_return;
+/* The browser is being used to PICK A VALUE, not to trigger an action:
+ * the chosen path becomes the profile photo and nothing else happens. */
+static int   g_fb_pick_profile;
 static char  g_fb_title[64];
 struct fentry { char name[256]; int isdir; };
 static struct fentry *g_fb_list;
@@ -309,8 +312,22 @@ static void path_tail(char *dst, size_t n, const char *src)
  * Every page re-tests real state rather than remembering that it ran, so this
  * doubles as a repair tool: reopen it and it shows exactly what is missing.
  */
-enum { WIZ_WELCOME = 0, WIZ_SYSTEM, WIZ_GAMES, WIZ_DONE, WIZ_PAGES };
+enum { WIZ_WELCOME = 0, WIZ_SYSTEM, WIZ_PROFILE, WIZ_GAMES, WIZ_DONE,
+       WIZ_PAGES };
 static int g_wiz_page;
+
+/* ---- the profile being composed on WIZ_PROFILE --------------------------
+ *
+ * A freshly installed system boots to Create Profile and stops there — the
+ * screen draws and nothing gets past it. Rather than leave setup blocked
+ * behind a broken screen, the wizard collects the same three things and
+ * writes the profile itself; the device then finds one already made.
+ */
+static char g_prof_name[21];
+static int  g_prof_grade = 1;
+static char g_prof_pic[PATHMAX];
+static int  g_prof_focus;        /* the name field has the keyboard */
+static int  g_prof_made;         /* one was created this session */
 
 /* WHAT THE WIZARD DROPPED, AND WHY.
  *
@@ -1063,6 +1080,12 @@ static void fb_enter(void)
 	}
 	path_join(g_action_path, sizeof(g_action_path), g_fb_dir,
 	          g_fb_list[g_fb_sel].name);
+	if (g_fb_pick_profile) {
+		snprintf(g_prof_pic, sizeof(g_prof_pic), "%s", g_action_path);
+		g_fb_pick_profile = 0;
+		g_modal = M_WIZARD;
+		return;
+	}
 	g_action = g_fb_action;
 	g_modal = M_NONE;
 }
@@ -1112,6 +1135,11 @@ void ui_init(SDL_Renderer *ren, const char *project_dir)
 	path_join(p, sizeof(p), g_proj, "tadpole.png");
 	logo_load(ren, p);
 	snprintf(g_status, sizeof(g_status), "idle");
+	/* SDL delivers SDL_TEXTINPUT only while text input is started. Enabled
+	 * once, here, rather than toggled per field: the name box is the only
+	 * typing surface in the program, every other key path already returns
+	 * early, and a mode that can be entered can be got stuck in. */
+	SDL_StartTextInput();
 
 	/* OPEN THE WIZARD WHEN THERE IS NOTHING TO BOOT. Without firmware the
 	 * emulator can only fail, and failing with a stack of missing-file errors
@@ -1154,6 +1182,14 @@ void ui_set_running(int r) { g_running = r; }
 
 /* Something may have installed or erased the system files. */
 void ui_invalidate_prereqs(void) { g_sys_ready = -1; }
+
+void ui_profile_get(char *name, size_t namesz, int *grade,
+                    char *picture, size_t picsz)
+{
+	if (name && namesz) snprintf(name, namesz, "%s", g_prof_name);
+	if (grade) *grade = g_prof_grade;
+	if (picture && picsz) snprintf(picture, picsz, "%s", g_prof_pic);
+}
 
 void ui_status(const char *fmt, ...)
 {
@@ -1648,7 +1684,8 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		struct prereq pq;
 		int bx = d.x + 62, by = d.y + 20, i2;
 		static const char *TITLES[WIZ_PAGES] = {
-			"Welcome to Tadpole", "System files", "Games", "Ready"
+			"Welcome to Tadpole", "System files", "Who is playing?",
+			"Games", "Ready"
 		};
 		prereq_check(&pq);
 
@@ -1762,6 +1799,74 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				     C_TEXT_DIM);
 			}
 			break;
+		case WIZ_PROFILE: {
+			/* A form, laid out like one: label, field, cursor. The name box
+			 * is the only place in Tadpole that takes typing, so it says so
+			 * — a bare rectangle that happens to accept keys is not
+			 * discoverable. */
+			int fy = by + 14;
+			text(r, bx, by, "The LeapPad asks who is playing before", C_TEXT_DIM);
+			text(r, bx, by + 10, "it will show a home screen.", C_TEXT_DIM);
+
+			text(r, bx, fy + 8, "Name", C_TEXT);
+			{
+				SDL_Rect f = { bx + 40, fy + 4, 132, 14 };
+				int hot = inside(g_mx, g_my, f.x, f.y, f.w, f.h);
+				fill(r, f.x, f.y, f.w, f.h, C_VOID);
+				bevel(r, f.x, f.y, f.w, f.h, g_prof_focus ? 1 : 0);
+				text(r, f.x + 4, f.y + 4, g_prof_name, C_TEXT);
+				if (g_prof_focus && (SDL_GetTicks() / 450) % 2 == 0)
+					fill(r, f.x + 4 + text_w(g_prof_name), f.y + 3, 1, 8, C_ACCENT);
+				if (!g_prof_name[0] && !g_prof_focus)
+					text(r, f.x + 4, f.y + 4, "click and type", C_TEXT_DIM);
+				(void)hot;
+			}
+
+			{
+				char gb[24];
+				SDL_Rect g = { bx + 40, fy + 22, 60, 14 };
+				int hot = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
+				text(r, bx, fy + 26, "Grade", C_TEXT);
+				fill(r, g.x, g.y, g.w, g.h, hot ? C_BAR_HI : C_PANEL);
+				bevel(r, g.x, g.y, g.w, g.h, 1);
+				if (g_prof_grade <= 0) snprintf(gb, sizeof(gb), "Pre-K");
+				else                   snprintf(gb, sizeof(gb), "Grade %d", g_prof_grade);
+				text_c(r, g.x, g.w, g.y + 4, gb, hot ? C_ACCENT : C_TEXT);
+			}
+
+			{
+				SDL_Rect p2 = { bx + 40, fy + 40, 60, 14 };
+				int hot = inside(g_mx, g_my, p2.x, p2.y, p2.w, p2.h);
+				text(r, bx, fy + 44, "Photo", C_TEXT);
+				fill(r, p2.x, p2.y, p2.w, p2.h, hot ? C_BAR_HI : C_PANEL);
+				bevel(r, p2.x, p2.y, p2.w, p2.h, 1);
+				text_c(r, p2.x, p2.w, p2.y + 4, "Choose...",
+				       hot ? C_ACCENT : C_TEXT);
+				if (g_prof_pic[0]) {
+					char shown[26];
+					path_tail(shown, sizeof(shown), g_prof_pic);
+					text(r, p2.x + 66, p2.y + 4, shown, C_ACCENT);
+				} else {
+					text(r, p2.x + 66, p2.y + 4, "optional, .jpg", C_TEXT_DIM);
+				}
+			}
+
+			{
+				SDL_Rect b = { bx, fy + 60, 96, 15 };
+				int on = g_prof_name[0] != 0;
+				int hot = on && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+				fill(r, b.x + 1, b.y + 1, b.w, b.h, C_SHADOW);
+				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI);
+				bevel(r, b.x, b.y, b.w, b.h, 1);
+				text_c(r, b.x, b.w, b.y + 4, "Create profile",
+				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
+				if (g_prof_made)
+					text(r, b.x + b.w + 8, b.y + 4, GL_CHECK_1 " created", C_ACCENT);
+				else if (!on)
+					text(r, b.x + b.w + 8, b.y + 4, "a name is needed", C_TEXT_DIM);
+			}
+			break;
+		}
 		case WIZ_GAMES:
 			text(r, bx, by, pq.games ? GL_CHECK_1 " Games installed"
 			                         : GL_CHECK_0 " No games yet",
@@ -2183,6 +2288,35 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			        UI_ACT_SETUP_FIRMWARE);
 			return 1;
 		}
+		if (g_wiz_page == WIZ_PROFILE) {
+			int fy = d.y + 38 + 14;
+			int bx2 = d.x + 62;
+			if (inside(mx, my, bx2 + 40, fy + 4, 132, 14)) {
+				g_prof_focus = 1;
+				return 1;
+			}
+			g_prof_focus = 0;
+			if (inside(mx, my, bx2 + 40, fy + 22, 60, 14)) {
+				g_prof_grade = (g_prof_grade + 1) % 6;   /* Pre-K .. 5 */
+				return 1;
+			}
+			if (inside(mx, my, bx2 + 40, fy + 40, 60, 14)) {
+				const char *home = getenv("HOME");
+				fb_open("Profile photo (.jpg)", home ? home : "/", ".jpg",
+				        UI_ACT_NONE);
+				g_fb_action = UI_ACT_NONE;   /* the path is kept, not acted on */
+				g_fb_return = M_WIZARD;
+				g_fb_pick_profile = 1;
+				return 1;
+			}
+			if (g_prof_name[0] && inside(mx, my, bx2, fy + 60, 96, 15)) {
+				g_action = UI_ACT_MAKE_PROFILE;
+				g_fb_return = M_WIZARD;
+				g_prof_made = 1;
+				return 1;
+			}
+			return 1;
+		}
 		if (g_wiz_page == WIZ_SYSTEM &&
 		    inside(mx, my, d.x + 62, d.y + 130, 132, 15)) {
 			g_action = UI_ACT_ONLINE_UPDATE;
@@ -2477,7 +2611,40 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 		}
 		return g_modal != M_NONE;
 
+	case SDL_TEXTINPUT:
+		/* THE ONLY PLACE IN TADPOLE THAT TAKES TYPING. Everything else is
+		 * pointer-driven, so text input is enabled all the time and simply
+		 * ignored unless the name field has focus — no mode to get stuck in. */
+		if (g_modal == M_WIZARD && g_wiz_page == WIZ_PROFILE && g_prof_focus) {
+			size_t n = strlen(g_prof_name);
+			const char *t = e->text.text;
+			for (; *t && n < sizeof(g_prof_name) - 1; t++)
+				if ((unsigned char)*t >= 0x20 && (unsigned char)*t < 0x7F)
+					g_prof_name[n++] = *t;
+			g_prof_name[n] = 0;
+			g_prof_made = 0;      /* edited since it was written */
+			return 1;
+		}
+		return g_modal != M_NONE;
+
 	case SDL_KEYDOWN:
+		if (g_modal == M_WIZARD && g_wiz_page == WIZ_PROFILE && g_prof_focus) {
+			size_t n = strlen(g_prof_name);
+			if (e->key.keysym.sym == SDLK_BACKSPACE) {
+				if (n) g_prof_name[n - 1] = 0;
+				g_prof_made = 0;
+				return 1;
+			}
+			if (e->key.keysym.sym == SDLK_RETURN ||
+			    e->key.keysym.sym == SDLK_TAB) {
+				g_prof_focus = 0;
+				return 1;
+			}
+			if (e->key.keysym.sym == SDLK_ESCAPE) {
+				g_prof_focus = 0;
+				return 1;
+			}
+		}
 		if (g_modal == M_GAMES) {
 			switch (e->key.keysym.sym) {
 			case SDLK_ESCAPE:

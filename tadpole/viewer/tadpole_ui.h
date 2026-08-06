@@ -76,6 +76,7 @@ enum ui_action {
 	UI_ACT_ERASE_FW,         /* wipe the installed system files */
 	UI_ACT_BUILD_SYSROOT,    /* regenerate runtime/sysroot from the rootfs */
 	UI_ACT_ONLINE_UPDATE,    /* fetch the system files from LeapFrog */
+	UI_ACT_MAKE_PROFILE,     /* create a player profile; fields via ui_profile_get */
 	UI_ACT_SCAN_GAMES,       /* path = folder of .tar backups to read */
 	UI_ACT_INSTALL_GAMES,    /* path = file listing the archives to install */
 	UI_ACT_STOP,
@@ -130,6 +131,11 @@ void  ui_invalidate_prereqs(void);
 /* Re-read the game index written by tools/scan-games.sh, and re-test which
  * titles are installed. Call after a scan or an install finishes. */
 void  ui_games_reload(void);
+
+/* The profile the wizard is composing. The viewer turns these into arguments
+ * for tools/make-profile.sh when UI_ACT_MAKE_PROFILE comes back. */
+void  ui_profile_get(char *name, size_t namesz, int *grade,
+                     char *picture, size_t picsz);
 
 /* Told by the viewer so the bar can show it and File can offer Stop. */
 void  ui_set_running(int running);

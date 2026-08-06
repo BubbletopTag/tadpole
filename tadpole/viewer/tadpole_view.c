@@ -1288,6 +1288,23 @@ static void tool_run(const char *what, const char *script, const char *arg)
 	tool_run2(what, script, arg, NULL);
 }
 
+/* Up to six arguments, for the tools that take flags rather than a path. */
+static void tool_runv(const char *what, const char *script, char *const av[])
+{
+	char *argv[8];
+	int n = 0;
+	argv[n++] = (char *)script;
+	while (av[n - 1] && n < 7) { argv[n] = av[n - 1]; n++; }
+	argv[n] = NULL;
+	if (g_tool > 0) { ui_status("busy: %s", g_tool_what); return; }
+	snprintf(g_tool_what, sizeof(g_tool_what), "%s", what);
+	g_tool_len = 0;
+	g_tool = spawn_script(script, argv, 0, &g_tool_fd, 0);
+	ui_status("%s...", what);
+	if (g_tool > 0) { ui_progress_begin(what); ui_progress_line("starting..."); }
+	else ui_status("%s could not start", what);
+}
+
 /* Drain whatever the tool has written, a line at a time. Called every frame. */
 static void tool_drain(void)
 {
@@ -2062,6 +2079,19 @@ int main(int argc, char **argv)
 		case UI_ACT_ONLINE_UPDATE:
 			tool_run("online update", "tools/online-update.sh", NULL);
 			break;
+		case UI_ACT_MAKE_PROFILE: {
+			static char nm[64], gr[16], pic[1024];
+			char *av[7];
+			int grade = 1, n = 0;
+			ui_profile_get(nm, sizeof(nm), &grade, pic, sizeof(pic));
+			snprintf(gr, sizeof(gr), "%d", grade);
+			av[n++] = (char *)"--name"; av[n++] = nm;
+			av[n++] = (char *)"--grade"; av[n++] = gr;
+			if (pic[0]) { av[n++] = (char *)"--picture"; av[n++] = pic; }
+			av[n] = NULL;
+			tool_runv("profile", "tools/make-profile.sh", av);
+			break;
+		}
 		case UI_ACT_ERASE_FW:
 			/* Stop the guest first: it has the old sysroot mapped, and pulling
 			 * that out from under a running emulator is a poor way to find out
