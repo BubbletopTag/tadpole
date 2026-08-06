@@ -239,8 +239,8 @@ wizard opens instead of a wall of errors.
 | | |
 |---|---|
 | Arrow keys | D-pad |
-| Z / X | A / B |
-| A / S | L / R |
+| X / Z | A / B |
+| Q / W | L / R |
 | Home | Menu |
 | Esc | Back |
 | Mouse | stylus |

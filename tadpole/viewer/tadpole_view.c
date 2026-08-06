@@ -425,10 +425,15 @@ static uint16_t map_key(SDL_Keycode k, int rotate)
 	case SDLK_RIGHT:  return rotate_dpad(1, rotate);
 	case SDLK_DOWN:   return rotate_dpad(2, rotate);
 	case SDLK_LEFT:   return rotate_dpad(3, rotate);
-	case SDLK_z:      return KEY_A_;
-	case SDLK_x:      return KEY_B_;
+	case SDLK_x:      return KEY_A_;
+	case SDLK_z:      return KEY_B_;
 	case SDLK_h:      return KEY_H_;
 	case SDLK_p:      return KEY_P_;
+	/* THE SHOULDER BUTTONS WERE NEVER WIRED UP. KEY_L_ and KEY_R_ have been
+	 * defined since the keycode table was written and nothing ever returned
+	 * them, so a title that wanted L or R could not be given one. */
+	case SDLK_q:      return KEY_L_;
+	case SDLK_w:      return KEY_R_;
 	case SDLK_HOME:   return KEY_M_;
 	case SDLK_ESCAPE: return KEY_ESC_;
 	case SDLK_EQUALS: return KEY_VOLUMEUP_;
@@ -1440,7 +1445,11 @@ int main(int argc, char **argv)
 				uint16_t code;
 				if (e.key.repeat)
 					break;
-				if (e.key.keysym.sym == SDLK_q &&
+				/* KEYDOWN only, like the Ctrl+R handler below it. Q is the
+				 * guest's L button now, and swallowing its key-UP because
+				 * Ctrl happened to be held would leave L stuck down inside
+				 * the guest with nothing to release it. */
+				if (e.key.keysym.sym == SDLK_q && e.type == SDL_KEYDOWN &&
 				    (e.key.keysym.mod & KMOD_CTRL)) {
 					running = 0;
 					break;

@@ -1533,8 +1533,8 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_PAD: {
 		static const char *rows[] = {
 			"Arrows      D-pad",
-			"Z / X       A / B",
-			"A / S       L / R",
+			"X / Z       A / B",
+			"Q / W       L / R",
 			"Home        Menu",
 			"Esc         Back",
 			"Mouse       Stylus",
