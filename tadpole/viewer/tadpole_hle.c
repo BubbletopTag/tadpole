@@ -391,6 +391,53 @@ static int make_target(int w, int h, int samples)
 	return 1;
 }
 
+/* Change the sample count on a LIVE replayer.
+ *
+ * Anti-aliasing is a checkbox in a settings panel, and a checkbox that needs
+ * the emulator restarted to take effect is not a checkbox — it is a note to
+ * self. Only the framebuffer object and its attachments depend on the sample
+ * count; textures, buffers and every scrap of guest GL state live elsewhere
+ * and are untouched, so the target can simply be rebuilt underneath the
+ * replay.
+ *
+ * Called from the viewer's loop, never from inside a pump: between frames the
+ * FBO holds nothing anyone still wants. The viewport and scissor DO belong to
+ * the framebuffer, so they are re-applied afterwards — without that, the frame
+ * after a toggle renders into a default viewport, which looks like the picture
+ * jumping to a corner.
+ */
+void hle_host_set_msaa(int samples)
+{
+	if (!g_ctx || samples == g_msaa) return;
+	if (samples < 0) samples = 0;
+
+	ctx_enter();
+	/* Tear down the old target completely. g_fbo and g_resolve are the SAME
+	 * object when AA is off, so deleting both handles blindly would delete a
+	 * name twice and leave the second delete pointing at whatever the driver
+	 * recycled that name for. */
+	if (g_fbo && g_fbo != g_resolve) glDeleteFramebuffers(1, &g_fbo);
+	if (g_resolve) glDeleteFramebuffers(1, &g_resolve);
+	if (g_colour) glDeleteTextures(1, &g_colour);
+	if (g_depth) glDeleteRenderbuffers(1, &g_depth);
+	if (g_ms_colour) glDeleteRenderbuffers(1, &g_ms_colour);
+	if (g_ms_depth) glDeleteRenderbuffers(1, &g_ms_depth);
+	g_fbo = g_resolve = g_colour = g_depth = g_ms_colour = g_ms_depth = 0;
+	g_msaa = 0;
+
+	if (!make_target(g_w, g_h, samples)) {
+		fprintf(stderr, "hle: could not rebuild the target for %dx AA\n", samples);
+		make_target(g_w, g_h, 0);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+	if (g_vw && g_vh)
+		glViewport(g_vx, g_h - g_vy - g_vh, g_vw, g_vh);
+	apply_scissor();
+	ctx_leave();
+}
+
+int hle_host_msaa(void) { return g_msaa; }
+
 int hle_host_init(const char *dir, int w, int h, int samples)
 {
 	char path[600];

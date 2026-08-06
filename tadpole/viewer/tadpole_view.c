@@ -1751,6 +1751,16 @@ int main(int argc, char **argv)
 		}
 		tool_poll();
 		guest_log_pump();
+		/* Anti-aliasing, applied the moment it is changed rather than at the
+		 * next launch. One int compare per frame; the rebuild only happens on
+		 * an actual change. */
+		if (hle_host_ready() && ui_cfg()->msaa != hle_host_msaa()) {
+			hle_host_set_msaa(ui_cfg()->msaa);
+			if (hle_host_msaa())
+				ui_status("AA %dx", hle_host_msaa());
+			else
+				ui_status("AA off");
+		}
 		if (g_guest > 0 && !guest_alive()) {
 			ui_status("stopped");
 			guest_log_close();     /* flush the tail of a boot that just died */

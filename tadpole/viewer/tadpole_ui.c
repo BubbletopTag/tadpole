@@ -1497,7 +1497,8 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		};
 		int lv = g_cfg.debug_level;
 		char buf[32];
-		if (lv < 0) lv = 0; if (lv > 3) lv = 3;
+		if (lv < 0) lv = 0;
+		if (lv > 3) lv = 3;
 		row_value(r, &d, 0, "Debug level", LV[lv], row_hit(&d, 0, g_mx, g_my));
 		/* The two explanation lines take a whole row of their own. They used
 		 * to be drawn into row 1 at +8, which put the second line straight
@@ -2258,9 +2259,9 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			for (i = 0; i < 4; i++)
 				if (s[i] == g_cfg.msaa) k = (i + 1) % 4;
 			g_cfg.msaa = s[k];
-			/* The render target is built once, when the replayer starts. */
-			ui_status(g_cfg.msaa ? "AA %dx at next launch" : "AA off at next launch",
-			          g_cfg.msaa);
+			/* The viewer notices the change and rebuilds the render target on
+			 * the next frame, so this takes effect while you watch — which is
+			 * the only way to judge whether it was worth having. */
 		}
 		else if (row_hit(&d, 3, mx, my)) g_cfg.hle_strict = !g_cfg.hle_strict;
 		else if (row_hit(&d, 4, mx, my)) {

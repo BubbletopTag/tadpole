@@ -7,6 +7,11 @@
  * Returns 0 if the host cannot replay, in which case the guest sees no
  * heartbeat and keeps rasterising in software. */
 int  hle_host_init(const char *dir, int w, int h, int samples);
+
+/* Anti-aliasing, changeable while a guest is running. `samples` is 0, 2, 4 or
+ * 8; anything the driver cannot honour is clamped and reported. */
+void hle_host_set_msaa(int samples);
+int  hle_host_msaa(void);
 void hle_host_shutdown(void);
 int  hle_host_ready(void);
 

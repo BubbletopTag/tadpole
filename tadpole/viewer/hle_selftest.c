@@ -174,6 +174,56 @@ int main(void)
 		}
 	}
 
+	/* ---- anti-aliasing, switched on while the replayer is LIVE ----------
+	 *
+	 * Changing the sample count deletes the framebuffer object and its
+	 * attachments and builds new ones underneath a running replay. If that
+	 * teardown is wrong the failure is silent and total — every later frame
+	 * comes out black, or lands in a default viewport — and it would only be
+	 * noticed by someone toggling a settings row mid-game. So toggle it here
+	 * and draw the same frame again.
+	 */
+	hle_host_set_msaa(4);
+	if (hle_host_msaa() == 0) {
+		printf("  (no multisampling on this driver — live-toggle test skipped)\n");
+	} else {
+		printf("  AA switched to %dx mid-session\n", hle_host_msaa());
+
+		hle_viewport(0, 0, W, H);
+		hle_clear(COLOUR_BIT | DEPTH_BIT, 0xFF0D2113u, 1.0f);
+		hle_bindtexture(1);
+		hle_enable(GL_TEXTURE_2D_);
+		hle_color(1, 1, 1, 1);
+		hle_clientstate(TADGL_ARR_VERTEX, 1);
+		hle_clientstate(TADGL_ARR_TEXCOORD, 1);
+		hle_arraypointer(TADGL_ARR_VERTEX,   1, 2, GL_FIXED_, 0, 0);
+		hle_arraypointer(TADGL_ARR_TEXCOORD, 2, 2, GL_FIXED_, 0, 0);
+		hle_drawelements(GL_TRIANGLES_, 6, GL_UNSIGNED_SHORT_, 3, 0);
+		hle_present_nowait();
+
+		memset(fb, 0xAB, sizeof fb);
+		check(hle_host_pump(fb, W) == 1, "replays a frame after the AA change");
+		check(hle_host_desyncs() == 0, "no desync from rebuilding the target");
+		{
+			unsigned int corner = fb[4 * W + 4];
+			unsigned int centre = fb[(H / 2) * W + (W / 2)];
+			printf("  corner %08X  centre %08X (multisampled)\n",
+			       corner & 0xFFFFFF, centre & 0xFFFFFF);
+			check((corner & 0xFFFFFF) == 0x0D2113u,
+			      "clear colour survives the resolve");
+			check(centre != 0xABABABABu, "the quad still draws (not poison)");
+			{
+				unsigned int c = centre & 0xFFFFFF;
+				check(c == 0xFF0000u || c == 0x00FF00u ||
+				      c == 0x0000FFu || c == 0xFFFF00u,
+				      "texture path survives the resolve");
+			}
+		}
+		/* And back off again, which is the other half of a toggle. */
+		hle_host_set_msaa(0);
+		check(hle_host_msaa() == 0, "AA switches back off");
+	}
+
 	/* ---- the ring must end level ---------------------------------------- */
 	{
 		char path[600];
