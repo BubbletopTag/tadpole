@@ -525,6 +525,61 @@ void hle_host_set_quality(int samples, int ss)
 int hle_host_msaa(void) { return g_msaa; }
 int hle_host_scale(void) { return g_ss; }
 
+/* ---- handing the frame over at draw resolution --------------------------- */
+
+static int g_want_full;      /* the viewer will draw the game layer itself */
+static int g_full_ready;     /* a frame is sitting in the resolve buffer */
+
+void hle_host_want_full(int on) { g_want_full = on ? 1 : 0; }
+
+/* The size of what hle_host_read_full produces: the LAYER RECTANGLE at draw
+ * scale, not the whole draw buffer. Only that rectangle is ever rendered — the
+ * multisample resolve covers only it, and the rest holds whatever was there
+ * last time. Reporting the full buffer would have the viewer upload and draw
+ * that leftover as if it were picture. */
+void hle_host_full(int *w, int *h)
+{
+	int rw = g_vw ? g_vw : g_w, rh = g_vh ? g_vh : g_h;
+	if (w) *w = rw * g_ss;
+	if (h) *h = rh * g_ss;
+}
+
+void hle_host_rect(int *x, int *y, int *w, int *h)
+{
+	if (x) *x = g_vw ? g_vx : 0;
+	if (y) *y = g_vw ? g_vy : 0;
+	if (w) *w = g_vw ? g_vw : g_w;
+	if (h) *h = g_vh ? g_vh : g_h;
+}
+
+/* Read the finished frame at draw size. Costs a glReadPixels of g_dw x g_dh —
+ * nine times the pixels of the old panel-sized one at 3x — which is the price
+ * of not having a second GL context to share the texture with. Whether that
+ * price is worth paying is a measurement, not an opinion: compare frame counts
+ * over the same scripted route with it on and off. */
+int hle_host_read_full(unsigned int *out)
+{
+	int rx = g_vw ? g_vx : 0, ry = g_vw ? g_vy : 0;
+	int rw = g_vw ? g_vw : g_w, rh = g_vh ? g_vh : g_h;
+	int dw = rw * g_ss, dh = rh * g_ss;
+	int y;
+
+	if (!g_ready || !g_full_ready || !out) return 0;
+	ctx_enter();
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_resolve);
+	/* Bottom-up to top-down, a row at a time, exactly as the panel-sized
+	 * readback does. The rectangle is the layer's, scaled into the draw
+	 * buffer. */
+	for (y = 0; y < dh; y++)
+		glReadPixels(rx * g_ss, (g_h - (ry + rh)) * g_ss + (dh - 1 - y),
+		             dw, 1, GL_BGRA, GL_UNSIGNED_BYTE,
+		             out + (size_t)y * (size_t)dw);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+	ctx_leave();
+	g_full_ready = 0;
+	return 1;
+}
+
 int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 {
 	char path[600];
@@ -892,7 +947,13 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 					                  dx0, dy0, dx1, dy1,
 					                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
 				}
-				if (g_ss > 1) {
+				/* THE DOWNSCALE IS SKIPPED when the viewer is taking the
+				 * full-size frame: squeezing 1440x816 into 320x240 only to
+				 * throw it away is the one step in this chain with no
+				 * purpose. The guest's own layer then holds a stale picture,
+				 * which is exactly right — nothing reads it, and the viewer
+				 * draws over that rectangle with the big one. */
+				if (g_ss > 1 && !g_want_full) {
 					/* Down to panel size. GL_LINEAR here is the whole point:
 					 * it is what turns g_ss*g_ss rendered samples into one
 					 * averaged pixel. */
@@ -902,14 +963,20 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 					                  rx, py0, rx + rw, py1,
 					                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
 				}
+				g_full_ready = 1;
 				if (g_msaa || g_ss > 1)
 					glBindFramebuffer(GL_READ_FRAMEBUFFER, g_final);
 			}
 			glFinish();
-			for (y = 0; y < rh; y++)
-				glReadPixels(rx, g_h - 1 - (ry + y), rw, 1, GL_BGRA,
-				             GL_UNSIGNED_BYTE,
-				             out + (size_t)(ry + y) * pitch_px + rx);
+			/* The panel-sized readback exists to fill the guest's layer. When
+			 * the viewer is drawing the game itself it does not need filling,
+			 * and this is the expensive line in the whole replay — a
+			 * synchronous transfer of the finished frame, every frame. */
+			if (!g_want_full)
+				for (y = 0; y < rh; y++)
+					glReadPixels(rx, g_h - 1 - (ry + y), rw, 1, GL_BGRA,
+					             GL_UNSIGNED_BYTE,
+					             out + (size_t)(ry + y) * pitch_px + rx);
 			/* Back to the draw target: more frames may follow in this same
 			 * pump, and they must not land in a resolve buffer. */
 			if (g_msaa || g_ss > 1)

@@ -708,6 +708,38 @@ static void blit_layer(uint32_t *dst, int w, int h, const struct layer_state *ls
 	}
 }
 
+/* The same layer, but KEEPING its transparency instead of flattening it.
+ *
+ * The alpha in these buffers is a key, not a blend factor: the guest writes
+ * zero where the layer below should show through and anything non-zero where
+ * it should not. Turning that into a real 0/255 alpha channel lets the layer
+ * be drawn as its own texture over whatever the GPU has already put on screen
+ * — which is how a 1440x816 game picture gets underneath a 480x272 frame of
+ * chrome without either being resampled to meet the other. */
+static void blit_layer_keyed(uint32_t *dst, int w, int h,
+                             const struct layer_state *ls, const void *src)
+{
+	int x, y;
+
+	if (!src)
+		return;
+	if (ls->bpp == 16) {
+		/* 16bpp has no alpha channel, so it is opaque everywhere. */
+		blit_layer(dst, w, h, ls, src, 1);
+		return;
+	}
+	{
+		const uint32_t *s = src;
+		for (y = 0; y < h; y++)
+			for (x = 0; x < w; x++) {
+				uint32_t p = s[y * w + x];
+				dst[y * w + x] = ((p >> 24) & 0xFF)
+				               ? (0xFF000000u | (p & 0x00FFFFFFu))
+				               : 0u;
+			}
+	}
+}
+
 static int guest_external(void);   /* defined with the guest controls below */
 
 /* ---- --ui-shot: render one frame of a named UI state to a PNG -------------
@@ -1280,6 +1312,29 @@ int main(int argc, char **argv)
 	SDL_Renderer *ren;
 	SDL_Texture *tex;
 	uint32_t *pixels;
+	/* THE PICTURE IS BUILT IN THREE PIECES, not one.
+	 *
+	 * The guest's layers composite bottom-up: fb2, then fb1, then fb0 on top,
+	 * and for a 3D title fb1 IS the game viewport — its layer window is
+	 * 320x240 at +15+17 and everything outside that is transparent, with the
+	 * bamboo frame and the A/B/L/R buttons all living on fb0 above it.
+	 *
+	 * That is what makes a high-resolution game picture possible at all: the
+	 * GL image occupies one rectangle, with guest 2D strictly above and below
+	 * it. So the two halves are composited separately on the CPU as before,
+	 * and the GL layer is drawn between them at whatever size we have it in —
+	 * 1440x816 rather than 320x240. Nothing else in the frame changes.
+	 *
+	 * With HLE off, `top` is still split out and drawn second, which composites
+	 * to exactly what the single buffer used to produce. */
+	SDL_Texture *tex_top = NULL;      /* fb0: chrome, alpha-keyed, drawn last */
+	uint32_t *pixels_top = NULL;
+	SDL_Texture *tex_gl = NULL;       /* the game viewport at draw resolution */
+	uint32_t *gl_px = NULL;
+	int gl_tw = 0, gl_th = 0;         /* size of tex_gl */
+	int top_drawn = 0;                /* fb0 had something to show this frame */
+	int gl_have = 0;                  /* tex_gl holds a current frame */
+	int gl_rx = 0, gl_ry = 0, gl_rw = 0, gl_rh = 0;   /* where it belongs */
 	char path[512];
 	int scale = 2, w, h, i, running = 1, touching = 0;
 	int rotate = 0;   /* degrees CW; portrait apps need 90 */
@@ -1367,6 +1422,10 @@ int main(int argc, char **argv)
 	tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
 	                        SDL_TEXTUREACCESS_STREAMING, w, h);
 	pixels = malloc((size_t)w * h * 4);
+	tex_top = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
+	                            SDL_TEXTUREACCESS_STREAMING, w, h);
+	if (tex_top) SDL_SetTextureBlendMode(tex_top, SDL_BLENDMODE_BLEND);
+	pixels_top = malloc((size_t)w * h * 4);
 
 	/* "Boot the system menu at startup" — for people who set Tadpole up once
 	 * and afterwards only ever want the LeapPad. Not while the wizard is up:
@@ -1583,10 +1642,45 @@ int main(int argc, char **argv)
 						        g_state ? g_state->layer[1].yoffset : 0);
 				}
 				hle_host_pump(dst, (unsigned)w);
+
+				/* THE GAME LAYER, AT DRAW RESOLUTION.
+				 *
+				 * Only worth doing when there is more resolution to have; at
+				 * 1x the panel-sized frame the guest already received is the
+				 * same picture, and going round again would cost a second
+				 * transfer for nothing. */
+				if (ui_cfg()->render_scale > 1 && hle_host_scale() > 1) {
+					int fw = 0, fh = 0;
+					hle_host_full(&fw, &fh);
+					if (fw > 0 && fh > 0) {
+						if (fw != gl_tw || fh != gl_th) {
+							/* The layer rectangle can change when a title
+							 * switches screens, so the texture follows it. */
+							if (tex_gl) SDL_DestroyTexture(tex_gl);
+							free(gl_px);
+							tex_gl = SDL_CreateTexture(ren,
+							             SDL_PIXELFORMAT_ARGB8888,
+							             SDL_TEXTUREACCESS_STREAMING, fw, fh);
+							gl_px = malloc((size_t)fw * fh * 4);
+							gl_tw = fw; gl_th = fh;
+							if (tex_gl)
+								SDL_SetTextureBlendMode(tex_gl, SDL_BLENDMODE_NONE);
+						}
+						if (tex_gl && gl_px && hle_host_read_full(gl_px)) {
+							SDL_UpdateTexture(tex_gl, NULL, gl_px, fw * 4);
+							hle_host_rect(&gl_rx, &gl_ry, &gl_rw, &gl_rh);
+							gl_have = 1;
+						}
+					}
+				} else if (gl_have) {
+					gl_have = 0;      /* back to the guest's own picture */
+				}
 			}
 		}
+		hle_host_want_full(ui_cfg()->render_scale > 1);
 
 		memset(pixels, 0, (size_t)w * h * 4);
+		top_drawn = 0;
 		if (g_state) {
 			int drawn = 0;
 			/* Z-ORDER: fb0 is the TOPMOST layer, not the bottom.
@@ -1613,8 +1707,17 @@ int main(int argc, char **argv)
 					off = 0;
 				base = (const unsigned char *)g_fb[i] + off;
 
-				blit_layer(pixels, w, h, ls, base, drawn == 0);
-				drawn++;
+				/* fb0 is the TOP layer and goes into its own buffer, so the
+				 * game picture can be drawn between the two at its own
+				 * resolution. Everything else composites as before. */
+				if (i == 0 && pixels_top) {
+					memset(pixels_top, 0, (size_t)w * h * 4);
+					blit_layer_keyed(pixels_top, w, h, ls, base);
+					top_drawn = 1;
+				} else {
+					blit_layer(pixels, w, h, ls, base, drawn == 0);
+					drawn++;
+				}
 			}
 		}
 
@@ -1630,18 +1733,78 @@ int main(int argc, char **argv)
 			SDL_SetRenderDrawColor(ren, 6, 15, 10, 255);
 			SDL_RenderClear(ren);
 			if (g_state) {
+				/* Bottom: everything below the game layer. */
 				SDL_UpdateTexture(tex, NULL, pixels, w * 4);
 				if (rotate)
 					SDL_RenderCopyEx(ren, tex, NULL, &dst, (double)rotate,
 					                 NULL, SDL_FLIP_NONE);
 				else
 					SDL_RenderCopy(ren, tex, NULL, &dst);
+
+				/* Middle: the game, at whatever resolution it was drawn at.
+				 * Its destination is the layer rectangle mapped into the same
+				 * place on screen the panel-sized version would have occupied,
+				 * so nothing moves — it simply arrives with more detail. */
+				if (gl_have && tex_gl) {
+					SDL_Rect g = { dst.x + gl_rx, dst.y + gl_ry, gl_rw, gl_rh };
+					if (rotate)
+						SDL_RenderCopyEx(ren, tex_gl, NULL, &g, (double)rotate,
+						                 NULL, SDL_FLIP_NONE);
+					else
+						SDL_RenderCopy(ren, tex_gl, NULL, &g);
+				}
+
+				/* Top: fb0's chrome, alpha-keyed over both. */
+				if (top_drawn && tex_top) {
+					SDL_UpdateTexture(tex_top, NULL, pixels_top, w * 4);
+					if (rotate)
+						SDL_RenderCopyEx(ren, tex_top, NULL, &dst, (double)rotate,
+						                 NULL, SDL_FLIP_NONE);
+					else
+						SDL_RenderCopy(ren, tex_top, NULL, &dst);
+				}
 			} else {
 				ui_draw_idle(ren, lw, lh + UI_BAR_H);
 			}
 			ui_draw(ren, lw, lh + UI_BAR_H);
 		}
 		SDL_RenderPresent(ren);
+
+		/* ---- screenshot what is ACTUALLY ON SCREEN ----------------------
+		 *
+		 * tools/fbshot.py composites the guest's shared framebuffers, which
+		 * was the whole picture right up until the game layer stopped being
+		 * squeezed back into them. With a high-resolution game layer the
+		 * arena holds a stale copy, so an arena screenshot would show the old
+		 * picture and every capture comparison would be measuring nothing.
+		 *
+		 * A trigger file rather than a key, because the thing that wants a
+		 * screenshot is a script: write the destination path into
+		 * $TADPOLE_DIR/shot.req and the next frame lands there.
+		 */
+		{
+			char req[600], want[512];
+			FILE *rf;
+			snprintf(req, sizeof(req), "%s/shot.req", g_dir);
+			if ((rf = fopen(req, "r"))) {
+				if (fgets(want, sizeof(want), rf)) {
+					int ow = 0, oh = 0;
+					size_t n = strlen(want);
+					while (n && (want[n-1] == '\n' || want[n-1] == '\r'))
+						want[--n] = 0;
+					SDL_GetRendererOutputSize(ren, &ow, &oh);
+					if (n && ow > 0 && oh > 0) {
+						unsigned char *rgb = malloc((size_t)ow * oh * 3);
+						if (rgb && SDL_RenderReadPixels(ren, NULL,
+						        SDL_PIXELFORMAT_RGB24, rgb, ow * 3) == 0)
+							write_png(want, ow, oh, rgb);
+						free(rgb);
+					}
+				}
+				fclose(rf);
+				unlink(req);
+			}
+		}
 
 		if (ui_cfg()->audio_on) {
 			static Uint32 last_fmt_poll;

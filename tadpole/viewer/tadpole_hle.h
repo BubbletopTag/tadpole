@@ -26,6 +26,24 @@ int  hle_host_ready(void);
  * `out` holding it as ARGB8888 at `pitch_px` pixels per row. */
 int  hle_host_pump(unsigned int *out, unsigned int pitch_px);
 
+/* ---- the frame at FULL draw resolution ----------------------------------
+ *
+ * hle_host_pump hands back a panel-sized frame because that is what the
+ * guest's framebuffer is. When the replay is drawing at 3x, squeezing it into
+ * 480x272 is the last thing that happens to it — and the only reason to do
+ * that is that the guest's layer has to hold something.
+ *
+ * The viewer draws the game layer itself, so it can have the big one. Call
+ * hle_host_want_full(1) and the downscale is skipped; hle_host_full() then
+ * reports the size to allocate and hle_host_read_full() fills it after a
+ * frame completes.
+ */
+void hle_host_want_full(int on);
+void hle_host_full(int *w, int *h);          /* draw-buffer size */
+/* The layer rectangle in PANEL coordinates — where the picture belongs. */
+void hle_host_rect(int *x, int *y, int *w, int *h);
+int  hle_host_read_full(unsigned int *out);  /* 1 if it produced pixels */
+
 void hle_host_stats(unsigned long *frames, unsigned long *packets);
 unsigned int hle_host_desyncs(void);
 int  hle_guest_fell_back(void);

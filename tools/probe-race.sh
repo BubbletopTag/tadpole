@@ -94,9 +94,28 @@ reap() {
 shot_n=0
 shoot() {                      # $1 = label
     shot_n=$((shot_n+1))
-    local f
+    local f w
     f="$(printf '%s/%02d-%s.png' "$OUT" "$shot_n" "$1")"
-    "$HERE/fbshot.py" "$f" >/dev/null 2>&1 && echo "    shot $f"
+    # THE WINDOW FIRST, the arena second.
+    #
+    # fbshot.py composites the guest's shared framebuffers, and that was the
+    # whole picture until the game layer stopped being squeezed back into
+    # them: at a render scale above 1 the arena holds a stale copy of the
+    # game and only the viewer's window has the real one. Ask the viewer, and
+    # fall back to the arena when there is no viewer to ask (--no-viewer runs,
+    # or a build without the trigger).
+    w="$f"
+    echo "$w" > "$TADPOLE_DIR/shot.req" 2>/dev/null
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        [ -e "$TADPOLE_DIR/shot.req" ] || break
+        sleep 0.2
+    done
+    if [ -s "$f" ]; then
+        echo "    shot $f (window)"
+    else
+        rm -f "$TADPOLE_DIR/shot.req"
+        "$HERE/fbshot.py" "$f" >/dev/null 2>&1 && echo "    shot $f (arena)"
+    fi
 }
 
 waitfor() {                    # $1 = regex  $2 = seconds
