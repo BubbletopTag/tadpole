@@ -104,10 +104,14 @@ def main():
     out = "fb.png"
     d = os.environ.get("TADPOLE_DIR", "/tmp/tadpole")
     args = sys.argv[1:]
+    probe = None
     i = 0
     while i < len(args):
         if args[i] == "-d":
             d = args[i + 1]; i += 2
+        elif args[i] == "--probe":
+            # --probe X,Y,W,H,RRGGBB — "is that patch mostly that colour?"
+            probe = args[i + 1]; i += 2
         else:
             out = args[i]; i += 1
 
@@ -115,6 +119,35 @@ def main():
     if magic != MAGIC:
         print(f"bad magic 0x{magic:08x} in {d}/state.bin", file=sys.stderr)
         return 1
+
+    if probe is not None:
+        # ASKING THE SCREEN A QUESTION, for scripts that have to know what is
+        # on it before deciding what to do next.
+        #
+        # This exists because the race harness waited on a LOG marker to decide
+        # the home screen was ready — and the picker loads its icons BEHIND the
+        # Connect nag, so the marker appeared while a full-screen dialog still
+        # covered everything. Every later tap then landed on the dialog, and
+        # the run failed a minute later looking like the emulator ignoring
+        # input. The framebuffer knew the truth the whole time.
+        px, py, pw, ph, want = probe.split(",")
+        px, py, pw, ph = int(px), int(py), int(pw), int(ph)
+        want = int(want, 16)
+        wr, wg, wb = (want >> 16) & 255, (want >> 8) & 255, want & 255
+        rgb = composite(d, w, h, layers)
+        hit = tot = 0
+        for y in range(max(0, py), min(h, py + ph)):
+            row = y * w * 3
+            for x in range(max(0, px), min(w, px + pw)):
+                o = row + x * 3
+                tot += 1
+                if (abs(rgb[o] - wr) < 48 and abs(rgb[o+1] - wg) < 48
+                        and abs(rgb[o+2] - wb) < 48):
+                    hit += 1
+        pct = (100 * hit // tot) if tot else 0
+        print(f"probe {px},{py} {pw}x{ph} vs {want:06X}: {pct}% match")
+        return 0 if pct >= 25 else 1
+
     for i, L in enumerate(layers):
         print(f"  fb{i}: enabled={L['enabled']} {L['xres']}x{L['yres']} "
               f"bpp={L['bpp']} yoff={L['yoffset']} alpha={L['alpha']} "

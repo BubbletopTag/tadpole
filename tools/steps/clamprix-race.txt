@@ -1,0 +1,56 @@
+# Clam Prix -> the start line of an actual race, and STOP there.
+#
+# WHY THIS EXISTS ALONGSIDE clamprix-deep.txt: that route opens with
+# `tap 160 130`, which was the Clam Prix tile on the home screen of the install
+# it was written against. Reinstall the firmware, or install a different set of
+# games, and the picker reorders — the tap then lands on some other title, or
+# on nothing, and the run ends twenty screenshots later at a black frame that
+# looks like a rendering bug. Every coordinate below was MEASURED off a capture
+# from the install it runs against, and the note says how, so the next person
+# to find it stale can redo the measurement instead of guessing.
+#
+# HOW THE COORDINATES WERE FOUND (480x272 framebuffer, portrait UI):
+#
+#   18,228    the scroll-down arrow, bottom left of the picker
+#   269,221   Clam Prix's tile, page 2, bottom-left. Found by searching the
+#             capture for SpongeBob's yellow inside that tile's box:
+#             bbox x 251..287 y 205..238, centre 269,221
+#
+# THE ROUTE ENDS AT THE START LINE, ON PURPOSE. The kart sits still until you
+# press A, so the frame is IDENTICAL run to run — which is what makes this
+# usable as an A/B reference for a rendering change. Drive off and every later
+# frame differs for reasons that have nothing to do with what you changed.
+
+tap 18 228
+sleep 6
+tap 269 221
+wait LoadNewApp path = /LF/Bulk/ProgramFiles/LST3-0x00180025
+wait CGameViewFrame::Enter
+sleep 25
+shot 1-title
+
+# Three A presses reach the Play menu: publisher screen, title screen, and the
+# "press A" prompt.
+key a
+sleep 9
+key a
+sleep 9
+key a
+sleep 9
+shot 2-menu
+
+# Play -> mode -> go.
+key a
+sleep 12
+shot 3-modes
+key a
+sleep 12
+key a
+sleep 35
+shot 4-race
+
+# A second frame ten seconds later. Nothing has been pressed, so if these two
+# differ the scene is animating on its own — worth knowing before treating
+# either as a reference.
+sleep 10
+shot 5-race-still

@@ -153,13 +153,30 @@ done
 # model the sequence, drive toward the OBSERVABLE END STATE: the picker loading
 # its icons. Tap the nag's dismiss button, check, repeat.
 echo "==> reaching the home screen"
+# ASK THE SCREEN, NOT THE LOG.
+#
+# This loop used to break as soon as `LoadIconImage` appeared. That marker is
+# the picker loading its icons — which it does BEHIND the Connect nag, within
+# a second of signing in. So the loop exited satisfied while a full-screen
+# dialog still covered everything, every later tap landed on the dialog, and
+# the run died a minute later at "the tile tap did nothing", which reads as a
+# broken emulator rather than a harness that never looked.
+#
+# The nag's dismiss button is a red rounded square at 65,207 40x40 — measured
+# off a capture, not guessed. While that red is on screen, the nag is up.
+nag_up() { "$HERE/fbshot.py" --probe 65,207,40,40,C83232 -d "$TADPOLE_DIR" >/dev/null 2>&1; }
+
 for attempt in 1 2 3 4 5 6; do
-    grep -qa 'LoadIconImage' "$LOG" && break
-    "$HERE/tap.py" 85 228 >/dev/null 2>&1     # Connect nag: "not now"
-    sleep 4
-    grep -qa 'LoadIconImage' "$LOG" && break
-    "$HERE/tap.py" 355 57 >/dev/null 2>&1     # or still on sign-in
-    sleep 4
+    if nag_up; then
+        "$HERE/tap.py" 83 228 >/dev/null 2>&1     # Connect nag: dismiss
+        sleep 5
+        nag_up || { echo "    nag dismissed"; break; }
+    elif grep -qa 'LoadIconImage' "$LOG"; then
+        break
+    else
+        "$HERE/tap.py" 355 57 >/dev/null 2>&1     # still on sign-in
+        sleep 5
+    fi
     echo "    attempt $attempt"
 done
 
