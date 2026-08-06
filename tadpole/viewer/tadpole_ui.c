@@ -1262,7 +1262,7 @@ static struct dlg cur_dlg(int lw, int lh)
 	case M_DEBUG: return dlg_fit(lw, lh, 268, 200);
 	case M_SYSTEM: return dlg_fit(lw, lh, 268, 150);
 	case M_FILES: return dlg_fit(lw, lh, 300, 172);
-	case M_WIZARD: return dlg_fit(lw, lh, 340, 196);
+	case M_WIZARD: return dlg_fit(lw, lh, 348, 210);
 	case M_PROGRESS: return dlg_fit(lw, lh, 350, 150);
 	case M_MSG:   return dlg_fit(lw, lh, 250, 92);
 	/* The library wants every pixel it can have: it is a list of eighty-odd
@@ -1690,17 +1690,32 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				text(r, bx, by + 88, "  Run ./tools/fetch-deps.sh", C_TEXT_DIM);
 			break;
 		case WIZ_SYSTEM:
-			text(r, bx, by, pq.rootfs ? GL_CHECK_1 " Firmware installed"
-			                          : GL_CHECK_0 " Firmware NOT installed",
-			     pq.rootfs ? C_TEXT : C_ACCENT);
-			text(r, bx, by + 11, pq.sysroot ? GL_CHECK_1 " Sysroot built"
-			                                : GL_CHECK_0 " Sysroot not built",
-			     pq.sysroot ? C_TEXT : C_ACCENT);
-			text(r, bx, by + 27, "From a folder: point Tadpole at", C_TEXT_DIM);
-			text(r, bx, by + 37, "your LFConnect downloads (the", C_TEXT_DIM);
-			text(r, bx, by + 47, ".lf2 / .lfp packages).", C_TEXT_DIM);
+			/* ---- the state of the install, as a checklist --------------
+			 *
+			 * Two lines of yes/no used to sit at the top of this page and
+			 * that was the whole report. A setup wizard is judged on whether
+			 * you can see where you are in it, so this is a list with ticks
+			 * and a rule under it — the shape every installer has used since
+			 * they were a novelty. */
 			{
-				SDL_Rect b = { bx, by + 60, 76, 13 };
+				static const char *NAMES[3] = { "System files",
+				                                "Runtime sysroot",
+				                                "Games" };
+				int ok[3], i3;
+				ok[0] = pq.rootfs; ok[1] = pq.sysroot; ok[2] = pq.games;
+				for (i3 = 0; i3 < 3; i3++) {
+					int yy = by + i3 * 11;
+					text(r, bx, yy, ok[i3] ? GL_CHECK_1 : GL_CHECK_0,
+					     ok[i3] ? C_ACCENT : C_TEXT_DIM);
+					text(r, bx + 12, yy, NAMES[i3], ok[i3] ? C_TEXT : C_TEXT_DIM);
+					text(r, bx + d.w - 132, yy, ok[i3] ? "ready" : "missing",
+					     ok[i3] ? C_ACCENT : C_TEXT_DIM);
+				}
+				fill(r, bx, by + 35, d.w - 76, 1, C_EDGE_DK);
+			}
+			text(r, bx, by + 42, "From your own LFConnect downloads:", C_TEXT_DIM);
+			{
+				SDL_Rect b = { bx, by + 54, 76, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
 				bevel(r, b.x, b.y, b.w, b.h, 1);
@@ -1711,7 +1726,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			 * Erase that took the sysroot with it — and then the page reported
 			 * "Sysroot not built" with no way to act on it. */
 			if (pq.rootfs && !pq.sysroot) {
-				SDL_Rect b = { bx + 84, by + 60, 96, 13 };
+				SDL_Rect b = { bx + 84, by + 54, 96, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
 				bevel(r, b.x, b.y, b.w, b.h, 1);
@@ -1724,15 +1739,27 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			 * firmware and have no idea where to get it, so this is where the
 			 * answer belongs: one button, no hardware, no PC software.
 			 */
-			text(r, bx, by + 78, "Or fetch them from LeapFrog:", C_TEXT_DIM);
+			/* ---- Online System Update ----
+			 *
+			 * The recommended path, and drawn like it: a boxed panel with a
+			 * rule above it, the button raised, and the download size stated
+			 * so nobody starts 124 MB by accident. This is where someone
+			 * stands when they discover they need firmware and have no idea
+			 * where to get it — so this is where the answer belongs. */
+			fill(r, bx, by + 74, d.w - 76, 1, C_EDGE_DK);
+			text(r, bx, by + 80, "Or download them, with no device at all:",
+			     C_TEXT);
 			{
-				SDL_Rect b = { bx, by + 90, 128, 14 };
+				SDL_Rect b = { bx, by + 92, 132, 15 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+				fill(r, b.x + 1, b.y + 1, b.w, b.h, C_SHADOW);
+				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI);
 				bevel(r, b.x, b.y, b.w, b.h, 1);
 				text_c(r, b.x, b.w, b.y + 4, "Online System Update",
 				       hot ? C_ACCENT : C_TEXT);
-				text(r, b.x + b.w + 6, b.y + 4, "~129 MB", C_TEXT_DIM);
+				text(r, b.x + b.w + 8, b.y + 4, "124 MB", C_TEXT_DIM);
+				text(r, bx, by + 111, "from digitalcontent.leapfrog.com",
+				     C_TEXT_DIM);
 			}
 			break;
 		case WIZ_GAMES:
@@ -2141,12 +2168,12 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		}
 		/* the per-page Browse buttons */
 		if (g_wiz_page == WIZ_SYSTEM && pq.rootfs && !pq.sysroot &&
-		    inside(mx, my, d.x + 62 + 84, d.y + 98, 96, 13)) {
+		    inside(mx, my, d.x + 62 + 84, d.y + 92, 96, 13)) {
 			g_action = UI_ACT_BUILD_SYSROOT;
 			return 1;
 		}
 		if (g_wiz_page == WIZ_SYSTEM &&
-		    inside(mx, my, d.x + 62, d.y + 98, 76, 13)) {
+		    inside(mx, my, d.x + 62, d.y + 92, 76, 13)) {
 			path_join(start, sizeof(start), g_proj, "sources");
 			if (access(start, R_OK) != 0)
 				path_join(start, sizeof(start), g_proj, "");
@@ -2157,7 +2184,7 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			return 1;
 		}
 		if (g_wiz_page == WIZ_SYSTEM &&
-		    inside(mx, my, d.x + 62, d.y + 128, 128, 14)) {
+		    inside(mx, my, d.x + 62, d.y + 130, 132, 15)) {
 			g_action = UI_ACT_ONLINE_UPDATE;
 			g_fb_return = M_WIZARD;      /* back to setup when it finishes */
 			return 1;
