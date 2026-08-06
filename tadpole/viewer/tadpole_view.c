@@ -1387,9 +1387,12 @@ int main(int argc, char **argv)
 		 * discarded, so the sample count is ours to pick. TADPOLE_GL_MSAA
 		 * overrides the setting for a one-line comparison run. */
 		int aa = ui_cfg()->msaa;
+		int ss = ui_cfg()->render_scale;
 		const char *e = getenv("TADPOLE_GL_MSAA");
+		const char *e2 = getenv("TADPOLE_GL_SCALE");
 		if (e) aa = atoi(e);
-		if (!hle_host_init(g_dir, w, h, aa))
+		if (e2) ss = atoi(e2);
+		if (!hle_host_init(g_dir, w, h, aa, ss))
 			ui_status("HLE unavailable; software raster");
 	}
 
@@ -1754,9 +1757,15 @@ int main(int argc, char **argv)
 		/* Anti-aliasing, applied the moment it is changed rather than at the
 		 * next launch. One int compare per frame; the rebuild only happens on
 		 * an actual change. */
-		if (hle_host_ready() && ui_cfg()->msaa != hle_host_msaa()) {
-			hle_host_set_msaa(ui_cfg()->msaa);
-			if (hle_host_msaa())
+		if (hle_host_ready() &&
+		    (ui_cfg()->msaa != hle_host_msaa() ||
+		     ui_cfg()->render_scale != hle_host_scale())) {
+			hle_host_set_quality(ui_cfg()->msaa, ui_cfg()->render_scale);
+			if (hle_host_scale() > 1 && hle_host_msaa())
+				ui_status("%dx scale + %dx AA", hle_host_scale(), hle_host_msaa());
+			else if (hle_host_scale() > 1)
+				ui_status("%dx render scale", hle_host_scale());
+			else if (hle_host_msaa())
 				ui_status("AA %dx", hle_host_msaa());
 			else
 				ui_status("AA off");

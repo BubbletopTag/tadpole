@@ -79,7 +79,23 @@ static SDL_GLContext     g_ctx;
  */
 static GLuint            g_fbo, g_resolve, g_colour, g_depth;
 static GLuint            g_ms_colour, g_ms_depth;
+static GLuint            g_final, g_final_tex;
 static int               g_msaa;      /* samples in use; 0 = off */
+/* RENDER SCALE. The replay draws into a buffer g_ss times the panel in each
+ * axis and the finished frame is filtered back down to 480x272 on its way to
+ * the guest — supersampling, the oldest and least clever anti-aliasing there
+ * is, and the one that improves everything at once: polygon edges, texture
+ * minification, the lot.
+ *
+ * The guest cannot tell. Its glViewport is discarded (we set the viewport from
+ * the layer rectangle) and its geometry is all in projection space, so the
+ * only thing that has to be scaled by hand is anything expressed in PIXELS:
+ * the viewport itself and the scissor box. Those are the two places below.
+ *
+ * It cannot make the picture sharper on screen — the guest still receives
+ * 480x272 — but it decides how much detail survives being squeezed into it. */
+static int               g_ss = 1;
+static int               g_dw, g_dh;  /* draw-buffer size: panel * g_ss */
 static GLuint            g_tex[MAX_TEX];       /* guest name -> host name */
 /* host_tex() creates an empty GL texture object on demand, so "the object
  * exists" says nothing about whether we ever received its PIXELS. A draw with a
@@ -273,7 +289,12 @@ static void apply_scissor(void)
 		if (w < 0) w = 0;
 		if (h < 0) h = 0;   /* disjoint: draw nothing, which is correct */
 	}
-	glScissor(x, g_h - y - h, w, h);
+	/* SCALED INTO THE DRAW BUFFER. The scissor box arrives in panel pixels,
+	 * and for most of this file's life the FBO's pixels WERE panel pixels, so
+	 * it could be handed to GL untouched. Supersampling breaks that: the draw
+	 * buffer is g_ss times larger in each axis, and an unscaled scissor would
+	 * clip everything outside the bottom-left 1/9th of a 3x frame. */
+	glScissor(x * g_ss, (g_h - y - h) * g_ss, w * g_ss, h * g_ss);
 	glEnable(GL_SCISSOR_TEST);
 }
 
@@ -344,9 +365,37 @@ static void drop_multisample(void)
 	g_msaa = 0;
 }
 
-static int make_target(int w, int h, int samples)
+/* The panel-sized buffer the guest actually receives. Only needed when the
+ * draw buffer is larger; otherwise the resolve target IS panel-sized and this
+ * step does not exist. */
+static int make_final(int w, int h)
 {
-	GLint maxs = 0;
+	glGenFramebuffers(1, &g_final);
+	glBindFramebuffer(GL_FRAMEBUFFER, g_final);
+	glGenTextures(1, &g_final_tex);
+	glBindTexture(GL_TEXTURE_2D, g_final_tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
+	             GL_UNSIGNED_BYTE, NULL);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+	                       GL_TEXTURE_2D, g_final_tex, 0);
+	return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+}
+
+static int make_target(int w, int h, int samples, int ss)
+{
+	GLint maxs = 0, maxtex = 0;
+
+	/* A draw buffer the driver cannot allocate is not a smaller picture, it
+	 * is an incomplete framebuffer and a black screen. Ask first. */
+	if (ss < 1) ss = 1;
+	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxtex);
+	while (ss > 1 && maxtex > 0 && (w * ss > maxtex || h * ss > maxtex))
+		ss--;
+	g_ss = ss;
+	g_dw = w * ss;
+	g_dh = h * ss;
 
 	if (samples > 0) {
 		/* ASK THE DRIVER, do not assume. A request for 8x on hardware that
@@ -365,14 +414,23 @@ static int make_target(int w, int h, int samples)
 		}
 	}
 
-	if (!make_plain(w, h, samples == 0))
+	/* The chain, longest first:
+	 *
+	 *   [draw, g_dw x g_dh, multisampled]   the replay renders here
+	 *        -> resolve blit (NEAREST)
+	 *   [resolve, g_dw x g_dh]              samples averaged
+	 *        -> downscale blit (LINEAR)
+	 *   [final, w x h]                      what the guest reads back
+	 *
+	 * Each step only exists if its setting is on, and with both off all three
+	 * names refer to the same framebuffer object — which is exactly the
+	 * original one-FBO arrangement, with no blits at all. */
+	if (!make_plain(g_dw, g_dh, samples == 0))
 		return 0;
 	if (samples == 0) {
-		g_fbo = g_resolve;            /* one object, exactly as before */
+		g_fbo = g_resolve;
 		g_msaa = 0;
-		return 1;
-	}
-	if (!make_multisample(w, h, samples)) {
+	} else if (!make_multisample(g_dw, g_dh, samples)) {
 		/* Never fail the whole replayer over a cosmetic setting: fall back to
 		 * no anti-aliasing and say so. */
 		fprintf(stderr, "hle: %dx AA target incomplete; falling back to none\n",
@@ -381,13 +439,34 @@ static int make_target(int w, int h, int samples)
 		glBindFramebuffer(GL_FRAMEBUFFER, g_resolve);
 		glGenRenderbuffers(1, &g_depth);
 		glBindRenderbuffer(GL_RENDERBUFFER, g_depth);
-		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, w, h);
+		glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, g_dw, g_dh);
 		glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
 		                          GL_RENDERBUFFER, g_depth);
-		return glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+			return 0;
+	} else {
+		g_msaa = samples;
 	}
-	g_msaa = samples;
-	fprintf(stderr, "hle: %dx anti-aliasing\n", samples);
+
+	if (g_ss > 1) {
+		if (!make_final(w, h)) {
+			fprintf(stderr, "hle: %dx render scale target incomplete;"
+			        " falling back to 1x\n", g_ss);
+			if (g_final) glDeleteFramebuffers(1, &g_final);
+			if (g_final_tex) glDeleteTextures(1, &g_final_tex);
+			g_final = 0; g_final_tex = 0;
+			g_ss = 1;
+			/* The draw buffer is already the wrong size for 1x, so rebuild
+			 * the whole chain rather than leaving a mismatch behind. */
+			return make_target(w, h, samples, 1);
+		}
+	} else {
+		g_final = g_resolve;
+	}
+
+	if (g_msaa || g_ss > 1)
+		fprintf(stderr, "hle: render %dx%d (%dx scale)%s\n", g_dw, g_dh, g_ss,
+		        g_msaa ? ", multisampled" : "");
 	return 1;
 }
 
@@ -406,10 +485,12 @@ static int make_target(int w, int h, int samples)
  * after a toggle renders into a default viewport, which looks like the picture
  * jumping to a corner.
  */
-void hle_host_set_msaa(int samples)
+void hle_host_set_quality(int samples, int ss)
 {
-	if (!g_ctx || samples == g_msaa) return;
+	if (!g_ctx) return;
 	if (samples < 0) samples = 0;
+	if (ss < 1) ss = 1;
+	if (samples == g_msaa && ss == g_ss) return;
 
 	ctx_enter();
 	/* Tear down the old target completely. g_fbo and g_resolve are the SAME
@@ -422,23 +503,29 @@ void hle_host_set_msaa(int samples)
 	if (g_depth) glDeleteRenderbuffers(1, &g_depth);
 	if (g_ms_colour) glDeleteRenderbuffers(1, &g_ms_colour);
 	if (g_ms_depth) glDeleteRenderbuffers(1, &g_ms_depth);
+	if (g_final && g_final != g_resolve) glDeleteFramebuffers(1, &g_final);
+	if (g_final_tex) glDeleteTextures(1, &g_final_tex);
 	g_fbo = g_resolve = g_colour = g_depth = g_ms_colour = g_ms_depth = 0;
-	g_msaa = 0;
+	g_final = g_final_tex = 0;
+	g_msaa = 0; g_ss = 1;
 
-	if (!make_target(g_w, g_h, samples)) {
-		fprintf(stderr, "hle: could not rebuild the target for %dx AA\n", samples);
-		make_target(g_w, g_h, 0);
+	if (!make_target(g_w, g_h, samples, ss)) {
+		fprintf(stderr, "hle: could not rebuild the target (%dx AA, %dx scale)\n",
+		        samples, ss);
+		make_target(g_w, g_h, 0, 1);
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
 	if (g_vw && g_vh)
-		glViewport(g_vx, g_h - g_vy - g_vh, g_vw, g_vh);
+		glViewport(g_vx * g_ss, (g_h - g_vy - g_vh) * g_ss,
+		           g_vw * g_ss, g_vh * g_ss);
 	apply_scissor();
 	ctx_leave();
 }
 
 int hle_host_msaa(void) { return g_msaa; }
+int hle_host_scale(void) { return g_ss; }
 
-int hle_host_init(const char *dir, int w, int h, int samples)
+int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 {
 	char path[600];
 	int fd;
@@ -471,7 +558,7 @@ int hle_host_init(const char *dir, int w, int h, int samples)
 	if (!g_ctx) { fprintf(stderr, "hle: no GL context: %s\n", SDL_GetError()); return 0; }
 	SDL_GL_SetSwapInterval(0);
 
-	if (!make_target(w, h, samples)) {
+	if (!make_target(w, h, samples, scale)) {
 		fprintf(stderr, "hle: incomplete framebuffer object\n");
 		return 0;
 	}
@@ -789,22 +876,43 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			 * FBO's untouched black over it would hide the video plane
 			 * underneath. GL_NEAREST is required for a multisample source —
 			 * the averaging is the resolve itself, not the filter. */
-			if (g_msaa) {
-				glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
-				glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_resolve);
-				glBlitFramebuffer(rx, g_h - (ry + rh), rx + rw, g_h - ry,
-				                  rx, g_h - (ry + rh), rx + rw, g_h - ry,
-				                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
-				glBindFramebuffer(GL_READ_FRAMEBUFFER, g_resolve);
+			{
+				/* The layer rectangle in GL's bottom-up coordinates, at panel
+				 * scale and at draw scale. */
+				int py0 = g_h - (ry + rh), py1 = g_h - ry;
+				int dx0 = rx * g_ss, dx1 = (rx + rw) * g_ss;
+				int dy0 = py0 * g_ss, dy1 = py1 * g_ss;
+
+				if (g_msaa) {
+					/* Same size, so GL_NEAREST — the averaging IS the resolve,
+					 * not the filter. */
+					glBindFramebuffer(GL_READ_FRAMEBUFFER, g_fbo);
+					glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_resolve);
+					glBlitFramebuffer(dx0, dy0, dx1, dy1,
+					                  dx0, dy0, dx1, dy1,
+					                  GL_COLOR_BUFFER_BIT, GL_NEAREST);
+				}
+				if (g_ss > 1) {
+					/* Down to panel size. GL_LINEAR here is the whole point:
+					 * it is what turns g_ss*g_ss rendered samples into one
+					 * averaged pixel. */
+					glBindFramebuffer(GL_READ_FRAMEBUFFER, g_resolve);
+					glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_final);
+					glBlitFramebuffer(dx0, dy0, dx1, dy1,
+					                  rx, py0, rx + rw, py1,
+					                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
+				}
+				if (g_msaa || g_ss > 1)
+					glBindFramebuffer(GL_READ_FRAMEBUFFER, g_final);
 			}
 			glFinish();
 			for (y = 0; y < rh; y++)
 				glReadPixels(rx, g_h - 1 - (ry + y), rw, 1, GL_BGRA,
 				             GL_UNSIGNED_BYTE,
 				             out + (size_t)(ry + y) * pitch_px + rx);
-			/* Back to the multisampled target: more frames may follow in this
-			 * same pump, and they must not land in the resolve buffer. */
-			if (g_msaa)
+			/* Back to the draw target: more frames may follow in this same
+			 * pump, and they must not land in a resolve buffer. */
+			if (g_msaa || g_ss > 1)
 				glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
 			g_frames++;
 			g_ring->frames_done++;
@@ -860,8 +968,10 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		}
 		case TADGL_VIEWPORT: {
 			int v[4]; ring_get(v, 16);
-			/* The guest's y is measured from the top; GL's is from the bottom. */
-			glViewport(v[0], g_h - v[1] - v[3], v[2], v[3]);
+			/* The guest's y is measured from the top; GL's is from the bottom.
+			 * Scaled into the draw buffer, which is g_ss times the panel. */
+			glViewport(v[0] * g_ss, (g_h - v[1] - v[3]) * g_ss,
+			           v[2] * g_ss, v[3] * g_ss);
 			g_vx = v[0]; g_vy = v[1]; g_vw = v[2]; g_vh = v[3];
 			apply_scissor();
 			break;

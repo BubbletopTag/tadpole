@@ -99,7 +99,7 @@ int main(void)
 	unlink("/tmp/tadpole-hle-selftest/glcmd.bin");
 
 	/* Host first: the guest refuses to encode without a live heartbeat. */
-	check(hle_host_init(dir, W, H, 0), "host replayer init");
+	check(hle_host_init(dir, W, H, 0, 1), "host replayer init");
 	if (!hle_host_ready()) { printf("FAIL cannot continue\n"); return 1; }
 	check(hle_on(), "guest encoder attaches to the ring");
 	if (!hle_on()) { printf("FAIL cannot continue\n"); return 1; }
@@ -183,7 +183,7 @@ int main(void)
 	 * noticed by someone toggling a settings row mid-game. So toggle it here
 	 * and draw the same frame again.
 	 */
-	hle_host_set_msaa(4);
+	hle_host_set_quality(4, 1);
 	if (hle_host_msaa() == 0) {
 		printf("  (no multisampling on this driver — live-toggle test skipped)\n");
 	} else {
@@ -220,8 +220,57 @@ int main(void)
 			}
 		}
 		/* And back off again, which is the other half of a toggle. */
-		hle_host_set_msaa(0);
+		hle_host_set_quality(0, 1);
 		check(hle_host_msaa() == 0, "AA switches back off");
+	}
+
+	/* ---- supersampling: draw big, filter down ---------------------------
+	 *
+	 * The draw buffer is now 3x the panel in each axis, so anything the
+	 * replayer expresses in PIXELS has to be scaled with it — the viewport
+	 * and the scissor box. Getting either wrong is not subtle: an unscaled
+	 * viewport renders the scene into the bottom-left ninth of the buffer, and
+	 * an unscaled scissor clips everything outside that same ninth. Both come
+	 * back here as a corner that is no longer the clear colour, or a centre
+	 * that is no longer a texel.
+	 */
+	hle_host_set_quality(0, 3);
+	if (hle_host_scale() != 3) {
+		printf("  (3x render scale unavailable here — skipped)\n");
+	} else {
+		printf("  render scale now %dx\n", hle_host_scale());
+
+		hle_viewport(0, 0, W, H);
+		hle_clear(COLOUR_BIT | DEPTH_BIT, 0xFF0D2113u, 1.0f);
+		hle_bindtexture(1);
+		hle_enable(GL_TEXTURE_2D_);
+		hle_color(1, 1, 1, 1);
+		hle_clientstate(TADGL_ARR_VERTEX, 1);
+		hle_clientstate(TADGL_ARR_TEXCOORD, 1);
+		hle_arraypointer(TADGL_ARR_VERTEX,   1, 2, GL_FIXED_, 0, 0);
+		hle_arraypointer(TADGL_ARR_TEXCOORD, 2, 2, GL_FIXED_, 0, 0);
+		hle_drawelements(GL_TRIANGLES_, 6, GL_UNSIGNED_SHORT_, 3, 0);
+		hle_present_nowait();
+
+		memset(fb, 0xAB, sizeof fb);
+		check(hle_host_pump(fb, W) == 1, "replays a frame at 3x render scale");
+		{
+			unsigned int corner = fb[4 * W + 4];
+			unsigned int centre = fb[(H / 2) * W + (W / 2)];
+			printf("  corner %08X  centre %08X (supersampled)\n",
+			       corner & 0xFFFFFF, centre & 0xFFFFFF);
+			check((corner & 0xFFFFFF) == 0x0D2113u,
+			      "clear colour survives the downscale — viewport scaled");
+			check(centre != 0xABABABABu, "the quad still draws");
+			{
+				unsigned int c = centre & 0xFFFFFF;
+				check(c == 0xFF0000u || c == 0x00FF00u ||
+				      c == 0x0000FFu || c == 0xFFFF00u,
+				      "centre is still a texel colour — scissor scaled");
+			}
+		}
+		hle_host_set_quality(0, 1);
+		check(hle_host_scale() == 1, "render scale returns to 1x");
 	}
 
 	/* ---- the ring must end level ---------------------------------------- */

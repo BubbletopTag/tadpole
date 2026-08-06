@@ -109,6 +109,7 @@ static struct ui_settings g_cfg = {
 	.frame_cap        = 60,
 	.hle_strict       = 0,
 	.msaa             = 0,
+	.render_scale     = 1,
 	.io_delay_us      = 0,
 	.tslib            = 0,
 	.boot_on_start    = 0,
@@ -788,13 +789,15 @@ void ui_cfg_save(void)
 	           "gl_dumpframe %d\ngl_dumptex %d\n"
 	           "rotate %d\nscale %d\ntouch_debug %d\n"
 	           "audio_on %d\naudio_latency_ms %d\naudio_pace %d\n"
-	           "frame_cap %d\nhle_strict %d\nmsaa %d\nio_delay_us %d\ntslib %d\n"
+	           "frame_cap %d\nhle_strict %d\nmsaa %d\nrender_scale %d\n"
+	           "io_delay_us %d\ntslib %d\n"
 	           "boot_on_start %d\n",
 	        g_cfg.gl, g_cfg.gl_hle, g_cfg.debug_level, g_cfg.log_to_file,
 	        g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
 	        g_cfg.rotate, g_cfg.scale, g_cfg.touch_debug,
 	        g_cfg.audio_on, g_cfg.audio_latency_ms, g_cfg.audio_pace,
-	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.msaa, g_cfg.io_delay_us,
+	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.msaa, g_cfg.render_scale,
+	        g_cfg.io_delay_us,
 	        g_cfg.tslib,
 	        g_cfg.boot_on_start);
 	/* Last, and only if set: it is the one value that can contain spaces. */
@@ -846,6 +849,7 @@ static void cfg_load(void)
 			else if (!strcmp(k, "frame_cap"))        g_cfg.frame_cap = val;
 			else if (!strcmp(k, "hle_strict"))       g_cfg.hle_strict = val;
 			else if (!strcmp(k, "msaa"))             g_cfg.msaa = val;
+			else if (!strcmp(k, "render_scale"))     g_cfg.render_scale = val;
 			else if (!strcmp(k, "io_delay_us"))      g_cfg.io_delay_us = val;
 			else if (!strcmp(k, "tslib"))            g_cfg.tslib = val;
 			else if (!strcmp(k, "boot_on_start"))    g_cfg.boot_on_start = val;
@@ -1244,7 +1248,7 @@ static struct dlg cur_dlg(int lw, int lh)
 {
 	switch (g_modal) {
 	case M_ABOUT: return dlg_fit(lw, lh, 210, 132);
-	case M_GFX:   return dlg_fit(lw, lh, 250, 178);
+	case M_GFX:   return dlg_fit(lw, lh, 250, 200);
 	case M_AUDIO: return dlg_fit(lw, lh, 230, 122);
 	case M_PAD:   return dlg_fit(lw, lh, 240, 140);
 	case M_DEBUG: return dlg_fit(lw, lh, 268, 200);
@@ -1448,17 +1452,29 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			text(r, d.x + d.w - 12 - text_w(buf), y, buf,
 			     g_cfg.gl_hle ? C_ACCENT : C_TEXT_DIM);
 		}
-		row_check(r, &d, 3, "Stop if HLE falls back", g_cfg.hle_strict,
-		          row_hit(&d, 3, g_mx, g_my));
+		/* Render scale. Also HLE-only, and worth keeping next to AA: they are
+		 * the same idea spent two different ways. */
+		if (g_cfg.render_scale > 1) snprintf(buf, sizeof(buf), "%dx", g_cfg.render_scale);
+		else                        snprintf(buf, sizeof(buf), "native");
+		{
+			int y = row_y(&d, 3);
+			int hot = row_hit(&d, 3, g_mx, g_my);
+			if (hot && g_cfg.gl_hle) fill(r, d.x + 6, y - 3, d.w - 12, ROW_H, C_PANEL_HI);
+			text(r, d.x + 10, y, "Render scale", g_cfg.gl_hle ? C_TEXT : C_TEXT_DIM);
+			text(r, d.x + d.w - 12 - text_w(buf), y, buf,
+			     g_cfg.gl_hle ? C_ACCENT : C_TEXT_DIM);
+		}
+		row_check(r, &d, 4, "Stop if HLE falls back", g_cfg.hle_strict,
+		          row_hit(&d, 4, g_mx, g_my));
 		if (g_cfg.frame_cap) snprintf(buf, sizeof(buf), "%d fps", g_cfg.frame_cap);
 		else                 snprintf(buf, sizeof(buf), "uncapped");
-		row_value(r, &d, 4, "Frame cap", buf, row_hit(&d, 4, g_mx, g_my));
+		row_value(r, &d, 5, "Frame cap", buf, row_hit(&d, 5, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%d deg", g_cfg.rotate);
-		row_value(r, &d, 5, "Orientation", buf, row_hit(&d, 5, g_mx, g_my));
+		row_value(r, &d, 6, "Orientation", buf, row_hit(&d, 6, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%dx", g_cfg.scale);
-		row_value(r, &d, 6, "Window scale", buf, row_hit(&d, 6, g_mx, g_my));
-		row_check(r, &d, 7, "Touch debug overlay", g_cfg.touch_debug,
-		          row_hit(&d, 7, g_mx, g_my));
+		row_value(r, &d, 7, "Window scale", buf, row_hit(&d, 7, g_mx, g_my));
+		row_check(r, &d, 8, "Touch debug overlay", g_cfg.touch_debug,
+		          row_hit(&d, 8, g_mx, g_my));
 		text(r, d.x + 10, d.y + d.h - 30,
 		     g_running ? "GL: reboot to apply."
 		               : "GL applies at next boot.",
@@ -2263,20 +2279,23 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			 * the next frame, so this takes effect while you watch — which is
 			 * the only way to judge whether it was worth having. */
 		}
-		else if (row_hit(&d, 3, mx, my)) g_cfg.hle_strict = !g_cfg.hle_strict;
-		else if (row_hit(&d, 4, mx, my)) {
+		else if (row_hit(&d, 3, mx, my) && g_cfg.gl_hle) {
+			g_cfg.render_scale = g_cfg.render_scale % 3 + 1;
+		}
+		else if (row_hit(&d, 4, mx, my)) g_cfg.hle_strict = !g_cfg.hle_strict;
+		else if (row_hit(&d, 5, mx, my)) {
 			static const int hz[] = { 60, 30, 0 };   /* 0 = uncapped */
 			int i, k = 0;
 			for (i = 0; i < 3; i++)
 				if (hz[i] == g_cfg.frame_cap) k = (i + 1) % 3;
 			g_cfg.frame_cap = hz[k];
 		}
-		else if (row_hit(&d, 5, mx, my)) cycle_rotate();
-		else if (row_hit(&d, 6, mx, my)) {
+		else if (row_hit(&d, 6, mx, my)) cycle_rotate();
+		else if (row_hit(&d, 7, mx, my)) {
 			g_cfg.scale = g_cfg.scale % 4 + 1;
 			g_action = UI_ACT_RELAYOUT;
 		}
-		else if (row_hit(&d, 7, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
+		else if (row_hit(&d, 8, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
 		ui_cfg_save();
 		return 1;
 	}
