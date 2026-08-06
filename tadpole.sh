@@ -352,7 +352,41 @@ case "$mode" in
                 exit 1 ;;
         esac ;;
     shell)
-        guest /bin/busybox sh ;;
+        # A SHELL THAT ACTUALLY LOOKS AT THE GUEST.
+        #
+        # This used to be `guest /bin/busybox sh`, which started a real ARM
+        # shell and then lied to you about everything it showed. qemu-user
+        # does not chroot: its -L prefix redirects open() and stat(), but NOT
+        # execve(). So when that shell ran `ls`, it searched the HOST's PATH,
+        # found the host's /usr/bin/ls, and qemu handed the exec straight to
+        # the host kernel — you got a host directory listing, from a host
+        # binary, inside what looked like a guest prompt.
+        #
+        #     $ ls /          bin boot dev etc home lib64 lost+found opt run
+        #     $ cat /etc/hostname
+        #     acpc            <- the host's hostname
+        #
+        # Pointing PATH at the guest instead does not help: exec'ing an ARM
+        # binary from a host shell needs binfmt_misc, which needs root, and
+        # "cannot execute binary file" is where that ends.
+        #
+        # So each command is run as its own guest process, where -L works.
+        # busybox applets are invoked directly (`busybox ls /`) because that
+        # is the one form needing no exec at all. Pipes and redirection belong
+        # to the host shell you typed into, not to this.
+        echo "Tadpole guest shell — every command runs inside the emulator."
+        echo "busybox applets: ls, cat, ps, find, grep, od, mount, ..."
+        echo "'exit' to leave."
+        while :; do
+            printf 'guest %s $ ' "$(basename "$SYSROOT")"
+            IFS= read -r line || { echo; break; }
+            case "$line" in
+                ""|"#"*) continue ;;
+                exit|quit) break ;;
+            esac
+            # shellcheck disable=SC2086
+            guest /bin/busybox $line
+        done ;;
     logo)
         guest /usr/bin/imager-fb /dev/fb0 /var/screens/Valencia-Boot-logoCW.png
         echo "logo drawn to $TADPOLE_DIR/fb0.bin"

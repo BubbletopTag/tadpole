@@ -1300,7 +1300,16 @@ static void tool_drain(void)
 		for (i = 0; i < n; i++) {
 			if (chunk[i] == '\n' || g_tool_len == (int)sizeof(g_tool_buf) - 1) {
 				g_tool_buf[g_tool_len] = 0;
-				if (g_tool_len) ui_progress_line(g_tool_buf);
+				/* A tool that knows its total says so, and the panel draws a
+				 * measured bar instead of a moving one. Anything else is an
+				 * ordinary log line. */
+				if (!strncmp(g_tool_buf, "@@PROGRESS ", 11)) {
+					long a2 = 0, b2 = 0;
+					if (sscanf(g_tool_buf + 11, "%ld %ld", &a2, &b2) == 2 && b2 > 0)
+						ui_progress_pct((int)((a2 * 100) / b2));
+				} else if (g_tool_len) {
+					ui_progress_line(g_tool_buf);
+				}
 				g_tool_len = 0;
 			} else if (chunk[i] != '\r') {
 				g_tool_buf[g_tool_len++] = chunk[i];
@@ -2049,6 +2058,9 @@ int main(int argc, char **argv)
 			break;
 		case UI_ACT_BUILD_SYSROOT:
 			tool_run("sysroot", "runtime/setup-sysroot.sh", NULL);
+			break;
+		case UI_ACT_ONLINE_UPDATE:
+			tool_run("online update", "tools/online-update.sh", NULL);
 			break;
 		case UI_ACT_ERASE_FW:
 			/* Stop the guest first: it has the old sysroot mapped, and pulling

@@ -115,36 +115,66 @@ def main():
     want = None if sel in ("", "all") else set(
         t.strip() for t in sel.split(",") if t.strip())
 
-    found = missing = 0
-    total = 0
+    # LOOK BEFORE DOWNLOADING. Every package's size is one HEAD away, so the
+    # total is knowable before a single byte is fetched — which is what makes
+    # an honest percentage possible here, as opposed to the extraction step
+    # further on, where the durations are genuinely not knowable and a bar
+    # would be a lie.
+    plan, missing = [], 0
     for pid, desc, types in pkgs:
         if want is not None and not (types & want):
             continue
         hit = locate(pid)
         if hit is None:
             missing += 1
-            print(f"  --   {pid:28s} {desc}")
+            if a.probe:
+                print(f"  --   {pid:28s} {desc}")
             continue
         url, size, ext = hit
-        found += 1
-        total += size
-        print(f"  OK   {pid:28s} {size:>12,}  {desc}")
+        plan.append((pid, desc, url, size, ext))
         if a.probe:
-            continue
-        os.makedirs(a.out, exist_ok=True)
+            print(f"  OK   {pid:28s} {size:>12,}  {desc}")
+
+    total = sum(p[3] for p in plan)
+    print(f"\n{len(plan)} available, {missing} not on the CDN, {total:,} bytes total")
+    if a.probe:
+        return
+
+    os.makedirs(a.out, exist_ok=True)
+    done = 0
+    # A machine-readable line beside the human one. The viewer's progress panel
+    # reads these and draws a real bar; anything that does not understand them
+    # sees one more line of log.
+    print(f"@@PROGRESS 0 {total}", flush=True)
+    for n, (pid, desc, url, size, ext) in enumerate(plan, 1):
         dest = os.path.join(a.out, f"{pid}.{ext}")
         if os.path.exists(dest) and os.path.getsize(dest) == size:
+            done += size
+            print(f"  [{n}/{len(plan)}] {desc or pid} (already here)")
+            print(f"@@PROGRESS {done} {total}", flush=True)
             continue
-        with urllib.request.urlopen(url, timeout=120) as r, open(dest, "wb") as f:
-            while True:
-                chunk = r.read(1 << 16)
-                if not chunk:
-                    break
-                f.write(chunk)
-
-    print(f"\n{found} available, {missing} not on the CDN, {total:,} bytes total")
-    if not a.probe and found:
-        print(f"downloaded into {a.out}")
+        print(f"  [{n}/{len(plan)}] {desc or pid}  {size/1048576:.1f} MB", flush=True)
+        try:
+            with urllib.request.urlopen(url, timeout=120) as r, \
+                 open(dest + ".part", "wb") as f:
+                while True:
+                    chunk = r.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    print(f"@@PROGRESS {done} {total}", flush=True)
+            os.replace(dest + ".part", dest)
+        except OSError as e:
+            # One package failing is not the run failing: the rest still make
+            # a working system, and saying which one went missing is more use
+            # than stopping.
+            print(f"      failed: {e}")
+            try:
+                os.unlink(dest + ".part")
+            except OSError:
+                pass
+    print(f"downloaded into {a.out}")
 
 
 if __name__ == "__main__":

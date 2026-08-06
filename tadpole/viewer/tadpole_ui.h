@@ -75,6 +75,7 @@ enum ui_action {
 	UI_ACT_SETUP_FIRMWARE,   /* path filled in */
 	UI_ACT_ERASE_FW,         /* wipe the installed system files */
 	UI_ACT_BUILD_SYSROOT,    /* regenerate runtime/sysroot from the rootfs */
+	UI_ACT_ONLINE_UPDATE,    /* fetch the system files from LeapFrog */
 	UI_ACT_SCAN_GAMES,       /* path = folder of .tar backups to read */
 	UI_ACT_INSTALL_GAMES,    /* path = file listing the archives to install */
 	UI_ACT_STOP,
@@ -113,6 +114,10 @@ int   ui_modal(void);
 void ui_progress_begin(const char *title);
 void ui_progress_line(const char *line);
 void ui_progress_done(int ok);
+/* A REAL percentage, when one is honestly knowable. The downloader knows the
+ * byte total before it starts; the extractor does not, and keeps the
+ * marquee. Pass -1 to go back to "still working". */
+void ui_progress_pct(int pct);
 int  ui_progress_active(void);
 
 /* One-line status shown at the right of the bar. */

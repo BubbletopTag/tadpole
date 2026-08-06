@@ -155,6 +155,7 @@ static char g_prog[PROG_LINES][PROG_COLS];
 static int  g_prog_n;              /* lines written, monotonic */
 static int  g_prog_running;
 static int  g_prog_ok;
+static int  g_prog_pct = -1;
 static char g_prog_title[64];
 
 void ui_progress_begin(const char *title)
@@ -164,6 +165,7 @@ void ui_progress_begin(const char *title)
 	g_prog_n = 0;
 	g_prog_running = 1;
 	g_prog_ok = 0;
+	g_prog_pct = -1;
 	g_modal = M_PROGRESS;
 }
 
@@ -185,6 +187,12 @@ void ui_progress_done(int ok)
 {
 	g_prog_running = 0;
 	g_prog_ok = ok;
+}
+
+void ui_progress_pct(int pct)
+{
+	if (pct > 100) pct = 100;
+	g_prog_pct = pct;
 }
 
 int ui_progress_active(void) { return g_modal == M_PROGRESS; }
@@ -1591,7 +1599,17 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		 * below say what it is working on. */
 		fill(r, d.x + 8, ly, d.w - 16, 7, C_VOID);
 		bevel(r, d.x + 8, ly, d.w - 16, 7, 0);
-		if (g_prog_running) {
+		if (g_prog_running && g_prog_pct >= 0) {
+			/* A MEASURED bar, not a moving one: the downloader knows the
+			 * byte total before it starts, so this is the one step where a
+			 * percentage is a fact rather than a guess. */
+			int span = d.w - 20;
+			int fillw = span * g_prog_pct / 100;
+			char pc[8];
+			if (fillw > 0) fill(r, d.x + 10, ly + 1, fillw, 5, C_ACCENT);
+			snprintf(pc, sizeof(pc), "%d%%", g_prog_pct);
+			text(r, d.x + d.w - 10 - text_w(pc), ly - 10, pc, C_ACCENT);
+		} else if (g_prog_running) {
 			int span = d.w - 20, wdt = 46;
 			int pos = (int)((SDL_GetTicks() / 12) % (unsigned)(span + wdt)) - wdt;
 			int x0 = d.x + 10 + (pos < 0 ? 0 : pos);
@@ -1700,19 +1718,21 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				text_c(r, b.x, b.w, b.y + 3, "Build sysroot",
 				       hot ? C_ACCENT : C_TEXT);
 			}
-			/* ---- Online System Update: ANNOUNCED, NOT BUILT ----
+			/* ---- Online System Update ----
 			 *
-			 * It goes here because this is where someone stands when they
-			 * discover they need firmware and have no idea where to get it,
-			 * and the answer will eventually be "press this". Drawn disabled
-			 * and labelled, so it reads as a promise rather than a bug. */
-			text(r, bx, by + 80, "Or, soon, without any of that:", C_TEXT_DIM);
+			 * This is where someone stands when they discover they need
+			 * firmware and have no idea where to get it, so this is where the
+			 * answer belongs: one button, no hardware, no PC software.
+			 */
+			text(r, bx, by + 78, "Or fetch them from LeapFrog:", C_TEXT_DIM);
 			{
-				SDL_Rect b = { bx, by + 92, 128, 13 };
-				fill(r, b.x, b.y, b.w, b.h, C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 0);
-				text_c(r, b.x, b.w, b.y + 3, "Online System Update", C_TEXT_DIM);
-				text(r, b.x + b.w + 6, b.y + 3, "soon", C_TEXT_DIM);
+				SDL_Rect b = { bx, by + 90, 128, 14 };
+				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+				bevel(r, b.x, b.y, b.w, b.h, 1);
+				text_c(r, b.x, b.w, b.y + 4, "Online System Update",
+				       hot ? C_ACCENT : C_TEXT);
+				text(r, b.x + b.w + 6, b.y + 4, "~129 MB", C_TEXT_DIM);
 			}
 			break;
 		case WIZ_GAMES:
@@ -2136,13 +2156,10 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			        UI_ACT_SETUP_FIRMWARE);
 			return 1;
 		}
-		/* "Online System Update", which does not exist yet. Say so plainly
-		 * rather than letting a dead button look like a broken one. */
 		if (g_wiz_page == WIZ_SYSTEM &&
-		    inside(mx, my, d.x + 62, d.y + 130, 128, 13)) {
-			g_confirm = 0;
-			g_fb_return = M_WIZARD;      /* Close comes back to the wizard */
-			msg("Online System Update", "Not built yet.");
+		    inside(mx, my, d.x + 62, d.y + 128, 128, 14)) {
+			g_action = UI_ACT_ONLINE_UPDATE;
+			g_fb_return = M_WIZARD;      /* back to setup when it finishes */
 			return 1;
 		}
 		if (g_wiz_page == WIZ_GAMES &&
