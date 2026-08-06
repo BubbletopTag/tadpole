@@ -2280,7 +2280,15 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			 * the only way to judge whether it was worth having. */
 		}
 		else if (row_hit(&d, 3, mx, my) && g_cfg.gl_hle) {
-			g_cfg.render_scale = g_cfg.render_scale % 3 + 1;
+			/* Up to 8x, which is 3840x2176 — 4K for a 480x272 panel. The
+			 * driver's own ceiling is asked for at build time and the
+			 * request clamped to it, so an ambitious setting costs frames
+			 * rather than producing a black screen. */
+			static const int steps[] = { 1, 2, 3, 4, 6, 8 };
+			int i, k = 0;
+			for (i = 0; i < 6; i++)
+				if (steps[i] == g_cfg.render_scale) k = (i + 1) % 6;
+			g_cfg.render_scale = steps[k];
 		}
 		else if (row_hit(&d, 4, mx, my)) g_cfg.hle_strict = !g_cfg.hle_strict;
 		else if (row_hit(&d, 5, mx, my)) {

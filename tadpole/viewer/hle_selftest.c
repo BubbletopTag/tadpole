@@ -78,7 +78,88 @@ static void check(int ok, const char *what)
 	if (!ok) fails++;
 }
 
-int main(void)
+/* ---- --bench: what a render scale actually costs -------------------------
+ *
+ * "How far can it scale" has two answers and only one of them is interesting.
+ * The driver's limit is enormous — this card accepts 16x, which is 7680x4352
+ * for a 480x272 panel — so the real ceiling is the per-frame work: rendering
+ * N*N times the pixels, resolving them, and above all TRANSFERRING the result
+ * back across the bus, which grows with N*N too.
+ *
+ * This drives the real replayer with a real frame at each scale and times it,
+ * including the full-size readback the viewer does at Tier 3. No guest, no
+ * game, no home screen to navigate — just the part that scales.
+ */
+static void bench_frame(void)
+{
+	static const int   verts[8] = { 40 << 16,  40 << 16, 440 << 16,  40 << 16,
+	                                440 << 16, 232 << 16,  40 << 16, 232 << 16 };
+	static const int   uvs[8]   = { 0, 0, 1 << 16, 0, 1 << 16, 1 << 16, 0, 1 << 16 };
+	hle_viewport(0, 0, W, H);
+	hle_clear(COLOUR_BIT | DEPTH_BIT, 0xFF0D2113u, 1.0f);
+	hle_bindtexture(1);
+	hle_enable(GL_TEXTURE_2D_);
+	hle_color(1, 1, 1, 1);
+	hle_clientstate(TADGL_ARR_VERTEX, 1);
+	hle_clientstate(TADGL_ARR_TEXCOORD, 1);
+	hle_arraypointer(TADGL_ARR_VERTEX,   1, 2, GL_FIXED_, 0, 0);
+	hle_arraypointer(TADGL_ARR_TEXCOORD, 2, 2, GL_FIXED_, 0, 0);
+	hle_drawelements(GL_TRIANGLES_, 6, GL_UNSIGNED_SHORT_, 3, 0);
+	hle_present_nowait();
+	(void)verts; (void)uvs;
+}
+
+static int bench(void)
+{
+	static const int scales[] = { 1, 2, 3, 4, 6, 8 };
+	static unsigned int fb[W * H];
+	unsigned int *big = NULL;
+	size_t bigsz = 0;
+	int i, k;
+
+	printf("\n  scale     draw buffer     ms/frame   equivalent fps   readback\n");
+	for (i = 0; i < (int)(sizeof scales / sizeof *scales); i++) {
+		int ss = scales[i], fw = 0, fh = 0;
+		Uint32 t0, t1;
+		int frames = 30;
+
+		hle_host_set_quality(0, ss);
+		if (hle_host_scale() != ss) {
+			printf("  %2dx       unavailable\n", ss);
+			continue;
+		}
+		hle_host_want_full(1);
+		hle_host_full(&fw, &fh);
+		if ((size_t)fw * fh * 4 > bigsz) {
+			free(big);
+			bigsz = (size_t)fw * fh * 4;
+			big = malloc(bigsz);
+		}
+		/* one warm frame, so texture upload and target creation are not
+		 * counted as if they happened every frame */
+		bench_frame(); hle_host_pump(fb, W); hle_host_read_full(big);
+
+		t0 = SDL_GetTicks();
+		for (k = 0; k < frames; k++) {
+			bench_frame();
+			hle_host_pump(fb, W);
+			hle_host_read_full(big);
+		}
+		t1 = SDL_GetTicks();
+		{
+			double ms = (double)(t1 - t0) / frames;
+			printf("  %2dx    %5dx%-5d      %6.2f       %6.0f       %5.1f MB\n",
+			       ss, W * ss, H * ss, ms, ms > 0 ? 1000.0 / ms : 9999.0,
+			       (double)fw * fh * 4 / (1024 * 1024));
+		}
+	}
+	hle_host_want_full(0);
+	hle_host_set_quality(0, 1);
+	free(big);
+	return 0;
+}
+
+int main(int argc, char **argv)
 {
 	static unsigned int fb[W * H];
 	unsigned int tex[4];
@@ -271,6 +352,13 @@ int main(void)
 		}
 		hle_host_set_quality(0, 1);
 		check(hle_host_scale() == 1, "render scale returns to 1x");
+	}
+
+	if (argc > 1 && !strcmp(argv[1], "--bench")) {
+		bench();
+		hle_host_shutdown();
+		SDL_Quit();
+		return 0;
 	}
 
 	/* ---- the ring must end level ---------------------------------------- */

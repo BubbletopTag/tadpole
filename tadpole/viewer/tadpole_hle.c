@@ -390,9 +390,22 @@ static int make_target(int w, int h, int samples, int ss)
 	/* A draw buffer the driver cannot allocate is not a smaller picture, it
 	 * is an incomplete framebuffer and a black screen. Ask first. */
 	if (ss < 1) ss = 1;
+	/* BOTH LIMITS, not just the texture one. The single-sample targets are
+	 * textures, but the multisampled colour and depth are RENDERBUFFERS, and
+	 * a driver is free to cap those lower. Exceeding either makes an
+	 * incomplete framebuffer, which here means a black screen. */
 	glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxtex);
-	while (ss > 1 && maxtex > 0 && (w * ss > maxtex || h * ss > maxtex))
+	{
+		GLint maxrb = 0;
+		glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &maxrb);
+		if (maxrb > 0 && (maxtex <= 0 || maxrb < maxtex))
+			maxtex = maxrb;
+	}
+	while (ss > 1 && maxtex > 0 && (w * ss > maxtex || h * ss > maxtex)) {
+		fprintf(stderr, "hle: %dx render scale needs %dx%d, driver allows "
+		        "%d — using %dx\n", ss, w * ss, h * ss, (int)maxtex, ss - 1);
 		ss--;
+	}
 	g_ss = ss;
 	g_dw = w * ss;
 	g_dh = h * ss;
