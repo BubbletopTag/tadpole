@@ -46,6 +46,20 @@ def read_state(d):
     return magic, ver, w, h, vsync, layers
 
 
+def layer_window(L, w, h):
+    """Where this layer lands on the panel, and how much of it is picture.
+
+    Must stay in step with layer_window() in tadpole_view.c — this script exists
+    to composite the arena EXACTLY as the viewer does, and a capture that placed
+    layers differently would quietly disagree with what is on screen.
+    """
+    x, y = L["win_x"], L["win_y"]
+    cw, ch = L["win_w"], L["win_h"]
+    if cw <= 0 or ch <= 0 or x < 0 or y < 0 or x + cw > w or y + ch > h:
+        return 0, 0, w, h
+    return x, y, cw, ch
+
+
 def composite(d, w, h, layers):
     with open(os.path.join(d, "fb0.bin"), "rb") as f:
         arena = f.read()
@@ -59,23 +73,24 @@ def composite(d, w, h, layers):
             continue
         bpp = L["bpp"] or 32
         pitch = w * bpp // 8
+        wx, wy, ww, wh = layer_window(L, w, h)
         off = yoff * pitch
-        if off + pitch * h > len(arena):
+        if off + pitch * wh > len(arena):
             off = 0
-        if off + pitch * h > len(arena):
+        if off + pitch * wh > len(arena):
             continue
         first = drawn == 0
-        for y in range(h):
+        for y in range(wh):
             row = off + y * pitch
-            o = y * w * 3
+            o = ((wy + y) * w + wx) * 3
             if bpp == 16:
-                for x in range(w):
+                for x in range(ww):
                     p = arena[row + x * 2] | (arena[row + x * 2 + 1] << 8)
                     px[o + x * 3] = ((p >> 11) & 0x1F) << 3
                     px[o + x * 3 + 1] = ((p >> 5) & 0x3F) << 2
                     px[o + x * 3 + 2] = (p & 0x1F) << 3
             else:
-                for x in range(w):
+                for x in range(ww):
                     q = row + x * 4
                     a = arena[q + 3]
                     if first or a:

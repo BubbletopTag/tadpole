@@ -63,7 +63,14 @@ reap() {
 reap; sleep 1
 
 echo "booting -> $LOG"
-"$PROJ/tadpole.sh" --no-viewer > "$LOG" 2>&1 &
+# --boot IS REQUIRED, not optional. tadpole.sh's default mode became `front`
+# (open the window and wait) when the viewer took over the decision to start a
+# guest, and this script was left asking for `--no-viewer` alone — which is a
+# contradiction tadpole.sh rejects in two lines and exits. The run then spent
+# its whole 120-second timeout waiting for a SignIn that no guest was booting,
+# and reported "never reached SignIn", which reads as an emulator failure.
+# PROBE_DEBUG=1 turns on the shim's tracing, as in probe-home.sh.
+"$PROJ/tadpole.sh" --boot --no-viewer ${PROBE_DEBUG:+--debug} > "$LOG" 2>&1 &
 BOOT=$!
 trap 'kill $BOOT 2>/dev/null; reap' EXIT
 

@@ -74,8 +74,8 @@ static SDL_GLContext     g_ctx;
  * averaged instead of stepped.
  *
  * Why this is worth so little code: the title's own glViewport is discarded —
- * we set the viewport from the layer rectangle — so the sample count is
- * entirely ours to choose and nothing in the guest has an opinion about it.
+ * we set the viewport from the layer's size — so the sample count is entirely
+ * ours to choose and nothing in the guest has an opinion about it.
  */
 static GLuint            g_fbo, g_resolve, g_colour, g_depth;
 static GLuint            g_ms_colour, g_ms_depth;
@@ -88,7 +88,7 @@ static int               g_msaa;      /* samples in use; 0 = off */
  * minification, the lot.
  *
  * The guest cannot tell. Its glViewport is discarded (we set the viewport from
- * the layer rectangle) and its geometry is all in projection space, so the
+ * the layer's size) and its geometry is all in projection space, so the
  * only thing that has to be scaled by hand is anything expressed in PIXELS:
  * the viewport itself and the scissor box. Those are the two places below.
  *
@@ -109,11 +109,14 @@ static int               g_tex_enabled;  /* GL_TEXTURE_2D on unit 0 */
 static struct hbuf       g_buf[MAX_BUF];
 static struct harr       g_arr[TADGL_ARR_COUNT];
 static int               g_w, g_h;
-/* The layer rectangle the guest told us about. Only this region is read back:
- * blanket-writing the whole panel filled the REST of fb1 with the FBO's
- * untouched black, and since the compositor draws fb2 (video) beneath fb1, an
- * opaque fb1 hides it. The software rasteriser only ever wrote inside the
- * window, so matching that is also what keeps compositing behaviour identical. */
+/* The layer rectangle the guest told us about. Only g_vw x g_vh of the draw
+ * buffer is rendered and read back: blanket-writing the whole panel filled the
+ * REST of fb1 with the FBO's untouched black, and since the compositor draws
+ * fb2 (video) beneath fb1, an opaque fb1 hides it.
+ *
+ * g_vx/g_vy are the layer's PLACE ON THE PANEL and are never a draw parameter —
+ * see the note above apply_scissor(). Only hle_host_rect() reads them, so the
+ * viewer can composite the finished picture where it belongs. */
 static int               g_vx, g_vy, g_vw, g_vh;
 static int               g_ready;
 /* SDL_Renderer with SDL_RENDERER_ACCELERATED is an OpenGL renderer here, and it
@@ -207,81 +210,77 @@ static const char *tadgl_opname(unsigned int op)
 	return op < TADGL_OP_COUNT ? g_opnames[op] : "?";
 }
 
-/* ---- the scissor box has TWO owners, and that is the whole problem --------
+/* ---- WE DRAW AT THE LAYER'S OWN ORIGIN, NOT AT ITS PLACE ON THE PANEL -----
  *
- * The layer window comes first. GL renders into /dev/fb1, which is one plane of
- * a three-layer compositor, and the guest tells us the rectangle that plane
- * occupies. Everything outside it must stay untouched or the 3D layer paints
- * over the 2D frame the title drew around it. TADGL_VIEWPORT has always
- * enforced that with glScissor — the scissor box was never the title's, it was
- * ours.
+ * GL renders into /dev/fb1, one plane of a three-layer compositor. The plane's
+ * buffer holds a win_w x win_h image starting at its base address, and the MLC
+ * composites it at (win_x, win_y) — Brio's own log for a 250x250 window at
+ * (76,11) reads `CreateHandle: 250x250 (1920) @ <pan base>`, with no offset
+ * anywhere in it.
  *
- * Then glScissor stopped being a stub. The title's own scissor box started
- * arriving and OVERWROTE the layer clip, in the guest's top-left coordinates
- * rather than GL's bottom-left, and Pet Pals 2's 3D plane moved. Two rectangles
- * with one register.
+ * This file used to draw at (win_x, win_y) instead, which came to the same
+ * picture only because the viewer then copied fb1 onto the panel one-for-one.
+ * That was the wrong half of the pipeline to compensate in: every title whose
+ * pixels do NOT come through here — the Flash-rendered Leapster titles, which
+ * is most of them — got no compensation at all and drew in the panel's corner.
+ * The viewer's compositor now places every layer at its window (see
+ * layer_window() in tadpole_view.c), so this side must draw at the origin or
+ * the offset would be applied twice.
  *
- * So compose them instead: the effective box is the layer window, narrowed by
- * the title's box when the title has scissoring on. The intersection is done in
- * the guest's top-left space, where both rectangles are expressed, and flipped
- * once at the end.
+ * So the layer clip is (0,0,g_vw,g_vh) in the layer's own top-left space, and
+ * everything below is expressed there.
  *
- * GL_SCISSOR_TEST IS THEREFORE ALWAYS ON HERE, and glEnable/glDisable of it are
- * consumed rather than forwarded. A title that disables scissoring is asking to
- * stop clipping to ITS box; it is not — and has no way of knowing it could be —
+ * GL_SCISSOR_TEST IS ALWAYS ON HERE, and glEnable/glDisable of it are consumed
+ * rather than forwarded. A title that disables scissoring is asking to stop
+ * clipping to ITS box; it is not — and has no way of knowing it could be —
  * asking to escape the layer window. Forwarding the disable is what let a title
- * paint outside its plane, which is the "renders in the wrong position" that
- * Mr. Pencil's video tutorials and Digging for Dinosaurs have always shown.
+ * paint outside its plane.
  */
 static int g_sc_on;            /* the TITLE's GL_SCISSOR_TEST */
 static int g_sc[4];            /* the TITLE's box, as it sent it */
 static int g_sc_honour = -1;   /* TADPOLE_GL_SCISSOR — off by default */
 static unsigned int g_sc_logged;
 
-/* THE TITLE'S BOX IS NOT HONOURED BY DEFAULT, AND THAT IS NOT LAZINESS.
+/* THE TITLE'S BOX IS STILL NOT HONOURED BY DEFAULT, BUT THE REASON HAS CHANGED.
  *
- * Composing the two rectangles requires knowing what frame the title's box is
- * expressed in, and we do not:
- *
- *   - TADGL_VIEWPORT does not carry the title's glViewport. The guest's
- *     glViewport is a no-op that only traces; what crosses the wire is the
- *     LAYER rectangle, read from the compositor state in state.bin, in
- *     framebuffer coordinates with y from the TOP.
- *   - The title's glScissor is an ordinary GL call, so its box is in window
- *     coordinates with y from the BOTTOM, relative to whatever surface the
- *     title believes it has — and since its glViewport is discarded, we do not
- *     know what size that is.
- *
+ * It used to be that the two rectangles were in frames we could not relate: the
+ * layer window arrived in PANEL coordinates with y from the top, while the
+ * title's glScissor is in ITS surface's coordinates with y from the bottom, and
+ * since its glViewport was discarded we did not know that surface's size.
  * Intersecting them directly moved Pet Pals 2's 3D plane; flipping one of them
- * moved the error from the top edge to the bottom. Both attempts were guesses,
- * and guessing is what the rest of this session exists to stop doing.
+ * moved the error from the top edge to the bottom.
  *
- * So the default is exactly the behaviour that worked: clip to the layer window
- * and ignore the title's box. TADPOLE_GL_SCISSOR=1 enables the composition, and
- * TADPOLE_GL_DEBUG=1 prints both rectangles so the mapping can be derived from
- * real numbers rather than reasoned about. Once a title's box and the layer
- * rectangle have been seen side by side, this becomes a five-line fix.
+ * Both rectangles now live in the same space. The title's surface IS the layer,
+ * g_vw x g_vh, so its box converts to the layer's top-left space by flipping y
+ * about g_vh — which is what the intersection below does. That makes the
+ * composition derivable rather than guessed.
+ *
+ * It stays off by default because turning it on changes what several titles
+ * clip, and that is a separate change with its own before/after captures.
+ * TADPOLE_GL_SCISSOR=1 enables it; TADPOLE_GL_DEBUG=1 prints both rectangles.
  */
 static void apply_scissor(void)
 {
-	int x = g_vx, y = g_vy, w = g_vw, h = g_vh;
+	int x = 0, y = 0, w = g_vw, h = g_vh;
 
 	if (g_sc_honour < 0)
 		g_sc_honour = getenv("TADPOLE_GL_SCISSOR") != NULL;
 
 	if (g_level >= 1 && g_sc_on && g_sc_logged < 12) {
 		g_sc_logged++;
-		fprintf(stderr, "hle: scissor — layer(top-left) %d,%d %dx%d   title(raw)"
-		        " %d,%d %dx%d   honoured=%d\n",
-		        g_vx, g_vy, g_vw, g_vh,
+		fprintf(stderr, "hle: scissor — layer %dx%d (drawn at its own origin,"
+		        " composited at %d,%d)   title(raw) %d,%d %dx%d   honoured=%d\n",
+		        g_vw, g_vh, g_vx, g_vy,
 		        g_sc[0], g_sc[1], g_sc[2], g_sc[3], g_sc_honour);
 	}
 
 	if (g_sc_honour && g_sc_on) {
-		int x0 = g_sc[0] > x ? g_sc[0] : x;
-		int y0 = g_sc[1] > y ? g_sc[1] : y;
-		int x1 = g_sc[0] + g_sc[2];
-		int y1 = g_sc[1] + g_sc[3];
+		/* The title's box, flipped into the layer's top-left space. */
+		int tx = g_sc[0], ty = g_vh - (g_sc[1] + g_sc[3]);
+		int x0 = tx > x ? tx : x;
+		int y0 = ty > y ? ty : y;
+		int x1 = tx + g_sc[2];
+		int y1 = ty + g_sc[3];
 		if (x1 > x + w) x1 = x + w;
 		if (y1 > y + h) y1 = y + h;
 		x = x0; y = y0;
@@ -289,11 +288,11 @@ static void apply_scissor(void)
 		if (w < 0) w = 0;
 		if (h < 0) h = 0;   /* disjoint: draw nothing, which is correct */
 	}
-	/* SCALED INTO THE DRAW BUFFER. The scissor box arrives in panel pixels,
-	 * and for most of this file's life the FBO's pixels WERE panel pixels, so
-	 * it could be handed to GL untouched. Supersampling breaks that: the draw
-	 * buffer is g_ss times larger in each axis, and an unscaled scissor would
-	 * clip everything outside the bottom-left 1/9th of a 3x frame. */
+	/* Into GL's bottom-up coordinates, and SCALED INTO THE DRAW BUFFER. The box
+	 * is in layer pixels; the draw buffer is g_ss times larger in each axis, and
+	 * an unscaled scissor would clip everything outside the bottom-left 1/9th of
+	 * a 3x frame. The layer occupies the TOP-left of a panel-sized FBO, so the
+	 * flip is about the panel height. */
 	glScissor(x * g_ss, (g_h - y - h) * g_ss, w * g_ss, h * g_ss);
 	glEnable(GL_SCISSOR_TEST);
 }
@@ -529,8 +528,7 @@ void hle_host_set_quality(int samples, int ss)
 	}
 	glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
 	if (g_vw && g_vh)
-		glViewport(g_vx * g_ss, (g_h - g_vy - g_vh) * g_ss,
-		           g_vw * g_ss, g_vh * g_ss);
+		glViewport(0, (g_h - g_vh) * g_ss, g_vw * g_ss, g_vh * g_ss);
 	apply_scissor();
 	ctx_leave();
 }
@@ -557,6 +555,12 @@ void hle_host_full(int *w, int *h)
 	if (h) *h = rh * g_ss;
 }
 
+/* WHERE THE PICTURE BELONGS ON THE PANEL — a destination, not a draw origin.
+ *
+ * The replay draws the layer at its own origin (see apply_scissor above), so
+ * this is the one place the layer's PANEL position is still needed: the viewer
+ * uses it to place the full-resolution game texture, exactly where the
+ * compositor would have put the guest's own panel-sized copy. */
 void hle_host_rect(int *x, int *y, int *w, int *h)
 {
 	if (x) *x = g_vw ? g_vx : 0;
@@ -572,7 +576,6 @@ void hle_host_rect(int *x, int *y, int *w, int *h)
  * over the same scripted route with it on and off. */
 int hle_host_read_full(unsigned int *out)
 {
-	int rx = g_vw ? g_vx : 0, ry = g_vw ? g_vy : 0;
 	int rw = g_vw ? g_vw : g_w, rh = g_vh ? g_vh : g_h;
 	int dw = rw * g_ss, dh = rh * g_ss;
 	int y;
@@ -581,10 +584,10 @@ int hle_host_read_full(unsigned int *out)
 	ctx_enter();
 	glBindFramebuffer(GL_READ_FRAMEBUFFER, g_resolve);
 	/* Bottom-up to top-down, a row at a time, exactly as the panel-sized
-	 * readback does. The rectangle is the layer's, scaled into the draw
-	 * buffer. */
+	 * readback does. The layer sits at the TOP-LEFT of a panel-sized draw
+	 * buffer, so its rows are the last rh of it in GL's order. */
 	for (y = 0; y < dh; y++)
-		glReadPixels(rx * g_ss, (g_h - (ry + rh)) * g_ss + (dh - 1 - y),
+		glReadPixels(0, (g_h - rh) * g_ss + (dh - 1 - y),
 		             dw, 1, GL_BGRA, GL_UNSIGNED_BYTE,
 		             out + (size_t)y * (size_t)dw);
 	glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
@@ -933,8 +936,12 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		switch (p.op) {
 		case TADGL_PRESENT: {
 			/* Read straight into the caller's framebuffer row order. GL's
-			 * origin is bottom-left and the panel's is top-left, so flip. */
-			int rx = g_vw ? g_vx : 0, ry = g_vw ? g_vy : 0;
+			 * origin is bottom-left and the panel's is top-left, so flip.
+			 *
+			 * The layer is drawn at ITS OWN origin and read back to the same
+			 * place in the guest's buffer, which is where the guest's driver
+			 * puts it: win_w x win_h from the layer's base address. Placing it
+			 * on the panel is the compositor's job. */
 			int rw = g_vw ? g_vw : g_w, rh = g_vh ? g_vh : g_h;
 			int y;
 			check_gl("frame");
@@ -946,9 +953,10 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			 * the averaging is the resolve itself, not the filter. */
 			{
 				/* The layer rectangle in GL's bottom-up coordinates, at panel
-				 * scale and at draw scale. */
-				int py0 = g_h - (ry + rh), py1 = g_h - ry;
-				int dx0 = rx * g_ss, dx1 = (rx + rw) * g_ss;
+				 * scale and at draw scale. It occupies the top-left of a
+				 * panel-sized buffer, so in GL's order it is the last rh rows. */
+				int py0 = g_h - rh, py1 = g_h;
+				int dx0 = 0, dx1 = rw * g_ss;
 				int dy0 = py0 * g_ss, dy1 = py1 * g_ss;
 
 				if (g_msaa) {
@@ -973,7 +981,7 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 					glBindFramebuffer(GL_READ_FRAMEBUFFER, g_resolve);
 					glBindFramebuffer(GL_DRAW_FRAMEBUFFER, g_final);
 					glBlitFramebuffer(dx0, dy0, dx1, dy1,
-					                  rx, py0, rx + rw, py1,
+					                  0, py0, rw, py1,
 					                  GL_COLOR_BUFFER_BIT, GL_LINEAR);
 				}
 				g_full_ready = 1;
@@ -987,9 +995,9 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			 * synchronous transfer of the finished frame, every frame. */
 			if (!g_want_full)
 				for (y = 0; y < rh; y++)
-					glReadPixels(rx, g_h - 1 - (ry + y), rw, 1, GL_BGRA,
+					glReadPixels(0, g_h - 1 - y, rw, 1, GL_BGRA,
 					             GL_UNSIGNED_BYTE,
-					             out + (size_t)(ry + y) * pitch_px + rx);
+					             out + (size_t)y * pitch_px);
 			/* Back to the draw target: more frames may follow in this same
 			 * pump, and they must not land in a resolve buffer. */
 			if (g_msaa || g_ss > 1)
@@ -1048,10 +1056,16 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 		}
 		case TADGL_VIEWPORT: {
 			int v[4]; ring_get(v, 16);
-			/* The guest's y is measured from the top; GL's is from the bottom.
-			 * Scaled into the draw buffer, which is g_ss times the panel. */
-			glViewport(v[0] * g_ss, (g_h - v[1] - v[3]) * g_ss,
-			           v[2] * g_ss, v[3] * g_ss);
+			/* The packet carries the whole layer rectangle, but only its SIZE
+			 * is a draw parameter: the picture is rendered at the layer's own
+			 * origin, and (v[0],v[1]) is where the compositor will later put
+			 * it. Drawing at the panel position as well would offset it twice.
+			 *
+			 * The guest's y is measured from the top and GL's from the bottom,
+			 * and the layer lives in the top-left of a panel-sized draw buffer,
+			 * so the flip is about the panel height. Scaled into that buffer,
+			 * which is g_ss times the panel. */
+			glViewport(0, (g_h - v[3]) * g_ss, v[2] * g_ss, v[3] * g_ss);
 			g_vx = v[0]; g_vy = v[1]; g_vw = v[2]; g_vh = v[3];
 			apply_scissor();
 			break;

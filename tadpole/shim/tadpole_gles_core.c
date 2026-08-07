@@ -209,7 +209,11 @@ static int g_tint = -1;
 #define FB_H 272
 
 /* The layer rectangle, defined next to the viewport logic further down but
- * declared here because the presenter and the HLE forwarding need it. */
+ * declared here because the presenter and the HLE forwarding need it.
+ *
+ * g_vw/g_vh SIZE the picture and are what everything rasterises against.
+ * g_vx/g_vy are where the compositor will place it, and are forwarded to the
+ * host for that purpose only — never added to a pixel here. */
 static int g_vx, g_vy, g_vw, g_vh, g_view_init;
 static void view_update(void);
 
@@ -678,6 +682,10 @@ static int parse_int(const char **p)
  * Re-read once per frame, from tadpole_gl_present(). The rect is set while the
  * title loads, which can race the first draw call, and it changes again when
  * the app exits and the Flash UI takes fb1 back at full size.
+ *
+ * ONLY THE SIZE IS A DRAWING PARAMETER. The picture is rasterised at the
+ * layer's own origin, because that is where the layer's buffer begins on the
+ * device; (x,y) is where the MLC — here, the viewer's compositor — puts it.
  *
  * TADPOLE_GL_VIEW="x,y,w,h" overrides everything, for bisecting.
  */
@@ -1480,8 +1488,8 @@ void glClear(GLbitfield mask)
 		view_init();
 		/* Only the window, not the whole panel — the colour clear is already
 		 * scoped this way and 130560 float stores per frame is not free. */
-		for (yy = g_vy; yy < g_vy + g_vh; yy++)
-			for (xx = g_vx; xx < g_vx + g_vw; xx++)
+		for (yy = 0; yy < g_vh; yy++)
+			for (xx = 0; xx < g_vw; xx++)
 				g_zbuf[yy*FB_W + xx] = g_depth_clear;
 	}
 	fb_init();
@@ -1497,8 +1505,8 @@ void glClear(GLbitfield mask)
 		int yy;
 		if (!dst) return;
 		view_init();
-		for (yy = g_vy; yy < g_vy + g_vh; yy++)
-			for (i = g_vx; i < g_vx + g_vw; i++)
+		for (yy = 0; yy < g_vh; yy++)
+			for (i = 0; i < g_vw; i++)
 				dst[yy*FB_W + i] = g_clear_argb;
 	}
 }
@@ -1840,10 +1848,14 @@ static void to_screen(struct vert *v)
 {
 	v->wclip = v->w;                 /* keep pre-divide w for the near test */
 	if (v->w != 0.0f) { v->x /= v->w; v->y /= v->w; v->z /= v->w; }
-	/* NDC -> pixels. GL's Y is up; the framebuffer's is down. */
+	/* NDC -> pixels, at the LAYER'S OWN ORIGIN. The layer's buffer holds a
+	 * g_vw x g_vh image starting at its base address and the compositor places
+	 * it at (g_vx,g_vy) — see layer_window() in the viewer. Rasterising at the
+	 * panel position instead, as this used to, offsets it twice.
+	 * GL's Y is up; the framebuffer's is down. */
 	view_init();
-	v->x = (float)g_vx + (v->x*0.5f + 0.5f) * (float)g_vw;
-	v->y = (float)g_vy + (1.0f - (v->y*0.5f + 0.5f)) * (float)g_vh;
+	v->x = (v->x*0.5f + 0.5f) * (float)g_vw;
+	v->y = (1.0f - (v->y*0.5f + 0.5f)) * (float)g_vh;
 }
 
 static float edge(const struct vert *a, const struct vert *b, float px, float py)
@@ -2017,8 +2029,8 @@ static void raster_tri(struct vert a, struct vert b, struct vert c)
 
 	x0 = (int)mnx; x1 = (int)mxx + 1; y0 = (int)mny; y1 = (int)mxy + 1;
 	view_init();
-	if (x0 < g_vx) x0 = g_vx;  if (x1 > g_vx + g_vw) x1 = g_vx + g_vw;
-	if (y0 < g_vy) y0 = g_vy;  if (y1 > g_vy + g_vh) y1 = g_vy + g_vh;
+	if (x0 < 0) x0 = 0;  if (x1 > g_vw) x1 = g_vw;
+	if (y0 < 0) y0 = 0;  if (y1 > g_vh) y1 = g_vh;
 	if (x1 > x0 && y1 > y0)
 		g_f_tris_out++;          /* survived clipping: has on-screen area */
 
@@ -4246,9 +4258,13 @@ static int get_integers(GLenum p, GLint *v)
 	case GL_STENCIL_BITS:                 *v = 0; break;
 	case GL_RED_BITS: case GL_GREEN_BITS:
 	case GL_BLUE_BITS: case GL_ALPHA_BITS: *v = 8; break;
+	/* THE SURFACE THE TITLE BELIEVES IT HAS, which is its layer at its own
+	 * origin — not the layer's place on the panel. A title that reads this back
+	 * to size a projection or an ortho box would otherwise be told its window
+	 * starts at (76,11), and would inset everything it draws by that much. */
 	case GL_VIEWPORT:
 		view_init();
-		v[0] = g_vx; v[1] = g_vy; v[2] = g_vw; v[3] = g_vh;
+		v[0] = 0; v[1] = 0; v[2] = g_vw; v[3] = g_vh;
 		return 4;
 	/* THE PAIR THAT KEPT COOKING! RECIPES ON THE ROAD OFF THE SCREEN.
 	 *

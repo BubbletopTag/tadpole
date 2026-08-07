@@ -694,37 +694,101 @@ static int selftest(int rotate, int scale)
 	return bad ? 1 : 0;
 }
 
+/* WHERE THIS LAYER GOES ON THE PANEL, AND HOW MUCH OF IT IS PICTURE.
+ *
+ * A LAYER'S BUFFER IS NOT A PANEL-SIZED IMAGE. The MLC reads win_w x win_h
+ * pixels from the layer's base address, `line_length` bytes per row, and
+ * composites them at (win_x, win_y). The guest writes accordingly — for
+ * Digging for Dinosaurs, whose ViewFrame window is 250x250 at (76,11), Brio's
+ * own log says
+ *
+ *     AllocBuffer: new buf offset 0017E800, length 00075300
+ *     CreateHandle: 0x86728: 250x250 (1920) @ 0x8217e800
+ *     SetWindowPosition: 0x86728: 0,0 .. 250,250
+ *
+ * 0x75300 is 250 x 1920: two hundred and fifty rows of PANEL stride, starting
+ * at the pan base with no offset of any kind. The (76,11) exists only in the
+ * IOCSPOSTION the shim records into state.bin.
+ *
+ * Copying the buffer 1:1 onto the panel therefore drew every such title in the
+ * top-left corner, where the ViewFrame art then cropped off its left and top
+ * edges — "the game is cut off and is not centred". It went unnoticed for the
+ * 3D titles because the GL rasteriser used to compensate by rendering AT the
+ * window, which is why Clam Prix looked right and every Flash-rendered Leapster
+ * title did not. Placement belongs here, once, for all of them.
+ *
+ * Anything that does not describe a rectangle inside the panel means the guest
+ * has not told us a window, and the layer IS the panel — which is the Flash
+ * UI's normal state and by far the common case.
+ */
+static void layer_window(const struct layer_state *ls, int w, int h,
+                         int *wx, int *wy, int *ww, int *wh)
+{
+	int x = (int)ls->win_x, y = (int)ls->win_y;
+	int cw = (int)ls->win_w, ch = (int)ls->win_h;
+
+	if (cw <= 0 || ch <= 0 || x < 0 || y < 0 || x + cw > w || y + ch > h) {
+		x = 0; y = 0; cw = w; ch = h;
+	}
+	*wx = x; *wy = y; *ww = cw; *wh = ch;
+}
+
+/* SAY WHERE A LAYER IS BEING COMPOSITED, once, and again whenever it moves.
+ *
+ * A misplaced layer is invisible in a log and ambiguous in a screenshot: the
+ * ViewFrame art crops whatever spills out of the window, so "drawn in the
+ * corner" and "drawn correctly but with the wrong content" look identical.
+ * Three numbers per title settle it without a pixel ruler. */
+static void say_layer(int idx, int wx, int wy, int ww, int wh)
+{
+	static int last[NUM_FB][4];
+	static int seen[NUM_FB];
+
+	if (seen[idx] && last[idx][0] == wx && last[idx][1] == wy &&
+	    last[idx][2] == ww && last[idx][3] == wh)
+		return;
+	seen[idx] = 1;
+	last[idx][0] = wx; last[idx][1] = wy;
+	last[idx][2] = ww; last[idx][3] = wh;
+	fprintf(stderr, "[tadpole] fb%d layer %dx%d at %d,%d\n",
+	        idx, ww, wh, wx, wy);
+}
+
 /* Convert one layer into the ARGB8888 SDL texture. */
 static void blit_layer(uint32_t *dst, int w, int h, const struct layer_state *ls,
                        const void *src, int first)
 {
-	int x, y;
+	int x, y, wx, wy, ww, wh;
 
 	if (!src)
 		return;
+	layer_window(ls, w, h, &wx, &wy, &ww, &wh);
 
 	if (ls->bpp == 16) {
 		const uint16_t *s = src;
-		for (y = 0; y < h; y++) {
-			for (x = 0; x < w; x++) {
+		for (y = 0; y < wh; y++) {
+			for (x = 0; x < ww; x++) {
 				uint16_t p = s[y * w + x];
 				uint32_t r = (uint32_t)((p >> 11) & 0x1F) << 3;
 				uint32_t g = (uint32_t)((p >> 5)  & 0x3F) << 2;
 				uint32_t b = (uint32_t)( p        & 0x1F) << 3;
-				dst[y * w + x] = 0xFF000000u | (r << 16) | (g << 8) | b;
+				dst[(wy + y) * w + wx + x] =
+					0xFF000000u | (r << 16) | (g << 8) | b;
 			}
 		}
 	} else {
 		const uint32_t *s = src;
-		for (y = 0; y < h; y++) {
-			for (x = 0; x < w; x++) {
+		for (y = 0; y < wh; y++) {
+			for (x = 0; x < ww; x++) {
 				uint32_t p = s[y * w + x];
 				if (first) {
-					dst[y * w + x] = 0xFF000000u | (p & 0x00FFFFFFu);
+					dst[(wy + y) * w + wx + x] =
+						0xFF000000u | (p & 0x00FFFFFFu);
 				} else {
 					uint32_t a = (p >> 24) & 0xFF;
 					if (a)
-						dst[y * w + x] = 0xFF000000u | (p & 0x00FFFFFFu);
+						dst[(wy + y) * w + wx + x] =
+							0xFF000000u | (p & 0x00FFFFFFu);
 				}
 			}
 		}
@@ -742,7 +806,7 @@ static void blit_layer(uint32_t *dst, int w, int h, const struct layer_state *ls
 static void blit_layer_keyed(uint32_t *dst, int w, int h,
                              const struct layer_state *ls, const void *src)
 {
-	int x, y;
+	int x, y, wx, wy, ww, wh;
 
 	if (!src)
 		return;
@@ -751,16 +815,99 @@ static void blit_layer_keyed(uint32_t *dst, int w, int h,
 		blit_layer(dst, w, h, ls, src, 1);
 		return;
 	}
+	layer_window(ls, w, h, &wx, &wy, &ww, &wh);
 	{
 		const uint32_t *s = src;
-		for (y = 0; y < h; y++)
-			for (x = 0; x < w; x++) {
+		for (y = 0; y < wh; y++)
+			for (x = 0; x < ww; x++) {
 				uint32_t p = s[y * w + x];
-				dst[y * w + x] = ((p >> 24) & 0xFF)
+				dst[(wy + y) * w + wx + x] = ((p >> 24) & 0xFF)
 				               ? (0xFF000000u | (p & 0x00FFFFFFu))
 				               : 0u;
 			}
 	}
+}
+
+/* --selftest-layers: prove a layer lands on the panel where its window says.
+ *
+ * Needs no window and no GL, because the thing under test is arithmetic: the
+ * layer's buffer holds win_w x win_h at the PANEL pitch starting at its base,
+ * and the compositor has to put that at (win_x, win_y) and touch nothing else.
+ * Getting this wrong by (win_x, win_y) is the whole of "the game is cut off and
+ * is not centred", and it is invisible in a screenshot because the ViewFrame
+ * art crops whatever spills out.
+ *
+ * The cases are the shapes that actually ship: the reading titles' 250x250 at
+ * (76,11), a Leapster game's 320x240 at (15,17), the full-panel Flash UI, and a
+ * layer whose window is nonsense — which must fall back to the whole panel
+ * rather than drop the picture. */
+static int selftest_layers(void)
+{
+	static const struct { int x, y, w, h, ex, ey, ew, eh; const char *what; } cases[] = {
+		{  76, 11, 250, 250,  76, 11, 250, 250, "reading title 250x250" },
+		{  15, 17, 320, 240,  15, 17, 320, 240, "Leapster game 320x240" },
+		{   0,  0, 480, 272,   0,  0, 480, 272, "full panel"            },
+		{   0,  0,   0,   0,   0,  0, 480, 272, "no window announced"   },
+		{ 400,  0, 250, 250,   0,  0, 480, 272, "window off the panel"  },
+	};
+	const int w = 480, h = 272;
+	uint32_t *src = malloc((size_t)w * h * 4);
+	uint32_t *dst = malloc((size_t)w * h * 4);
+	int bad = 0, k;
+
+	if (!src || !dst) { free(src); free(dst); return 1; }
+	printf("layer window -> panel placement\n\n");
+
+	for (k = 0; k < (int)(sizeof(cases) / sizeof(cases[0])); k++) {
+		struct layer_state ls;
+		int x, y, wx, wy, ww, wh, wrong = 0, missing = 0, spill = 0;
+
+		memset(&ls, 0, sizeof(ls));
+		ls.enabled = 1; ls.bpp = 32;
+		ls.win_x = (uint32_t)cases[k].x; ls.win_y = (uint32_t)cases[k].y;
+		ls.win_w = (uint32_t)cases[k].w; ls.win_h = (uint32_t)cases[k].h;
+
+		layer_window(&ls, w, h, &wx, &wy, &ww, &wh);
+
+		/* A source whose every pixel encodes its own position, so a shifted
+		 * copy is caught rather than merely a blank one. */
+		for (y = 0; y < h; y++)
+			for (x = 0; x < w; x++)
+				src[y * w + x] = 0xFF000000u | (uint32_t)(y << 9) | (uint32_t)x;
+		memset(dst, 0, (size_t)w * h * 4);
+		blit_layer(dst, w, h, &ls, src, 1);
+
+		for (y = 0; y < h; y++)
+			for (x = 0; x < w; x++) {
+				int inside = x >= wx && x < wx + ww && y >= wy && y < wy + wh;
+				uint32_t got = dst[y * w + x];
+				if (!inside) {
+					if (got) spill++;
+					continue;
+				}
+				if (!got) { missing++; continue; }
+				/* Source row (y-wy), column (x-wx) — the layer's own origin. */
+				if (got != (0xFF000000u | (uint32_t)((y - wy) << 9)
+				                        | (uint32_t)(x - wx)))
+					wrong++;
+			}
+
+		if (wx != cases[k].ex || wy != cases[k].ey ||
+		    ww != cases[k].ew || wh != cases[k].eh || wrong || missing || spill)
+			bad++;
+		printf("  %-24s window %d,%d %dx%d -> %d,%d %dx%d  "
+		       "wrong %d missing %d spill %d  %s\n",
+		       cases[k].what, cases[k].x, cases[k].y, cases[k].w, cases[k].h,
+		       wx, wy, ww, wh, wrong, missing, spill,
+		       (wx == cases[k].ex && wy == cases[k].ey &&
+		        ww == cases[k].ew && wh == cases[k].eh &&
+		        !wrong && !missing && !spill) ? "ok" : "FAIL");
+	}
+
+	free(src); free(dst);
+	printf("\n%s\n", bad ? "FAILED — layers are not composited at their window"
+	                     : "PASS — layers land where their window says");
+	return bad ? 1 : 0;
 }
 
 static int guest_external(void);   /* defined with the guest controls below */
@@ -1416,6 +1563,8 @@ int main(int argc, char **argv)
 			rotate = ui_cfg()->rotate = atoi(argv[++i]);
 		else if (!strcmp(argv[i], "--selftest"))
 			selftest_want = 1;
+		else if (!strcmp(argv[i], "--selftest-layers"))
+			return selftest_layers();
 		else if (!strcmp(argv[i], "--boot"))
 			boot_now = 1;
 		else if (!strcmp(argv[i], "--ui-shot") && i + 2 < argc) {
@@ -1649,7 +1798,9 @@ int main(int argc, char **argv)
 				const struct layer_state *ls = &g_state->layer[1];
 				size_t pitch = (size_t)w * (ls->bpp ? ls->bpp : 32) / 8;
 				size_t off = (size_t)ls->yoffset * pitch;
-				dst = (off + pitch * (size_t)h <= g_fbsz[1])
+				int wx, wy, ww, wh;
+				layer_window(ls, w, h, &wx, &wy, &ww, &wh);
+				dst = (off + pitch * (size_t)wh <= g_fbsz[1])
 				    ? (uint32_t *)((unsigned char *)g_fb[1] + off)
 				    : (uint32_t *)g_fb[1];
 			}
@@ -1759,18 +1910,24 @@ int main(int argc, char **argv)
 				const struct layer_state *ls = &g_state->layer[i];
 				const unsigned char *base;
 				size_t pitch, off;
+				int wx, wy, ww, wh;
 
 				if (!ls->enabled || ls->blank || !g_fb[i])
 					continue;
 
 				/* Brio double/triple-buffers inside one framebuffer and
 				 * flips with FBIOPAN_DISPLAY, so the visible screen starts
-				 * yoffset lines in — not at byte 0. */
+				 * yoffset lines in — not at byte 0. Only the layer's own
+				 * rows have to fit: demanding a full panel's worth of them
+				 * would reject a legal window sitting near the end of the
+				 * arena and silently rewind it to offset 0. */
+				layer_window(ls, w, h, &wx, &wy, &ww, &wh);
 				pitch = (size_t)w * (ls->bpp ? ls->bpp : 32) / 8;
 				off   = (size_t)ls->yoffset * pitch;
-				if (off + pitch * (size_t)h > g_fbsz[i])
+				if (off + pitch * (size_t)wh > g_fbsz[i])
 					off = 0;
 				base = (const unsigned char *)g_fb[i] + off;
+				say_layer(i, wx, wy, ww, wh);
 
 				/* fb0 is the TOP layer and goes into its own buffer, so the
 				 * game picture can be drawn between the two at its own

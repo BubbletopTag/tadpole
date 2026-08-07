@@ -354,6 +354,79 @@ int main(int argc, char **argv)
 		check(hle_host_scale() == 1, "render scale returns to 1x");
 	}
 
+	/* ---- A LAYER THAT IS NOT THE WHOLE PANEL ----------------------------
+	 *
+	 * Every case above uses the full 480x272, which is the one shape that
+	 * cannot catch a positioning bug: at (0,0,480,272) drawing at the layer's
+	 * origin and drawing at its panel position are the same thing.
+	 *
+	 * The shipping titles are not that shape. A reading title's ViewFrame
+	 * window is 250x250 at (76,11), and its layer's buffer holds those 250x250
+	 * pixels starting at ITS OWN base address — the (76,11) is the compositor's
+	 * business, not the renderer's. Rendering at the panel position instead put
+	 * the picture 76 px right and 11 px down of where the readback took it,
+	 * which is exactly the "the game is cut off and is not centred" this test
+	 * now guards against.
+	 *
+	 * So: send the layer rectangle, draw a quad covering the whole of it, and
+	 * require the picture to come back in the buffer's top-left 250x250 with
+	 * nothing outside it.
+	 */
+	{
+		const int lx = 76, ly = 11, lw = 250, lh = 250;
+
+		verts[0] =      0; verts[1] =      0;
+		verts[2] = lw << 16; verts[3] =      0;
+		verts[4] = lw << 16; verts[5] = lh << 16;
+		verts[6] =      0; verts[7] = lh << 16;
+		hle_bufferdata(1, sizeof verts, verts);
+
+		hle_viewport(lx, ly, lw, lh);
+		hle_clear(COLOUR_BIT | DEPTH_BIT, 0xFF0D2113u, 1.0f);
+		hle_matrixmode(GL_PROJECTION_);
+		hle_loadidentity();
+		hle_ortho(0, lw, lh, 0, -1, 1);
+		hle_matrixmode(GL_MODELVIEW_);
+		hle_loadidentity();
+		hle_bindtexture(1);
+		hle_enable(GL_TEXTURE_2D_);
+		hle_color(1, 1, 1, 1);
+		hle_clientstate(TADGL_ARR_VERTEX, 1);
+		hle_clientstate(TADGL_ARR_TEXCOORD, 1);
+		hle_arraypointer(TADGL_ARR_VERTEX,   1, 2, GL_FIXED_, 0, 0);
+		hle_arraypointer(TADGL_ARR_TEXCOORD, 2, 2, GL_FIXED_, 0, 0);
+		hle_drawelements(GL_TRIANGLES_, 6, GL_UNSIGNED_SHORT_, 3, 0);
+		hle_present_nowait();
+
+		memset(fb, 0xAB, sizeof fb);
+		check(hle_host_pump(fb, W) == 1, "replays a frame for a 250x250 layer");
+		{
+			int x, y, painted = 0, outside = 0;
+			int rx = 0, ry = 0, rw = 0, rh = 0;
+			for (y = 0; y < H; y++)
+				for (x = 0; x < W; x++)
+					if (fb[y * W + x] != 0xABABABABu) {
+						painted++;
+						if (x >= lw || y >= lh) outside++;
+					}
+			hle_host_rect(&rx, &ry, &rw, &rh);
+			printf("  painted %d px, %d of them outside the layer's own "
+			       "%dx%d; host reports the panel rect as %dx%d at %d,%d\n",
+			       painted, outside, lw, lh, rw, rh, rx, ry);
+			check(painted == lw * lh,
+			      "exactly the layer's own rectangle was written");
+			check(outside == 0,
+			      "nothing landed outside it — drawn at the layer origin");
+			check(fb[(lh / 2) * W + (lw / 2)] != 0xABABABABu,
+			      "the middle of the layer has pixels");
+			check(rx == lx && ry == ly && rw == lw && rh == lh,
+			      "host still reports where the compositor must place it");
+		}
+		/* Deliberately NOT restoring the viewport: the ring check below
+		 * requires head == tail, and a packet queued after the last pump is
+		 * one the host never gets to consume. */
+	}
+
 	if (argc > 1 && !strcmp(argv[1], "--bench")) {
 		bench();
 		hle_host_shutdown();

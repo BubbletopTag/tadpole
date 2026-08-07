@@ -5194,3 +5194,123 @@ Two bugs found while testing that, both older than this work:
 * A single `mkdir()` cannot create `~/.local/state/tadpole` on an account where
   `~/.local/state` does not exist yet, and the failure was invisible: no log
   file, no message.
+
+## SOLVED: "the game is cut off and is not centred" — the layer window was recorded and never applied
+
+Symptom, reported against *Digging for Dinosaurs*: the game draws in the corner
+of its ViewFrame box, losing its left and top edges, with a black band down the
+right of the box. The Scholastic splash lost the first few characters of every
+line. Reported as happening "across a few games", which it did.
+
+### The picture was exactly the layer size at the panel origin
+
+Measured off the reported screenshots rather than eyeballed:
+
+| | |
+|---|---|
+| `EmeraldTitles/LST3-0x0018003C-000000/ViewFrame.json` | `x:76 y:11 w:250 h:250` |
+| transparent hole in `Digging4Dinos.png` | x 78–324, y 13–259 |
+| where the picture actually ended | panel x=250, y=250 |
+
+A 250x250 image whose bottom-right corner is at (250,250) is the layer's own
+size drawn at the PANEL's origin — a translation of exactly −(76,11). The
+ViewFrame art then cropped everything left of x=78 and above y=13, which is why
+it read as "cut off" rather than "in the wrong place".
+
+### The guest says what it does, in its own log
+
+`~/.local/state/tadpole/tadpole.log`, with the shim's tracing on:
+
+```
+[tadpole] fb1 PUTVAR req 250x250 virt 480x2176 off 0,0
+[tadpole] fb1 window 76,11
+[0x5] AllocBuffer: new buf offset 0017E800, length 00075300
+[0x5] CreateHandle: 0x86728: 250x250 (1920) @ 0x8217e800
+[0x5] SetWindowPosition: 0x86728: 0,0 .. 250,250
+```
+
+`0x17E800` is the pan base (816 rows x 1920 B) and `0x75300` is 250 x 1920:
+**250 rows of PANEL stride starting at the pan base, with no offset in it.**
+A layer's buffer is not a panel-sized image — the MLC reads `win_w x win_h` from
+the layer's base address and composites it at `(win_x, win_y)`. The (76,11)
+exists only in the `IOCSPOSTION` the shim records into `state.bin`.
+
+So `win_x/win_y` reached `state.bin` correctly the whole time. `blit_layer()` in
+`tadpole_view.c` simply copied each framebuffer onto the panel 1:1 and never
+read them.
+
+### Why only some titles
+
+`tadpole_gles_core.c` compensated for the window by RENDERING at `(g_vx,g_vy)`,
+which came to the same picture as long as the compositor copied 1:1. That is the
+wrong half of the pipeline to compensate in, and it only ever covered titles
+whose pixels come through our GL:
+
+* **3D titles were fine.** Clam Prix's menu sat at exactly (15,17) in
+  `shots/46-viewport-auto.png` — verified pixel by pixel, not assumed.
+* **Everything Flash-rendered was not.** Digging for Dinosaurs runs
+  `LF/Bulk/ProgramFiles/LST3-0x0018003C-000000/LeapsterEmulator.swf` — a Leapster
+  emulator written in Flash. Its pixels are 2D writes into fb1 and got no
+  compensation at all.
+
+### The fix: placement belongs to the compositor, once, for every layer
+
+* `layer_window()` in `tadpole_view.c` derives the destination rect; `blit_layer`
+  and `blit_layer_keyed` copy `win_w x win_h` from the layer's base (panel pitch)
+  to `(win_x, win_y)`. A window that is not a rectangle inside the panel means
+  the guest never announced one, and the layer IS the panel — the Flash UI's
+  normal state and by far the common case.
+* The GL paths therefore draw at the layer's OWN origin: `to_screen()`, the
+  `glClear` loops and the raster bbox clamp in `tadpole_gles_core.c`, and
+  `TADGL_VIEWPORT`, `apply_scissor()` and the `TADGL_PRESENT` readback in
+  `tadpole_hle.c`. `hle_host_rect()` still reports the panel position, because
+  the viewer needs it to place the full-resolution game texture.
+* `glGetIntegerv(GL_VIEWPORT)` now answers `0,0,w,h` — the surface the title
+  believes it has. Answering `76,11,...` would have any title that sizes an ortho
+  box from it inset everything it draws by that much.
+* `tools/fbshot.py` composites the same way. It has its own copy of this logic
+  for the same reason it has its own copy of `struct layer_state`, and the same
+  warning applies: if the two disagree, every headless capture quietly stops
+  matching what is on screen.
+* Side effect worth having: leftovers outside the window are no longer drawn.
+  The olive band along the bottom of the box in the original screenshots was
+  stale home-screen pixels still sitting in fb1.
+
+**The two rectangles now live in the same coordinate space**, which retires the
+open question above `apply_scissor()`. The title's `glScissor` box is in its
+surface's coordinates with y from the bottom, and its surface IS the layer, so it
+converts to the layer's top-left space by flipping y about `g_vh`.
+`TADPOLE_GL_SCISSOR` stays off by default only because turning it on changes what
+several titles clip, and that deserves its own before/after captures.
+
+### Tests, so this cannot come back quietly
+
+* `tadpole-view --selftest-layers` — no window, no GL, just the arithmetic. A
+  source whose every pixel encodes its own position, so a SHIFTED copy fails and
+  not merely a blank one. Covers 250x250 at (76,11), 320x240 at (15,17), the
+  full panel, an unannounced window and a window that runs off the panel.
+* `hle-selftest` gained a 250x250-layer case. Every earlier case used the full
+  480x272, which is the one shape that cannot catch a positioning bug: at
+  (0,0,480,272) the layer's origin and its panel position are the same point.
+
+### Measured after the fix
+
+| title | window | result |
+|---|---|---|
+| Digging for Dinosaurs | 250x250 at 76,11 | fills the hole; 7 stray black pixels (line art) where a 75x237 band had been |
+| Mr. Pencil Saves Doodleburg | 320x240 at 17,16 | fills the hole to all four corners |
+| Clam Prix (3D, GL) | 320x240 at 15,17 | content edges **byte-identical** to `shots/46-viewport-auto.png` |
+| home screen, sign-in | 480x272 at 0,0 | unchanged |
+
+Touch was checked too, and it improves rather than regresses: the guest already
+mapped taps assuming its window was at (76,11), so it agreed with the picture
+only after this. Tapping Play inside Clam Prix's window advances to Play Modes.
+
+### `tools/probe-launch.sh` was broken, and it looked like an emulator failure
+
+It ran `tadpole.sh --no-viewer` with no mode. `tadpole.sh`'s default became
+`front` — open the window and wait — when the viewer took over the decision to
+start a guest, so that combination is a contradiction it rejects in two lines
+and exits. The probe then spent its full 120-second timeout waiting for a SignIn
+nothing was booting and reported "never reached SignIn". Fixed to `--boot
+--no-viewer`, matching `probe-home.sh`, with `PROBE_DEBUG=1` for the shim trace.
