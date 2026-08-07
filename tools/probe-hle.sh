@@ -25,6 +25,16 @@ export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-x11}"
 mkdir -p "$OUT"
 LOG="$OUT/run.log"
 
+# WHERE THE GUEST ACTUALLY TALKS.
+#
+# tadpole-view only echoes guest output to stdout when stdout is a TTY
+# (guest_log_pump: `if (isatty(1))`). This probe redirects stdout to a file, so
+# every grep below was searching a log the guest had never written a word to,
+# and the run died on "never reached SignIn" while the emulator was booting
+# perfectly well behind it. The guest's words go to the state log instead.
+GLOG="${XDG_STATE_HOME:-$HOME/.local/state}/tadpole/tadpole.log"
+saw() { grep -qaE "$1" "$LOG" 2>/dev/null || grep -qaE "$1" "$GLOG" 2>/dev/null; }
+
 is_ancestor() {
     local p=$$
     while [ "${p:-0}" -gt 1 ]; do
@@ -59,9 +69,9 @@ done
 
 for i in $(seq 1 150); do
     sleep 1
-    grep -qa "SignIn_mc )" "$LOG" && break
+    saw "SignIn_mc \)" && break
 done
-grep -qa "SignIn_mc )" "$LOG" || { echo "never reached SignIn" >&2; tail -5 "$LOG" >&2; exit 1; }
+saw "SignIn_mc \)" || { echo "never reached SignIn" >&2; tail -5 "$LOG" "$GLOG" >&2; exit 1; }
 sleep 12
 
 echo "sign in"
@@ -69,34 +79,39 @@ for try in 1 2 3; do
     "$HERE/tap.py" 355 57 >/dev/null 2>&1
     for i in $(seq 1 15); do
         sleep 1
-        grep -qaE "PushState-+ ConnectNag\.swf|ReplaceTopState-+ HomePicker\.swf" "$LOG" && break 2
+        saw "PushState-+ ConnectNag\.swf|ReplaceTopState-+ HomePicker\.swf" && break 2
     done
 done
 
-if grep -qa "ConnectNag" "$LOG"; then
+if saw "ConnectNag"; then
     echo "dismiss Connect nag"
     for i in $(seq 1 40); do
         sleep 1
-        grep -qa "onLoadInit( _level0.mcContent.ConnectNag_mc )" "$LOG" && break
+        saw "onLoadInit\( _level0.mcContent.ConnectNag_mc \)" && break
     done
     sleep 10
     for try in 1 2 3; do
         "$HERE/tap.py" 85 228 >/dev/null 2>&1
         for i in $(seq 1 12); do
             sleep 1
-            grep -qa "UIPetLPAD::EnableButtons" "$LOG" && break 2
+            saw "UIPetLPAD::EnableButtons" && break 2
         done
     done
 fi
 
 for i in $(seq 1 40); do
     sleep 1
-    grep -qa "LoadIconImage----------icon6" "$LOG" && break
+    saw "LoadIconImage-+icon6" && break
 done
 sleep 6
 
-echo "launch the installed title"
-"$HERE/tap.py" 160 130 >/dev/null 2>&1
+# WHICH TILE TO LAUNCH. Defaults to the installed title in row 2 col 1, which
+# is what this probe was written for. Overridable because the video work needs
+# Sneak Peeks (row 1 col 1, 160,45) and duplicating the whole sign-in dance
+# into a second script to change two numbers is how harnesses rot.
+HLE_TAP="${HLE_TAP:-160,130}"
+echo "launch tile fb(${HLE_TAP/,/ })"
+"$HERE/tap.py" "${HLE_TAP%%,*}" "${HLE_TAP##*,}" >/dev/null 2>&1
 
 # BURST-CAPTURE THE STARTUP SEQUENCE.
 #
@@ -138,7 +153,14 @@ done
 #
 # HLE_NOCAP=1 skips captures entirely.
 for i in $(seq -w 1 24); do
-    [ -z "${HLE_NOCAP:-}" ] && "$HERE/fbshot.py" "$OUT/t$i.png" >/dev/null 2>&1
+    if [ -z "${HLE_NOCAP:-}" ]; then
+        "$HERE/fbshot.py" "$OUT/t$i.png" >/dev/null 2>&1
+        # WHAT THE LAYERS HELD, not only what the composite made of them.
+        # A video layer that is full of correct pixels and a video layer that
+        # is empty produce the same black rectangle once something opaque is
+        # drawn over it, and the PNG cannot tell them apart.
+        { echo "--- t$i"; "$HERE/fbshot.py" --layers; } >> "$OUT/layers.txt" 2>&1
+    fi
     sleep 1
 done
 cp "$OUT/t24.png" "$OUT/screen.png" 2>/dev/null

@@ -18,7 +18,8 @@ MAGIC = 0x54414450  # 'TADP'
 # so every layer after the first reads garbage: the composite then picks the
 # wrong page out of the arena and the capture comes out blank.
 LAYER_FIELDS = ("enabled", "xres", "yres", "bpp", "xoffset", "yoffset",
-                "nonstd", "alpha", "blank", "win_x", "win_y", "win_w", "win_h")
+                "nonstd", "alpha", "blank", "win_x", "win_y", "win_w", "win_h",
+                "vid_w", "vid_h")
 LAYER_SIZE = 4 * len(LAYER_FIELDS)
 HDR_SIZE = 20                      # magic, version, width, height, vsync_count
 
@@ -65,7 +66,14 @@ def composite(d, w, h, layers):
         arena = f.read()
     px = bytearray(w * h * 3)
     drawn = 0
-    for i in range(NUM_FB - 1, -1, -1):
+    # Bottom-up. The video plane is not fixed at the bottom: MLC priority 0/1
+    # put it above fb1. Must match the order in tadpole_view.c or a capture
+    # disagrees with the screen, which is the one thing this script must never
+    # do. See soc_dpc_set_vid_priority in the kernel's dpc.c.
+    v = layers[2]
+    order = ([1, 2, 0] if (v["nonstd"] >> 20) & 7 == 1
+             and ((v["nonstd"] >> 24) & 3) <= 1 else [2, 1, 0])
+    for i in order:
         L = layers[i]
         enabled, blank = L["enabled"], L["blank"]
         yoff, alpha = L["yoffset"], L["alpha"]
@@ -74,11 +82,37 @@ def composite(d, w, h, layers):
         bpp = L["bpp"] or 32
         pitch = w * bpp // 8
         wx, wy, ww, wh = layer_window(L, w, h)
-        off = yoff * pitch
+        # xoffset is part of the address — see the note in tadpole_view.c.
+        off = yoff * pitch + L["xoffset"] * bpp // 8
         if off + pitch * wh > len(arena):
             off = 0
         if off + pitch * wh > len(arena):
             continue
+        if (L["nonstd"] >> 20) & 7 == 1:      # LAYER_FORMAT_YUV420
+            # The MLC video plane. Plane layout and the scaler are both the
+            # driver's — see blit_layer_yuv420() in tadpole_view.c.
+            sw = min(L["vid_w"] or ww, L["xres"]) or ww
+            sh = min(L["vid_h"] or wh, L["yres"]) or wh
+            for y in range(wh):
+                sy = y if wh == sh else y * sh // wh
+                yr = off + sy * pitch
+                cb = off + (sy // 2) * pitch + pitch // 2
+                cr = off + (sh // 2 + sy // 2) * pitch + pitch // 2
+                o = ((wy + y) * w + wx) * 3
+                for x in range(ww):
+                    sx = x if ww == sw else x * sw // ww
+                    Y = arena[yr + sx]
+                    U = arena[cb + sx // 2] - 128
+                    V = arena[cr + sx // 2] - 128
+                    r = Y + ((91881 * V) >> 16)
+                    g = Y - ((22554 * U + 46802 * V) >> 16)
+                    b = Y + ((116130 * U) >> 16)
+                    px[o + x * 3]     = 0 if r < 0 else (255 if r > 255 else r)
+                    px[o + x * 3 + 1] = 0 if g < 0 else (255 if g > 255 else g)
+                    px[o + x * 3 + 2] = 0 if b < 0 else (255 if b > 255 else b)
+            drawn += 1
+            continue
+
         first = drawn == 0
         for y in range(wh):
             row = off + y * pitch
@@ -101,6 +135,50 @@ def composite(d, w, h, layers):
     return px
 
 
+def layer_report(d, w, h, layers):
+    """What is IN each layer, as opposed to what the composite makes of it.
+
+    The composite answers "what does the screen look like", which is the wrong
+    question when a layer is suspected of holding pixels in a format we decode
+    wrongly — noise and black composite to "looks broken" either way. This
+    reports the layer's own bytes: how much of it is non-zero, how many distinct
+    values it holds, and the raw `nonstd` word, whose format field says whether
+    the layer is RGB at all. fb2 is the MLC's video overlay and is the reason
+    this exists.
+    """
+    with open(os.path.join(d, "fb0.bin"), "rb") as f:
+        arena = f.read()
+    for i, L in enumerate(layers):
+        bpp = L["bpp"] or 32
+        pitch = w * bpp // 8
+        wx, wy, ww, wh = layer_window(L, w, h)
+        off = L["yoffset"] * pitch + L["xoffset"] * bpp // 8
+        note = ""
+        if off + pitch * wh > len(arena):
+            off, note = 0, " (yoffset past the arena, rewound to 0)"
+        nz = tot = 0
+        vals = set()
+        if off + pitch * wh <= len(arena):
+            step = max(1, wh // 64)          # sample rows; this runs per frame
+            for y in range(0, wh, step):
+                row = off + y * pitch
+                seg = arena[row:row + ww * bpp // 8]
+                tot += len(seg)
+                nz += len(seg) - seg.count(0)
+                vals.update(seg[::7])
+        pct = (100 * nz // tot) if tot else 0
+        # lf1000fb.h: LF1000_NONSTD_FORMAT=20, mask 0x7.
+        # 0 = RGB, 1 = YUV420, 2 = YUV422.
+        fmt = (L["nonstd"] >> 20) & 0x7
+        print(f"  fb{i}: enabled={L['enabled']} blank={L['blank']} "
+              f"{L['xres']}x{L['yres']} bpp={bpp} "
+              f"off={L['xoffset']},{L['yoffset']} alpha={L['alpha']}")
+        print(f"        win={ww}x{wh}+{wx}+{wy} nonstd=0x{L['nonstd']:08x} "
+              f"(fmt={fmt} prio={(L['nonstd'] >> 24) & 3})")
+        print(f"        bytes non-zero {pct}% of {tot}, {len(vals)} distinct"
+              f"{note}")
+
+
 def write_png(path, w, h, rgb):
     raw = b"".join(b"\x00" + bytes(rgb[y * w * 3:(y + 1) * w * 3]) for y in range(h))
 
@@ -120,6 +198,7 @@ def main():
     d = os.environ.get("TADPOLE_DIR", "/tmp/tadpole")
     args = sys.argv[1:]
     probe = None
+    layers_only = False
     i = 0
     while i < len(args):
         if args[i] == "-d":
@@ -127,6 +206,9 @@ def main():
         elif args[i] == "--probe":
             # --probe X,Y,W,H,RRGGBB — "is that patch mostly that colour?"
             probe = args[i + 1]; i += 2
+        elif args[i] == "--layers":
+            # What each layer HOLDS, no PNG. See layer_report().
+            layers_only = True; i += 1
         else:
             out = args[i]; i += 1
 
@@ -134,6 +216,11 @@ def main():
     if magic != MAGIC:
         print(f"bad magic 0x{magic:08x} in {d}/state.bin", file=sys.stderr)
         return 1
+
+    if layers_only:
+        layer_report(d, w, h, layers)
+        print(f"  panel {w}x{h}  vsync={vsync}")
+        return 0
 
     if probe is not None:
         # ASKING THE SCREEN A QUESTION, for scripts that have to know what is

@@ -349,15 +349,27 @@ slong snd_pcm_mmap_writei(snd_pcm_t *pcm, const void *buffer, ulong frames)
 	if (g_debug_audio < 0)
 		{ const char *d = getenv("TADPOLE_DEBUG");
 		  g_debug_audio = (d && d[0] && d[0] != '0'); }
+	left = (size_t_)(frames * pcm->frame_bytes);
+
+	/* PACE FIRST, EVEN WHEN THERE IS NOWHERE TO PUT IT.
+	 *
+	 * This used to return early when the FIFO had no reader, which skipped
+	 * pacing altogether — and the guest's own sense of time comes from this
+	 * call blocking. With nothing draining the pipe, Brio's audio clock ran
+	 * as fast as qemu could generate samples, and everything synced to it ran
+	 * away too: a 4.416 s video finished in 0.27 s with 46 of its 49 frames
+	 * binned as "late" (VideoModule::GetVideoFrame: Dropped frame N).
+	 *
+	 * Discarding the bytes is fine. Discarding the TIMING is not — a device
+	 * with the speaker unplugged still takes a second to play a second. */
+	pace_pcm(pcm, left);
+
 	if (pcm->fd < 0) {
 		open_fifo(pcm);
 		if (pcm->fd < 0)
-			return (slong)frames;      /* no viewer: discard */
+			return (slong)frames;      /* no reader: discard, but on time */
 	}
 
-	left = (size_t_)(frames * pcm->frame_bytes);
-	/* Block here, like a real device, BEFORE touching the pipe. */
-	pace_pcm(pcm, left);
 	while (left) {
 		slong n = write(pcm->fd, p, left);
 		if (n > 0) {

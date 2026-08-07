@@ -283,6 +283,7 @@ guest() {
            -E TADPOLE_DIR="$TADPOLE_DIR" \
            -E TADPOLE_SYSROOT="$SYSROOT" \
            $([ "$debug" = 1 ] && echo "-E TADPOLE_DEBUG=1") \
+           ${TADPOLE_LOG:+-E TADPOLE_LOG="$TADPOLE_LOG"} \
            "$bin" "$@" )
 }
 
@@ -396,7 +397,16 @@ case "$mode" in
     ui)
         # rcS launches VideoDaemon alongside AppManager; AppManager connects to
         # it over /tmp/video_events_socket.
-        guest /LF/Base/bin/VideoDaemon 750 >/dev/null 2>&1 &
+        #
+        # ITS OUTPUT USED TO GO TO /dev/null, and that cost real time: the
+        # daemon narrates every step it takes ("Creating Display Surface",
+        # "Starting Video", "Stopping Video"), and with all of it discarded the
+        # only visible symptom of a failed video was a layer that turned on and
+        # went blank again. Prefixed so it does not read as AppManager's.
+        # sed -u, not sed: the daemon double-forks and then says very little,
+        # so a 4 KB block buffer holds its entire account of a failed video
+        # until the process group dies. Unbuffered or not at all.
+        guest /LF/Base/bin/VideoDaemon 750 2>&1 | sed -u 's/^/[vd] /' &
         sleep 1
         echo "=== AppManager ==="
         guest /LF/Base/bin/AppManager ;;

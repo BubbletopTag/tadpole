@@ -65,6 +65,8 @@ extern void *memcpy(void *d, const void *s, u32 n);
 extern long  write(int fd, const void *buf, u32 n);
 extern char *getenv(const char *name);
 extern int   snprintf(char *s, u32 n, const char *fmt, ...);
+extern long  lseek(int fd, long off, int whence);
+#define SEEK_END_ 2
 
 /* Timebase for frame pacing. struct timespec is two longs on this target. */
 struct tad_ts { long tv_sec; long tv_nsec; };
@@ -689,10 +691,20 @@ static int parse_int(const char **p)
  *
  * TADPOLE_GL_VIEW="x,y,w,h" overrides everything, for bisecting.
  */
+/* MUST MATCH struct layer_state in tadpole_shim.c, FIELD FOR FIELD.
+ *
+ * Not just the fields this file reads — the whole thing, because layer[1] is
+ * addressed by STRIDE. Adding vid_w/vid_h to the shim's copy and not this one
+ * moved layer[1] eight bytes and every 3D title came up black with a sliver
+ * of picture in the top-left corner: the viewport was being read out of the
+ * middle of layer[0]. Nothing warns; the numbers are just quietly wrong.
+ *
+ * A layout check runs at map time — see view_update(). */
 struct tad_layer_state {
 	u32 enabled, xres, yres, bpp, xoffset, yoffset;
 	u32 nonstd, alpha, blank;
 	u32 win_x, win_y, win_w, win_h;
+	u32 vid_w, vid_h;
 };
 struct tad_state {
 	u32 magic, version, width, height, vsync_count;
@@ -700,6 +712,7 @@ struct tad_state {
 };
 
 static const struct tad_state *g_tstate;
+static long g_state_bytes;
 static int g_view_forced = -1;      /* from TADPOLE_GL_VIEW */
 static int g_fx, g_fy, g_fw, g_fh;
 
@@ -726,13 +739,34 @@ static void view_update(void)
 			snprintf(path, sizeof(path), "%s/state.bin", d);
 			fd = open(path, O_RDWR);
 			if (fd >= 0) {
+				long got = lseek(fd, 0, SEEK_END_);
 				void *m = mmap(NULL, sizeof(struct tad_state),
 				               PROT_RW, MAP_SHARED, fd, 0);
 				close(fd);
 				if (m != (void *)-1)
 					g_tstate = m;
+				g_state_bytes = got;
 			}
 			tr2("view state mapped?", g_tstate ? 1 : 0, 0);
+			/* DOES OUR IDEA OF THE LAYOUT MATCH WHAT IS THERE?
+			 *
+			 * state.bin is exactly the header plus three layers, so its
+			 * length pins the stride. Getting that wrong does not fail —
+			 * it reads plausible-looking numbers out of the wrong layer
+			 * and every 3D title renders to a wrong viewport, which is a
+			 * far worse thing to debug than a refusal. Fall back to the
+			 * full panel and say so, rather than trust a bad stride. */
+			if (g_tstate) {
+				long want = (long)sizeof(struct tad_state);
+				long got  = g_state_bytes;
+				if (got > 0 && got != want) {
+					tr2("STATE LAYOUT MISMATCH bytes want/got",
+					    (int)want, (int)got);
+					tr2("struct tad_layer_state is out of step with "
+					    "tadpole_shim.c; using the full panel", 0, 0);
+					g_tstate = 0;
+				}
+			}
 		}
 	}
 

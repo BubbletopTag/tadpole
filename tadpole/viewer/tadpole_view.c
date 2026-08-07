@@ -32,6 +32,11 @@
 #define NUM_FB 3
 #define NUM_EV 6
 
+/* How long the viewer keeps drawing the game layer after the last HLE frame.
+ * See the drop in the render loop — this is "the title has gone", not a
+ * frame-pacing tolerance. */
+#define GL_STALE_MS 1000u
+
 /* Mirrors struct tadpole_state in the shim. Keep the two in sync. */
 struct layer_state {
 	uint32_t enabled, xres, yres, bpp, xoffset, yoffset;
@@ -40,6 +45,8 @@ struct layer_state {
 	 * tadpole_shim.c. Must stay in step with the shim's copy: both map the
 	 * same state.bin, so a mismatch silently shifts every field after it. */
 	uint32_t win_x, win_y, win_w, win_h;
+	/* Video-scaler source size for the YUV layer; 0 = unset. */
+	uint32_t vid_w, vid_h;
 };
 
 struct tadpole_state {
@@ -755,8 +762,109 @@ static void say_layer(int idx, int wx, int wy, int ww, int wh)
 }
 
 /* Convert one layer into the ARGB8888 SDL texture. */
+/* Layer format, out of fb_var_screeninfo.nonstd — include/linux/lf1000/
+ * lf1000fb.h in the LF2 kernel drop:
+ *
+ *   #define LF1000_NONSTD_FORMAT       20
+ *   #define LF1000_NONSTD_FORMAT_MASK  0x7
+ *   enum { LAYER_FORMAT_RGB = 0, LAYER_FORMAT_YUV420 = 1, LAYER_FORMAT_YUV422 = 2 };
+ *
+ * fb0 and fb1 always report 0. fb2 is the MLC's video plane and reports
+ * YUV420 the moment anything starts a video. */
+#define LF_FORMAT(nonstd) (((nonstd) >> 20) & 0x7)
+#define LF_FMT_RGB     0
+#define LF_FMT_YUV420  1
+#define LF_FMT_YUV422  2
+
+/* THE VIDEO PLANE, WHICH IS NOT RGB AND NEVER WAS.
+ *
+ * This is why FMV showed nothing. The decoder worked the whole time — Brio's
+ * libVideo.so decodes Theora in software with libtheora and writes the result
+ * into fb2 — but fb2 holds YUV420, and every layer went through the packed-RGB
+ * path above. A correct frame composited as noise or as nothing, and the only
+ * visible symptom was "video plays audio, shows no picture".
+ *
+ * The plane layout is the driver's, not a guess. lf2000fb.c, nxfb_ops_set_par:
+ *
+ *   soc_dpc_set_vid_address(module, pbase,                        4096,
+ *                                   pbase + 2048,                 4096,
+ *                                   pbase + 2048 + 4096*yres/2,   4096, 0);
+ *
+ * so with P the layer pitch: Y at 0, Cb at P/2, Cr at P/2 + P*(yres/2), every
+ * plane strided by P. The driver hardcodes P = 4096 (fix.line_length for the
+ * YUV layer is always 4096, whatever the mode); we pass the pitch in because
+ * our shim reports fb2's line_length by the ordinary RGB formula and Brio
+ * lays the planes out from what we told it. Both agree on the SHAPE, which is
+ * what this arithmetic depends on — see the note in docs about making the
+ * shim report 4096 and why that is a separate, riskier change.
+ *
+ * 4:2:0, so one chroma sample covers a 2x2 luma block. */
+static void blit_layer_yuv420(uint32_t *dst, int w, int h,
+                              const struct layer_state *ls, const void *src)
+{
+	const unsigned char *base = src;
+	size_t pitch = (size_t)w * (ls->bpp ? ls->bpp : 32) / 8;
+	int x, y, wx, wy, ww, wh, sw, sh;
+
+	if (!src)
+		return;
+	layer_window(ls, w, h, &wx, &wy, &ww, &wh);
+
+	/* THE SCALER. The decoded picture is sw x sh; the MLC stretches it to the
+	 * layer window. Sneak Peeks plays 320x240 trailers into a 362x272 window,
+	 * so without this the right 42 columns and bottom 32 rows of every frame
+	 * are read from a part of the buffer the decoder never wrote. Nearest
+	 * neighbour: this is a 480x272 panel being upscaled again by the viewer,
+	 * and a second filtering pass here would only smear it. */
+	sw = ls->vid_w ? (int)ls->vid_w : ww;
+	sh = ls->vid_h ? (int)ls->vid_h : wh;
+	if (sw > (int)ls->xres) sw = (int)ls->xres;
+	if (sh > (int)ls->yres) sh = (int)ls->yres;
+	if (sw < 1) sw = 1;
+	if (sh < 1) sh = 1;
+
+	for (y = 0; y < wh; y++) {
+		int sy = wh == sh ? y : y * sh / wh;
+		const unsigned char *yr = base + (size_t)sy * pitch;
+		const unsigned char *cb = base + (size_t)(sy / 2) * pitch + pitch / 2;
+		const unsigned char *cr = base + ((size_t)(sh / 2) + (size_t)(sy / 2))
+		                        * pitch + pitch / 2;
+		for (x = 0; x < ww; x++) {
+			int sx = ww == sw ? x : x * sw / ww;
+			int Y = yr[sx];
+			int U = cb[sx / 2] - 128;
+			int V = cr[sx / 2] - 128;
+			int r = Y + ((91881 * V) >> 16);
+			int g = Y - ((22554 * U + 46802 * V) >> 16);
+			int b = Y + ((116130 * U) >> 16);
+			if (r < 0) r = 0; else if (r > 255) r = 255;
+			if (g < 0) g = 0; else if (g > 255) g = 255;
+			if (b < 0) b = 0; else if (b > 255) b = 255;
+			dst[(wy + y) * w + wx + x] = 0xFF000000u |
+			        ((uint32_t)r << 16) | ((uint32_t)g << 8) | (uint32_t)b;
+		}
+	}
+}
+
+static void blit_layer_rgb(uint32_t *dst, int w, int h,
+                           const struct layer_state *ls,
+                           const void *src, int first);
+
 static void blit_layer(uint32_t *dst, int w, int h, const struct layer_state *ls,
                        const void *src, int first)
+{
+	if (LF_FORMAT(ls->nonstd) == LF_FMT_YUV420) {
+		/* The video plane is the bottom layer and opaque where it is
+		 * enabled, so `first` never has anything useful to say about it. */
+		blit_layer_yuv420(dst, w, h, ls, src);
+		return;
+	}
+	blit_layer_rgb(dst, w, h, ls, src, first);
+}
+
+static void blit_layer_rgb(uint32_t *dst, int w, int h,
+                           const struct layer_state *ls,
+                           const void *src, int first)
 {
 	int x, y, wx, wy, ww, wh;
 
@@ -1529,7 +1637,11 @@ int main(int argc, char **argv)
 	uint32_t *gl_px = NULL;
 	int gl_tw = 0, gl_th = 0;         /* size of tex_gl */
 	int top_drawn = 0;                /* fb0 had something to show this frame */
+	int n;                            /* index into the composite order */
+	int vid_over_fb1 = 0;             /* MLC video priority puts fb2 above fb1 */
+	int said_vid_order = -1;
 	int gl_have = 0;                  /* tex_gl holds a current frame */
+	Uint32 gl_stamp = 0;              /* when that frame arrived */
 	int gl_rx = 0, gl_ry = 0, gl_rw = 0, gl_rh = 0;   /* where it belongs */
 	char path[512];
 	int scale = 2, w, h, i, running = 1, touching = 0;
@@ -1879,6 +1991,7 @@ int main(int argc, char **argv)
 								        "layer itself, %dx%d into %dx%d at %d,%d\n",
 								        fw, fh, gl_rw, gl_rh, gl_rx, gl_ry);
 							gl_have = 1;
+							gl_stamp = SDL_GetTicks();
 						} else if (!gl_have) {
 							static int said;
 							if (!said++)
@@ -1893,6 +2006,29 @@ int main(int argc, char **argv)
 				}
 			}
 		}
+		/* THE LAST FRAME OF A TITLE MUST NOT OUTLIVE IT.
+		 *
+		 * Leaving a game does NOT kill the guest — AppManager returns to the
+		 * home screen and carries on drawing into its own layers — so there
+		 * is no process death to hang this on. What does happen is that the
+		 * HLE ring goes quiet: hle_host_read_full() stops producing frames
+		 * and `gl_have` stays set, painting the title's final frame over the
+		 * home screen until the render scale is cycled (which resets it via
+		 * the branch above).
+		 *
+		 * Nothing announces "the title exited", so use the absence of frames
+		 * as the signal. A second is far longer than any legitimate gap — a
+		 * stalled frame at 12 fps is 83 ms — and if it ever fires early the
+		 * next frame sets gl_have straight back. */
+		if (gl_have && (!hle_host_ready() ||
+		                SDL_GetTicks() - gl_stamp > GL_STALE_MS)) {
+			gl_have = 0;
+			if (getenv("TADPOLE_HLE_DEBUG"))
+				fprintf(stderr, "hle: no game-layer frame for %ums — "
+				        "dropping it so the guest's own picture shows\n",
+				        (unsigned)GL_STALE_MS);
+		}
+
 		hle_host_want_full(ui_cfg()->render_scale > 1);
 
 		memset(pixels, 0, (size_t)w * h * 4);
@@ -1905,9 +2041,46 @@ int main(int argc, char **argv)
 			 * MLC's fixed layer order. AppManager puts native widgets on
 			 * fb0 and Flash content on fb1 — and a native widget like the
 			 * on-screen keyboard has to appear OVER the Flash UI, which is
-			 * fully opaque. So composite bottom-up: fb2, fb1, then fb0. */
-			for (i = NUM_FB - 1; i >= 0; i--) {
-				const struct layer_state *ls = &g_state->layer[i];
+			 * fully opaque. So composite bottom-up: fb2, fb1, then fb0.
+			 *
+			 * EXCEPT THAT THE VIDEO PLANE MOVES. fb2 is not fixed at the
+			 * bottom; the MLC lets the video plane sit at any of four depths
+			 * and the guest picks one. soc_dpc_set_vid_priority (dpc.c):
+			 *
+			 *   0  video>0>1>2      video above every RGB layer
+			 *   1  0>video>1>2      under fb0, OVER fb1
+			 *   2  0>1>video>2      what we always assumed
+			 *   3  0>1>2>video      the very bottom
+			 *
+			 * Sneak Peeks asks for priority 1 (nonstd 0x01100000), and it
+			 * draws an opaque background on fb1 — so compositing fb2 at the
+			 * bottom buried a perfectly good trailer under the app's own
+			 * artwork. That is the whole of "plays audio, shows no picture".
+			 *
+			 * Priority 0 is folded in with 1 here: fb0 is composited in its
+			 * own later pass so the Tier 3 game layer can go between it and
+			 * the rest, and putting the video above THAT needs more than a
+			 * reorder. Nothing has asked for it yet; make it say so if it
+			 * ever does. */
+			{
+				const struct layer_state *v = &g_state->layer[2];
+				int vp = (v->nonstd >> 24) & 0x3;
+				vid_over_fb1 = LF_FORMAT(v->nonstd) == LF_FMT_YUV420 && vp <= 1;
+				if (vid_over_fb1 != said_vid_order) {
+					said_vid_order = vid_over_fb1;
+					fprintf(stderr, "[tadpole] video plane priority %d — "
+					        "drawing it %s fb1\n", vp,
+					        vid_over_fb1 ? "OVER" : "under");
+				}
+			}
+			for (n = 0; n < NUM_FB; n++) {
+				const struct layer_state *ls;
+				/* Bottom-up. Swap the two lower slots when the video plane
+				 * outranks fb1. fb0 stays last either way. */
+				static const int base_order[NUM_FB] = { 2, 1, 0 };
+				static const int over_order[NUM_FB] = { 1, 2, 0 };
+				i = (vid_over_fb1 ? over_order : base_order)[n];
+				ls = &g_state->layer[i];
 				const unsigned char *base;
 				size_t pitch, off;
 				int wx, wy, ww, wh;
@@ -1923,7 +2096,22 @@ int main(int argc, char **argv)
 				 * arena and silently rewind it to offset 0. */
 				layer_window(ls, w, h, &wx, &wy, &ww, &wh);
 				pitch = (size_t)w * (ls->bpp ? ls->bpp : 32) / 8;
-				off   = (size_t)ls->yoffset * pitch;
+				/* xoffset IS PART OF THE ADDRESS, not a decoration.
+				 *
+				 * Brio hands out layer buffers from one arena at byte
+				 * granularity and then expresses the result as a pan: the
+				 * whole rows go in yoffset and the remainder in xoffset. For
+				 * the video layer that remainder is not zero —
+				 *
+				 *   DeAllocBuffer: remove offset 002FC000
+				 *   fb2 PUTVAR ... off 416,1629
+				 *   1629 * 1920 + 416 * 4 = 0x2FC000
+				 *
+				 * — so reading from yoffset alone starts 416 pixels early and
+				 * every row of the video lands shifted. fb0 and fb1 have only
+				 * ever had xoffset 0, which is why this went unnoticed. */
+				off   = (size_t)ls->yoffset * pitch
+				      + (size_t)ls->xoffset * (ls->bpp ? ls->bpp : 32) / 8;
 				if (off + pitch * (size_t)wh > g_fbsz[i])
 					off = 0;
 				base = (const unsigned char *)g_fb[i] + off;

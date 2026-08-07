@@ -26,7 +26,8 @@ import time
 NUM_FB = 3
 HDR = 20                       # magic, version, width, height, vsync_count
 LAYER_FIELDS = ("enabled", "xres", "yres", "bpp", "xoffset", "yoffset",
-                "nonstd", "alpha", "blank", "win_x", "win_y", "win_w", "win_h")
+                "nonstd", "alpha", "blank", "win_x", "win_y", "win_w", "win_h",
+                "vid_w", "vid_h")
 LAYER = 4 * len(LAYER_FIELDS)
 
 

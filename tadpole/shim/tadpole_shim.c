@@ -46,6 +46,8 @@ extern int   mkdir(const char *path, u32 mode);
 extern int   mkfifo(const char *path, u32 mode);
 extern int   ftruncate(int fd, long length);
 extern long  write(int fd, const void *buf, size_t n);
+extern int   getpid(void);
+extern int   fcntl(int fd, int cmd, ...);
 
 /* For the vsync timebase. Declared by hand like the rest — no ARM sysroot at
  * build time. struct timespec on this 32-bit target is two longs. */
@@ -67,7 +69,10 @@ extern void (*tad_crash_take_signal(int sig, void (*h)(int)))(int);
 #define O_RDONLY 00
 #define O_RDWR   02
 #define O_CREAT  0100
+#define O_APPEND 02000
 #define O_NONBLOCK 04000
+
+#define F_DUPFD  0
 
 /* ---- fb ioctls --------------------------------------------------------- */
 #define FBIOGET_VSCREENINFO 0x4600
@@ -153,6 +158,19 @@ struct layer_state {
 	 * Defaults to the full panel, which is what the Flash UI actually uses.
 	 */
 	u32 win_x, win_y, win_w, win_h;
+
+	/* THE VIDEO SCALER'S SOURCE SIZE, for the YUV layer only.
+	 *
+	 * LF1000FB_IOCSVIDSCALE carries the size of the picture that was actually
+	 * decoded; the MLC then stretches it to the layer window. Sneak Peeks
+	 * plays 320x240 trailers into a 362x272 window and says so:
+	 *
+	 *     SetVideoScaler: 0x86498: 320x240 (2)
+	 *
+	 * Without this the viewer reads a 362x272 rectangle out of a buffer that
+	 * only holds 320x240 of picture — cropped, with the remainder garbage.
+	 * Zero means "no scaler set": use the window size. */
+	u32 vid_w, vid_h;
 };
 
 struct tadpole_state {
@@ -177,6 +195,8 @@ static u32 g_bpp = 32;
 
 static int  g_ready;
 static int  g_debug;
+static int  g_logfd = 2;     /* see TADPOLE_LOG in init() */
+static char g_logpfx[256];   /* empty unless TADPOLE_LOG is set */
 static char g_dir[256];
 static long g_io_delay_us;   /* see io_pace() — artificial NAND latency */
 
@@ -277,12 +297,64 @@ static int  (*real_lstat)(const char *, void *);
 static int  (*real_access)(const char *, int);
 static long (*real_read)(int, void *, size_t);
 static void *(*real_fopen)(const char *, const char *);
+static void *(*real_dlopen)(const char *, int);
+static char *(*real_dlerror)(void);
 static void *(*real_fopen64)(const char *, const char *);
+
+/* Open <TADPOLE_LOG>.<pid>.log and park it on a high fd.
+ *
+ * Named for the CURRENT pid, so a process that forks gets its own file from
+ * the moment it next logs — which is what you want when the fork is a daemon
+ * and the parent exits immediately. */
+static void log_open(void)
+{
+	char lp[320];
+	int fd, hi;
+
+	g_logfd = -1;
+	if (!g_logpfx[0] || !real_open)
+		return;
+	snprintf(lp, sizeof(lp), "%s.%d.log", g_logpfx, getpid());
+	fd = real_open(lp, O_RDWR | O_CREAT | O_APPEND, 0666);
+	if (fd < 0)
+		return;
+	/* Above 100 so an ordinary dup2 onto 0/1/2 cannot land on it. */
+	hi = fcntl(fd, F_DUPFD, 100);
+	if (hi >= 0) { real_close(fd); fd = hi; }
+	g_logfd = fd;
+}
 
 static void dbg(const char *msg)
 {
-	if (g_debug)
-		write(2, msg, strlen(msg));
+	size_t n;
+
+	if (!g_debug || g_logfd < 0)
+		return;
+	n = strlen(msg);
+	if (write(g_logfd, msg, n) >= 0)
+		return;
+
+	/* THE FD IS GONE, AND THAT IS NORMAL FOR A DAEMON.
+	 *
+	 * VideoDaemon daemonizes the textbook way: fork, setsid, then close every
+	 * descriptor up to RLIMIT_NOFILE and reopen 0/1/2 on /dev/null. No fd
+	 * survives that, however high we parked it — which is exactly why the
+	 * shim's account of the one process we most needed to watch went missing
+	 * the moment it started doing real work.
+	 *
+	 * Reopen and retry once. O_APPEND, so if a parent and child do end up
+	 * sharing a file their writes still interleave whole lines rather than
+	 * overwriting each other.
+	 *
+	 * CAVEAT: between the close-all and this reopen, the guest could in
+	 * principle have opened enough files to be handed our old number back,
+	 * and the failed write above would then have gone to it instead. It takes
+	 * >100 open fds in a daemon that has just closed all of them, and this
+	 * whole path only exists under TADPOLE_LOG, so the trade is worth it —
+	 * but do not promote this to always-on without solving that. */
+	log_open();
+	if (g_logfd >= 0)
+		write(g_logfd, msg, n);
 }
 
 static void init(void)
@@ -314,6 +386,8 @@ static void init(void)
 	real_stat64 = dlsym(RTLD_NEXT, "stat64");
 	real_lstat  = dlsym(RTLD_NEXT, "lstat");
 	real_access = dlsym(RTLD_NEXT, "access");
+	real_dlopen = dlsym(RTLD_NEXT, "dlopen");
+	real_dlerror= dlsym(RTLD_NEXT, "dlerror");
 	real_fopen  = dlsym(RTLD_NEXT, "fopen");
 	real_fopen64= dlsym(RTLD_NEXT, "fopen64");
 
@@ -329,6 +403,27 @@ static void init(void)
 		 * One boot produced 2.1 MILLION log lines and never finished. */
 		const char *d = getenv("TADPOLE_DEBUG");
 		g_debug = (d && d[0] && d[0] != '0');
+	}
+	{
+		/* TADPOLE_LOG=<prefix> — DEBUG OUTPUT THAT SURVIVES A DAEMONIZE.
+		 *
+		 * dbg() wrote to fd 2, which is fine right up until the guest is a
+		 * daemon. VideoDaemon forks, setsid()s and reopens 0/1/2 on /dev/null,
+		 * so from that moment the shim is writing its entire account of what
+		 * the process is doing into the void — and VideoDaemon is exactly the
+		 * process whose behaviour we could not see. Hours went into "the video
+		 * layer turns on and goes blank again" with no way to ask why.
+		 *
+		 * One file per PID, because AppManager and VideoDaemon run at once and
+		 * interleaved lines from two processes are worse than none. The fd is
+		 * moved above 100 so the guest's own dup2 onto 0/1/2 cannot land on
+		 * it — a daemonize that silently reassigned our log fd would corrupt
+		 * whatever it then wrote there. */
+		const char *pfx = getenv("TADPOLE_LOG");
+		if (pfx && pfx[0] && g_debug) {
+			snprintf(g_logpfx, sizeof(g_logpfx), "%s", pfx);
+			log_open();
+		}
 	}
 	{
 		/* Microseconds of artificial latency on guest .png opens — see io_pace.
@@ -569,6 +664,28 @@ static int open_common(const char *path, int flags, int mode)
 
 	init();
 
+	/* A DAEMON'S /dev/null IS WHERE ITS OWN ACCOUNT OF ITSELF GOES.
+	 *
+	 * VideoDaemon narrates every decision it makes — "Creating Display
+	 * Surface", "Starting Video", "UI is ready!! Stopping video early!",
+	 * "Got a power down!!" — and then daemonizes onto /dev/null, so the one
+	 * process whose reasoning we needed was the one process that could not be
+	 * heard. Under TADPOLE_LOG, hand it our log file instead of the bit
+	 * bucket and the narration comes back.
+	 *
+	 * Writing opens only: something that reads /dev/null wants zero bytes,
+	 * and giving it a log file would hand it our own output. */
+	if (g_logpfx[0] && g_debug && path && (flags & 3) != O_RDONLY &&
+	    strncmp(path, "/dev/null", 10) == 0) {
+		char lp[320];
+		snprintf(lp, sizeof(lp), "%s.%d.log", g_logpfx, getpid());
+		fd = real_open(lp, O_RDWR | O_CREAT | O_APPEND, 0666);
+		if (fd >= 0) {
+			dbg("[tadpole] /dev/null -> this log (guest daemonizing)\n");
+			return fd;
+		}
+	}
+
 	if ((idx = fb_index(path)) >= 0) {
 		/* all layers share one arena — see the note in init() */
 		snprintf(real, sizeof(real), "%s/fb0.bin", g_dir);
@@ -665,6 +782,40 @@ void *fopen(const char *path, const char *mode)
 void *fopen64(const char *path, const char *mode)
 {
 	return fopen_common(path, mode, real_fopen64 ? real_fopen64 : real_fopen);
+}
+
+/* SAY WHEN A dlopen FAILS. Debug builds only.
+ *
+ * Brio loads its modules by hand — libModuleMPI scans /LF/Base/Brio/Module/
+ * and dlopen()s what it finds — so a module that cannot be loaded does not
+ * produce a link error at startup. It produces a working program with one
+ * capability silently absent, which is a much worse thing to debug. libVideo.so
+ * alone pulls in libtheora, libogg and four libav libraries; any one of them
+ * missing takes the whole video path out with nothing said.
+ *
+ * NOTE: calling dlerror() CONSUMES the error, so a caller that checks it after
+ * us sees none. That is why this is inside `if (g_debug)` and stays there. */
+void *dlopen(const char *path, int flags)
+{
+	void *h;
+
+	init();
+	if (!real_dlopen)
+		return 0;
+	h = real_dlopen(path, flags);
+	if (g_debug && !h) {
+		const char *e = real_dlerror ? real_dlerror() : 0;
+		dbg("[tadpole] dlopen FAILED ");
+		dbg(path ? path : "(self)");
+		dbg(": ");
+		dbg(e ? e : "(no dlerror)");
+		dbg("\n");
+	} else if (g_debug && path) {
+		dbg("[tadpole] dlopen ");
+		dbg(path);
+		dbg("\n");
+	}
+	return h;
 }
 
 /* tslib's input.so is dlopen'd and its PLT entry for read() resolves to NULL
@@ -1179,6 +1330,25 @@ int ioctl(int fd, ulong req, ...)
 				if (w[0] < g_w && w[1] < g_h) {
 					g_state->layer[idx].win_x = w[0];
 					g_state->layer[idx].win_y = w[1];
+				}
+			}
+			/* struct lf1000fb_vidscale_cmd is { sizex, sizey, apply:1 } —
+			 * the size of the DECODED picture, which the MLC then stretches
+			 * to the layer window. Publish it so the viewer can do the same
+			 * stretch; accepting and discarding it left every scaled video
+			 * cropped to the top-left corner of its window. */
+			if (req == LF1000FB_IOCSVIDSCALE && g_state && arg) {
+				const u32 *v = (const u32 *)arg;
+				if (v[0] && v[1] && v[0] <= 4096 && v[1] <= 4096) {
+					g_state->layer[idx].vid_w = v[0];
+					g_state->layer[idx].vid_h = v[1];
+					if (g_debug) {
+						char b[96];
+						snprintf(b, sizeof(b),
+						         "[tadpole] fb%d vidscale src %ux%u\n",
+						         idx, v[0], v[1]);
+						dbg(b);
+					}
 				}
 			}
 			if (g_debug && arg && req == LF1000FB_IOCSPOSTION) {
