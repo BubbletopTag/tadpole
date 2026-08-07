@@ -1,0 +1,23 @@
+# Tadpole build test — Arch.
+#
+# EXACTLY README.md's list, nothing else. See Dockerfile.ubuntu for why.
+#
+# Arch is the interesting one: it ships no `sdl2` at all any more. That package
+# name was in the README for months and installs nothing. `sdl2-compat`
+# provides the SDL2 ABI on top of SDL3 and dlopen()s SDL3 BY NAME at run time,
+# which is exactly why fetch-deps.sh bundles Ubuntu's real SDL2 instead of the
+# host's.
+FROM docker.io/library/archlinux:latest
+RUN pacman -Syu --noconfirm --needed \
+        ca-certificates \
+        qemu-user sdl2-compat mesa zlib \
+        clang lld make python base-devel curl unzip bzip2 zstd xz \
+    && pacman -Scc --noconfirm
+
+# NO `useradd`. Ubuntu 24.04 already ships a uid-1000 user, so creating one
+# fails outright; and under rootless podman the container's root is already an
+# unprivileged host user, so running as root inside buys writable bind-mounted
+# caches without actually being root on the machine. (Under rootful docker it
+# IS root, and the cache comes out root-owned. The only reason to prefer
+# podman here.)
+WORKDIR /root/tadpole

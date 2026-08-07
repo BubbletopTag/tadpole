@@ -24,7 +24,7 @@ games — the ones from your own device. See
 | Host-GPU rendering (HLE) | yes — about 5x the software renderer |
 | 3D (race tracks) | yes — Clam Prix races render and play |
 | Skinned player character | **not yet** — the kart draws, its rider does not |
-| FMV / video layer | **not yet** |
+| FMV / video layer | yes — Sneak Peeks trailers and the system videos play |
 
 Frame rate on an AMD FirePro W4100: ~57 fps with GPU replay, against 11.5 fps
 software. Both are capped at the panel's real 60 Hz.
@@ -47,9 +47,20 @@ To build that file yourself:
 
 ```sh
 ./tools/fetch-deps.sh          # stage qemu and the firmware tools (~70 MB)
+./tools/online-update.sh       # system files, straight from LeapFrog
 cd tadpole && make && cd ..    # the shim and the viewer
 ./tools/build-appimage.sh      # -> build/Tadpole-x86_64.AppImage, ~22 MB
 ```
+
+**The firmware step is not optional, and it comes before `make`.** The ARM shim
+links against the LeapPad's own uClibc, which is LeapFrog's and cannot be
+shipped here — so a fresh clone has no `runtime/libs/libc.so.0` and `make` stops
+with an explanation of how to get one. `make viewer` on its own needs none of
+it, if all you want is the front end.
+
+`tools/test-build.sh` runs exactly this sequence in a clean Ubuntu, Arch and
+Fedora container, from `git archive HEAD` rather than your working tree — which
+is the only way to find out whether the instructions above are true.
 
 ---
 
@@ -87,33 +98,44 @@ Roughly 70 MB, pinned by SHA-256, re-fetchable at any time
 
 **To run:**
 
-| | Arch | Debian / Ubuntu | Why |
-|---|---|---|---|
-| qemu-arm | `qemu-user` | `qemu-user` | runs the guest's 32-bit ARM code — *or bundled* |
-| SDL2 | `sdl2` | `libsdl2-dev` | window, input, audio |
-| OpenGL | `mesa` | `libgl1-mesa-dev` | host-GPU rendering (HLE) |
-| zlib | `zlib` | `zlib1g-dev` | the viewer decodes its own icon |
+| | Arch | Debian / Ubuntu | Fedora | Why |
+|---|---|---|---|---|
+| qemu-arm | `qemu-user` | `qemu-user` | `qemu-user` | runs the guest's 32-bit ARM code — *or bundled* |
+| SDL2 | `sdl2-compat` | `libsdl2-dev` | `SDL2-devel` | window, input, audio |
+| OpenGL | `mesa` | `libgl1-mesa-dev` | `mesa-libGL-devel` | host-GPU rendering (HLE) |
+| zlib | `zlib` | `zlib1g-dev` | `zlib-ng-compat-devel` | the viewer decodes its own icon |
 
 **To build:**
 
-| | Arch | Debian / Ubuntu | Why |
-|---|---|---|---|
-| clang | `clang` | `clang` | cross-compiles the guest shim to ARM |
-| lld | `lld` | `lld` | the ARM linker |
-| make | `make` | `make` | |
-| python3 | `python` | `python3` | build and analysis tooling |
+| | Arch | Debian / Ubuntu | Fedora | Why |
+|---|---|---|---|---|
+| clang | `clang` | `clang` | `clang` | cross-compiles the guest shim to ARM |
+| lld | `lld` | `lld` | `lld` | the ARM linker |
+| make | `make` | `make` | `make` | |
+| python3 | `python` | `python3` | `python3` | build and analysis tooling |
+| pkg-config | `base-devel` | `pkg-config` | `pkgconf-pkg-config` | finds SDL2's flags |
+| curl | `curl` | `curl` | `curl` | `fetch-deps.sh` downloads with it |
+| zstd, xz | `zstd xz` | `zstd xz-utils` | `zstd xz` | unpack the `.deb`s `fetch-deps.sh` pulls (Ubuntu uses zstd, Debian xz) |
 
-**To install firmware** (once) — all of this is bundled by `fetch-deps.sh`:
+**To install firmware** (once) — **all of this is bundled by `fetch-deps.sh`,**
+which is why the table is here for reference rather than as a shopping list:
 
-| | Arch | Debian / Ubuntu | Why |
-|---|---|---|---|
-| ubi_reader | `python-ubi-reader` (AUR) | `python3-ubi-reader` | reads the UBIFS root filesystem |
-| lzallright | `python-lzallright` (AUR) | pip | ubi_reader's LZO backend |
-| cryptography | `python-cryptography` | `python3-cryptography` | ubi_reader imports it unconditionally |
-| zstandard | `python-zstandard` | `python3-zstandard` | ubi_reader imports it unconditionally |
-| unzip, bzip2 | `unzip bzip2` | `unzip bzip2` | optional — `tools/pkgtool.py` reads both formats with Python's stdlib |
+| | Arch | Debian / Ubuntu | Fedora | Why |
+|---|---|---|---|---|
+| ubi_reader | AUR / pip | pip | pip | reads the UBIFS root filesystem |
+| lzallright | AUR / pip | pip | pip | ubi_reader's LZO backend |
+| cryptography | `python-cryptography` | `python3-cryptography` | `python3-cryptography` | ubi_reader imports it unconditionally |
+| zstandard | `python-zstandard` | `python3-zstandard` | `python3-zstandard` | ubi_reader imports it unconditionally |
+| unzip, bzip2 | `unzip bzip2` | `unzip bzip2` | `unzip bzip2` | optional — `tools/pkgtool.py` reads both formats with Python's stdlib |
 
-**ubi_reader's three dependencies are not optional.** It imports them at module
+**ubi_reader is not packaged by any of the three.** There is no
+`python3-ubi-reader` on Ubuntu and no `python-ubi-reader` in the Arch repos —
+both are pip or AUR only, and `lzallright` is the same. That is precisely why
+`fetch-deps.sh` exists: it stages a private Python with all four inside
+`build/deps/`, installing nothing system-wide, and every tool here prefers that
+one. Use it and this whole table is somebody else's problem.
+
+**Its three dependencies are not optional.** ubi_reader imports them at module
 scope, so a missing one fails the whole extraction — and reports only one at a
 time. `check-deps.sh` asks the one question that matters (*can the Python that
 would actually be used import `ubireader.ubifs.misc`?*), and
@@ -122,20 +144,27 @@ would actually be used import `ubireader.ubifs.misc`?*), and
 ### Arch
 
 ```sh
-sudo pacman -S qemu-user sdl2 mesa zlib clang lld make python unzip bzip2 \
-               python-cryptography python-zstandard
-yay -S python-ubi-reader python-lzallright
+sudo pacman -S qemu-user sdl2-compat mesa zlib clang lld make python \
+               base-devel curl unzip bzip2 zstd xz
 ```
 
 ### Debian / Ubuntu
 
 ```sh
 sudo apt install qemu-user libsdl2-dev libgl1-mesa-dev zlib1g-dev \
-                 clang lld make python3 unzip bzip2 \
-                 python3-cryptography python3-zstandard
-# ubi_reader and its LZO backend are usually not packaged:
-pip install --user ubi_reader lzallright
+                 clang lld make python3 pkg-config curl unzip bzip2 zstd xz-utils
 ```
+
+### Fedora
+
+```sh
+sudo dnf install qemu-user SDL2-devel mesa-libGL-devel zlib-ng-compat-devel \
+                 clang lld make python3 pkgconf-pkg-config curl unzip bzip2 zstd xz
+```
+
+Then `./tools/fetch-deps.sh` for the rest. If you would rather not use it, add
+your distribution's `python3-cryptography` and `python3-zstandard`, then
+`pip install --user ubi_reader lzallright`.
 
 ### One note on OpenGL
 
@@ -149,6 +178,42 @@ glxinfo -B | grep -i compatibility
 
 ---
 
+## Getting the system files
+
+**Do this before `make`.** Tadpole ships nothing from LeapFrog, and the ARM shim
+has to link against the LeapPad's own uClibc — so there is no build without a
+firmware first. (`make` says so, at length, if you try.)
+
+### The easy way: no device, no LFConnect
+
+```sh
+./tools/online-update.sh
+```
+
+LFConnect fetches these packages from a public LeapFrog server, and so can this.
+It downloads the firmware and the content packages, extracts the root
+filesystem, and builds the sysroot — everything below happens automatically.
+**Help → Online System Update** in the application does the same thing.
+
+Two things it deliberately does not get: `Firmware-BulkEmpty` (15 MB of zeros —
+`/LF/Bulk` is filled by the content packages, not the firmware), and `.lf3`
+packages, which are encrypted and need a key Tadpole does not ship.
+
+### Or from an LFConnect download cache
+
+If you have run LFConnect on a PC, it leaves a `LFC_Downloads` folder with a
+`cache/` directory full of hash-named `.lf2` and `.lfp` files:
+
+```sh
+./tools/install-firmware.sh /path/to/LFC_Downloads
+```
+
+It finds the `Firmware-Base` package, extracts the root filesystem, installs the
+content packages, and builds the sysroot. Or use **Help → Setup Wizard** in the
+application and press Browse.
+
+---
+
 ## Build
 
 ```sh
@@ -158,24 +223,21 @@ cd tadpole && make
 That builds the guest shim libraries (ARM) and the viewer (host). `make check`
 reports any missing toolchain.
 
----
+`make viewer` builds the front end alone and needs no firmware and no cross
+toolchain — useful if you want the window and the setup wizard first, and will
+fetch the system files through it.
 
-## Getting the system files
-
-Tadpole ships nothing from LeapFrog. You need a firmware download, which
-LFConnect — LeapFrog's own PC software — leaves in its download cache when it
-updates a device.
-
-On the machine where you have run LFConnect, look for a `LFC_Downloads` folder
-with a `cache/` directory full of hash-named `.lf2` and `.lfp` files. Then:
+To check the instructions on this page still work on a machine that is not
+yours:
 
 ```sh
-./tools/install-firmware.sh /path/to/LFC_Downloads
+./tools/test-build.sh              # Ubuntu 24.04, Arch and Fedora, in podman
+./tools/test-build.sh ubuntu       # just one
 ```
 
-It finds the `Firmware-Base` package, extracts the root filesystem, installs the
-content packages, and builds the sysroot. Or use **Help → Setup Wizard** in the
-application and press Browse.
+It builds from `git archive HEAD`, so nothing in your working tree — no
+extracted rootfs, no `runtime/libs`, no months-old object files — can make a
+broken build look fine.
 
 The pieces, if you want to know what it is doing:
 
@@ -336,6 +398,7 @@ tadpole.sh              start the front end
 tadpole/shim/           guest-side libraries (ARM) — the emulation itself
 tadpole/viewer/         the application: window, UI, audio, host-GPU replay
 tools/                  install and diagnostic scripts
+tools/test-build.sh     build from scratch in a clean container, 3 distributions
 rootfs/                 firmware you installed          (not distributed)
 runtime/sysroot/        the guest's filesystem view
 docs/HANDOVER.md        engineering notes — how it works and why

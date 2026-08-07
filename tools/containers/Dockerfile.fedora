@@ -1,0 +1,21 @@
+# Tadpole build test — Fedora.
+#
+# EXACTLY README.md's list, nothing else. See Dockerfile.ubuntu for why.
+#
+# Fedora was undocumented until this container existed, and it is not a
+# search-and-replace of the Debian names: zlib-devel does not exist here (it is
+# zlib-ng-compat-devel) and pkg-config is pkgconf-pkg-config.
+FROM fedora:41
+RUN dnf -y install \
+        ca-certificates \
+        qemu-user SDL2-devel mesa-libGL-devel zlib-ng-compat-devel \
+        clang lld make python3 pkgconf-pkg-config curl unzip bzip2 zstd xz \
+    && dnf clean all
+
+# NO `useradd`. Ubuntu 24.04 already ships a uid-1000 user, so creating one
+# fails outright; and under rootless podman the container's root is already an
+# unprivileged host user, so running as root inside buys writable bind-mounted
+# caches without actually being root on the machine. (Under rootful docker it
+# IS root, and the cache comes out root-owned. The only reason to prefer
+# podman here.)
+WORKDIR /root/tadpole

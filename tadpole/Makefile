@@ -30,7 +30,21 @@ ARMFLAGS := --target=$(ARCH_TRIPLE) -march=armv7-a -mfpu=vfp -mfloat-abi=softfp
 # place) and becomes a dependency of ours, which means dlopen/dlsym/dlclose
 # resolve straight through to it and we get dlsym(RTLD_NEXT, ...) for free.
 GUESTLIBS := ../runtime/libs
-ROOTFS_LIB := ../rootfs/stock-4.6.0.784/1221351650/ubi_rfs/usr/lib
+
+# WHERE THE STOCK ROOTFS IS — DISCOVERED, NEVER HARDCODED.
+#
+# This was pinned to `../rootfs/stock-4.6.0.784/1221351650/ubi_rfs`, the path of
+# the very first firmware anyone dumped by hand. Nobody else has that path:
+# install-firmware.sh lays out rootfs/<version>/ubi_rfs with no numeric level,
+# and the version depends on which device the firmware came from. So `make
+# realdl` worked on exactly one machine in the world and failed everywhere else
+# with a Python traceback about a missing file.
+#
+# tadpole.sh, runtime/setup-sysroot.sh and tools/glconform/build.sh all glob for
+# it already; this is the same rule, spelled the same way.
+ROOTFS := $(firstword $(wildcard ../rootfs/*/ubi_rfs ../rootfs/*/*/ubi_rfs))
+ROOTFS_LIB := $(ROOTFS)/usr/lib
+
 SHIMLIBS  := ../runtime/shimlibs
 SHIM_SONAME := libdl.so.0
 REAL_DL     := libdl.so.9
@@ -82,6 +96,51 @@ SDL_LIBS   := $(shell pkg-config --libs sdl2 2>/dev/null)
 
 all: shim shimz asound gl viewer
 
+# THE SHIM CANNOT BE BUILT WITHOUT THE SYSTEM FILES, AND THAT SURPRISES PEOPLE.
+#
+# Every ARM object here links against ../runtime/libs/libc.so.0 — the GUEST's
+# own uClibc, extracted from LeapFrog firmware. It is not in git and cannot be:
+# it is LeapFrog's. So a fresh clone has a viewer it can build and a shim it
+# cannot, and the failure it used to give was
+#
+#     clang: error: no such file or directory: '../runtime/libs/libc.so.0'
+#
+# which reads as a broken checkout rather than a missing step. README.md also
+# had "Build" ahead of "Getting the system files", so following it in order
+# could not work.
+#
+# Order-only prerequisites (| need-libs) so this is checked before anything
+# tries to compile, and never treated as a file to rebuild.
+.PHONY: need-libs need-rootfs
+need-libs:
+	@if [ ! -f $(GUESTLIBS)/libc.so.0 ]; then \
+	  echo ""; \
+	  echo "  The guest libraries are not here yet."; \
+	  echo ""; \
+	  echo "  The ARM shim links against the LeapPad's own uClibc, which comes"; \
+	  echo "  out of LeapFrog firmware. Tadpole ships none, so fetch it once:"; \
+	  echo ""; \
+	  echo "      ./tools/fetch-deps.sh        # the extractor, if not done yet"; \
+	  echo "      ./tools/online-update.sh     # downloads from LeapFrog"; \
+	  echo ""; \
+	  echo "  or, if you already have an LFConnect download cache:"; \
+	  echo ""; \
+	  echo "      ./tools/install-firmware.sh /path/to/LFC_Downloads"; \
+	  echo ""; \
+	  echo "  The viewer alone needs none of this:  make viewer"; \
+	  echo ""; \
+	  exit 1; \
+	fi
+
+need-rootfs:
+	@if [ -z "$(ROOTFS)" ]; then \
+	  echo ""; \
+	  echo "  No rootfs/*/ubi_rfs found — the system files are not installed."; \
+	  echo "  Run ./tools/online-update.sh (or tools/install-firmware.sh)."; \
+	  echo ""; \
+	  exit 1; \
+	fi
+
 shim: $(SHIM_OUT)
 
 asound: $(ASOUND_OUT)
@@ -90,7 +149,7 @@ asound: $(ASOUND_OUT)
 # Freestanding — these call nothing but each other.
 gl: gl-links
 
-$(EGL_OUT): $(EGL_SRC) $(GLES_OUT)
+$(EGL_OUT): $(EGL_SRC) $(GLES_OUT) | need-libs
 	@mkdir -p $(SHIMLIBS_GL)
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-Wno-incompatible-library-redeclaration \
@@ -99,7 +158,7 @@ $(EGL_OUT): $(EGL_SRC) $(GLES_OUT)
 		-L$(SHIMLIBS_GL) -l:libGLESv1_CM.so $(GUESTLIBS)/libc.so.0
 	@echo "built $@"
 
-$(GLES_OUT): $(GLES_SRC) shim/tadpole_glcmd.h shim/tadpole_gles_debug.h
+$(GLES_OUT): $(GLES_SRC) shim/tadpole_glcmd.h shim/tadpole_gles_debug.h | need-libs
 	@mkdir -p $(SHIMLIBS_GL)
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
@@ -168,7 +227,7 @@ gl-links: $(GLES_OUT) $(EGL_OUT)
 
 tone: $(TONE_OUT)
 
-$(TONE_OUT): $(TONE_SRC) $(ASOUND_OUT)
+$(TONE_OUT): $(TONE_SRC) $(ASOUND_OUT) | need-libs
 	$(CLANG) $(ARMFLAGS) -O2 -Wall -nostdlib -fno-builtin \
 		-fno-stack-protector -fuse-ld=lld -o $@ $< \
 		-Wl,--dynamic-linker=/lib/ld-uClibc.so.0 \
@@ -176,7 +235,7 @@ $(TONE_OUT): $(TONE_SRC) $(ASOUND_OUT)
 	@echo "built $@" 
 
 
-$(ASOUND_OUT): $(ASOUND_SRC)
+$(ASOUND_OUT): $(ASOUND_SRC) | need-libs
 	@mkdir -p $(SHIMLIBS)
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-Wno-incompatible-library-redeclaration \
@@ -186,7 +245,7 @@ $(ASOUND_OUT): $(ASOUND_SRC)
 	@echo "built $@"
 
 
-$(SHIM_OUT): $(SHIM_SRC) $(SHIMLIBS)/$(REAL_DL)
+$(SHIM_OUT): $(SHIM_SRC) $(SHIMLIBS)/$(REAL_DL) | need-libs
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
 		-fuse-ld=lld -Wl,-soname,$(SHIM_SONAME) -o $@ $(SHIM_SRC) \
@@ -196,31 +255,36 @@ $(SHIM_OUT): $(SHIM_SRC) $(SHIMLIBS)/$(REAL_DL)
 	@echo -n "  NEEDED: "; readelf -d $@ | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/' | tr '\n' ' '; echo
 
 # The real libdl, renamed so it can coexist with our impersonator.
-$(SHIMLIBS)/$(REAL_DL):
-	@echo "run: make realdl" && false
+# BUILT ON DEMAND rather than telling the user to run another target: it is a
+# mechanical copy-with-one-string-patched out of the rootfs, there is never a
+# reason to want it and not want it, and "run: make realdl" was one more step
+# between a clone and a build.
+$(SHIMLIBS)/$(REAL_DL): | need-rootfs
+	@$(MAKE) --no-print-directory realdl
 
 .PHONY: realdl
-realdl:
+realdl: | need-rootfs
 	@mkdir -p $(SHIMLIBS)
-	@python3 -c "import pathlib;\
-s=pathlib.Path('../rootfs/stock-4.6.0.784/1221351650/ubi_rfs/lib/libdl-0.9.32.1-git.so');\
+	@python3 -c "import pathlib,sys;\
+c=list(pathlib.Path('$(ROOTFS)/lib').glob('libdl-*.so'));\
+sys.exit('no libdl-*.so in $(ROOTFS)/lib') if not c else None;\
 d=pathlib.Path('$(SHIMLIBS)/$(REAL_DL)');\
-d.write_bytes(s.read_bytes().replace(b'libdl.so.0\x00', b'libdl.so.9\x00'));\
-print('wrote', d)"
+d.write_bytes(c[0].read_bytes().replace(b'libdl.so.0\x00', b'libdl.so.9\x00'));\
+print('wrote', d, 'from', c[0].name)"
 
 shimz: $(SHIM_OUT_Z)
 
-$(SHIM_OUT_Z): $(SHIM_SRC) $(SHIMLIBS_Z)/$(REAL_Z)
+$(SHIM_OUT_Z): $(SHIM_SRC) $(SHIMLIBS_Z)/$(REAL_Z) | need-libs
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
 		-fuse-ld=lld -Wl,-soname,libz.so.1 -o $@ $(SHIM_SRC) \
 		$(SHIMLIBS_Z)/$(REAL_Z) $(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0
 	@echo "built $@"
 
-$(SHIMLIBS_Z)/$(REAL_Z):
+$(SHIMLIBS_Z)/$(REAL_Z): | need-rootfs
 	@mkdir -p $(SHIMLIBS_Z)
 	@python3 -c "import pathlib;\
-b=pathlib.Path('../rootfs/stock-4.6.0.784/1221351650/ubi_rfs/usr/lib');\
+b=pathlib.Path('$(ROOTFS_LIB)');\
 s=(b/'libz.so.1').resolve();\
 d=pathlib.Path('$(SHIMLIBS_Z)/$(REAL_Z)');\
 d.write_bytes(s.read_bytes().replace(b'libz.so.1\x00', b'libz.so.9\x00'));\

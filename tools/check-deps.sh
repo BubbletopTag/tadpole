@@ -40,7 +40,7 @@ command -v pacman  >/dev/null && DISTRO=arch
 command -v apt-get >/dev/null && DISTRO=debian
 command -v dnf     >/dev/null && DISTRO=fedora
 
-missing_pac=""; missing_aur=""
+missing_pac=""; missing_aur=""; missing_pip=""
 ok=0; bad=0
 
 have_cmd() { command -v "$1" >/dev/null 2>&1; }
@@ -63,9 +63,14 @@ report() {                      # $1=ok/bundled/no  $2=label  $3=why
         *)       say "  \033[31m-\033[0m $(printf '%-22s' "$2") $3\n"; bad=$((bad+1)) ;;
     esac
 }
-need() {                        # $1=state $2=label $3=why $4=arch $5=debian $6=aur
+need() {                        # $1=state $2=label $3=why $4=arch $5=debian $6=aur|pip
     report "$1" "$2" "$3"
     case "$1" in ok|bundled) return ;; esac
+    # "pip" means NO DISTRIBUTION PACKAGES IT. ubi_reader and lzallright are
+    # the whole reason this case exists: there is no python3-ubi-reader on
+    # Debian or Ubuntu and none in the Arch repos, and printing an apt line for
+    # a package that does not exist is worse than printing nothing.
+    if [ "${6:-}" = pip ]; then missing_pip="$missing_pip $2"; return; fi
     case "$DISTRO" in
         arch)   [ "${6:-}" = aur ] && missing_aur="$missing_aur $4" || missing_pac="$missing_pac $4" ;;
         debian) missing_pac="$missing_pac $5" ;;
@@ -89,7 +94,8 @@ if [ "$WHAT" = all ]; then
     need "$s" qemu-arm "runs the guest's ARM code" qemu-user qemu-user
 
     if have_pc sdl2 || have_cmd sdl2-config; then s=ok; else s=no; fi
-    need "$s" SDL2 "window, input, audio" sdl2 libsdl2-dev
+    # Arch dropped `sdl2`; sdl2-compat provides the ABI (on top of SDL3).
+    need "$s" SDL2 "window, input, audio" sdl2-compat libsdl2-dev
     have_pc gl && s=ok || s=no
     need "$s" OpenGL "host-GPU rendering" mesa libgl1-mesa-dev
     have_pc zlib && s=ok || s=no
@@ -135,7 +141,7 @@ if tad_python_with_ubireader >/dev/null; then
 else
     s=no
 fi
-need "$s" ubi_reader "reads the UBIFS root filesystem" python-ubi-reader python3-ubi-reader aur
+need "$s" ubi_reader "reads the UBIFS root filesystem" "" "" pip
 if [ "$s" = no ]; then
     # Say WHICH part is missing: "install ubi_reader" is unhelpful advice to
     # someone who has it and is missing only the LZO backend.
@@ -160,8 +166,6 @@ case "$DISTRO" in
         ;;
     debian)
         [ -n "$missing_pac" ] && say "    sudo apt install$missing_pac\n"
-        say "\n  If a python3-* package is unavailable, use pip instead:\n"
-        say "    pip install --user ubi_reader\n"
         ;;
     fedora)
         [ -n "$missing_pac" ] && say "    sudo dnf install$missing_pac\n"
@@ -170,4 +174,8 @@ case "$DISTRO" in
         say "    packages:$missing_pac$missing_aur\n"
         ;;
 esac
+if [ -n "$missing_pip" ]; then
+    say "\n  No distribution packages these; pip or the AUR only:\n"
+    say "    pip install --user ubi_reader lzallright\n"
+fi
 exit 1

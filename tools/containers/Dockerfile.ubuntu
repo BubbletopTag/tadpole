@@ -1,0 +1,27 @@
+# Tadpole build test — Ubuntu 24.04.
+#
+# EXACTLY the packages README.md tells a user to install, and nothing else.
+# That is the test: if a step needs something not on this list, the README is
+# wrong, and it fails here rather than in a stranger's terminal.
+#
+# Note what is NOT here: binutils, python3-cryptography,
+# python3-zstandard, ubi_reader. fetch-deps.sh is supposed to make all of those
+# unnecessary, and the only way to know it does is to withhold them.
+# ca-certificates is the one addition — a container image has no root
+# certificates and a desktop always does, so its absence would be an artefact
+# of the container rather than a real finding.
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        qemu-user libsdl2-dev libgl1-mesa-dev zlib1g-dev \
+        clang lld make python3 pkg-config curl unzip bzip2 zstd xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# NO `useradd`. Ubuntu 24.04 already ships a uid-1000 user, so creating one
+# fails outright; and under rootless podman the container's root is already an
+# unprivileged host user, so running as root inside buys writable bind-mounted
+# caches without actually being root on the machine. (Under rootful docker it
+# IS root, and the cache comes out root-owned. The only reason to prefer
+# podman here.)
+WORKDIR /root/tadpole

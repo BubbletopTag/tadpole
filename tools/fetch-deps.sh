@@ -107,9 +107,98 @@ esac
 die() { echo "error: $*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-for t in curl ar tar sha256sum; do
-    have "$t" || die "need '$t' to fetch dependencies"
+# WHICH PACKAGE PROVIDES A MISSING COMMAND.
+#
+# "error: need 'ar' to fetch dependencies" is a true statement and a useless
+# one: `ar` is not a package on any distribution, it is part of binutils, and
+# the person reading the message is by definition someone who has not set this
+# up before. Report EVERY missing tool at once, with the command that installs
+# them, for the distribution actually running.
+pkg_for() {                                  # $1 = command
+    case "$1:$DISTRO" in
+        curl:*)            echo curl ;;
+        tar:*|sha256sum:*) echo coreutils ;;
+        ar:arch)           echo binutils ;;
+        ar:*)              echo binutils ;;
+        xz:debian)         echo xz-utils ;;
+        xz:arch)           echo xz ;;
+        xz:*)              echo xz ;;
+        zstd:*)            echo zstd ;;
+        python3:arch)      echo python ;;
+        python3:*)         echo python3 ;;
+        *)                 echo "$1" ;;
+    esac
+}
+DISTRO=other
+if   [ -r /etc/arch-release ]; then DISTRO=arch
+elif [ -r /etc/fedora-release ]; then DISTRO=fedora
+elif [ -r /etc/debian_version ]; then DISTRO=debian
+fi
+install_hint() {                             # $@ = package names
+    case "$DISTRO" in
+        arch)   echo "  sudo pacman -S $*" ;;
+        fedora) echo "  sudo dnf install $*" ;;
+        debian) echo "  sudo apt install $*" ;;
+        *)      echo "  install: $*" ;;
+    esac
+}
+
+# `ar` is wanted, not required: a .deb is an ar archive with a header format
+# simple enough that Python reads it in a dozen lines, and python3 is already
+# needed to build anything here. So either will do.
+missing=""
+for t in curl tar sha256sum; do
+    have "$t" || missing="$missing $(pkg_for "$t")"
 done
+have ar || have python3 || missing="$missing $(pkg_for ar)"
+if [ -n "$missing" ]; then
+    echo "error: missing tools needed to fetch dependencies:" >&2
+    # shellcheck disable=SC2086
+    for p in $missing; do echo "    $p" >&2; done
+    echo >&2
+    # shellcheck disable=SC2086
+    install_hint $missing >&2
+    exit 1
+fi
+
+# Unpack a .deb's payload into $2. Uses ar when it is there, Python when it is
+# not, so binutils stops being a prerequisite for a first-time setup.
+deb_extract() {                              # $1 = .deb  $2 = destdir
+    local deb="$1" dest="$2" data
+    if have ar; then
+        ( cd "$dest" && ar x "$deb" ) || die "ar failed on $(basename "$deb")"
+    else
+        python3 - "$deb" "$dest" <<'PY' || die "could not read $(basename "$deb")"
+import sys, os
+deb, dest = sys.argv[1], sys.argv[2]
+with open(deb, "rb") as f:
+    if f.read(8) != b"!<arch>\n":
+        sys.exit("not an ar archive: %s" % deb)
+    while True:
+        hdr = f.read(60)
+        if len(hdr) < 60:
+            break
+        name = hdr[0:16].decode("latin1").strip().rstrip("/")
+        size = int(hdr[48:58].decode("latin1").strip())
+        body = f.read(size)
+        if size % 2:
+            f.read(1)                        # members are 2-byte aligned
+        with open(os.path.join(dest, name), "wb") as o:
+            o.write(body)
+PY
+    fi
+    data="$(ls "$dest"/data.tar.* 2>/dev/null | head -1)"
+    [ -n "$data" ] || die "no data.tar.* inside $(basename "$deb")"
+    # Debian compresses the payload with xz, Ubuntu with zstd. Take whichever
+    # is there rather than assuming, and name the PACKAGE if tar cannot read it.
+    case "$data" in
+        *.zst) have zstd || { echo "error: $(basename "$deb") has a zstd payload" >&2
+                              install_hint "$(pkg_for zstd)" >&2; exit 1; } ;;
+        *.xz)  have xz   || { echo "error: $(basename "$deb") has an xz payload" >&2
+                              install_hint "$(pkg_for xz)" >&2; exit 1; } ;;
+    esac
+    printf '%s' "$data"
+}
 
 mkdir -p "$CACHE" "$DEPS/bin"
 
@@ -143,16 +232,7 @@ if [ "$FORCE" = 1 ] || [ ! -x "$DEPS/bin/qemu-arm" ]; then
 
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/tadpole-deb.XXXXXX")"
     trap 'rm -rf "$tmp"' EXIT
-    ( cd "$tmp" && ar x "$CACHE/qemu-user-static.deb" ) || die "ar failed on the .deb"
-    # Debian compresses the payload with xz, Ubuntu with zstd. Take whichever
-    # is there rather than assuming, and say which tool is missing if tar
-    # cannot read it.
-    data="$(ls "$tmp"/data.tar.* 2>/dev/null | head -1)"
-    [ -n "$data" ] || die "no data.tar.* inside the .deb"
-    case "$data" in
-        *.zst) have zstd || die "the payload is zstd-compressed - install 'zstd'" ;;
-        *.xz)  have xz   || die "the payload is xz-compressed - install 'xz'" ;;
-    esac
+    data="$(deb_extract "$CACHE/qemu-user-static.deb" "$tmp")"
     tar xf "$data" -C "$tmp" ./usr/bin/qemu-arm-static \
         || die "qemu-arm-static is not in this package"
     cp "$tmp/usr/bin/qemu-arm-static" "$DEPS/bin/qemu-arm"
@@ -177,17 +257,17 @@ if [ "$FORCE" = 1 ] || [ ! -f "$DEPS/lib/libSDL2-2.0.so.0" ]; then
     fetch "$SDL2_URL" "$SDL2_SHA" "$CACHE/libsdl2.deb"
     tmp="$(mktemp -d "${TMPDIR:-/tmp}/tadpole-sdl.XXXXXX")"
     trap 'rm -rf "$tmp"' EXIT
-    ( cd "$tmp" && ar x "$CACHE/libsdl2.deb" ) || die "ar failed on the SDL2 .deb"
-    data="$(ls "$tmp"/data.tar.* 2>/dev/null | head -1)"
-    [ -n "$data" ] || die "no data.tar.* inside the SDL2 .deb"
+    data="$(deb_extract "$CACHE/libsdl2.deb" "$tmp")"
     tar xf "$data" -C "$tmp" || die "could not unpack the SDL2 .deb"
     real="$(find "$tmp" -name 'libSDL2-2.0.so.0.*' | head -1)"
     [ -n "$real" ] || die "no libSDL2 in that package"
     mkdir -p "$DEPS/lib"
     cp "$real" "$DEPS/lib/libSDL2-2.0.so.0"
     rm -rf "$tmp"; trap - EXIT
-    echo "  glibc floor: $(objdump -T "$DEPS/lib/libSDL2-2.0.so.0" 2>/dev/null |
-                           grep -oE 'GLIBC_2\.[0-9]+' | sort -V -u | tail -1)"
+    if have objdump; then
+        echo "  glibc floor: $(objdump -T "$DEPS/lib/libSDL2-2.0.so.0" 2>/dev/null |
+                               grep -oE 'GLIBC_2\.[0-9]+' | sort -V -u | tail -1)"
+    fi
 else
     echo "==> SDL2 already staged"
 fi
