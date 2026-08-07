@@ -26,6 +26,36 @@ CACHE="$PROJ/sources/nxp320/LFC_full/LFC_Downloads/cache"
 
 [ -d "$ROOTFS" ] || { echo "no rootfs at $ROOTFS" >&2; exit 1; }
 
+# WHICH DEVICE. Everything below used to be LeapPad2 constants inline. They now
+# come from runtime/devices/<id>.conf, chosen by reading the installed
+# firmware's own Firmware/meta.inf — see runtime/device.sh.
+. "$HERE/device.sh"
+tad_load_device
+echo "==> device: $DEV_NAME ($DEV_ID, $DEV_LCD) — $(basename "$DEV_CONF")"
+
+# AN ABSOLUTE SYMLINK INSIDE THE ROOTFS RESOLVES ON THE HOST, NOT IN IT.
+#
+# The Ultra ships usr/lib/libustring.so as a symlink to the absolute path
+# /usr/lib/libglibmm-2.4.so.1 — correct on the device, where that IS the
+# guest's glibmm. Symlink runtime/libs/libustring.so straight at it and the
+# chain ends at the DEVELOPER'S /usr/lib/libglibmm-2.4.so.1, so the guest is
+# handed an x86-64 object and says something that sounds like a build problem:
+#
+#     VideoDaemon: '/usr/lib/libustring.so' is not an ELF executable for ARM
+#
+# Re-root any absolute link target under $ROOTFS. Relative links need no help:
+# they resolve inside the rootfs on their own.
+rootfs_target() {
+    local p="$1" t
+    if [ -L "$p" ]; then
+        t="$(readlink "$p")"
+        case "$t" in
+            /*) [ -e "$ROOTFS$t" ] && { printf '%s' "$ROOTFS$t"; return; } ;;
+        esac
+    fi
+    printf '%s' "$p"
+}
+
 echo "==> sysroot skeleton"
 mkdir -p "$SYSROOT"
 cd "$SYSROOT"
@@ -57,7 +87,7 @@ mkdir -p usr/lib
 for src in "$ROOTFS"/usr/lib "$ROOTFS"/lib; do
     for f in "$src"/*; do
         [ -e "$f" ] || continue
-        ln -sfn "$f" "usr/lib/$(basename "$f")" 2>/dev/null || true
+        ln -sfn "$(rootfs_target "$f")" "usr/lib/$(basename "$f")" 2>/dev/null || true
     done
 done
 
@@ -116,6 +146,12 @@ echo "==> /var/sounds video symlinks (rcS does this per-platform)"
 # them at boot according to /sys/devices/system/board/platform, and for
 # VALENCIA they must resolve to LpadAssets. We never run rcS, so without this
 # they dangle and VideoDaemon exits immediately instead of serving its socket.
+#
+# The asset directory is per-device ($DEV_ASSETS): VALENCIA and MADRID use
+# LpadAssets, RIO (the Ultra) keeps its boot and shutdown audio in LF/Base/Qt
+# and only borrows TransitionVideo.ogg from LpadAssets. Both layouts are just
+# "look in $DEV_ASSETS first, fall back to LpadAssets", which is what the loop
+# below does.
 [ -L var ] && rm -f var
 mkdir -p var
 for d in "$ROOTFS"/var/*; do
@@ -126,34 +162,41 @@ mkdir -p var/sounds
 for f in "$ROOTFS"/var/sounds/*; do
     ln -sfn "$f" "var/sounds/$(basename "$f")" 2>/dev/null || true
 done
-for v in StartupVideo.ogg ShutdownVideo.ogg TransitionVideo.ogg; do
-    [ -e "$ROOTFS/LF/Base/LpadAssets/Video/$v" ] &&
-        ln -sfn "$ROOTFS/LF/Base/LpadAssets/Video/$v" "var/sounds/$v"
+# DEV_SOUNDS is "<name in /var/sounds> <path under the rootfs>", one per line,
+# transcribed from this device's branch of rcS. Do not be tempted to derive it:
+# on RIO the source names do not match the destinations (boot.ogg becomes
+# StartupVideo.ogg), so only the firmware's own table is right.
+printf '%s\n' "$DEV_SOUNDS" | while read -r name src; do
+    [ -n "$name" ] || continue
+    if [ -e "$ROOTFS/$src" ]; then
+        ln -sfn "$ROOTFS/$src" "var/sounds/$name"
+    else
+        echo "    note: no $src (var/sounds/$name will be absent)" >&2
+    fi
 done
-if [ -e "$ROOTFS/LF/Base/LpadAssets/Video/powerdown.wav" ]; then
-    ln -sfn "$ROOTFS/LF/Base/LpadAssets/Video/powerdown.wav" var/sounds/powerdown.wav
-fi
 
 echo "==> sysfs (rcS branches on platform; libDisplay reads lcd_size)"
 mkdir -p sys/devices/system/board \
-         sys/devices/platform/lf2000-power \
-         sys/devices/platform/lf2000-aclmtr \
-         sys/devices/platform/lf1000-gpio \
-         sys/devices/platform/lf1000-dpc \
+         "sys/devices/platform/$DEV_POWER_DEV" \
+         "sys/devices/platform/$DEV_ACLMTR_DEV" \
+         "sys/devices/platform/$DEV_GPIO_DEV" \
+         "sys/devices/platform/$DEV_DPC_DEV" \
          sys/class/graphics/fb0
-printf 'VALENCIA' > sys/devices/system/board/platform
-# All values below read off a live LeapPad2 — reference/device-capture/.
-printf 'LPAD'      > sys/devices/system/board/platform_family
-printf '0x310'     > sys/devices/system/board/system_rev
-printf '480x272'   > sys/devices/system/board/lcd_size         # format is %ux%u
-printf 'ILI6480G2' > sys/devices/system/board/lcd_type
-printf 'K&D-1'     > sys/devices/system/board/lcd_mfg
-printf 'K&D-1'     > sys/devices/system/board/lcd_mfg_get
-printf '480'      > sys/devices/platform/lf1000-dpc/xres
-printf '272'      > sys/devices/platform/lf1000-dpc/yres
-printf '0'        > sys/devices/platform/lf1000-gpio/board_id
-printf '1'        > sys/devices/platform/lf2000-power/status   # 1 = EXTERNAL
-printf '0'        > sys/class/graphics/fb0/rotate
+# For LeapPad2 all of these were read off a live device —
+# reference/device-capture/. For other devices see the UNVERIFIED markers in
+# the profile.
+printf '%s' "$DEV_PLATFORM"        > sys/devices/system/board/platform
+printf '%s' "$DEV_PLATFORM_FAMILY" > sys/devices/system/board/platform_family
+printf '%s' "$DEV_SYSTEM_REV"      > sys/devices/system/board/system_rev
+printf '%s' "$DEV_LCD"             > sys/devices/system/board/lcd_size  # %ux%u
+printf '%s' "$DEV_LCD_TYPE"        > sys/devices/system/board/lcd_type
+printf '%s' "$DEV_LCD_MFG"         > sys/devices/system/board/lcd_mfg
+printf '%s' "$DEV_LCD_MFG"         > sys/devices/system/board/lcd_mfg_get
+printf '%s' "${DEV_LCD%x*}"        > "sys/devices/platform/$DEV_DPC_DEV/xres"
+printf '%s' "${DEV_LCD#*x}"        > "sys/devices/platform/$DEV_DPC_DEV/yres"
+printf '0'                         > "sys/devices/platform/$DEV_GPIO_DEV/board_id"
+printf '1'                         > "sys/devices/platform/$DEV_POWER_DEV/status"  # 1 = EXTERNAL
+printf '0'                         > sys/class/graphics/fb0/rotate
 
 echo "==> device nodes"
 # These must EXIST as directory entries or the guest stops enumerating after
@@ -171,23 +214,14 @@ echo "==> /proc/asound (audio codec identity)"
 # guest was reading the developer machine's /proc/asound/card0/id and finding
 # "PCH", the host's Intel HDA codec. Give it the device's identity instead.
 mkdir -p proc/asound/card0
-printf 'socaudiolfp100\n' > proc/asound/card0/id
+printf '%s\n' "$DEV_CODEC" > proc/asound/card0/id
 
 echo "==> /proc/mtd + MfgData"
 # CMfgData::Init parses /proc/mtd for a partition named MfgData0, then opens
 # /dev/mtd<N>. Without this it fails to init and CMfgData::Read segfaults
 # inside libc. With it, the locale lookup degrades gracefully to "en-us".
 # Sizes/erasesizes are the documented LeapPad2 partition table.
-cat > proc/mtd <<'EOF'
-dev:    size   erasesize  name
-mtd0: 0007e000 00001000 "NOR_Boot"
-mtd1: 00001000 00001000 "MfgData0"
-mtd2: 00001000 00001000 "MfgData1"
-mtd3: 00400000 00100000 "Reserved"
-mtd4: 01000000 00100000 "Kernel"
-mtd5: 0a000000 00100000 "RFS"
-mtd6: f4c00000 00100000 "Bulk"
-EOF
+{ echo "dev:    size   erasesize  name"; printf '%s\n' "$DEV_MTD"; } > proc/mtd
 python3 - <<'PY'
 for n, size in ((0, 0x7e000), (1, 0x1000), (2, 0x1000)):
     with open(f"dev/mtd{n}", "wb") as f:
@@ -207,7 +241,7 @@ mkdir -p LF/Bulk/Data/Uploads/0 LF/Bulk/Data/Downloads LF/Bulk/Data/Settings
 # AppManager logs "CJSonFile::Load() failed" for both when they are absent.
 # Seed ProgramFileAppOrder.json from the base defaults so the home screen has
 # an app list to work from.
-UIPKG=PAD2-0x1F1E0002-100000
+UIPKG="$DEV_UIPKG"
 for prof in 0 1 2 3 All; do
     mkdir -p "LF/Bulk/Data/Local/$prof/$UIPKG"
     # UIData.json — verbatim shape from the working device
@@ -226,6 +260,21 @@ for prof in 0 1 2 3 All; do
 done
 mkdir -p LF/Bulk/Data/Uploads/1 LF/Bulk/Data/Uploads/2 LF/Bulk/Data/Uploads/3
 : > tmp/bulk_ready                 # rcS's "Bulk is mounted" flag
+
+# Qt Embedded's server socket directory. AppServer runs with -qws, which makes
+# it the QWS SERVER, and the first thing that does is bind a listening socket:
+#
+#     QWSServerSocket: could not bind to file /tmp/qtembedded-0/QtEmbedded-0
+#     FATAL........: Failed to bind to /tmp/qtembedded-0/QtEmbedded-0
+#
+# On the device /tmp is a writable tmpfs and Qt creates this itself; here the
+# parent has to exist first. 0700 is what Qt sets it to, and it checks.
+if [ "${DEV_HAS_QT:-0}" = 1 ]; then
+    mkdir -p tmp/qtembedded-0
+    chmod 700 tmp/qtembedded-0
+    # QWS_DATA_HOME / QWS_CACHE_HOME / TMPDIR out of the device's /etc/profile.
+    mkdir -p LF/Bulk/Data/Local/All/qws/share LF/Bulk/Data/Local/All/qws/cache
+fi
 
 # Runtime files captured from a live booted device (reference/device-capture/
 # 05-runtime-files.txt). Contents matter: bulk_ready is "1", not empty.
@@ -246,13 +295,16 @@ printf '0 65536 0 0 0 65536 65536\n' > flags/pointercal
 # here and some code paths check it.
 : > flags/developer
 
-# Touchscreen tuning, mirroring /flags/set-ts.sh on the device
-mkdir -p sys/devices/platform/lf2000-touchscreen
-printf '23'    > sys/devices/platform/lf2000-touchscreen/max_tnt_down
-printf '521'   > sys/devices/platform/lf2000-touchscreen/min_tnt_up
-printf '5'     > sys/devices/platform/lf2000-touchscreen/max_delta_tnt
-printf '0'     > sys/devices/platform/lf2000-touchscreen/tnt_mode
-printf '%s' '-1' > sys/devices/platform/lf2000-touchscreen/averaging
+# Touchscreen tuning, mirroring /flags/set-ts.sh on the device.
+# The Ultra's rcS also reads $DEV_TOUCH_DEV/firmware_version and logs it as
+# "Neonode Version", so that node has to exist even though nothing acts on it.
+mkdir -p "sys/devices/platform/$DEV_TOUCH_DEV"
+printf '23'      > "sys/devices/platform/$DEV_TOUCH_DEV/max_tnt_down"
+printf '521'     > "sys/devices/platform/$DEV_TOUCH_DEV/min_tnt_up"
+printf '5'       > "sys/devices/platform/$DEV_TOUCH_DEV/max_delta_tnt"
+printf '0'       > "sys/devices/platform/$DEV_TOUCH_DEV/tnt_mode"
+printf '%s' '-1' > "sys/devices/platform/$DEV_TOUCH_DEV/averaging"
+printf '0\n'     > "sys/devices/platform/$DEV_TOUCH_DEV/firmware_version"
 
 # CriticalDoom.json (LF/Base/LpadAssets_en/Data/) lists ten folders that must
 # exist or HasDoomPackageCritical reports doom. We have the two LanguagePacks
@@ -297,11 +349,14 @@ LIBDIR="$PROJ/runtime/libs"
 mkdir -p "$LIBDIR"
 find "$LIBDIR" -maxdepth 1 -type l -delete 2>/dev/null
 nlib=0
-for d in /lib /usr/lib /LF/Base/lib /LF/Base/Brio/lib /LF/Base/Flash/lib; do
+# /LF/Base/Qt/lib is the Ultra's: 40-odd libQtApp*.so that only its shell
+# links. It is simply absent on a LeapPad2, so listing it costs nothing there.
+for d in /lib /usr/lib /LF/Base/lib /LF/Base/Brio/lib /LF/Base/Flash/lib \
+         /LF/Base/Qt/lib; do
     [ -d "$ROOTFS$d" ] || continue
     for so in "$ROOTFS$d"/*.so*; do
         [ -e "$so" ] || continue
-        ln -sfn "$so" "$LIBDIR/$(basename "$so")"
+        ln -sfn "$(rootfs_target "$so")" "$LIBDIR/$(basename "$so")"
         nlib=$((nlib+1))
     done
 done

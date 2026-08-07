@@ -81,6 +81,53 @@ REAL_GLES := libGLESreal.so
 EGL_OUT   := $(SHIMLIBS_GL)/libEGL.so
 GLES_OUT  := $(SHIMLIBS_GL)/libGLESv1_CM.so
 
+# Fourth variant: libEGL.so, for the LeapPad Ultra.
+#
+# THE ULTRA'S SHELL LINKS NEITHER libdl NOR libz, so neither existing variant
+# can reach it. Its shell is Qt, and the DT_NEEDED lists say the one library
+# every part of it does link is libEGL.so:
+#
+#     AppServer  MainPicker  SignIn  ParentPicker  InitialSetup
+#     BrioServer  FirmwareUpdate  AppManager.legacy      all: libEGL.so
+#
+# It sits around position 20 of ~27, comfortably ahead of libc.so.0 at the end,
+# so our open/ioctl/mmap win symbol lookup.
+#
+# NOT VIA THE TRANSITIVE ROUTE. The stock libEGL.so.1.4 has libdl.so.0 in its
+# own NEEDED, and setup-sysroot.sh points /lib/libdl.so.0 at our shim — so it
+# is tempting to think the shim arrives on its own. It does not, and the reason
+# is worth writing down: ELF symbol resolution is breadth-first, so every
+# DIRECT dependency of the executable is searched before any second-level one.
+# libc.so.0 is a direct dependency and defines open(); a shim pulled in one
+# level down is found after it and never wins. Impersonation has to happen at
+# the first level or not at all.
+#
+# This variant carries the EGL implementation itself rather than chaining to
+# the stock one — combining tadpole_shim.c with tadpole_egl.c — because
+# chaining would put a SECOND copy of the framebuffer shim in the process
+# (through the stock EGL's own libdl.so.0), each with its own static state.
+#
+# CHAIN, DO NOT REPLACE — for the same reason as libGLESv1_CM above, found the
+# same way. The stock libEGL.so.1.4 is not only EGL: it also DEFINES five
+# globals that libvr5.so imports, and replacing it outright makes every guest
+# that loads the GL stack die at load time with
+#
+#     symbol 'g_IOControlCallSend': can't resolve symbol
+#     g_IOControlCallWait  g_IOControlCallWaitDummy
+#     gUseTextureOriginalSize  gForceLinear
+#
+# So keep the stock library in the process under another name and let our egl*
+# definitions win by being the direct dependency.
+#
+# ITS OWN libdl.so.0 IS PATCHED TO libdl.so.9 IN THE COPY. The stock EGL lists
+# libdl.so.0 in NEEDED, and setup-sysroot.sh points that name at our shim — so
+# chaining unpatched would load a SECOND copy of the framebuffer shim, with its
+# own static state, underneath the first. Pointing the copy at the real libdl
+# (same-length name, patches in place) keeps exactly one shim in the process.
+SHIMLIBS_EGL := ../runtime/shimlibs-egl
+SHIM_OUT_EGL := $(SHIMLIBS_EGL)/libEGL.so
+REAL_EGL     := libEGLreal.so
+
 TONE_SRC := shim/tone_test.c
 TONE_OUT := ../runtime/tone
 
@@ -92,9 +139,9 @@ VIEW_OUT := viewer/tadpole-view
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell pkg-config --libs sdl2 2>/dev/null)
 
-.PHONY: all shim shimz asound gl tone viewer hle-probe hle-selftest clean check realdl realz
+.PHONY: all shim shimz shimegl asound gl tone viewer hle-probe hle-selftest clean check realdl realz
 
-all: shim shimz asound gl viewer
+all: shim shimz shimegl asound gl viewer
 
 # THE SHIM CANNOT BE BUILT WITHOUT THE SYSTEM FILES, AND THAT SURPRISES PEOPLE.
 #
@@ -280,6 +327,34 @@ $(SHIM_OUT_Z): $(SHIM_SRC) $(SHIMLIBS_Z)/$(REAL_Z) | need-libs
 		-fuse-ld=lld -Wl,-soname,libz.so.1 -o $@ $(SHIM_SRC) \
 		$(SHIMLIBS_Z)/$(REAL_Z) $(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0
 	@echo "built $@"
+
+shimegl: $(SHIM_OUT_EGL)
+
+$(SHIM_OUT_EGL): $(SHIM_SRC) $(EGL_SRC) $(GLES_OUT) $(SHIMLIBS)/$(REAL_DL) \
+                 $(SHIMLIBS_EGL)/$(REAL_EGL) | need-libs
+	@mkdir -p $(SHIMLIBS_EGL)
+	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
+		-Wno-incompatible-library-redeclaration \
+		-fno-stack-protector -fno-builtin \
+		-fuse-ld=lld -Wl,-soname,libEGL.so -o $@ $(SHIM_SRC) $(EGL_SRC) \
+		-L$(SHIMLIBS_GL) -l:libGLESv1_CM.so \
+		-L$(SHIMLIBS_EGL) -l:$(REAL_EGL) \
+		$(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0
+	@echo "built $@"
+	@echo -n "  SONAME: "; readelf -d $@ | grep SONAME | sed 's/.*\[\(.*\)\]/\1/'
+	@echo -n "  NEEDED: "; readelf -d $@ | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/' | tr '\n' ' '; echo
+
+# The stock libEGL, renamed so it can coexist with our impersonator, and with
+# its libdl.so.0 dependency repointed at the real libdl. It has no SONAME, so
+# the copy is found by filename and needs no patching for that.
+$(SHIMLIBS_EGL)/$(REAL_EGL): | need-rootfs
+	@mkdir -p $(SHIMLIBS_EGL)
+	@python3 -c "import pathlib,sys;\
+s=(pathlib.Path('$(ROOTFS_LIB)')/'libEGL.so').resolve();\
+sys.exit('no libEGL.so in $(ROOTFS_LIB)') if not s.exists() else None;\
+d=pathlib.Path('$(SHIMLIBS_EGL)/$(REAL_EGL)');\
+d.write_bytes(s.read_bytes().replace(b'libdl.so.0\x00', b'libdl.so.9\x00'));\
+print('wrote', d, 'from', s.name)"
 
 $(SHIMLIBS_Z)/$(REAL_Z): | need-rootfs
 	@mkdir -p $(SHIMLIBS_Z)

@@ -30,9 +30,31 @@ import xml.etree.ElementTree as ET
 
 BASE = "https://digitalcontent.leapfrog.com/packages"
 HERE = os.path.dirname(os.path.abspath(__file__))
+PROJ = os.path.dirname(HERE)
+DEVICES = os.path.join(PROJ, "runtime", "devices")
 XML = os.path.join(HERE, "packagelists", "EnglishLeapPad2.xml")
 BUNDLED = os.path.join(HERE, "packagelists", "lp2-bundled.txt")
 EXTS = ("lf2", "lf3", "lfp")
+
+
+def profile(dev_id):
+    """-> the DEV_* map from runtime/devices/<dev_id>.conf.
+
+    The same file runtime/device.sh reads. Which packages exist and which CDN
+    directory holds them are per-device facts, so they live beside the rest of
+    the device's description; adding a tablet is then one file rather than an
+    edit here and an edit there.
+    """
+    out, path = {}, os.path.join(DEVICES, dev_id + ".conf")
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.startswith("DEV_"):
+                out[k] = v.strip().strip('"')
+    return out
 
 
 def bundled(path=BUNDLED):
@@ -93,6 +115,10 @@ def packages(xml_path):
 # so the directory is a per-DEVICE name and the extension is .lfp. Probing the
 # firmware ID under its own middle field 404s in every extension, which is why
 # "the firmware is not on the CDN" is an easy and wrong conclusion to reach.
+#
+# Set from the chosen profile's DEV_FW_DIR at startup. LeapPad2 is PADFW,
+# LeapPad Ultra is PAD3FW, Leapster GS is GAMFW — all confirmed against the
+# CDN, and all matching OpenLFConnect's LF_URL for the same device.
 DEVICE_DIR = "PADFW"          # LeapPad2; other devices have their own LF_URL
 
 
@@ -153,12 +179,25 @@ def main():
     ap.add_argument("--probe", action="store_true", help="report availability, download nothing")
     ap.add_argument("--get", metavar="TYPES", help="comma-separated types, or 'all'")
     ap.add_argument("-o", "--out", default="firmware", help="output directory")
-    ap.add_argument("--xml", default=XML)
+    ap.add_argument("--xml", default=None)
+    ap.add_argument("--device", default="leappad2",
+                    help="a DEV_ID from runtime/devices (default: leappad2)")
     a = ap.parse_args()
     if not a.probe and not a.get:
         ap.error("one of --probe or --get is required")
 
-    pkgs = packages(a.xml) + bundled()
+    global DEVICE_DIR
+    prof = profile(a.device)
+    DEVICE_DIR = prof.get("DEV_FW_DIR", DEVICE_DIR)
+    xml = a.xml or os.path.join(HERE, "packagelists",
+                                prof.get("DEV_PKGLIST", "EnglishLeapPad2.xml"))
+    print(f"device: {prof.get('DEV_NAME', a.device)}  "
+          f"cdn dir: {DEVICE_DIR}  list: {os.path.basename(xml)}")
+
+    # The bundled-titles list is LeapPad2's, and only LeapPad2's: those IDs are
+    # in no manifest the device ships with and had to be recovered by hand.
+    # Applying them to another tablet would probe ~40 URLs that cannot exist.
+    pkgs = packages(xml) + (bundled() if a.device == "leappad2" else [])
     sel = (a.get or "").strip()
     want = None if sel in ("", "all") else set(
         t.strip() for t in sel.split(",") if t.strip())

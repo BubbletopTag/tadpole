@@ -47,6 +47,14 @@ done
 # other. That is exactly what an A/B capture needs: one variable changed, and
 # the thing being measured is the code, not the content.
 SYSROOT="${TADPOLE_SYSROOT:-$HERE/runtime/sysroot}"
+
+# WHICH DEVICE. Screen geometry, the splash image and — the part that actually
+# differs — WHICH PROGRAM IS THE SYSTEM MENU all come from the profile that
+# matches the installed firmware. A LeapPad2 boots AppManager; a LeapPad Ultra
+# boots AppServer, a Qt application, and keeps AppManager only for cartridges.
+# See runtime/device.sh.
+. "$HERE/runtime/device.sh"
+tad_load_device || exit 1
 # Two shim variants, because targets link different libraries: AppManager and
 # VideoDaemon pull in libdl.so.0, while the display tools (imager-fb etc.) link
 # libz.so.1 and no libdl at all. Both dirs are on the path; whichever the
@@ -92,6 +100,12 @@ if [ "$TADPOLE_GL_HLE" = 0 ]; then unset TADPOLE_GL_HLE; else export TADPOLE_GL_
 
 LIBS="$HERE/runtime/shimlibs-z:$HERE/runtime/shimlibs:$HERE/runtime/libs"
 [ "$TADPOLE_GL" != 0 ] && LIBS="$HERE/runtime/shimlibs-gl:$LIBS"
+# AHEAD OF shimlibs-gl, AND ONLY FOR A Qt DEVICE. Both directories contain a
+# file called libEGL.so and the loader takes the first one it finds. On the
+# Ultra we want the variant that carries the framebuffer shim, because that is
+# the only library its Qt shell links that we can intercept through at all;
+# on a LeapPad2 we want the GL one, which is what AppManager expects.
+[ "${DEV_HAS_QT:-0}" = 1 ] && LIBS="$HERE/runtime/shimlibs-egl:$LIBS"
 VIEWER="$HERE/tadpole/viewer/tadpole-view"
 export TADPOLE_DIR="${TADPOLE_DIR:-/tmp/tadpole}"
 
@@ -156,6 +170,11 @@ if [ -d "$SYSROOT/tmp" ]; then
     printf '1\n'                        > "$SYSROOT/tmp/bulk_ready"
     printf '0'                          > "$SYSROOT/tmp/splash"
     : >                                   "$SYSROOT/tmp/initial"
+    # Qt Embedded binds /tmp/qtembedded-0/QtEmbedded-0 and will not create the
+    # parent itself. The wipe above removes it every boot, so put it back here
+    # as well as in setup-sysroot.sh.
+    [ "${DEV_HAS_QT:-0}" = 1 ] && {
+        mkdir -p "$SYSROOT/tmp/qtembedded-0"; chmod 700 "$SYSROOT/tmp/qtembedded-0"; }
     # Cartridge state. This file is written by /sbin/cnotify (format "%d, %s")
     # and read by Brio's CartridgeTask, which otherwise learns about carts over
     # /tmp/cart_events_socket from mdev. We have no mdev, so we set it here.
@@ -257,6 +276,16 @@ if [ -n "$LOCK" ]; then
     trap cleanup_lock EXIT
 fi
 
+# Per-device guest environment (DEV_ENV in the profile), as qemu -E arguments.
+# The device sets these in /etc/profile; we exec the shell binary directly and
+# never source one, so they have to be handed over explicitly.
+DEV_ENV_ARGS=()
+if [ -n "${DEV_ENV:-}" ]; then
+    while read -r kv; do
+        [ -n "$kv" ] && DEV_ENV_ARGS+=(-E "$kv")
+    done <<< "$DEV_ENV"
+fi
+
 guest() {
     local bin="$1"; shift
     case "$bin" in /*) [ -e "$bin" ] || bin="$ROOTFS$bin" ;; esac
@@ -282,6 +311,8 @@ guest() {
            -E LD_LIBRARY_PATH="$LIBS" \
            -E TADPOLE_DIR="$TADPOLE_DIR" \
            -E TADPOLE_SYSROOT="$SYSROOT" \
+           -E TADPOLE_W="${DEV_LCD%x*}" -E TADPOLE_H="${DEV_LCD#*x}" \
+           ${DEV_ENV_ARGS[@]+"${DEV_ENV_ARGS[@]}"} \
            $([ "$debug" = 1 ] && echo "-E TADPOLE_DEBUG=1") \
            ${TADPOLE_LOG:+-E TADPOLE_LOG="$TADPOLE_LOG"} \
            "$bin" "$@" )
@@ -292,7 +323,7 @@ guest() {
 # it — the real device does exactly this from rcS, so it doubles as a splash.
 # (Must be a binary that loads a shim variant: imager-fb pulls in libz.)
 if [ ! -e "$TADPOLE_DIR/state.bin" ]; then
-    guest /usr/bin/imager-fb /dev/fb0 /var/screens/Valencia-Boot-logoCW.png \
+    guest /usr/bin/imager-fb /dev/fb0 "$DEV_SPLASH" \
         >/dev/null 2>&1 || true
 fi
 
@@ -389,7 +420,7 @@ case "$mode" in
             guest /bin/busybox $line
         done ;;
     logo)
-        guest /usr/bin/imager-fb /dev/fb0 /var/screens/Valencia-Boot-logoCW.png
+        guest /usr/bin/imager-fb /dev/fb0 "$DEV_SPLASH"
         echo "logo drawn to $TADPOLE_DIR/fb0.bin"
         [ -n "$viewer_pid" ] && { echo "viewer showing it; Ctrl+C to stop"; wait $viewer_pid; } ;;
     run)
@@ -408,8 +439,12 @@ case "$mode" in
         # until the process group dies. Unbuffered or not at all.
         guest /LF/Base/bin/VideoDaemon 750 2>&1 | sed -u 's/^/[vd] /' &
         sleep 1
-        echo "=== AppManager ==="
-        guest /LF/Base/bin/AppManager ;;
+        # THE SYSTEM MENU IS NOT THE SAME PROGRAM ON EVERY DEVICE.
+        # LeapPad2: AppManager, no arguments.
+        # LeapPad Ultra: AppServer <first QML app> -qws, mirroring the
+        # `nice -n $niceLevel AppServer $appPath $2 -qws` in its /usr/bin/app.
+        echo "=== $(basename "$DEV_SHELL") ==="
+        guest "$DEV_SHELL" ${DEV_FIRST_APP:+"$DEV_FIRST_APP"} $DEV_SHELL_ARGS ;;
     front)
         # FRONT END ONLY — nothing boots until the user asks for it.
         #

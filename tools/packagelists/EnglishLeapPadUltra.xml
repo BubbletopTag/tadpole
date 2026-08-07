@@ -1,0 +1,132 @@
+<PackageListCollection>
+	<PackageList device="LeapPadUltra" locale="en_us" mandatoryVersion="5.2.7.1002">
+		<!-- Firmware -->
+		<Package type="magic,update,repair,surgeon"	 id="PHR1-0x00270003-000000" description="Surgeon"/>
+		
+		<!-- Required for Repair/Reset and Update -->
+		<Package type="update,repair"	id="PHRS-0x001E000F-000000" description="Language Pack"/>
+		<Package type="update,repair"	id="PHRS-0x001E000F-000001" description="Language Pack EN"/>
+
+		<!-- Pet App -->
+		<Package type="optional,repair,noSurgeon,hidden"	id="PHRS-0x00280003-000000" description="Pet Pad Party App"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x00280003-DA0000" description="Pet Pad Party App DA"/>
+		<Package type="optional,repair,noSurgeon,hidden"	id="PHRS-0x0028000B-000000" description="Pet Chat"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x0028000B-DA0000" description="Pet Chat DA"/>	
+		
+		<!-- Music Player -->
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x001B00B9-000000" description="Music Player"/>
+		
+		<!-- Widgets -->
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000001" description="Keyboard Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000002" description="Camera Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000003" description="Microphone Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000004" description="How to Play LeapPadUltra Widget"/>		
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000031" description="Gallery Widget"/>
+<!--	<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000051" description="Web Browser QML"/>-->
+<!--	<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000052" description="Web Browser  C  Plus"/>-->
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000060" description="Profile Manager"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000061" description="Parent Account Manager"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000062" description="App Store"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000063" description="Content Manager"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000064" description="Profile Manager"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000065" description="Change Locale"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270006-000070" description="Gallery Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x001B0008-000000" description="Movie Player Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00280017-000000" description="LeapSearch Browser"/>
+		<Package type="optional,repair,noSurgeon"	id="PHR1-0x00270007-000080" description="FirmwareUpdate"/>
+		
+		
+				
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00210008-200000" description="LeapPadUltra Compatibility Data"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00210008-210000" description="LeapPadUltra Games View Frames"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00210008-210001" description="French LeapPadUltra Games View Frames"/>
+
+
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00270008-400000" description="LeapPadUltra Cart Icon Compatibility Data"/>
+		
+		<!-- UI Themes -->
+		<Package type="optional,repair,noSurgeon"	id="PHR1-0x00270008-200001" description="Green Theme"/>
+		<Package type="optional,repair,noSurgeon"	id="PHR1-0x00270008-200002" description="Pink Theme"/>
+		<!-- UI Backgrounds -->
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00270008-200003" description= "LeapPadUltra Backgrounds"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00270008-200005" description= "Green Backgrounds"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00270008-200006" description= "Pink Backgrounds"/>
+		<!-- HD Videos Trailers Maybe-->
+		<Package type="optional,repair,noSurgeon"	id="MHRS-0x001F001A-099999" description="UEB4 HD Video"/>
+		<Package type="optional,repair,noSurgeon"	id="MHRS-0x001F004F-099999" description="bUEB4 HD Video"/>
+		<!--pickers-->
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270008-212345" description= "Child Picker Order"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270008-212346" description= "Parent Picker Order"/>
+		
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00270008-200010" description="src json"/>
+		
+		<!-- Patch Files -->
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x1F1E0002-300000" description="Patch List"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300001" description="Patch 1"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300002" description="Patch 2"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300003" description="Patch 3"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300004" description="Patch 4"/>
+<!--		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300005" description="Patch 5"/>-->
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300006" description="Patch 6"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300007" description="Pet Pals Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300008" description="French Pet Pals Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x1F1E0002-300005" description="SDE Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x1F1E0002-300009" description="UEB4 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x1F1E0002-300010" description="bUEB4 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x1F1E0002-300011" description="UEB Launcher Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x1F1E0002-300012" description="PONY Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300013" description="LFE Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x1F1E0002-300014" description="RPET Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300015" description="HKT Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300016" description="fMIP Patch"/>
+
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x00280003-099999" description="RPET Audio Patch"/>
+		
+		<Package type="optional,repair,noSurgeon"	id="MULT-0x0022000A-PP2000" description="Pet Pals Patch Libs"/>	
+		<Package type="optional,repair,noSurgeon"	id="MULT-0x0022000A-FONT00" description="Font Patch Libs"/>	
+		
+	
+		<!-- Base Apps -->
+
+<!--	<Package type="optional,noSurgeon"	id="PAD2-0x001E000C-100000" description="Connect Message Unlocker"/>-->
+		<Package type="optional,noSurgeon"	id="MHRS-0x0018004F-099999" description="Hi Res Connect Movie"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PHRS-0x00280001-000000" description="Art Studio Ultra"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00280001-DA0000" description="Art Studio Ultra Device Asset"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PHRS-0x00280002-000000" description="Photo Fun Ultra"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00280002-DA0000" description="Photo Fun Ultra Device Asset"/>
+		<Package type="update,repair,noSurgeon"	id="PHR1-0x00240006-000000" description= "My Books"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PHRS-0x00280010-000000" description= "Voice Memo"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00280010-DA0000" description= "Voice Memo DA"/>		
+		<Package type="update,repair,noSurgeon,hidden"	id="PHRS-0x00280012-000000" description= "Calculator"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00280012-DA0000" description= "Calculator DA"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PHRS-0x00280013-000000" description= "Notepad"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00280013-DA0000" description= "Notepad DA"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PHRS-0x00280014-000000" description= "Clock"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00280014-DA0000" description= "Clock DA"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PHRS-0x00280015-000000" description= "Calendar"/>
+		<Package type="update,repair,noSurgeon"	id="PHRS-0x00280015-DA0000" description= "Calendar DA"/>
+		
+		<!-- For In-Home Only -->
+		<Package type="update,repair,noSurgeon,hidden"	id="MULT-0x001B00E2-000000" description= "LeapFrog Learning Songs"/>
+		<Package type="allowed"	id="MULT-0x001B00E2-777777" description= "LeapFrog Learning Songs Info"/>		
+		<Package type="update,repair,noSurgeon,hidden"	id="MULT-0x001F0057-000000" description= "Songs from Us!"/>
+		<Package type="allowed"	id="MULT-0x001F0057-777777" description= "Songs from Us!"/>
+<!--		<Package type="update,repair,noSurgeon"	id="PAD2-0x001E0003-000041" description= "ConnmanReset"/>-->
+<!--		<Package type="update,repair,noSurgeon"	id="PHRS-0x001E000F-000002" description= "Lang Pack French"/>-->
+		
+		<!-- Content Packages -->
+		<Package type="content,landing"			id="LFCC-0x001A0001-100010" description="Landing Page SWF"/>
+		<Package type="content,uploadData"		id="LFCC-0x001A0002-100002" description="Upload Data (Naming Manager)"/>
+		<Package type="content,expandables"		id="LFCC-0x001A0003-100004" description="Expandables"/>
+		<Package type="content"					id="LFCC-0x001A0002-100008" description="PackageList" />
+		<Package type="content,deviceManagement" id="LFCC-0x001A0007-100001" description="Device Management" />
+
+
+	</PackageList>
+	
+	<!-- Micron -->
+	<packageList device="LeapPadUltra" locale="en_us" eraseSize="2097152" writeSize="8192">
+		<Package type="magic,update,repair,firmware" id="PHR1-0x00280005-000000" description="Firmware Base"/>
+		<Package type="magic,repair,bulkEmpty"		 id="PHR1-0x00280005-000002" description="Firmware Bulk Empty"/>
+	</packageList>	
+</PackageListCollection>

@@ -7,6 +7,9 @@ runtime/sysroot/
 runtime/libs/
 runtime/shimlibs/
 runtime/shimlibs-z/
+# shimlibs-egl carries libEGLreal.so, which IS LeapFrog's own libEGL with one
+# string patched. Build product and their code both; never commit it.
+runtime/shimlibs-egl/
 reference/device-capture/
 reference/
 
@@ -42,4 +45,9 @@ __pycache__/
 *.pyc
 
 # Keys live on your machine, never in the repository or an AppImage.
+# BOTH SPELLINGS. A git worktree reaches the real folder through a SYMLINK
+# named keys, and a pattern ending in / does not match a symlink — so "keys/"
+# alone left the key showing up as untracked and one `git add -A` from being
+# committed.
 keys/
+keys

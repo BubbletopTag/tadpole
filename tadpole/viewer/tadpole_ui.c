@@ -312,9 +312,87 @@ static void path_tail(char *dst, size_t n, const char *src)
  * Every page re-tests real state rather than remembering that it ran, so this
  * doubles as a repair tool: reopen it and it shows exactly what is missing.
  */
-enum { WIZ_WELCOME = 0, WIZ_SYSTEM, WIZ_PROFILE, WIZ_GAMES, WIZ_DONE,
-       WIZ_PAGES };
+enum { WIZ_WELCOME = 0, WIZ_DEVICE, WIZ_SYSTEM, WIZ_PROFILE, WIZ_GAMES,
+       WIZ_DONE, WIZ_PAGES };
 static int g_wiz_page;
+
+/* ---- the tablets Tadpole knows how to be -------------------------------
+ *
+ * Read from runtime/devices/*.conf rather than hardcoded, so adding a device
+ * is one file and no C. The shell side reads the same directory the same way
+ * (runtime/device.sh), which is what keeps the wizard's list and what
+ * actually boots from drifting apart.
+ *
+ * WHICH DEVICE IS NORMALLY NOT A CHOICE — it is a property of the firmware
+ * that is installed, and device.sh detects it. This page exists because the
+ * user has to pick BEFORE there is any firmware to detect: it decides which
+ * firmware the System page then downloads. */
+struct devinfo {
+	char id[UI_DEVICE_MAX];
+	char name[48];
+	char lcd[16];
+	int  installed;            /* a rootfs for this device is already here */
+};
+static struct devinfo g_devs[UI_DEVICES_MAX];
+static int g_ndevs;
+static int g_dev_sel;          /* index into g_devs */
+
+/* One "KEY=value" line out of a profile, unquoted. -> 1 if found. */
+static int conf_get(const char *path, const char *key, char *out, size_t n)
+{
+	FILE *f = fopen(path, "r");
+	char line[512];
+	size_t klen = strlen(key);
+	int got = 0;
+	if (!f) return 0;
+	while (!got && fgets(line, sizeof(line), f)) {
+		char *v, *e;
+		if (strncmp(line, key, klen) || line[klen] != '=') continue;
+		v = line + klen + 1;
+		if (*v == '"') v++;
+		e = v + strlen(v);
+		while (e > v && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == '"')) e--;
+		*e = 0;
+		snprintf(out, n, "%s", v);
+		got = 1;
+	}
+	fclose(f);
+	return got;
+}
+
+static void devices_scan(void)
+{
+	char dir[PATHMAX], path[PATHMAX];
+	DIR *d;
+	struct dirent *e;
+	g_ndevs = 0;
+	path_join(dir, sizeof(dir), g_proj, "runtime/devices");
+	if (!(d = opendir(dir))) return;
+	while ((e = readdir(d)) && g_ndevs < UI_DEVICES_MAX) {
+		size_t l = strlen(e->d_name);
+		struct devinfo *di = &g_devs[g_ndevs];
+		if (l < 6 || strcmp(e->d_name + l - 5, ".conf")) continue;
+		snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+		memset(di, 0, sizeof(*di));
+		if (!conf_get(path, "DEV_ID", di->id, sizeof(di->id))) continue;
+		conf_get(path, "DEV_NAME", di->name, sizeof(di->name));
+		conf_get(path, "DEV_LCD", di->lcd, sizeof(di->lcd));
+		if (!di->name[0]) snprintf(di->name, sizeof(di->name), "%s", di->id);
+		g_ndevs++;
+	}
+	closedir(d);
+	/* Stable order regardless of what readdir felt like returning. */
+	{
+		int i, j;
+		for (i = 1; i < g_ndevs; i++)
+			for (j = i; j > 0 && strcmp(g_devs[j-1].name, g_devs[j].name) > 0; j--) {
+				struct devinfo t = g_devs[j-1];
+				g_devs[j-1] = g_devs[j]; g_devs[j] = t;
+			}
+	}
+	for (int i = 0; i < g_ndevs; i++)
+		if (!strcmp(g_devs[i].id, g_cfg.device)) g_dev_sel = i;
+}
 
 /* ---- the profile being composed on WIZ_PROFILE --------------------------
  *
@@ -825,6 +903,11 @@ void ui_cfg_save(void)
 	        g_cfg.io_delay_us,
 	        g_cfg.tslib,
 	        g_cfg.boot_on_start);
+	/* Only written when chosen. An ABSENT device line means "detect it from
+	 * the installed firmware", which is the right default — see the note on
+	 * ui_settings.device. */
+	if (g_cfg.device[0])
+		fprintf(f, "device %s\n", g_cfg.device);
 	/* Last, and only if set: it is the one value that can contain spaces. */
 	if (g_cfg.games_dir[0])
 		fprintf(f, "games_dir %s\n", g_cfg.games_dir);
@@ -855,6 +938,10 @@ static void cfg_load(void)
 			v[--n] = 0;
 		if (!strcmp(k, "games_dir")) {
 			snprintf(g_cfg.games_dir, sizeof(g_cfg.games_dir), "%s", v);
+			continue;
+		}
+		if (!strcmp(k, "device")) {
+			snprintf(g_cfg.device, sizeof(g_cfg.device), "%s", v);
 			continue;
 		}
 		{
@@ -1684,8 +1771,8 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		struct prereq pq;
 		int bx = d.x + 62, by = d.y + 20, i2;
 		static const char *TITLES[WIZ_PAGES] = {
-			"Welcome to Tadpole", "System files", "Who is playing?",
-			"Games", "Ready"
+			"Welcome to Tadpole", "Which tablet?", "System files",
+			"Who is playing?", "Games", "Ready"
 		};
 		prereq_check(&pq);
 
@@ -1726,6 +1813,50 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			if (!pq.qemu || !pq.fwtools)
 				text(r, bx, by + 88, "  Run ./tools/fetch-deps.sh", C_TEXT_DIM);
 			break;
+		case WIZ_DEVICE: {
+			/* WHICH TABLET. This decides which firmware the next page
+			 * downloads, so it has to be asked before there is anything
+			 * installed to detect the answer from. Once a rootfs IS
+			 * installed, runtime/device.sh reads the truth out of its
+			 * Firmware/meta.inf and this is only an override — which is why
+			 * the already-installed one is marked and preselected. */
+			int i3;
+			if (!g_ndevs) devices_scan();
+			text(r, bx, by, "Tadpole emulates more than one tablet.", C_TEXT_DIM);
+			text(r, bx, by + 10, "Pick yours; the next page fetches its", C_TEXT_DIM);
+			text(r, bx, by + 20, "system files.", C_TEXT_DIM);
+			for (i3 = 0; i3 < g_ndevs; i3++) {
+				int ry = by + 36 + i3 * 30, on = (i3 == g_dev_sel);
+				char line[96];
+				fill(r, bx, ry - 3, d.w - 76, 27,
+				     on ? C_PANEL_HI : C_PANEL);
+				/* PLACEHOLDER ART. A screen-shaped box in the panel colour,
+				 * with the device's own aspect ratio — 480x272 is wide and
+				 * squat, 1024x600 less so, so the two are already
+				 * distinguishable without a photograph. Real device pictures
+				 * go in runtime/devices/<id>.png; see the README there. The
+				 * loader is not wired up yet, and a box that is visibly a
+				 * placeholder is better than a picture of the wrong tablet. */
+				{
+					int pw = 34, ph = 21, sw, sh, dw = 0, dh = 0;
+					if (sscanf(g_devs[i3].lcd, "%dx%d", &sw, &sh) == 2 &&
+					    sw > 0 && sh > 0) {
+						dw = pw; dh = pw * sh / sw;
+						if (dh > ph) { dh = ph; dw = ph * sw / sh; }
+					}
+					if (dw <= 0) { dw = pw; dh = ph; }
+					fill(r, bx + 3, ry, pw, ph, C_VOID);
+					fill(r, bx + 3 + (pw - dw) / 2, ry + (ph - dh) / 2,
+					     dw, dh, on ? C_EDGE_LT : C_EDGE_DK);
+				}
+				text(r, bx + 44, ry + 1, g_devs[i3].name,
+				     on ? C_ACCENT : C_TEXT);
+				snprintf(line, sizeof(line), "%s%s", g_devs[i3].lcd,
+				         g_devs[i3].installed ? "   installed" : "");
+				text(r, bx + 44, ry + 12, line, C_TEXT_DIM);
+			}
+			break;
+		}
 		case WIZ_SYSTEM:
 			/* ---- the state of the install, as a checklist --------------
 			 *
@@ -2270,6 +2401,19 @@ static int dialog_click(int lw, int lh, int mx, int my)
 				else { g_modal = M_NONE; g_wiz_page = 0; }
 			} else if (i == 2) { g_modal = M_NONE; g_wiz_page = 0; }
 			return 1;
+		}
+		/* picking a tablet */
+		if (g_wiz_page == WIZ_DEVICE) {
+			int i3;
+			for (i3 = 0; i3 < g_ndevs; i3++) {
+				int ry = d.y + 20 + 18 + 36 + i3 * 30;
+				if (!inside(mx, my, d.x + 62, ry - 3, d.w - 76, 27)) continue;
+				g_dev_sel = i3;
+				snprintf(g_cfg.device, sizeof(g_cfg.device), "%s",
+				         g_devs[i3].id);
+				ui_cfg_save();
+				return 1;
+			}
 		}
 		/* the per-page Browse buttons */
 		if (g_wiz_page == WIZ_SYSTEM && pq.rootfs && !pq.sysroot &&

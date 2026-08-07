@@ -43,6 +43,10 @@
  * volume is not the question there.
  */
 #define UI_GAMESDIR_MAX 512
+#define UI_DEVICE_MAX    32
+/* How many device profiles the wizard will list. runtime/devices/ holds one
+ * .conf per supported tablet; this only bounds what fits on the page. */
+#define UI_DEVICES_MAX    8
 
 struct ui_settings {
 	int gl;                  /* TADPOLE_GL — the software GLES1 rasteriser */
@@ -65,6 +69,13 @@ struct ui_settings {
 	int tslib;               /* TADPOLE_TSLIB — the device's own touch library */
 	int boot_on_start;       /* run the system menu as soon as Tadpole opens */
 	char games_dir[UI_GAMESDIR_MAX];   /* the folder the library was read from */
+	/* WHICH DEVICE TO EMULATE — a DEV_ID from a runtime/devices profile.
+	 * Empty means "work it out from the installed firmware", which is what
+	 * runtime/device.sh does by reading Firmware/meta.inf. This is an
+	 * OVERRIDE, so leaving it empty is the right default: the firmware
+	 * already knows what it is, and a stale setting here would boot a
+	 * LeapPad2 rootfs with a LeapPad Ultra's screen geometry. */
+	char device[UI_DEVICE_MAX];
 };
 
 enum ui_action {
