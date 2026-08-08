@@ -49,6 +49,7 @@ struct ui_settings {
 	int gl_hle;              /* TADPOLE_GL_HLE — replay on the host GPU */
 	int debug_level;         /* 0..3, see above */
 	int log_to_file;         /* also write the guest's output to a log file */
+	int update_check;        /* look for a newer release at startup */
 	int gl_dumpframe;        /* TADPOLE_GL_DUMPFRAME */
 	int gl_dumptex;          /* TADPOLE_GL_DUMPTEX */
 	int rotate;              /* 0/90/180/270, clockwise */
@@ -79,6 +80,8 @@ enum ui_action {
 	UI_ACT_MAKE_PROFILE,     /* create a player profile; fields via ui_profile_get */
 	UI_ACT_SCAN_GAMES,       /* path = folder of .tar backups to read */
 	UI_ACT_INSTALL_GAMES,    /* path = file listing the archives to install */
+	UI_ACT_CHECK_UPDATE,     /* ask GitHub whether a newer release exists */
+	UI_ACT_DO_UPDATE,        /* download it; path = where to write */
 	UI_ACT_STOP,
 	UI_ACT_QUIT,
 	UI_ACT_RELAYOUT          /* rotate/scale changed; viewer must resize */
@@ -120,6 +123,24 @@ void ui_progress_done(int ok);
  * marquee. Pass -1 to go back to "still working". */
 void ui_progress_pct(int pct);
 int  ui_progress_active(void);
+
+/* ---- update check ------------------------------------------------------
+ *
+ * The viewer runs tools/check-update.py and feeds its output here a line at a
+ * time; this side parses and presents it. Keeping the parse in the UI rather
+ * than the caller means the dialog owns its own state and there is one place
+ * that knows the script's output format.
+ *
+ * `silent` marks the check that runs by itself at startup: it must never open
+ * a dialog unless there is genuinely something newer, because an update check
+ * that interrupts someone who is up to date — or offline — is a bug. A check
+ * the user asked for always reports back, including "you are up to date".
+ */
+void ui_update_begin(int silent);
+void ui_update_line(const char *line);
+void ui_update_finish(void);
+const char *ui_update_asset(void);
+int  ui_update_pending(void);
 
 /* One-line status shown at the right of the bar. */
 void  ui_status(const char *fmt, ...);

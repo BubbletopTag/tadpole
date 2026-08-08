@@ -37,6 +37,13 @@
  * frame-pacing tolerance. */
 #define GL_STALE_MS 1000u
 
+/* Set by the Makefile; "dev" in a working copy. The update checker treats
+ * anything that is not a release tag as an unreleased build and offers the
+ * newest release without claiming you are behind. */
+#ifndef TADPOLE_VERSION
+#define TADPOLE_VERSION "dev"
+#endif
+
 /* Mirrors struct tadpole_state in the shim. Keep the two in sync. */
 struct layer_state {
 	uint32_t enabled, xres, yres, bpp, xoffset, yoffset;
@@ -1516,6 +1523,12 @@ static int  g_tool_len;
 
 /* Up to two arguments, either of which may be NULL — enough for every tool
  * here, and it keeps the "one argument" callers unchanged. */
+/* The update check reuses the tool runner, but its output is a report to be
+ * parsed rather than a log to be shown, and it must not open a progress panel.
+ * g_tool_update marks which kind of run is in flight. */
+static int  g_tool_update;
+static char g_update_dest[1100];
+
 static void tool_run2(const char *what, const char *script,
                       const char *a1, const char *a2)
 {
@@ -1556,8 +1569,15 @@ static void tool_runv(const char *what, const char *script, char *const av[])
 	g_tool_len = 0;
 	g_tool = spawn_script(script, argv, 0, &g_tool_fd, 0);
 	ui_status("%s...", what);
-	if (g_tool > 0) { ui_progress_begin(what); ui_progress_line("starting..."); }
-	else ui_status("%s could not start", what);
+	/* No progress panel for the update check: it is a background errand, and
+	 * covering the window with a box every launch to say "still nothing new"
+	 * is exactly the behaviour that makes people turn updaters off. */
+	if (g_tool > 0 && !g_tool_update) {
+		ui_progress_begin(what); ui_progress_line("starting...");
+	} else if (g_tool <= 0) {
+		g_tool_update = 0;
+		ui_status("%s could not start", what);
+	}
 }
 
 /* Drain whatever the tool has written, a line at a time. Called every frame. */
@@ -1579,6 +1599,10 @@ static void tool_drain(void)
 					long a2 = 0, b2 = 0;
 					if (sscanf(g_tool_buf + 11, "%ld %ld", &a2, &b2) == 2 && b2 > 0)
 						ui_progress_pct((int)((a2 * 100) / b2));
+				} else if (g_tool_update) {
+					ui_update_line(g_tool_buf);
+				} else if (!strncmp(g_tool_buf, "pct ", 4)) {
+					ui_progress_pct(atoi(g_tool_buf + 4));
 				} else if (g_tool_len) {
 					ui_progress_line(g_tool_buf);
 				}
@@ -1597,10 +1621,33 @@ static void tool_poll(void)
 	tool_drain();
 	if (waitpid(g_tool, &st, WNOHANG) != g_tool) return;
 	tool_drain();                      /* anything written just before exit */
-	if (g_tool_len) { g_tool_buf[g_tool_len] = 0; ui_progress_line(g_tool_buf); }
+	if (g_tool_len) {
+		g_tool_buf[g_tool_len] = 0;
+		if (g_tool_update) ui_update_line(g_tool_buf);
+		else               ui_progress_line(g_tool_buf);
+	}
 	g_tool_len = 0;
 	if (g_tool_fd >= 0) { close(g_tool_fd); g_tool_fd = -1; }
 	ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+
+	/* THE UPDATE CHECK OWNS ITS OWN ENDING. It never opened a progress panel
+	 * — a check that flashes a dialog at every launch is worse than no check —
+	 * so it must not close one, and its report is shown by the UI instead. */
+	if (g_tool_update) {
+		g_tool_update = 0;
+		g_tool = 0;
+		ui_update_finish();
+		ui_status(" ");
+		return;
+	}
+	if (g_update_dest[0] && ok) {
+		char note[1200];
+		snprintf(note, sizeof(note),
+		         "Saved as %s - quit Tadpole, replace the old file with it, "
+		         "and make it executable.", g_update_dest);
+		ui_progress_line(note);
+		g_update_dest[0] = 0;
+	}
 	ui_status("%s %s", g_tool_what, ok ? "done" : "FAILED");
 	ui_invalidate_prereqs();      /* it may have installed or erased things */
 	/* A scan writes a new index, and an install changes which titles are
@@ -1640,6 +1687,7 @@ int main(int argc, char **argv)
 	int n;                            /* index into the composite order */
 	int vid_over_fb1 = 0;             /* MLC video priority puts fb2 above fb1 */
 	int said_vid_order = -1;
+	int g_upd_checked = 0;            /* the silent update check has run */
 	int gl_have = 0;                  /* tex_gl holds a current frame */
 	Uint32 gl_stamp = 0;              /* when that frame arrived */
 	int gl_rx = 0, gl_ry = 0, gl_rw = 0, gl_rh = 0;   /* where it belongs */
@@ -2027,6 +2075,27 @@ int main(int argc, char **argv)
 				fprintf(stderr, "hle: no game-layer frame for %ums — "
 				        "dropping it so the guest's own picture shows\n",
 				        (unsigned)GL_STALE_MS);
+		}
+
+		/* THE CHECK THAT RUNS BY ITSELF — once, a few seconds in.
+		 *
+		 * Not at startup proper: the first seconds belong to opening the
+		 * window and, for a first-time user, the setup wizard, and a network
+		 * round trip competing with that is how a launch feels slow. Delayed,
+		 * silent, and it only ever surfaces if there really is something
+		 * newer — ui_update_finish() drops the "you are up to date" and the
+		 * "no connection" cases when the check was not asked for.
+		 */
+		if (!g_upd_checked && SDL_GetTicks() > 4000 && g_tool <= 0 &&
+		    !ui_modal() && ui_cfg()->update_check) {
+			char *av[3];
+			g_upd_checked = 1;
+			av[0] = (char *)"--current";
+			av[1] = (char *)TADPOLE_VERSION;
+			av[2] = NULL;
+			ui_update_begin(1);
+			g_tool_update = 1;
+			tool_runv("Checking for updates", "tools/check-update.py", av);
 		}
 
 		hle_host_want_full(ui_cfg()->render_scale > 1);
@@ -2421,6 +2490,40 @@ int main(int argc, char **argv)
 		case UI_ACT_BUILD_SYSROOT:
 			tool_run("sysroot", "runtime/setup-sysroot.sh", NULL);
 			break;
+		case UI_ACT_CHECK_UPDATE: {
+			char *av[3];
+			av[0] = (char *)"--current";
+			av[1] = (char *)TADPOLE_VERSION;
+			av[2] = NULL;
+			ui_update_begin(0);
+			g_tool_update = 1;
+			tool_runv("Checking for updates", "tools/check-update.py", av);
+			break;
+		}
+		case UI_ACT_DO_UPDATE: {
+			/* WHERE THE NEW IMAGE GOES. Next to the running AppImage when
+			 * there is one — that is where the user keeps it and what their
+			 * launcher points at — otherwise the current directory. It is
+			 * written to <name>.new rather than over the running file: a
+			 * running AppImage is a mounted image, and overwriting it under
+			 * itself is how you get a half-updated program that cannot
+			 * explain itself. */
+			const char *img = getenv("APPIMAGE");
+			char dest[1100];
+			char *av[3];
+			if (img && img[0])
+				snprintf(dest, sizeof(dest), "%s.new", img);
+			else
+				snprintf(dest, sizeof(dest), "%s/Tadpole-x86_64.AppImage",
+				         g_projdir[0] ? g_projdir : ".");
+			av[0] = (char *)"--download";
+			av[1] = dest;
+			av[2] = NULL;
+			snprintf(g_update_dest, sizeof(g_update_dest), "%s", dest);
+			g_tool_update = 0;
+			tool_runv("Downloading update", "tools/check-update.py", av);
+			break;
+		}
 		case UI_ACT_ONLINE_UPDATE:
 			tool_run("online update", "tools/online-update.sh", NULL);
 			break;

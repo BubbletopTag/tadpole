@@ -98,6 +98,7 @@ static struct ui_settings g_cfg = {
 	.gl_hle           = 1,
 	.debug_level      = 1,      /* the device's own serial log, nothing more */
 	.log_to_file      = 1,
+	.update_check     = 1,
 	.gl_dumpframe     = 0,
 	.gl_dumptex       = 0,
 	.rotate           = 0,
@@ -126,9 +127,28 @@ static int  g_open_menu = -1;         /* index into MENUS, -1 = closed */
 static int  g_hot_item  = -1;
 
 /* modal */
-enum modal_kind { M_NONE = 0, M_ABOUT, M_GFX, M_AUDIO, M_PAD, M_DEBUG, M_SYSTEM,
+enum modal_kind { M_NONE = 0, M_ABOUT, M_UPDATE, M_GFX, M_AUDIO, M_PAD, M_DEBUG, M_SYSTEM,
                   M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES };
 static enum modal_kind g_modal;
+
+/* ---- update check state -------------------------------------------------
+ * Filled by ui_update_line() from tools/check-update.py's output. The notes
+ * are kept as flat lines rather than a tree: they are only ever scrolled and
+ * drawn, and a release body is already line-oriented text. */
+#define UP_MAXLINE 160
+#define UP_MAXNOTE 220
+static char g_up_status[16];
+static char g_up_cur[48];
+static char g_up_latest[48];
+static char g_up_title[64];
+static char g_up_asset[512];
+static char g_up_reason[96];
+static char g_up_note[UP_MAXNOTE][UP_MAXLINE];
+static unsigned char g_up_head[UP_MAXNOTE];   /* 1 = a version heading */
+static int  g_up_nnote;
+static int  g_up_scroll;
+static int  g_up_count;
+static int  g_up_silent;
 static char  g_msg_title[64], g_msg_body[512];
 /* Non-zero when M_MSG is a yes/no rather than an acknowledgement. */
 static int   g_confirm;
@@ -810,6 +830,7 @@ void ui_cfg_save(void)
 	FILE *f;
 	cfg_path(p, sizeof(p));
 	if (!(f = fopen(p, "w"))) return;
+	fprintf(f, "update_check %d\n", g_cfg.update_check);
 	fprintf(f, "gl %d\ngl_hle %d\ndebug_level %d\nlog_to_file %d\n"
 	           "gl_dumpframe %d\ngl_dumptex %d\n"
 	           "rotate %d\nscale %d\ntouch_debug %d\n"
@@ -863,6 +884,7 @@ static void cfg_load(void)
 			else if (!strcmp(k, "gl_hle"))           g_cfg.gl_hle = val;
 			else if (!strcmp(k, "debug_level"))      g_cfg.debug_level = val;
 			else if (!strcmp(k, "log_to_file"))      g_cfg.log_to_file = val;
+			else if (!strcmp(k, "update_check"))     g_cfg.update_check = val;
 			else if (!strcmp(k, "gl_dumpframe"))     g_cfg.gl_dumpframe = val;
 			else if (!strcmp(k, "gl_dumptex"))       g_cfg.gl_dumptex = val;
 			else if (!strcmp(k, "rotate"))           g_cfg.rotate = val;
@@ -900,7 +922,7 @@ struct mitem {
 
 enum {
 	IT_RUN_UI = 1, IT_SWF, IT_PKG, IT_FW, IT_STOP, IT_QUIT,
-	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE,
+	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE, IT_UPDATE,
 	IT_GAMES, IT_DEBUG, IT_SYSTEM
 };
 
@@ -932,6 +954,7 @@ static const struct mitem OPT_ITEMS[] = {
 };
 static const struct mitem HELP_ITEMS[] = {
 	{ "Setup Wizard...",        IT_WIZARD, 0, 0, 0 },
+	{ "Check for Updates...",   IT_UPDATE, 0, 0, 0 },
 	{ "About Tadpole",          IT_ABOUT,  0, 0, 0 },
 };
 
@@ -1214,6 +1237,79 @@ static void msg(const char *title, const char *body)
 	g_modal = M_MSG;
 }
 
+
+/* ---- update check ------------------------------------------------------- */
+
+void ui_update_begin(int silent)
+{
+	g_up_status[0] = g_up_cur[0] = g_up_latest[0] = 0;
+	g_up_title[0] = g_up_asset[0] = g_up_reason[0] = 0;
+	g_up_nnote = g_up_scroll = g_up_count = 0;
+	g_up_silent = silent;
+}
+
+/* One line of tools/check-update.py's output. Format is deliberately dull:
+ * a keyword, a space, the rest of the line. */
+void ui_update_line(const char *line)
+{
+	const char *v;
+	if (!line) return;
+	while (*line == ' ' || *line == '\t') line++;
+
+	if (!strncmp(line, "status ", 7))
+		snprintf(g_up_status, sizeof(g_up_status), "%s", line + 7);
+	else if (!strncmp(line, "current ", 8))
+		snprintf(g_up_cur, sizeof(g_up_cur), "%s", line + 8);
+	else if (!strncmp(line, "latest ", 7))
+		snprintf(g_up_latest, sizeof(g_up_latest), "%s", line + 7);
+	else if (!strncmp(line, "title ", 6))
+		snprintf(g_up_title, sizeof(g_up_title), "%s", line + 6);
+	else if (!strncmp(line, "asset ", 6))
+		snprintf(g_up_asset, sizeof(g_up_asset), "%s", line + 6);
+	else if (!strncmp(line, "reason ", 7))
+		snprintf(g_up_reason, sizeof(g_up_reason), "%s", line + 7);
+	else if (!strncmp(line, "count ", 6))
+		g_up_count = atoi(line + 6);
+	else if (!strncmp(line, "ver ", 4) || !strncmp(line, "note ", 5)) {
+		int head = line[0] == 'v';
+		v = line + (head ? 4 : 5);
+		if (g_up_nnote < UP_MAXNOTE) {
+			/* A blank line between releases, so the list reads as sections
+			 * rather than one wall of text. */
+			if (head && g_up_nnote) {
+				g_up_note[g_up_nnote][0] = 0;
+				g_up_head[g_up_nnote] = 0;
+				g_up_nnote++;
+			}
+			if (g_up_nnote < UP_MAXNOTE) {
+				snprintf(g_up_note[g_up_nnote], UP_MAXLINE, "%s", v);
+				g_up_head[g_up_nnote] = (unsigned char)head;
+				g_up_nnote++;
+			}
+		}
+	}
+}
+
+const char *ui_update_asset(void) { return g_up_asset; }
+int ui_update_pending(void) { return !strcmp(g_up_status, "behind"); }
+
+void ui_update_finish(void)
+{
+	if (!strcmp(g_up_status, "behind")) {
+		g_modal = M_UPDATE;
+		return;
+	}
+	/* Nothing newer. A check the user asked for still owes them an answer;
+	 * the one that runs by itself at startup owes them silence. */
+	if (g_up_silent)
+		return;
+	if (!strcmp(g_up_status, "current"))
+		msg("Up to date", g_up_cur[0] ? g_up_cur : "You have the newest release.");
+	else
+		msg("Could not check", g_up_reason[0] ? g_up_reason :
+		    "No answer from GitHub.");
+}
+
 static void activate(int id)
 {
 	char start[PATHMAX];
@@ -1245,6 +1341,7 @@ static void activate(int id)
 	case IT_DEBUG: g_modal = M_DEBUG; break;
 	case IT_SYSTEM: g_modal = M_SYSTEM; break;
 	case IT_ABOUT: g_modal = M_ABOUT; break;
+	case IT_UPDATE: g_action = UI_ACT_CHECK_UPDATE; break;
 	case IT_GAMES: games_open(); break;
 	case IT_WIZARD: g_wiz_page = 0; g_modal = M_WIZARD; break;
 	case IT_ERASE:
@@ -1292,6 +1389,9 @@ static struct dlg cur_dlg(int lw, int lh)
 {
 	switch (g_modal) {
 	case M_ABOUT: return dlg_fit(lw, lh, 210, 132);
+	/* Wide and tall: this is a changelog, and a release body wrapped
+	 * into 30 columns would be unreadable. */
+	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
 	case M_GFX:   return dlg_fit(lw, lh, 250, 200);
 	case M_AUDIO: return dlg_fit(lw, lh, 230, 122);
 	case M_PAD:   return dlg_fit(lw, lh, 240, 140);
@@ -1348,6 +1448,19 @@ static void row_value(SDL_Renderer *r, const struct dlg *d, int i,
 /* Wizard buttons: Back / Next|Finish / Cancel, bottom right, in that order —
  * the arrangement every Windows installer has used for thirty years, because it
  * needs no explaining. */
+
+/* Buttons for the update dialog: 0 = Download, 1 = Later. Derived from the
+ * dialog rect rather than stored, so a clamped dialog on a small window still
+ * has its buttons where they are drawn. */
+static SDL_Rect up_btn(const struct dlg *d, int which)
+{
+	SDL_Rect b;
+	b.w = 76; b.h = 14;
+	b.y = d->y + d->h - b.h - 8;
+	b.x = which == 0 ? d->x + d->w - 2 * b.w - 16 : d->x + d->w - b.w - 8;
+	return b;
+}
+
 static SDL_Rect wiz_btn(const struct dlg *d, int which)   /* 0 back 1 next 2 cancel */
 {
 	SDL_Rect r;
@@ -1448,6 +1561,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_FILES: title = g_fb_title; break;
 	case M_PROGRESS: title = g_prog_title; break;
 	case M_MSG:   title = g_msg_title; break;
+	case M_UPDATE: title = "Update available"; break;
 	default: break;
 	}
 
@@ -1462,6 +1576,67 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	text(r, d.x + 6, d.y + 3, title, C_ACCENT);
 
 	switch (g_modal) {
+	case M_UPDATE: {
+		int x = d.x + 10, y = d.y + 20, i;
+		int listy, listh, row = FONT_H + 2, vis;
+		char line[96];
+
+		snprintf(line, sizeof(line), "You have %s",
+		         g_up_cur[0] ? g_up_cur : "an unreleased build");
+		text(r, x, y, line, C_TEXT);
+		snprintf(line, sizeof(line), "Newest is %s",
+		         g_up_title[0] ? g_up_title : g_up_latest);
+		text(r, x, y + 10, line, C_ACCENT);
+		snprintf(line, sizeof(line), "%d newer release%s", g_up_count,
+		         g_up_count == 1 ? "" : "s");
+		text(r, d.x + d.w - 10 - text_w(line), y, line, C_TEXT_DIM);
+
+		listy = y + 24;
+		listh = d.y + d.h - 30 - listy;
+		vis = listh / row;
+		fill(r, x - 2, listy - 2, d.w - 16, listh + 2, C_EDGE_DK);
+		bevel(r, x - 2, listy - 2, d.w - 16, listh + 2, 0);
+
+		/* Clamp here rather than at the scroll event: the visible count
+		 * depends on the dialog size, which depends on the window, which can
+		 * change under a scroll position that was legal when it was set. */
+		if (g_up_scroll > g_up_nnote - vis) g_up_scroll = g_up_nnote - vis;
+		if (g_up_scroll < 0) g_up_scroll = 0;
+
+		for (i = 0; i < vis && g_up_scroll + i < g_up_nnote; i++) {
+			const char *t = g_up_note[g_up_scroll + i];
+			int head = g_up_head[g_up_scroll + i];
+			int maxc = (d.w - 24) / GLYPH_ADV;
+			snprintf(line, sizeof(line), "%.*s", maxc > 90 ? 90 : maxc, t);
+			/* Headings in the accent, body dimmed and indented — the font is
+			 * one fixed 5x7 bitmap, so "smaller" has to be carried by weight
+			 * and indent rather than by size. */
+			text(r, head ? x : x + 8, listy + i * row, line,
+			     head ? C_ACCENT : C_TEXT_DIM);
+		}
+		if (g_up_nnote > vis) {
+			snprintf(line, sizeof(line), "%d/%d", g_up_scroll + 1, g_up_nnote);
+			text(r, d.x + d.w - 12 - text_w(line), listy + listh - FONT_H,
+			     line, C_TEXT_DIM);
+		}
+
+		{
+			/* Download is disabled when the release carried no AppImage —
+			 * better a greyed button than one that fails on click. */
+			static const char *L[2] = { "Download", "Later" };
+			int i2;
+			for (i2 = 0; i2 < 2; i2++) {
+				SDL_Rect b = up_btn(&d, i2);
+				int on = (i2 == 1) || g_up_asset[0] != 0;
+				int hot = on && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+				bevel(r, b.x, b.y, b.w, b.h, 1);
+				text_c(r, b.x, b.w, b.y + 3, L[i2],
+				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
+			}
+		}
+		break;
+	}
 	case M_ABOUT: {
 		int lx = d.x + 10, ly = d.y + 20;
 		if (g_logo) {
@@ -2116,8 +2291,9 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	default: break;
 	}
 
-	if (g_modal == M_WIZARD)
-		return;                      /* it has its own Back/Next/Cancel */
+	if (g_modal == M_WIZARD || g_modal == M_UPDATE)
+		return;      /* both carry their own buttons; a generic Close would
+		              * land on top of them, which it did */
 	cb = close_rect(&d);
 	{
 		int busy = (g_modal == M_PROGRESS && g_prog_running);
@@ -2254,6 +2430,19 @@ static int dialog_click(int lw, int lh, int mx, int my)
 {
 	struct dlg d = cur_dlg(lw, lh);
 	SDL_Rect cb = close_rect(&d);
+
+	if (g_modal == M_UPDATE) {
+		SDL_Rect b0 = up_btn(&d, 0), b1 = up_btn(&d, 1);
+		if (g_up_asset[0] && inside(mx, my, b0.x, b0.y, b0.w, b0.h)) {
+			g_action = UI_ACT_DO_UPDATE;
+			g_modal = M_NONE;
+			return 1;
+		}
+		if (inside(mx, my, b1.x, b1.y, b1.w, b1.h)) {
+			g_modal = M_NONE;
+			return 1;
+		}
+	}
 
 	if (g_modal == M_WIZARD) {
 		struct prereq pq;
@@ -2607,6 +2796,14 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 			g_gm_top -= e->wheel.y * 2;
 			if (g_gm_top > g_gm_n - g_gm_rows) g_gm_top = g_gm_n - g_gm_rows;
 			if (g_gm_top < 0) g_gm_top = 0;
+			return 1;
+		}
+		if (g_modal == M_UPDATE) {
+			/* Only the lower bound is clamped here. How many lines fit depends
+			 * on the dialog height, which depends on the window; the draw
+			 * clamps against the real visible count each frame. */
+			g_up_scroll -= e->wheel.y * 3;
+			if (g_up_scroll < 0) g_up_scroll = 0;
 			return 1;
 		}
 		return g_modal != M_NONE;

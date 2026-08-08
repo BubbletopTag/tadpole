@@ -324,6 +324,13 @@ hle-probe: viewer/hle_probe.c
 #
 # Going below 2.34 needs an older build host; 2.34 is where glibc merged
 # libpthread and every binary built since references __libc_start_main@2.34.
+# WHICH BUILD THIS IS, for the update check.
+#
+# Releases are tagged tadpole-DDMMYYYY-NNNN and the checker compares those
+# fields; anything that does not parse as one is treated as an unreleased
+# build, which is exactly right for a working copy. So the default is "dev" and
+# tools/build-appimage.sh passes the real tag when it makes a release build.
+TADPOLE_VERSION ?= dev
 HOST_STD := -std=gnu17
 #
 # AND _GNU_SOURCE HAS TO GO WITH IT. sdl2.pc puts -D_GNU_SOURCE=1 in its
@@ -342,7 +349,8 @@ SDL_CFLAGS_PORTABLE := $(filter-out -D_GNU_SOURCE=1 -D_GNU_SOURCE,$(SDL_CFLAGS))
 viewer: $(VIEW_OUT)
 
 $(VIEW_OUT): $(VIEW_SRC) $(VIEW_HDR)
-	$(CC) -O2 -Wall $(HOST_STD) -o $@ $(VIEW_SRC) $(SDL_CFLAGS_PORTABLE) \
+	$(CC) -O2 -Wall $(HOST_STD) -DTADPOLE_VERSION='"$(TADPOLE_VERSION)"' \
+	      -o $@ $(VIEW_SRC) $(SDL_CFLAGS_PORTABLE) \
 	      $(SDL_LIBS) -lz $(shell pkg-config --libs gl)
 	@echo "built $@"
 
