@@ -1574,3 +1574,76 @@ void _ZN11CAppManager7PushAppERKN4Glib7ustringEPv(void *self, const void *path,
 	}
 	real_pushapp(self, path, data);
 }
+
+/* ---- locales the guest's libstdc++ refuses ------------------------------
+ *
+ * WHAT BREAKS WITHOUT THIS. Nineteen titles die in their first second with
+ *
+ *     terminate called after throwing an instance of 'std::runtime_error'
+ *       what():  locale::facet::_S_create_c_locale name not valid
+ *
+ * They read Locale="en-us" out of their own meta.inf and construct
+ * std::locale("en-us") without catching. Five shared engines account for all
+ * nineteen — BookApp2.so, cartLauncher.so, UEB2013.so, trans.so, and the
+ * camera/photo/video widgets — so it is one fault reached nineteen ways.
+ *
+ * WHERE IT ACTUALLY COMES FROM, disassembled rather than guessed. libstdc++
+ * 6.0.14 here is built on the GENERIC locale model, and its
+ * _S_create_c_locale is the whole of the check:
+ *
+ *     *__cloc = 0;
+ *     if (strcmp(__s, "C") == 0) return;
+ *     __throw_runtime_error("locale::facet::_S_create_c_locale name not valid");
+ *
+ * It never calls setlocale — interposing that, which was the obvious first
+ * move, changes nothing. Any name but "C" throws, full stop.
+ *
+ * NONE OF THIS IS THE EMULATOR'S DOING. It is a literal strcmp inside the
+ * guest's own libstdc++, reached without touching a file or a syscall. The
+ * same binaries on this firmware fail the same way on real hardware. What it
+ * really says is that these titles are NEWER THAN THE FIRMWARE they are being
+ * run against — the packages are dated December 2013, the system August — and
+ * expect a build of libstdc++ with locale support.
+ *
+ * So this is a DELIBERATE DEVIATION FROM THE DEVICE, not an accuracy fix, and
+ * it should be read as one. It provides the success path of the function above
+ * for every name: clear the out-parameter and return, leaving the C locale in
+ * force underneath.
+ *
+ * The lie is small. The generic model has no locale but C to offer, so the
+ * alternative on the table is not "correct en-US formatting" — there is no
+ * such thing in this libstdc++ — it is SIGABRT before the first frame.
+ * Collation and number grouping stay C's, and these are ASCII titles.
+ *
+ * TADPOLE_STRICT_LOCALE=1 restores the stock behaviour, for measuring what the
+ * unmodified system does.
+ */
+static void (*real_create_c_locale)(short **, const char *, short *);
+
+void _ZNSt6locale5facet18_S_create_c_localeERPsPKcS1_(short **cloc,
+                                                      const char *name,
+                                                      short *old);
+void _ZNSt6locale5facet18_S_create_c_localeERPsPKcS1_(short **cloc,
+                                                      const char *name,
+                                                      short *old)
+{
+	init();
+	if (getenv("TADPOLE_STRICT_LOCALE")) {
+		if (!real_create_c_locale)
+			real_create_c_locale = dlsym(RTLD_NEXT,
+			        "_ZNSt6locale5facet18_S_create_c_localeERPsPKcS1_");
+		if (real_create_c_locale) {
+			real_create_c_locale(cloc, name, old);
+			return;
+		}
+	}
+	/* The success path, verbatim: the generic model stores nothing but a null
+	 * handle, because it has no locale object to build. */
+	if (cloc)
+		*cloc = 0;
+	if (g_debug && name && name[0] && !(name[0] == 'C' && !name[1])) {
+		dbg("[tadpole] std::locale(\"");
+		dbg(name);
+		dbg("\") accepted; C semantics underneath\n");
+	}
+}

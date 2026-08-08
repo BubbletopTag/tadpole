@@ -41,6 +41,14 @@ file. Only the control path (ioctl) is emulated.
 
 ## 2. Current state
 
+**THIS SECTION IS FROM THE FIRST WEEK AND IS KEPT AS WRITTEN.** This file is a
+log: entries go on the end and nothing is deleted, so the oldest account of
+"where we are" is also the first thing a cold reader meets. It has been
+overtaken many times over by the sections below — native titles run, 3D and FMV
+render, titles launch directly. For today's state read `docs/STATUS.md`, which
+is short and is the one file here allowed to go stale; for how any of it works,
+keep reading from section 4.
+
 **Working**
 - Stock firmware 4.6.0.784 obtained via LFConnect; rootfs extracted and
   verified complete against its own `erootfs.md5` manifest (1611 files).
@@ -593,6 +601,12 @@ A standalone launcher would mean reimplementing AppManager's app-host: init
 Brio, dlopen, call `CreateApp`, drive the returned object's lifecycle. The
 vtable would have to be reversed from `libLightningBase.so`. Feasible, but a
 project in itself.
+
+**Solved without building any of that** — see "Native Brio titles can be
+launched DIRECTLY" at the end of this file. The conclusion above was correct
+and the search was in the wrong place: rather than replacing AppManager's
+app-host, interpose the one function it calls to start an app
+(`CAppManager::PushApp`) and hand it a different path. `./tadpole.sh --app`.
 
 ## Home-screen apps — compared against a WORKING device
 
@@ -1871,6 +1885,11 @@ fb2  video playback / FMV
 Consistent evidence: the Sneak Peeks app plays video AUDIO but shows no picture,
 which is what you would expect if nothing handles the fb2 video layer. Our GL
 rasteriser writes to **fb1**, which is the right layer for 3D.
+
+**Right about the role, and it left out the two things that mattered**: fb2
+holds YUV420 rather than RGB, and it is not fixed at the bottom of the layer
+order. Both are in "SOLVED: FMV — fb2 is the MLC's VIDEO plane" at the end of
+this file, and Sneak Peeks now shows its trailers.
 
 ## Culling is NOT the cause — measured, not argued
 
@@ -5314,3 +5333,317 @@ start a guest, so that combination is a contradiction it rejects in two lines
 and exits. The probe then spent its full 120-second timeout waiting for a SignIn
 nothing was booting and reported "never reached SignIn". Fixed to `--boot
 --no-viewer`, matching `probe-home.sh`, with `PROBE_DEBUG=1` for the shim trace.
+
+## SOLVED: FMV — fb2 is the MLC's VIDEO plane, and it holds YUV420
+
+The decoder was never broken. Brio's `libVideo.so` decodes Theora in software
+with libtheora and had been writing finished frames into fb2 the whole time.
+Three separate things stopped any of it reaching the panel, and while the
+priority bug is the one that produced the exact reported symptom — "video plays
+audio, shows no picture" — fixing any single one of the three left the screen
+looking just as broken as before. That is why this survived so long.
+
+The old note under "Framebuffer roles" — `fb2 video playback / FMV`, from
+community intel — was right about the role and silent about the only part that
+mattered, which is that the plane is **not RGB**.
+
+### The format is announced, in a word we stored and never read
+
+`fb_var_screeninfo.nonstd`. From `include/linux/lf1000/lf1000fb.h` in the LF2
+kernel drop:
+
+```c
+#define LF1000_NONSTD_FORMAT       20
+#define LF1000_NONSTD_FORMAT_MASK  0x7
+enum { LAYER_FORMAT_RGB = 0, LAYER_FORMAT_YUV420 = 1, LAYER_FORMAT_YUV422 = 2 };
+```
+
+fb0 and fb1 report 0 always. fb2 reports **1** the moment anything starts a
+video. The shim had been copying `nonstd` into `state.bin` faithfully since the
+layer struct was written; nothing ever looked at it, so every layer went through
+the packed-RGB blit and a perfectly good frame composited as noise or as
+nothing.
+
+### The plane layout is the driver's, not a guess
+
+`lf2000fb.c`, `nxfb_ops_set_par`:
+
+```c
+soc_dpc_set_vid_address(module, pbase,                       4096,
+                                pbase + 2048,                4096,
+                                pbase + 2048 + 4096*yres/2,  4096, 0);
+```
+
+So with P the pitch: **Y at 0, Cb at P/2, Cr at P/2 + P*(yres/2)**, every plane
+strided by P, 4:2:0 so one chroma sample covers a 2x2 luma block.
+`blit_layer_yuv420()` in `tadpole_view.c` is that arithmetic and nothing else.
+
+**One divergence to know about.** The driver hardcodes P = 4096 — the YUV
+layer's `fix.line_length` on hardware is 4096 whatever the mode — while our
+shim answers `FBIOGET_FSCREENINFO` with the ordinary panel-width formula
+(1920 for 480 x 32bpp) for every layer. That is not an accident and it is not
+safe to "fix" casually: Brio lays the planes out from **what we told it**, so
+both sides agree on the SHAPE, which is all this arithmetic depends on. Making
+the shim report 4096 for fb2 alone would match the device more exactly and
+would also change every consumer of that field — see "3D surface pitch — REAL
+DIVERGENCE, but the obvious fix is WRONG (reverted)" above for what happened
+the last time the pitch was made per-layer. Separate change, separate captures.
+
+### The video plane is NOT fixed at the bottom of the compositor
+
+This is the part that had been assumed rather than checked. The MLC lets the
+video plane sit at any of four depths, and the guest picks one.
+`soc_dpc_set_vid_priority` in `arch/arm/mach-nxp3200/soc/dpc.c`:
+
+```
+0   video > 0 > 1 > 2     video above every RGB layer
+1   0 > video > 1 > 2     under fb0, but OVER fb1
+2   0 > 1 > video > 2     what we always assumed
+3   0 > 1 > 2 > video     the very bottom
+```
+
+The field is `nonstd` bits 24-25. **Sneak Peeks asks for priority 1**
+(`nonstd = 0x01100000` — format 1, priority 1) **and draws an opaque background
+on fb1**, so compositing fb2 at the bottom buried a working trailer under the
+app's own artwork. That is the whole of "plays audio, shows no picture", and no
+amount of staring at the decoder would ever have shown it.
+
+The viewer now reads the priority and swaps the two lower slots, announcing it
+once: `video plane priority N — drawing it OVER/under fb1`. Priority 0 is folded
+in with 1, because fb0 is composited in its own pass so the Tier 3 game layer
+can go between; putting video above THAT needs more than a reorder. Nothing has
+asked for it yet. Make it say so if it ever does.
+
+### xoffset IS PART OF A LAYER'S ADDRESS, not a decoration
+
+General, not a video thing — video is just where it first mattered. Brio hands
+out layer buffers from one arena at **byte** granularity and then expresses the
+result as a pan, so the whole rows go in `yoffset` and the remainder goes in
+`xoffset`. Both are address.
+
+```
+fb2 PUTVAR ... off 416,1629
+DeAllocBuffer: remove offset 002FC000          <- the guest's own allocator
+
+1629 * 1920 + 416 * 4 = 0x2FC000               <- exactly
+```
+
+We were using `yoffset` alone, so every row of the video started 416 pixels
+early. fb0 and fb1 have only ever come back with `xoffset` 0, which is why this
+went unnoticed for months in code that reads all three the same way.
+
+### Also fixed on the way, each one able to hide the others
+
+* **Playback ran 16x too fast.** `snd_pcm_mmap_writei` returned early when the
+  FIFO had no reader, skipping `pace_pcm` — pacing skipped exactly when nothing
+  was draining the pipe, and the guest's clock comes from that call blocking. A
+  4.416 s clip finished in 0.27 s with 46 of 49 frames dropped. Now 4.08 s and
+  none dropped.
+* **`SetVideoScaler` is honoured.** Sneak Peeks plays 320x240 trailers into a
+  362x272 window, so a window-sized read took 42 columns and 32 rows the decoder
+  never wrote. `layer_state` gained `vid_w`/`vid_h`.
+* **`struct layer_state` exists in FIVE places and nothing checked them.**
+  Growing it moved `layer[1]` — the game layer — eight bytes for
+  `tadpole_gles_core.c`'s copy, and every 3D title came up black with a sliver in
+  the corner. It now verifies `state.bin`'s length against its own `sizeof` and
+  falls back loudly. The three-copies warning elsewhere in this file is now a
+  five-copies warning.
+
+### What actually cracked it, and it was not a rendering idea
+
+`TADPOLE_LOG=<prefix>` — a per-pid shim log that survives a daemonize.
+VideoDaemon forks, `setsid`s and reopens 0/1/2 on `/dev/null`, so its narration
+**and the shim's** were going nowhere at all. Every previous look at this was
+reading a log that could not contain the answer. `tadpole.sh` no longer pipes
+the daemon to `/dev/null` either.
+
+Two instruments came out of it and both are worth keeping:
+
+* **`tools/vdplay.py`** — a four-second reproduction. VideoDaemon listens on
+  `/tmp/video_events_socket` and `recv()`s exactly 8 bytes, switching on the
+  second word: 4 shutdown, 5 transition, 6 startup. Protocol read out of the
+  binary, not guessed. Before this, the video path was only ever exercised by
+  reaching an expensive title by accident.
+* **`fbshot.py --layers`** — what a layer HOLDS, rather than what the composite
+  makes of it. Noise and black look identical once something opaque is drawn on
+  top, which is precisely the confusion this whole item was made of.
+
+Verified: Sneak Peeks plays its trailers — 29 of 30 one-second captures
+distinct, picture in exactly its 362-wide window at x=59, colours correct. Clam
+Prix still renders at native and at 3x with viewports 15,17 and 17,16, the
+values recorded above. Sign-in and home screen unchanged.
+
+## Native Brio titles can be launched DIRECTLY, with no home screen
+
+`./tadpole.sh --app 'Clam Prix'` boots straight into it. This retires "Launching
+native apps directly" above, which concluded that a standalone launcher meant
+reimplementing AppManager's app-host and was "a project in itself". It would
+have been. The way in was somewhere else entirely, and the earlier note had
+already written down the sentence that contains it — "make AppManager launch
+it".
+
+**Why there was no door.** A native title cannot be exec'd: its `App.so` exports
+one symbol, `CreateApp`, which `CAppManager` has to call. And AppManager's whole
+`main` is `CAppManager::Instance()->Run(argc, argv)` — `Run` ignores `argv[1]`,
+hardcodes `PushApp("LPAD/main.swf")`, and the only argument it does read is
+`argv[2]`, which it `atoi`s into a player ID. Nothing in `/LF/Base/bin` takes a
+package. So the only route was the Flash home screen: boot the UI, sign in,
+dismiss a dialog, tap a tile at coordinates that move whenever the library
+changes. Two minutes and three fragile steps to reach a title that segfaults in
+its first second.
+
+**How.** The same trick that already gets us `open()` and `ioctl()` — be earlier
+in the link order and define the symbol. `libLightningBase` calls its own
+`PushApp` through its PLT (eight sites), and in AppManager's `DT_NEEDED`
+`libdl.so.0` is #22 against `libLightningBase.so` at #25, so our definition wins
+and every one of those calls arrives in the shim:
+
+```
+$ readelf -d LF/Base/bin/AppManager | grep NEEDED | cat -n
+    22   libdl.so.0
+    25   libLightningBase.so
+    33   libc.so.0
+```
+
+With `TADPOLE_LAUNCH` set, the first call gets its path substituted. **Read
+`tadpole/shim/tadpole_shim.c` rather than this summary** — the comment there is
+the specification, and two details in it are load-bearing:
+
+* **Substituting only the first push was not enough.** AppManager pushes its
+  default UI more than once — `Run` does it, and so does the path that runs when
+  an app is popped — so `main.swf` ended up stacked ON TOP of the title, which
+  looked exactly like the launch had been ignored. Later pushes of the home
+  screen are dropped when a target is set.
+* **Reading the requested path means reading somebody else's ABI.**
+  `Glib::ustring` holds one `std::string`, which on this toolchain's pre-C++11
+  libstdc++ is a single `char*` at the front of the object. That is an
+  assumption, so it is checked before it is trusted — plausible pointer,
+  printable bytes — because a wrong guess faults inside a function every launch
+  goes through. Verified: it reads `/LF/Base/LPAD/main.swf` exactly.
+
+**This runs the REAL loader** — same `CAppManager`, same `LoadNewApp`, same
+`dlopen` and `CreateApp` — so a crash under it is the crash you would have got
+from the home screen. That is the entire point. A launcher standing up its own
+half-environment would produce crashes belonging to the launcher, which is worse
+than no launcher.
+
+What it unlocked immediately: `crash-soak.sh` rewritten to one fresh process per
+launch with no tapping, and `tools/compat-sweep.sh`, which launches all 110
+installed titles in turn. Neither is possible through a home screen.
+
+**The caveat travels with every result produced this way.** A title launched
+directly has no home screen and no player signed in. Camera, Gallery and
+Keyboard are exactly the things that would want profile data, so a crash means
+"crashed this way" until it has been checked both ways.
+
+## C++ exception unwinding under qemu-user WORKS — checked, so stop suspecting it
+
+Worth its own entry because it eliminates a whole class of explanation rather
+than fixing anything. 19 of the 28 sweep failures are a SIGABRT out of
+`libuClibc+0x00059920` reporting `locale::facet::_S_create_c_locale name not
+valid` — a C++ exception being thrown and reaching `std::terminate`. The obvious
+suspicion is that the throw is fine and the **unwind** is what fails: no
+personality routine, no `.ARM.exidx`, something qemu-user does not carry across.
+
+It does carry it. Probe:
+
+```c
+/* Does a C++ throw/catch survive qemu-user, our shim, and the guest's own
+ * unwinder? Runs from a library constructor, so the REAL loader (AppManager ->
+ * dlopen) triggers it in the real process — no synthetic environment. */
+extern "C" int printf(const char *, ...);
+
+static void probe(void) __attribute__((constructor));
+static void probe(void)
+{
+    printf("EHTEST: start\n");
+    try { throw 42; }
+    catch (int e) { printf("EHTEST: caught int %d\n", e); }
+    try { throw "str"; }
+    catch (const char *s) { printf("EHTEST: caught char* %s\n", s); }
+    printf("EHTEST: survived both\n");
+}
+```
+
+Cross-compiled to ARM, dropped in as `/LF/Bulk/ProgramFiles/EHTEST/App.so` and
+launched with `TADPOLE_LAUNCH` so the guest's own loader opens it:
+
+```
+[0x280] LoadNewApp path = /LF/Bulk/ProgramFiles/EHTEST/App.so
+EHTEST: start
+EHTEST: caught int 42
+EHTEST: caught char* str
+EHTEST: survived both
+[0x280] ... Could not load Create App symbol, /LF/Bulk/ProgramFiles/EHTEST/App.so
+```
+
+Both a thrown `int` and a thrown `char*` were caught, through
+`__cxa_throw`/`__cxa_begin_catch` in the guest's own `libstdc++.so.6` and
+`libgcc_s.so.1`. The "Could not load Create App symbol" line afterwards is
+expected and is itself the confirmation that mattered: the probe exports no
+`CreateApp`, so it rode the real `LoadNewApp` path all the way to the real
+rejection.
+
+**A constructor probe is the technique worth keeping.** It needs no `CreateApp`,
+no Brio, no app lifecycle and no cooperation from the title — write a
+constructor, install it as an `App.so`, and the real loader in the real process
+runs your code at the moment a real title would start. Anything answerable by
+"does X work in this environment" can be answered this way in about a minute,
+and the answer is about the environment titles actually run in rather than a
+standalone binary that resembles one. The locale question was probed the same
+way, with `setlocale` called across every plausible name.
+
+So the SIGABRTs are what they say they are: the locale is genuinely not being
+created. Not the unwinder.
+
+### What the locale probe measured, and the question it leaves
+
+Same constructor technique, `setlocale` across every plausible name:
+
+```
+LOCTEST: setlocale(LC_ALL,"C")           -> C
+LOCTEST: setlocale(LC_ALL,"POSIX")       -> C
+LOCTEST: setlocale(LC_ALL,"")            -> C
+LOCTEST: setlocale(LC_ALL,"en-us")       -> NULL
+LOCTEST: setlocale(LC_ALL,"en_US")       -> NULL
+LOCTEST: setlocale(LC_ALL,"en_US.UTF-8") -> NULL
+```
+
+`_S_create_c_locale` throws `name not valid` exactly when `setlocale` hands
+back NULL, so a title asking for a **named** locale aborts and a title asking
+for `C` or `""` does not.
+
+The obvious next move is to install locale data — and the reason to write this
+down before anyone does is that **the device has none either**. There is no
+`/usr/lib/locale` anywhere in the stock rootfs, `/etc/environment` holds
+nothing but comments, and `/etc/profile` sets `PATH`, `LD_LIBRARY_PATH` and
+`HISTFILESIZE` — no `LANG`, no `LC_ALL`. Whatever these 19 titles do on real
+hardware, they are not being handed a working `en_US` by uClibc.
+
+So the question is not "why is our locale missing" but **"where does the name
+come from, and why does it work there"**. Two suspects, in order:
+
+1. **`en-us` is a string this system genuinely carries, and we fabricate it.**
+   `runtime/setup-sysroot.sh` builds `/proc/mtd` and an empty `/dev/mtd1` so
+   `CMfgData::Init` succeeds, and its own comment records the consequence: "the
+   locale lookup degrades gracefully to `en-us`". The device stores that same
+   string in NOR — `LF/Base/MfgTest/SetLocale_US.sh` writes it with
+   `mfgdata set locale en-us`, and `GetLocale.sh` reads back one of `en-us`,
+   `es-es`, `fr-fr`. That is exactly the shape `setlocale` returns NULL for,
+   and "degrades gracefully" was written about `CMfgData` not crashing, not
+   about what the value would later be used for.
+2. **No player is signed in.** Every sweep launch went in through
+   `TADPOLE_LAUNCH`, and a profile is the other place a language setting would
+   come from.
+
+**The device can settle suspect 1 in one line**, and it is worth spending a
+boot on before anyone installs locale data or patches uClibc:
+
+```
+tools/lfsh.py <ip> "mfgdata get locale"
+```
+
+If hardware answers `en-us` too, then the device runs these titles with the
+same string ours chokes on, the difference is somewhere else entirely, and the
+locale data theory is dead before it costs a day. See "LeapDog — differential
+tracing against real hardware" above for getting a shell on it.

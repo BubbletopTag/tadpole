@@ -37,6 +37,11 @@ tools/glconform/*.log
 # obligation to meet than a repository quietly accumulating vendored binaries.
 build/
 
+# The release script. It lives in the working copy rather than in the
+# repository: it publishes to one particular GitHub repository, pushes tags, and
+# is the maintainer's tool rather than part of what Tadpole is.
+post-commit.sh
+
 # Byte-compiled Python from running the tools in place.
 __pycache__/
 *.pyc

@@ -23,11 +23,45 @@ games — the ones from your own device. See
 | Touch and buttons | yes |
 | Host-GPU rendering (HLE) | yes — about 5x the software renderer |
 | 3D (race tracks) | yes — Clam Prix races render and play |
-| Skinned player character | **not yet** — the kart draws, its rider does not |
+| Skinned player character | yes — the rider draws with the kart |
 | FMV / video layer | yes — Sneak Peeks trailers and the system videos play |
 
 Frame rate on an AMD FirePro W4100: ~57 fps with GPU replay, against 11.5 fps
 software. Both are capped at the panel's real 60 Hz.
+
+## How many titles actually run
+
+Every installed title, launched in turn and screenshotted:
+
+```sh
+./tools/compat-sweep.sh          # launch each one, capture it, record a verdict
+./tools/compat-report.py         # -> build/compat/<date>/index.html
+```
+
+The most recent run, 110 titles:
+
+| | |
+|---|---|
+| Launches to a real screen | 75 |
+| Crashes before drawing | 28 |
+| Runs, draws nothing | 6 |
+| Draws, then stops | 1 |
+
+**28 failures are not 28 bugs.** Nineteen of them abort in the same place with
+the same message; two further groups of three crash at one shared offset each,
+which is one engine build and one bug per group, not six. Six distinct fault
+sites account for all 28, and the report puts that above the table for exactly
+this reason.
+
+**And every one of those launches had no player signed in.** The sweep starts
+titles directly, with no home screen, because that is what makes a hundred
+launches practical; a title that wants profile data may well behave differently
+when it has some. A crash here means "crashed this way" until it is checked
+both ways.
+
+The report is a single self-contained page — every thumbnail embedded, so it
+can be sent on its own. It is written under `build/`, which is not in the
+repository, so run the sweep to get one.
 
 ---
 
@@ -294,8 +328,15 @@ wizard opens instead of a wall of errors.
 ```sh
 ./tadpole.sh --boot     # open it and start the system menu immediately
 ./tadpole.sh --list     # list installed titles
+./tadpole.sh --app NAME # launch one title straight in, no home screen
 ./tadpole.sh --shell    # an ARM shell inside the guest
 ```
+
+`--app` takes a name or a Package ID and matches on either, so
+`--app 'Clam Prix'` is enough. It skips the menu, the sign-in and the tile —
+useful when you are testing one title over and over, and the reason a sweep of
+a hundred of them is practical at all. Titles that expect a signed-in player
+may behave differently this way than they do from the home screen.
 
 ### Controls
 
@@ -399,6 +440,7 @@ tadpole/shim/           guest-side libraries (ARM) — the emulation itself
 tadpole/viewer/         the application: window, UI, audio, host-GPU replay
 tools/                  install and diagnostic scripts
 tools/test-build.sh     build from scratch in a clean container, 3 distributions
+tools/compat-sweep.sh   launch every installed title and record what it did
 rootfs/                 firmware you installed          (not distributed)
 runtime/sysroot/        the guest's filesystem view
 docs/HANDOVER.md        engineering notes — how it works and why

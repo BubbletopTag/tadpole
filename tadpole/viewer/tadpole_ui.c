@@ -24,6 +24,11 @@
 #define FONT_H 7
 #define GLYPH_ADV 6          /* 5px cell + 1px gap */
 
+/* Set by the Makefile; "dev" in a working copy. */
+#ifndef TADPOLE_VERSION
+#define TADPOLE_VERSION "dev"
+#endif
+
 /* Symbol glyphs appended past ASCII by tools/genfont.py. */
 #define GL_DIAMOND  "\x7f"
 #define GL_RIGHT    "\x80"
@@ -1295,7 +1300,10 @@ int ui_update_pending(void) { return !strcmp(g_up_status, "behind"); }
 
 void ui_update_finish(void)
 {
-	if (!strcmp(g_up_status, "behind")) {
+	/* "dev" opens the same dialog: an unreleased build still wants to see what
+	 * has shipped since, and the heading already reads "You have an unreleased
+	 * build" rather than claiming you are behind. */
+	if (!strcmp(g_up_status, "behind") || !strcmp(g_up_status, "dev")) {
 		g_modal = M_UPDATE;
 		return;
 	}
@@ -1303,8 +1311,15 @@ void ui_update_finish(void)
 	 * the one that runs by itself at startup owes them silence. */
 	if (g_up_silent)
 		return;
+	/* SAY IT, rather than leaving the version to speak for itself. This used
+	 * to put g_up_cur in the body, so a successful check answered with a bare
+	 * "08082026-0001" under a title — which reads as a fact about the build,
+	 * not as the answer to the question that was asked. The body is one plain
+	 * sentence instead; the version is already on the About dialog for anyone
+	 * who wants it. (Kept to one short line on purpose: text() does not wrap,
+	 * and this dialog is 250 logical px wide.) */
 	if (!strcmp(g_up_status, "current"))
-		msg("Up to date", g_up_cur[0] ? g_up_cur : "You have the newest release.");
+		msg("No updates", "You have the newest release.");
 	else
 		msg("Could not check", g_up_reason[0] ? g_up_reason :
 		    "No answer from GitHub.");
@@ -1388,7 +1403,7 @@ static struct dlg dlg_fit(int lw, int lh, int w, int h)
 static struct dlg cur_dlg(int lw, int lh)
 {
 	switch (g_modal) {
-	case M_ABOUT: return dlg_fit(lw, lh, 210, 132);
+	case M_ABOUT: return dlg_fit(lw, lh, 210, 144);
 	/* Wide and tall: this is a changelog, and a release body wrapped
 	 * into 30 columns would be unreadable. */
 	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
@@ -1646,6 +1661,11 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		text(r, lx + 62, ly + 2,  "Tadpole", C_ACCENT);
 		text(r, lx + 62, ly + 14, "LeapPad2 emulator", C_TEXT);
 		text(r, lx + 62, ly + 26, "NXP3200 / VALENCIA", C_TEXT_DIM);
+		/* WHICH BUILD THIS IS. Without it, "check for updates said I am up to
+		 * date" and "which one am I actually running" had no answer anywhere
+		 * in the program — and it is the first thing anyone reporting a bug
+		 * is asked for. Baked in at build time; "dev" in a working copy. */
+		text(r, lx + 62, ly + 38, TADPOLE_VERSION, C_ACCENT);
 		text(r, lx, ly + 60, "qemu-user + guest shim +", C_TEXT_DIM);
 		text(r, lx, ly + 70, "software GLES1 rasteriser", C_TEXT_DIM);
 		text(r, lx, ly + 84, "A childhood preserved.", C_ACCENT);

@@ -124,7 +124,11 @@ def main(argv):
             seen.append((v, r))
     seen.sort(key=lambda t: t[0], reverse=True)
     if not seen:
-        return unknown("no published releases yet")
+        # Releases exist but none use the tadpole-DDMMYYYY-NNNN scheme — say
+        # that, rather than "no releases", which sends someone looking at the
+        # wrong thing. The repo's first release predates the scheme.
+        return unknown("no releases use the tadpole-DDMMYYYY-NNNN tag scheme"
+                       if rels else "no published releases yet")
 
     latest_v, latest = seen[0]
 
@@ -181,8 +185,12 @@ def main(argv):
             print()
         return 0
 
+    # A WORKING COPY IS NOT A FAILED CHECK. `dev` used to fall through to
+    # "unknown", so the front end told a developer "Could not check — no answer
+    # from GitHub", blaming the network for the fact that they are not running
+    # a release. It is a third state and deserves its own name.
     print("status %s" % ("behind" if behind else
-                         ("current" if cur is not None else "unknown")))
+                         ("current" if cur is not None else "dev")))
     print("current %s" % (cur_s or "-"))
     print("latest %s" % (latest.get("tag_name") or "-"))
     print("title %s" % (latest.get("name") or "-"))
