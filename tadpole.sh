@@ -257,6 +257,19 @@ if [ -n "$LOCK" ]; then
     trap cleanup_lock EXIT
 fi
 
+# WHERE CRASHES ARE KEPT.
+#
+# One dated directory per run, outside /tmp, so a crash is still there tomorrow
+# and two of them can be compared. The shim writes crash.log into it; the
+# viewer drops the tail of the guest log beside it when a guest dies having
+# written one. Overridable so a soak run can point every iteration at one place.
+#
+# XDG_STATE_HOME is the right variable for this: it is for data that should
+# persist between restarts but is not something the user edits or would miss.
+CRASHDIR="${TADPOLE_CRASHDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tadpole/crashes/$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "$CRASHDIR" 2>/dev/null || CRASHDIR="$TADPOLE_DIR"
+export TADPOLE_CRASHDIR="$CRASHDIR"
+
 guest() {
     local bin="$1"; shift
     case "$bin" in /*) [ -e "$bin" ] || bin="$ROOTFS$bin" ;; esac
@@ -284,6 +297,7 @@ guest() {
            -E TADPOLE_SYSROOT="$SYSROOT" \
            $([ "$debug" = 1 ] && echo "-E TADPOLE_DEBUG=1") \
            ${TADPOLE_LOG:+-E TADPOLE_LOG="$TADPOLE_LOG"} \
+           -E TADPOLE_CRASHDIR="$CRASHDIR" \
            "$bin" "$@" )
 }
 
