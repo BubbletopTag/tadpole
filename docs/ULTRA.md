@@ -467,7 +467,7 @@ Known so far:
 * `PreviewIcon` must be RELATIVE to `InstallDir`. An absolute path there makes
   the reader build `InstallDir + "/LF/Bulk/..."`, and MainPicker segfaults on
   the resulting null image — which is what it did first time.
-* `Hidden=0`, `DeviceHidden=0`, `State=1`, `DeviceAccess` from `meta.inf`, and
+* `Hidden=0`, `DeviceHidden=0`, `State=1` (and `State=0`, tried separately), `DeviceAccess` from `meta.inf`, and
   `ProfileAccess` rows for every slot in `meta.inf`'s `ProfileAccess=` (the
   Ultra's apps say `-1,0,1,2,3`) are all set, and are not enough.
 
