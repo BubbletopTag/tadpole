@@ -1641,12 +1641,63 @@ static void tool_poll(void)
 		return;
 	}
 	if (g_update_dest[0] && ok) {
-		char note[1200];
-		snprintf(note, sizeof(note),
-		         "Saved as %s - quit Tadpole, replace the old file with it, "
-		         "and make it executable.", g_update_dest);
-		ui_progress_line(note);
+		/* INSTALL IT AND RESTART, rather than leaving homework.
+		 *
+		 * "Saved as <path> — now quit, swap the files and chmod +x" was a
+		 * correct instruction and a bad update: it asks someone to do by hand
+		 * the one step that is easy to get wrong, and until they do, the thing
+		 * they downloaded is not the thing they are running.
+		 *
+		 * A running AppImage is a mounted image, so it cannot be overwritten
+		 * in place — but it CAN be replaced by rename, which is atomic and
+		 * leaves the running mount alone: the old inode stays alive until this
+		 * process exits, which is exactly the moment we stop needing it.
+		 * Then re-exec the new path.
+		 */
+		const char *img = getenv("APPIMAGE");
+		char dest[1100];
+		snprintf(dest, sizeof(dest), "%s", g_update_dest);
 		g_update_dest[0] = 0;
+
+		if (img && img[0] && !strcmp(dest + strlen(dest) - 4, ".new")) {
+			char target[1100];
+			snprintf(target, sizeof(target), "%s", img);
+			if (rename(dest, target) == 0) {
+				chmod(target, 0755);
+				ui_progress_line("installed - restarting Tadpole");
+				ui_progress_done(1);
+				guest_stop();
+				guest_log_close();
+				SDL_Quit();
+				/* execv, not fork: the user asked for the new version, and
+				 * leaving the old one running beside it is how you end up
+				 * with two windows and no idea which is which. */
+				{
+					char *av[2];
+					av[0] = target;
+					av[1] = NULL;
+					execv(target, av);
+				}
+				/* Only reached if exec failed — say so plainly, do not
+				 * pretend the update worked. */
+				ui_progress_line("installed, but could not restart - "
+				                 "close Tadpole and open it again");
+				return;
+			}
+			{
+				char note[1200];
+				snprintf(note, sizeof(note),
+				         "Downloaded, but could not replace %s - move %s "
+				         "over it yourself.", target, dest);
+				ui_progress_line(note);
+			}
+		} else {
+			char note[1200];
+			snprintf(note, sizeof(note),
+			         "Saved as %s - this is not an AppImage install, so "
+			         "nothing was replaced.", dest);
+			ui_progress_line(note);
+		}
 	}
 	ui_status("%s %s", g_tool_what, ok ? "done" : "FAILED");
 	ui_invalidate_prereqs();      /* it may have installed or erased things */

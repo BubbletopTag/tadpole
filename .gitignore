@@ -48,3 +48,4 @@ __pycache__/
 
 # Keys live on your machine, never in the repository or an AppImage.
 keys/
+tadpole/.tadpole-version

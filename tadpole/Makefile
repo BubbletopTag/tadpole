@@ -331,6 +331,26 @@ hle-probe: viewer/hle_probe.c
 # build, which is exactly right for a working copy. So the default is "dev" and
 # tools/build-appimage.sh passes the real tag when it makes a release build.
 TADPOLE_VERSION ?= dev
+
+# A VERSION CHANGE HAS TO RELINK, AND MAKE CANNOT SEE THAT FROM TIMESTAMPS.
+#
+# The version is a -D on the command line, not a file, so changing it leaves
+# every source older than the binary and `make viewer` says there is nothing to
+# do. The release script hit exactly that: it stamped 08082026-0002, make
+# skipped the relink, and the image went out reporting 08082026-0001 — which
+# then told the update checker it was a version behind itself, for ever.
+#
+# So keep the value in a file and depend on the file. Rewritten only when it
+# actually differs, so an unchanged version does not force a rebuild.
+VERSION_STAMP := .tadpole-version
+.PHONY: version-stamp
+version-stamp:
+	@if [ ! -f $(VERSION_STAMP) ] || \
+	    [ "$$(cat $(VERSION_STAMP) 2>/dev/null)" != "$(TADPOLE_VERSION)" ]; then \
+	  echo "$(TADPOLE_VERSION)" > $(VERSION_STAMP); \
+	fi
+$(VERSION_STAMP): version-stamp ;
+
 HOST_STD := -std=gnu17
 #
 # AND _GNU_SOURCE HAS TO GO WITH IT. sdl2.pc puts -D_GNU_SOURCE=1 in its
@@ -348,7 +368,7 @@ SDL_CFLAGS_PORTABLE := $(filter-out -D_GNU_SOURCE=1 -D_GNU_SOURCE,$(SDL_CFLAGS))
 
 viewer: $(VIEW_OUT)
 
-$(VIEW_OUT): $(VIEW_SRC) $(VIEW_HDR)
+$(VIEW_OUT): $(VIEW_SRC) $(VIEW_HDR) $(VERSION_STAMP)
 	$(CC) -O2 -Wall $(HOST_STD) -DTADPOLE_VERSION='"$(TADPOLE_VERSION)"' \
 	      -o $@ $(VIEW_SRC) $(SDL_CFLAGS_PORTABLE) \
 	      $(SDL_LIBS) -lz $(shell pkg-config --libs gl)
