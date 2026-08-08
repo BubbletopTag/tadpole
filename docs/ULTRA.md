@@ -575,13 +575,7 @@ Dead ends recorded so they are not retried:
 
 * **icons** — see above; the packages are registered and the picker still
   filters them out
-* **touch does not work**, confirmed by trying it in the window. Nothing is
-  wired up: the device computes
-  `QWS_MOUSE_PROTO=TsLib:$(list-input-devices | fgrep "touchscreen interface")`,
-  which is `/dev/input/event2` here, but `tadpole.sh` disables tslib by default
-  because its module chain crashes on the first touch (see the TSLIB note
-  there). So the shim delivers events to a device nothing is listening on.
-  Either give Qt a `QWS_MOUSE_PROTO` it can use without tslib, or fix tslib.
+* **touch: most of the way, not there.** See "Touch" below.
 * **the firmware installer cannot be driven from the GUI** — reported against
   the wizard; not yet investigated
 * **`make-profile.sh` does not write the RIO profile shape** (see 8 above)
@@ -620,3 +614,62 @@ is invisible and the framebuffer simply gets created later by whatever boots
 next. Verified identically on `main` with the LeapPad2 rootfs, so it is not
 something this branch introduced. Worth a look on `main`: the splash never
 draws.
+
+
+---
+
+## Touch — the plumbing works, Qt still does not act on it
+
+Not finished. What is established, so none of it needs redoing:
+
+**`LinuxInput` is not an option, despite appearances.** `libQtGuiE`'s strings
+list `linuxinput`, `intellimouse`, `mouseman` and `qvfbmouse`, which reads like
+four built-in handlers. With `QWS_MOUSE_PROTO=LinuxInput:/dev/input/event2`
+correctly in the environment — verified in the running qemu's argv, not
+assumed — Qt opened **no** event node at all. The only mouse driver plugin in
+the image is `libqtslibmousedriver.so`, so that list is a name table for
+handlers this build does not carry. It has to be tslib.
+
+**tslib was never broken; it was pointed at a node that did not exist.**
+`/etc/profile` sets `TSLIB_TSDEVICE=/dev/input/touchscreen0`, which udev makes
+on hardware and nothing made here. `module_raw input` opened nothing, the chain
+came up with a null `ops->read`, and the first touch jumped through it — the
+crash that made `tadpole.sh` disable tslib by default in the first place. The
+shim now maps that name to event2 (`ev_index`), and with the device's own four
+`TSLIB_*` variables in `DEV_ENV`, tslib reads `/etc/ts.conf` and loads all five
+modules — `input`, `pthres`, `variance`, `dejitter`, `linear`.
+
+**The events reach the guest.** With `--debug`:
+
+```
+[tadpole] ev2 GUEST-GOT KEY code=330 val=1
+[tadpole] ev2 GUEST-GOT ABS code=0 val=690
+[tadpole] ev2 GUEST-GOT ABS code=1 val=290
+[tadpole] ev2 GUEST-GOT ABS code=24 val=60
+[tadpole] ev2 GUEST-GOT SYN code=0 val=0
+```
+
+Correct coordinates, correct pressure, read by exactly one process — so this is
+not two readers stealing from one FIFO, which was the obvious suspicion.
+
+**One sample is not a touch.** `tools/tap.py` sent a single position and held
+it. Real hardware reports continuously while a finger is down, and this
+device's `ts.conf` chain is made of filters with memory: `variance delta=30`
+and `dejitter delta=100` both need a run of samples before they emit anything.
+A single sample is swallowed inside tslib with no error. `tap.py` now streams
+at 50 Hz for the duration of the hold. **The viewer almost certainly needs the
+same treatment** — it sends on motion, so a press-and-hold without movement is
+one sample, exactly the case that vanishes.
+
+**Where it stops:** tslib has the samples and the picker does not move. Nothing
+in the log complains. The next step is to see what `ts_read` actually returns —
+there is no `ts_test` or `ts_print` in this image, so that means either
+building one against the guest's `libts` or logging inside the shim's read path
+for fd 8. After that, Qt's `QWSTslibMouseHandler` applies its own
+`QWSPointerCalibrationData`, which is the next place a correct sample can be
+turned into the wrong screen position — or into none.
+
+Also unstarted: **installing packages from the Tadpole GUI for the Ultra**. The
+Game Library and the wizard's install path are still LeapPad2-shaped, and the
+Ultra needs the extra step this branch found — after any install, the package
+manager has to be told, or the new title will not appear on the home screen.

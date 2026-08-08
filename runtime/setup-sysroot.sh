@@ -212,6 +212,11 @@ echo "==> device nodes"
 # event1. The shim intercepts open() on them regardless of content.
 # The required set is confirmed by usr/bin/make_dev_nodes.sh in the firmware.
 for i in $(seq 0 24); do : > "dev/input/event$i"; done
+# The device's udev makes this; nothing here does, and tslib opens it BY THIS
+# NAME (TSLIB_TSDEVICE in /etc/profile). The shim maps it to event2, the node
+# whose EVIOCGNAME is "touchscreen interface". A plain file is enough — the
+# shim intercepts open() on it regardless of what is inside.
+: > dev/input/touchscreen0
 for i in 0 1 2;      do : > "dev/fb$i"; done
 
 echo "==> /proc/asound (audio codec identity)"

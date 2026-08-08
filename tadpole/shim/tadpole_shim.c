@@ -38,6 +38,7 @@ typedef __SIZE_TYPE__ size_t;
 extern void *dlsym(void *handle, const char *symbol);
 extern int   snprintf(char *s, size_t n, const char *fmt, ...);
 extern int   strncmp(const char *a, const char *b, size_t n);
+extern int   strcmp(const char *a, const char *b);
 extern size_t strlen(const char *s);
 extern void *memcpy(void *d, const void *s, size_t n);
 extern void *memset(void *s, int c, size_t n);
@@ -202,6 +203,7 @@ static int  g_logfd = 2;     /* see TADPOLE_LOG in init() */
 static char g_logpfx[256];   /* empty unless TADPOLE_LOG is set */
 static char g_dir[256];
 static long g_io_delay_us;   /* see io_pace() — artificial NAND latency */
+static int  g_abs_panel;     /* TADPOLE_ABS_PANEL — see EVIOCGABS below */
 
 /* qemu-user's -L only redirects paths that ALREADY EXIST in the sysroot.
  * Creating a new file therefore falls through to the host path and fails
@@ -484,6 +486,8 @@ static void init(void)
 		 * One boot produced 2.1 MILLION log lines and never finished. */
 		const char *d = getenv("TADPOLE_DEBUG");
 		g_debug = (d && d[0] && d[0] != '0');
+		d = getenv("TADPOLE_ABS_PANEL");
+		g_abs_panel = (d && d[0] && d[0] != '0');
 	}
 	{
 		/* TADPOLE_LOG=<prefix> — DEBUG OUTPUT THAT SURVIVES A DAEMONIZE.
@@ -622,7 +626,22 @@ static int ev_index(const char *path)
 	const char *p;
 	int n = 0;
 
-	if (!path || strncmp(path, "/dev/input/event", 16))
+	if (!path)
+		return -1;
+	/* THE DEVICE'S OWN NAME FOR THE TOUCHSCREEN.
+	 *
+	 * /etc/profile sets TSLIB_TSDEVICE=/dev/input/touchscreen0, and that is
+	 * the path tslib opens — a symlink the kernel's udev rules make on
+	 * hardware, and nothing makes here. tslib's module_raw input then failed
+	 * to open anything, the chain came up with a null ops->read, and the
+	 * first tap jumped through it. That crash is why tadpole.sh disables
+	 * tslib by default; this is the cause of it, not the symptom.
+	 *
+	 * event2 is the node whose EVIOCGNAME is "touchscreen interface", which
+	 * is what the device's own list-input-devices | fgrep looks for. */
+	if (!strcmp(path, "/dev/input/touchscreen0"))
+		return 2;
+	if (strncmp(path, "/dev/input/event", 16))
 		return -1;
 	p = path + 16;
 	if (!*p)
@@ -1641,7 +1660,30 @@ int ioctl(int fd, ulong req, ...)
 				if (ai) {
 					memset(ai, 0, 24);
 					if (axis == 0 || axis == 1) {     /* ABS_X, ABS_Y */
-						ai[1] = 1; ai[2] = 1023; ai[3] = 2;
+						/* ...EXCEPT WHEN Qt READS EVDEV ITSELF.
+						 *
+						 * The paragraph above is right for the device, where
+						 * tslib sits between driver and application and an
+						 * identity pointercal turns the 10-bit claim back into
+						 * pixels. The Ultra's Qt has no tslib in the way: its
+						 * LinuxInput mouse handler scales for itself,
+						 *
+						 *   x = (value - min) * screenWidth / (max - min)
+						 *
+						 * so advertising 1..1023 while sending pixels makes every
+						 * touch land short: on a 1024x600 panel y=599 arrives as
+						 * about 351, and the bottom third cannot be reached.
+						 *
+						 * TADPOLE_ABS_PANEL advertises the panel instead, making
+						 * that scaling identity. tadpole.sh sets it for a device
+						 * whose shell reads evdev directly. */
+						if (g_abs_panel) {
+							ai[1] = 0;
+							ai[2] = (s32)((axis == 0 ? g_w : g_h) - 1);
+							ai[3] = 0;
+						} else {
+							ai[1] = 1; ai[2] = 1023; ai[3] = 2;
+						}
 					} else if (axis == 24) {          /* ABS_PRESSURE */
 						ai[1] = 1; ai[2] = 1023; ai[3] = 5;
 					} else {

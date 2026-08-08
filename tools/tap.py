@@ -40,11 +40,26 @@ def tap(d, x, y, press=60, hold=0.8):
     fd = os.open(os.path.join(d, f"ev{EV_TOUCH}"), os.O_RDWR | os.O_NONBLOCK)
     try:
         ev(fd, EV_KEY, BTN_TOUCH, 1)
-        ev(fd, EV_ABS, ABS_X, x)
-        ev(fd, EV_ABS, ABS_Y, y)
-        ev(fd, EV_ABS, ABS_PRESSURE, press)
-        ev(fd, EV_SYN, SYN_REPORT, 0)
-        time.sleep(hold)
+        # STREAM THE POSITION, DO NOT SEND IT ONCE.
+        #
+        # A real touchscreen reports continuously for as long as a finger is
+        # down. One sample looks equivalent and is not, because tslib's chain
+        # is made of filters with memory: `variance delta=30` and
+        # `dejitter delta=100` (this device's /etc/ts.conf) both need a run of
+        # samples before they will emit anything at all. Send one and the
+        # whole tap is swallowed inside tslib — no error, no event, nothing
+        # for the application to respond to.
+        #
+        # That is what made the Ultra look like it was ignoring touch after
+        # tslib was already working: the plumbing was right and the tap was
+        # too short-lived to survive the filters.
+        n = max(1, int(hold / 0.02))
+        for _ in range(n):
+            ev(fd, EV_ABS, ABS_X, x)
+            ev(fd, EV_ABS, ABS_Y, y)
+            ev(fd, EV_ABS, ABS_PRESSURE, press)
+            ev(fd, EV_SYN, SYN_REPORT, 0)
+            time.sleep(0.02)
         ev(fd, EV_KEY, BTN_TOUCH, 0)
         ev(fd, EV_ABS, ABS_PRESSURE, 0)
         ev(fd, EV_SYN, SYN_REPORT, 0)

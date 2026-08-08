@@ -302,6 +302,29 @@ fi
 # Per-device guest environment (DEV_ENV in the profile), as qemu -E arguments.
 # The device sets these in /etc/profile; we exec the shell binary directly and
 # never source one, so they have to be handed over explicitly.
+# TSLIB: OFF FOR BRIO, ON FOR Qt.
+#
+# The LeapPad2 does not want it — Brio has its own touchscreen path, says so
+# ("Falling back on touchscreen interface"), and tslib's chain crashes on the
+# first tap. Pointing TSLIB_CONFFILE at a nonexistent file makes its init fail
+# cleanly and Brio use its own path.
+#
+# The Ultra has no such choice: Qt's only mouse driver here is the tslib
+# plugin, so tslib has to work. It does, now that the shim answers to
+# /dev/input/touchscreen0 — the name /etc/profile tells tslib to open, and the
+# absence of which was the actual cause of that "tslib crash".
+#
+# AN ARRAY, NOT NESTED ${:-} EXPANSIONS. The first attempt wrote
+# ${TADPOLE_TSLIB:-${DEV_HAS_QT:--E TSLIB_CONFFILE=...}}, which reads as "use
+# DEV_HAS_QT if it is set" — so with DEV_HAS_QT=1 it expanded to a bare `1` on
+# qemu's command line and the guest never started.
+declare -a TSLIB_ARGS=()
+if [ -n "${TADPOLE_TSLIB:-}" ] || [ "${DEV_HAS_QT:-0}" = 1 ]; then
+    TSLIB_ARGS+=(-E TSLIB_REAL=1)
+else
+    TSLIB_ARGS+=(-E TSLIB_CONFFILE=/nonexistent-ts.conf)
+fi
+
 DEV_ENV_ARGS=()
 if [ -n "${DEV_ENV:-}" ]; then
     while read -r kv; do
@@ -339,13 +362,13 @@ guest() {
       # only sees open/fopen — stat, access and opendir bypass it, so "the
       # guest never opened X" is NOT a conclusion the shim log can support.
       exec "$QEMU" -s 67108864 -L "$SYSROOT" ${TADPOLE_STRACE:+-strace} \
-           ${TADPOLE_TSLIB:+-E TSLIB_REAL=1} \
-           ${TADPOLE_TSLIB:--E TSLIB_CONFFILE=/nonexistent-ts.conf} \
+           ${TSLIB_ARGS[@]+"${TSLIB_ARGS[@]}"} \
            -E LD_LIBRARY_PATH="$LIBS" \
            -E TADPOLE_DIR="$TADPOLE_DIR" \
            -E TADPOLE_SYSROOT="$SYSROOT" \
            -E TADPOLE_W="${DEV_LCD%x*}" -E TADPOLE_H="${DEV_LCD#*x}" \
            -E TADPOLE_QEMU="$QEMU" \
+           ${DEV_HAS_QT:+-E TADPOLE_ABS_PANEL=1} \
            ${DEV_ENV_ARGS[@]+"${DEV_ENV_ARGS[@]}"} \
            $([ "$debug" = 1 ] && echo "-E TADPOLE_DEBUG=1") \
            ${TADPOLE_LOG:+-E TADPOLE_LOG="$TADPOLE_LOG"} \
