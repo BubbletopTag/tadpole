@@ -369,7 +369,30 @@ case "$mode" in
                 # in tadpole/shim/tadpole_shim.c.
                 echo "=== $name — $guestpath (direct) ==="
                 export TADPOLE_LAUNCH="$guestpath"
-                guest /LF/Base/bin/AppManager ;;
+                # SIGN A PLAYER IN, the way the home screen would.
+                #
+                # CAppManager::Run reads argv[2] as a player ID and calls
+                # CSystem::SetCurrentPlayerID with it; with no argument there
+                # is no current player, and anything that reads profile data
+                # gets nothing back. That is not a hypothetical: GalleryWidget
+                # dereferenced the empty result and segfaulted in
+                # LTM::Value::asMap(), and it stops doing so the moment a
+                # player is set. Launching straight into a title should differ
+                # from the home screen in the steps it skips, not in who is
+                # playing.
+                #
+                # The first real profile directory, since a device that has
+                # been set up has at least one. TADPOLE_PLAYER overrides.
+                pid="${TADPOLE_PLAYER:-}"
+                if [ -z "$pid" ]; then
+                    for cand in "$SYSROOT"/LF/Bulk/Data/Local/[0-9]*; do
+                        [ -d "$cand" ] || continue
+                        pid="$(basename "$cand")"; break
+                    done
+                fi
+                : "${pid:=0}"
+                echo "    player $pid"
+                guest /LF/Base/bin/AppManager tadpole "$pid" ;;
         esac ;;
     shell)
         # A SHELL THAT ACTUALLY LOOKS AT THE GUEST.
