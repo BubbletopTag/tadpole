@@ -514,20 +514,51 @@ Local — a very reasonable reading of two adjacent `CREATE TABLE` strings, and
 wrong. Rows in the wrong file are not an error; they are simply never read,
 which looks exactly like filtering.
 
-### Still empty, and this is where it stands
+### Icons: ask the device to do it
 
-All of the above is in place — daemon running and shimmed, 26 rows in
-`Packages` in both databases, 130 `ProfileAccess` rows, correct schema written
-by the device's own code, `CurrProfile=0x00000000` matching slot 0, no crashes
-— and the picker still shows no icons.
+`shots/ultra-home-icons.png`. Fourteen tiles with their real artwork — Pet Pad
+Party, Pet Chat, Art Studio, Photo Fun, Bookshelf, App Center, LeapSearch,
+Calculator, Notepad, Clock, Calendar, Music, Voice Memo, Welcome.
 
-So the remaining unknown is narrow: either the daemon is answering with an
-empty list, or MainPicker is discarding what it gets. **The next thing to do is
-ask the daemon directly**, with `dbus-send --print-reply` against
-`com.leapfrog.PackageManager` on the session bus, which separates those two
-cases in one command and needs no rebuild.
+**The daemon does not scan at startup, but it will if asked.** Introspecting
+the service over D-Bus lists a method called `RebuildPackageDatabase`. Calling
+it walks `ProgramFiles`, parses every `meta.inf` with the code that wrote them,
+and fills both databases correctly — 26 hand-written rows became **126** real
+ones, including all the widget and download packages hand-registration had
+skipped.
 
-Leads worth trying after that, roughly in order:
+```sh
+dbus-send --session --print-reply --dest=com.leapfrog.PackageManager / \
+          com.leapfrog.PackageManager.RebuildPackageDatabase
+```
+
+`tadpole.sh` now does this automatically, **only when `Packages` is empty** — a
+rebuild discards per-package local state (install dates, the NEW! flags, last
+played), so it is not a thing to do on every boot.
+
+That also retires the interesting part of `tools/register-packages.py`. Hand
+registration got the schema right and the contents subtly wrong; the device's
+own code has neither problem. The tool is kept for `--list`, and for the record
+of what the schema is and how it was recovered.
+
+**The lesson worth keeping**: two days of this were spent reconstructing what
+the guest already knew how to do. The question that cracked it was not "what
+does this table need" but "what can I ask the device to do for me" — and the
+answer was one D-Bus introspection away the whole time.
+
+### Where it had stood
+
+Before the rebuild call above, everything looked right and nothing showed:
+daemon running and shimmed, 26 hand-written rows in both databases, 130
+`ProfileAccess` rows, schema written by the device's own code,
+`CurrProfile=0x00000000` matching slot 0, no crashes — and an empty picker.
+Two boots were spent on `State=1` and `State=0`; neither mattered.
+
+The rows were not wrong so much as incomplete: the device's own rebuild
+produces 126, not 26. Hand registration covered `ProgramFiles` directories
+only, and the picker wants rather more than that.
+
+Dead ends recorded so they are not retried:
 
 1. **`State`** is `LFP::PackageState`, a C++ enum — so its values are NOT in
    the strings and `1` is a guess. Disassembling `Package::SetState` or

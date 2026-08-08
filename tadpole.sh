@@ -509,6 +509,37 @@ case "$mode" in
             # files contain it, the proxy and the daemon.
             guest /usr/bin/package-manager 2>&1 | sed -u 's/^/[pkg] /' &
             sleep 2
+            # AND ASK IT TO SCAN, ONCE, IF THE DATABASE IS EMPTY.
+            #
+            # THIS IS WHAT PUTS THE ICONS ON THE HOME SCREEN. The daemon does
+            # not scan at startup — on hardware the databases arrive populated
+            # on the Bulk partition and lfpkg maintains them at install time.
+            # We install by untarring, so nothing does, and the picker is
+            # correct and empty.
+            #
+            # RebuildPackageDatabase is the device's own answer: it walks
+            # ProgramFiles, parses every meta.inf with the code that wrote
+            # them, and fills both databases in the right shape. Hand-written
+            # registration cannot compete with that and is no longer needed —
+            # tools/register-packages.py is kept for inspection (--list) and
+            # for the record of what the schema is.
+            #
+            # Only when Packages is empty: a rebuild discards per-package
+            # local state (install dates, "NEW!" flags, last played), which is
+            # not something to do on every boot.
+            if ! guest /usr/bin/dbus-send --session --print-reply \
+                    --dest=com.leapfrog.PackageManager / \
+                    com.leapfrog.PackageManager.GetPendingPackages \
+                    >/dev/null 2>&1; then
+                echo "tadpole: package manager did not answer; home screen may be empty" >&2
+            elif [ ! -s "$SYSROOT/LF/Bulk/SharedPackageInfo.db" ] ||
+                 ! "${TADPOLE_PYTHON:-python3}" -c "import sqlite3,sys; sys.exit(0 if sqlite3.connect('$SYSROOT/LF/Bulk/SharedPackageInfo.db').execute('select count(*) from Packages').fetchone()[0] else 1)" 2>/dev/null; then
+                echo "=== package database is empty; asking the device to build it"
+                guest /usr/bin/dbus-send --session --print-reply \
+                    --dest=com.leapfrog.PackageManager / \
+                    com.leapfrog.PackageManager.RebuildPackageDatabase \
+                    >/dev/null 2>&1 || true
+            fi
         fi
         # NO VideoDaemon ON A Qt DEVICE — not yet.
         #
