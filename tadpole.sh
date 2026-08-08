@@ -121,7 +121,10 @@ if [ "${DEV_HAS_QT:-0}" = 1 ]; then
     # shimlibs-egl is self-contained (it carries its own libdl.so.9), so
     # nothing else is needed. Note NO shimlibs-gl either: it holds a second
     # libEGL.so, and only one may win.
-    LIBS="$HERE/runtime/shimlibs-egl:$HERE/runtime/libs"
+    # shimlibs-pkg is SAFE to have here alongside shimlibs-egl: it impersonates
+    # libWebServices.so.1, which only package-manager links, so the two never
+    # land in the same process. Checked, not assumed — see the Makefile.
+    LIBS="$HERE/runtime/shimlibs-egl:$HERE/runtime/shimlibs-pkg:$HERE/runtime/libs"
 else
     LIBS="$HERE/runtime/shimlibs-z:$HERE/runtime/shimlibs:$HERE/runtime/libs"
     [ "$TADPOLE_GL" != 0 ] && LIBS="$HERE/runtime/shimlibs-gl:$LIBS"
@@ -491,6 +494,21 @@ case "$mode" in
             else
                 echo "tadpole: no d-bus session bus — the home screen will be empty" >&2
             fi
+            # THE PACKAGE MANAGER DAEMON — this is what puts icons on the home
+            # screen, and nothing else does.
+            #
+            # MainPicker does not read the package databases itself and does
+            # not scan ProgramFiles. It asks com.leapfrog.PackageManager over
+            # D-Bus, through libQtRioPkgManager, which is only a PROXY. The
+            # service is /usr/bin/package-manager. Without it the picker comes
+            # up correct, themed and completely empty, however many packages
+            # are installed and however carefully they are registered in the
+            # databases — the query never reaches anything.
+            #
+            # Found by grepping the image for the service name: exactly two
+            # files contain it, the proxy and the daemon.
+            guest /usr/bin/package-manager 2>&1 | sed -u 's/^/[pkg] /' &
+            sleep 2
         fi
         # NO VideoDaemon ON A Qt DEVICE — not yet.
         #

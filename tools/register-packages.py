@@ -61,6 +61,19 @@ LOCAL_DDL = ("CREATE TABLE Packages (PackageID TEXT, PreviewIcon TEXT, "
              "InstalledDate TEXT, LastPlayedDate TEXT, Type TEXT, "
              "CartBuddy NUMERIC, Redownload NUMERIC, DisplayName TEXT)")
 PROFILE_DDL = "CREATE TABLE ProfileAccess (PackageID TEXT, Slot NUMERIC)"
+# WHICH DATABASE HOLDS ProfileAccess IS NOT GUESSABLE, AND I GUESSED WRONG.
+# The two CREATE TABLE Packages and CREATE TABLE ProfileAccess statements sit
+# side by side in liblfp's strings with nothing to say which file each belongs
+# to, and "profile access is local to this device" is a very reasonable and
+# entirely incorrect reading. Letting /usr/bin/package-manager build the
+# databases itself and then reading back sqlite_master settles it:
+#
+#   SharedPackageInfo.db   Packages, ProfileAccess
+#   LocalPackageInfo.db    Packages, CartTracker
+#
+# Rows written to the wrong file are not an error — they are simply never
+# read, which looks exactly like the picker filtering them out.
+CART_DDL = "CREATE TABLE CartTracker (PackageID TEXT, PreviewIcon TEXT)"
 
 
 def meta(path):
@@ -147,8 +160,8 @@ def main():
                     pass
         print("databases removed")
 
-    shared = open_db(shared_path, [SHARED_DDL])
-    local = open_db(local_path, [LOCAL_DDL, PROFILE_DDL])
+    shared = open_db(shared_path, [SHARED_DDL, PROFILE_DDL])
+    local = open_db(local_path, [LOCAL_DDL, CART_DDL])
 
     if a.list:
         rows = list(shared.execute(
@@ -208,9 +221,9 @@ def main():
             (pid, icon, "", 0,
              "", 0, 0, 1, 0, now, now, typ, 0, 0, name))
 
-        local.execute("DELETE FROM ProfileAccess WHERE PackageID = ?", (pid,))
+        shared.execute("DELETE FROM ProfileAccess WHERE PackageID = ?", (pid,))
         for slot in profile_slots(m.get("ProfileAccess")):
-            local.execute(
+            shared.execute(
                 "INSERT INTO ProfileAccess(PackageID, Slot) VALUES (?,?)",
                 (pid, slot))
         n += 1

@@ -471,7 +471,63 @@ Known so far:
   `ProfileAccess` rows for every slot in `meta.inf`'s `ProfileAccess=` (the
   Ultra's apps say `-1,0,1,2,3`) are all set, and are not enough.
 
-Leads worth trying next, roughly in order:
+### The missing service: `/usr/bin/package-manager`
+
+MainPicker does not read the databases itself. It asks
+**`com.leapfrog.PackageManager`** over D-Bus, through `libQtRioPkgManager`,
+which is only a PROXY. Exactly two files in the image contain that name: the
+proxy, and `/usr/bin/package-manager`. Nothing started the daemon, so the query
+had nothing to reach — the picker came up correct, themed and empty however
+carefully the databases were filled in.
+
+`tadpole.sh` starts it now for a Qt device.
+
+**It needed a fifth shim variant to work at all.** package-manager links none
+of `libdl`/`libz`/`libEGL`, so it ran unshimmed — and an unshimmed guest cannot
+CREATE files, because qemu-user's `-L` only redirects paths that already exist.
+SQLite creates a journal beside its database, so every write failed:
+
+```
+Failed to vacuum local database, most likely corrupt:
+QSqlError(14, "Unable to fetch row", "unable to open database file")
+```
+
+`runtime/shimlibs-pkg/libWebServices.so.1` is the vector, chosen because
+package-manager links it and **neither AppServer nor MainPicker does** — so it
+can share a `LD_LIBRARY_PATH` with `shimlibs-egl` without ever putting two
+shims in one process. Unlike libEGL, the stock libWebServices HAS a SONAME, so
+the copy's had to be patched too (`libWebServices.so.1` -> `libWebServices.so.9`,
+same length): a copy still calling itself by the original name made our library
+depend on itself, and package-manager died on
+`can't resolve symbol '_ZN8LeapFrog11WebServices15DownloadManagerC1Ev'`.
+
+With that in place the daemon registers on the bus and **builds both databases
+itself**, which settled a question the strings could not:
+
+```
+SharedPackageInfo.db   Packages, ProfileAccess
+LocalPackageInfo.db    Packages, CartTracker
+```
+
+`ProfileAccess` is in the SHARED database. `register-packages.py` had it in
+Local — a very reasonable reading of two adjacent `CREATE TABLE` strings, and
+wrong. Rows in the wrong file are not an error; they are simply never read,
+which looks exactly like filtering.
+
+### Still empty, and this is where it stands
+
+All of the above is in place — daemon running and shimmed, 26 rows in
+`Packages` in both databases, 130 `ProfileAccess` rows, correct schema written
+by the device's own code, `CurrProfile=0x00000000` matching slot 0, no crashes
+— and the picker still shows no icons.
+
+So the remaining unknown is narrow: either the daemon is answering with an
+empty list, or MainPicker is discarding what it gets. **The next thing to do is
+ask the daemon directly**, with `dbus-send --print-reply` against
+`com.leapfrog.PackageManager` on the session bus, which separates those two
+cases in one command and needs no rebuild.
+
+Leads worth trying after that, roughly in order:
 
 1. **`State`** is `LFP::PackageState`, a C++ enum — so its values are NOT in
    the strings and `1` is a guess. Disassembling `Package::SetState` or

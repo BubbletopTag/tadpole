@@ -128,6 +128,29 @@ SHIMLIBS_EGL := ../runtime/shimlibs-egl
 SHIM_OUT_EGL := $(SHIMLIBS_EGL)/libEGL.so
 REAL_EGL     := libEGLreal.so
 
+# Fifth variant: libWebServices.so.1, for the Ultra's package-manager daemon.
+#
+# WITHOUT THIS THERE ARE NO ICONS. /usr/bin/package-manager owns the package
+# databases and serves com.leapfrog.PackageManager, which is where the home
+# screen gets its app list. It links none of the four names above, so it ran
+# unshimmed — and an unshimmed guest cannot CREATE files, because qemu-user's
+# -L only redirects paths that already exist. SQLite needs to create its
+# journal beside the database, so every write failed with
+#
+#     Failed to vacuum local database, most likely corrupt:
+#     QSqlError(14, "Unable to fetch row", "unable to open database file")
+#
+# and the daemon rebuilt nothing, and the picker stayed empty.
+#
+# libWebServices.so.1 is the vector because package-manager links it and
+# NEITHER AppServer NOR MainPicker does — so this variant can sit on the same
+# LD_LIBRARY_PATH as shimlibs-egl without ever putting two shims in one
+# process. That property is the whole reason for choosing it over libqjson,
+# which MainPicker also links.
+SHIMLIBS_PKG := ../runtime/shimlibs-pkg
+SHIM_OUT_PKG := $(SHIMLIBS_PKG)/libWebServices.so.1
+REAL_WS      := libWebServices.so.9
+
 TONE_SRC := shim/tone_test.c
 TONE_OUT := ../runtime/tone
 
@@ -139,9 +162,9 @@ VIEW_OUT := viewer/tadpole-view
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell pkg-config --libs sdl2 2>/dev/null)
 
-.PHONY: all shim shimz shimegl asound gl tone viewer hle-probe hle-selftest clean check realdl realz
+.PHONY: all shim shimz shimegl shimpkg asound gl tone viewer hle-probe hle-selftest clean check realdl realz
 
-all: shim shimz shimegl asound gl viewer
+all: shim shimz shimegl shimpkg asound gl viewer
 
 # THE SHIM CANNOT BE BUILT WITHOUT THE SYSTEM FILES, AND THAT SURPRISES PEOPLE.
 #
@@ -386,6 +409,48 @@ s=(pathlib.Path('$(ROOTFS_LIB)')/'libEGL.so').resolve();\
 sys.exit('no libEGL.so in $(ROOTFS_LIB)') if not s.exists() else None;\
 d=pathlib.Path('$(SHIMLIBS_EGL)/$(REAL_EGL)');\
 d.write_bytes(s.read_bytes().replace(b'libdl.so.0\x00', b'libdl.so.9\x00'));\
+print('wrote', d, 'from', s.name)"
+
+shimpkg: $(SHIM_OUT_PKG) $(SHIMLIBS_PKG)/$(REAL_DL)
+
+$(SHIMLIBS_PKG)/$(REAL_DL): $(SHIMLIBS)/$(REAL_DL)
+	@mkdir -p $(SHIMLIBS_PKG)
+	@cp $< $@ && echo "copied $@"
+
+$(SHIM_OUT_PKG): $(SHIM_SRC) $(SHIMLIBS)/$(REAL_DL) \
+                 $(SHIMLIBS_PKG)/$(REAL_WS) | need-libs
+	@mkdir -p $(SHIMLIBS_PKG)
+	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
+		-fno-stack-protector -fno-builtin \
+		-fuse-ld=lld -Wl,-soname,libWebServices.so.1 -o $@ $(SHIM_SRC) \
+		-L$(SHIMLIBS_PKG) -l:$(REAL_WS) \
+		$(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0
+	@echo "built $@"
+	@echo -n "  NEEDED: "; readelf -d $@ | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/' | tr '\n' ' '; echo
+
+# The stock libWebServices, renamed so it can coexist with our impersonator,
+# and with its libdl.so.0 repointed at the real libdl for the same reason as
+# libEGLreal: one shim per process, never two.
+#
+# UNLIKE libEGL, THIS ONE HAS A SONAME, and that has to be patched too. The
+# loader records a dependency by the dependee's SONAME, not by the filename it
+# was found under — so a copy still calling itself libWebServices.so.1 made our
+# library depend on ITSELF, the real one never loaded, and package-manager
+# died on the first symbol that only the real one defines:
+#
+#     can't resolve symbol '_ZN8LeapFrog11WebServices15DownloadManagerC1Ev'
+#
+# libWebServices.so.9 is the same length, so it patches in place without
+# shifting a single offset — the same trick as libdl.so.0 -> libdl.so.9.
+$(SHIMLIBS_PKG)/$(REAL_WS): | need-rootfs
+	@mkdir -p $(SHIMLIBS_PKG)
+	@python3 -c "import pathlib,sys;\
+s=(pathlib.Path('$(ROOTFS_LIB)')/'libWebServices.so.1').resolve();\
+sys.exit('no libWebServices.so.1 in $(ROOTFS_LIB)') if not s.exists() else None;\
+d=pathlib.Path('$(SHIMLIBS_PKG)/$(REAL_WS)');\
+b=s.read_bytes().replace(b'libdl.so.0\x00', b'libdl.so.9\x00');\
+b=b.replace(b'libWebServices.so.1\x00', b'libWebServices.so.9\x00');\
+d.write_bytes(b);\
 print('wrote', d, 'from', s.name)"
 
 $(SHIMLIBS_Z)/$(REAL_Z): | need-rootfs
