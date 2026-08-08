@@ -7,6 +7,7 @@
 #   ./tadpole.sh --shell         ARM shell inside the guest, no viewer
 #   ./tadpole.sh --logo          draw the boot logo (quick "is it alive" test)
 #   ./tadpole.sh --app NAME      launch an installed app by name or PackageID
+#                                (native titles too — straight in, no home screen)
 #   ./tadpole.sh --list           list installed apps
 #   ./tadpole.sh --run PROG ...  run any guest binary with the viewer up
 #   ./tadpole.sh --no-viewer     skip the SDL window
@@ -362,9 +363,13 @@ case "$mode" in
                 echo "=== $name — $guestpath ==="
                 guest /LF/Base/Flash/bin/saplayer "$guestpath" ;;
             *)
-                echo "$name uses a native entry point ($entry)." >&2
-                echo "Native Brio apps need AppManager, which is not up yet." >&2
-                exit 1 ;;
+                # A NATIVE TITLE. It cannot be exec'd — CreateApp has to be
+                # called by CAppManager — so hand it to AppManager and tell the
+                # shim to push it instead of the home screen. See TADPOLE_LAUNCH
+                # in tadpole/shim/tadpole_shim.c.
+                echo "=== $name — $guestpath (direct) ==="
+                export TADPOLE_LAUNCH="$guestpath"
+                guest /LF/Base/bin/AppManager ;;
         esac ;;
     shell)
         # A SHELL THAT ACTUALLY LOOKS AT THE GUEST.

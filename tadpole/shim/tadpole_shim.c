@@ -65,6 +65,7 @@ extern void tad_crash_install(const char *dir,
 extern void (*tad_crash_take_signal(int sig, void (*h)(int)))(int);
 
 #define RTLD_NEXT ((void *)-1L)
+#define RTLD_DEFAULT ((void *)0)
 
 #define O_RDONLY 00
 #define O_RDWR   02
@@ -1460,4 +1461,116 @@ int ioctl(int fd, ulong req, ...)
 		return -1;
 	}
 	return real_ioctl(fd, req, arg);
+}
+
+/* ---- direct launch: boot straight into one title ------------------------
+ *
+ * TADPOLE_LAUNCH=/LF/Bulk/ProgramFiles/<pkg>/App.so
+ *
+ * WHY THIS IS NEEDED AT ALL. A native Brio title cannot be started on its own.
+ * AppManager's whole main is `CAppManager::Instance()->Run(argc, argv)`, Run
+ * ignores argv[1] and hardcodes PushApp("LPAD/main.swf") — argv[2], the only
+ * argument it reads, is a player ID — and nothing in /LF/Base/bin takes a
+ * package as an argument. So the only door was the Flash home screen, which
+ * means booting the whole UI, signing in, dismissing a dialog and tapping a
+ * tile at coordinates that move whenever the library changes. Two minutes and
+ * three fragile steps to reach a title that crashes in its first second.
+ *
+ * HOW. Exactly the trick that already gets us open() and ioctl(): be earlier in
+ * the link order and define the symbol. libLightningBase calls its own
+ * PushApp through the PLT — eight sites — and libdl.so.0 is DT_NEEDED #22 in
+ * AppManager against libLightningBase.so at #25, so our definition wins and
+ * every one of those calls arrives here. Substitute the path on the first
+ * call, forward the rest untouched.
+ *
+ * This runs the REAL loader: the same CAppManager, the same LoadNewApp, the
+ * same dlopen and CreateApp. A crash under it is the crash you would have got
+ * from the home screen, which is the entire point — a launcher that set up its
+ * own half-environment would produce crashes that belong to the launcher.
+ */
+static int str_has(const char *hay, const char *needle)
+{
+	int i, j;
+	for (i = 0; hay[i]; i++) {
+		for (j = 0; needle[j] && hay[i + j] == needle[j]; j++)
+			;
+		if (!needle[j])
+			return 1;
+	}
+	return 0;
+}
+
+static void (*real_pushapp)(void *, const void *, void *);
+static void *(*ustring_from_cstr)(void *, const char *);
+
+void _ZN11CAppManager7PushAppERKN4Glib7ustringEPv(void *self, const void *path,
+                                                  void *data);
+void _ZN11CAppManager7PushAppERKN4Glib7ustringEPv(void *self, const void *path,
+                                                  void *data)
+{
+	static int done;
+	const char *want;
+
+	init();
+	if (!real_pushapp)
+		real_pushapp = dlsym(RTLD_NEXT,
+		                     "_ZN11CAppManager7PushAppERKN4Glib7ustringEPv");
+	if (!real_pushapp)
+		return;
+
+	want = getenv("TADPOLE_LAUNCH");
+
+	/* READ THE PATH BEING PUSHED, carefully.
+	 *
+	 * Glib::ustring holds one std::string, and on this toolchain's pre-C++11
+	 * libstdc++ that is a single char* to the character data. So the first
+	 * word of the object is the string — but this is an assumption about
+	 * somebody else's ABI, so it is checked before it is trusted: a plausible
+	 * pointer, and printable bytes at the other end. A wrong guess here would
+	 * fault inside a function every app launch goes through.
+	 */
+	if (want && want[0] && path) {
+		const char *q = *(const char *const *)path;
+		int ok = 0, i;
+		if (q && (unsigned long)q > 0x1000) {
+			for (i = 0, ok = 1; i < 8; i++) {
+				if (q[i] == 0) break;
+				if (q[i] < 0x20 || (unsigned char)q[i] > 0x7e) { ok = 0; break; }
+			}
+		}
+		/* AppManager pushes its default UI more than once — Run does it, and
+		 * so does the path that runs when an app is popped. Substituting only
+		 * the first left main.swf stacked ON TOP of the title, which looked
+		 * exactly like the launch had been ignored. With a target set, the
+		 * Flash home screen is not wanted at all. */
+		if (ok && done && str_has(q, "main.swf")) {
+			dbg("[tadpole] suppressing the home screen: ");
+			dbg(q);
+			dbg("\n");
+			return;
+		}
+	}
+
+	if (!done && want && want[0]) {
+		/* Glib::ustring holds a single std::string, so it is one pointer on
+		 * this toolchain. The buffer is absurdly oversized on purpose: the
+		 * exact size is not documented anywhere we can see, this is called
+		 * once, and a few spare words cost nothing next to guessing low.
+		 * Never freed — the process is about to be given to a title. */
+		static unsigned long us[16];
+		done = 1;
+		if (!ustring_from_cstr)
+			ustring_from_cstr = dlsym(RTLD_DEFAULT, "_ZN4Glib7ustringC1EPKc");
+		if (ustring_from_cstr) {
+			ustring_from_cstr(us, want);
+			dbg("[tadpole] launching directly: ");
+			dbg(want);
+			dbg("\n");
+			real_pushapp(self, us, data);
+			return;
+		}
+		dbg("[tadpole] TADPOLE_LAUNCH set but Glib::ustring's ctor is not "
+		    "loaded; booting normally\n");
+	}
+	real_pushapp(self, path, data);
 }
