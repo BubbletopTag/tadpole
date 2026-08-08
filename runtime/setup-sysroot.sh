@@ -110,8 +110,17 @@ done
 # Point both paths at the shim so there is exactly one libdl. dlopen/dlsym/
 # dlclose still resolve, through the shim's DT_NEEDED on the renamed real
 # libdl.so.9.
+#
+# NOT ON A Qt DEVICE. The paragraph above is about AppManager, which reaches
+# the shim THROUGH libdl — so there, one libdl and it must be ours. The Ultra
+# reaches it through libEGL instead, and pointing libdl at the shim as well
+# would put a SECOND copy in the process the moment anything resolves libdl by
+# absolute path. Two shims chain into each other and recurse until the stack
+# is gone (see the note in tadpole.sh). Leave the real libdl alone here.
 SHIM_DL="$PROJ/runtime/shimlibs/libdl.so.0"
-if [ -e "$SHIM_DL" ]; then
+if [ "${DEV_HAS_QT:-0}" = 1 ]; then
+    echo "    libdl left as the device's own ($DEV_NAME injects via libEGL)"
+elif [ -e "$SHIM_DL" ]; then
     ln -sfn "$SHIM_DL" lib/libdl.so.0
     ln -sfn "$SHIM_DL" usr/lib/libdl.so.0
 else

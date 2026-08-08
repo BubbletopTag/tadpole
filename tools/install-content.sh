@@ -114,7 +114,19 @@ for f in "$CACHE"/*.lfp "$CACHE"/*.lf2; do
             # meta.inf files that confuse anything enumerating ProgramFiles.
             extract_as "$f" "$BULK/ProgramFiles/$pid";  n_app=$((n_app+1)) ;;
         Download|MicroDownload)
-            extract_to "$f" "$BULK/Downloads/$pid";     n_dl=$((n_dl+1)) ;;
+            # extract_as, NOT extract_to — downloads self-wrap too.
+            #
+            # The LeapPad2's downloads happen to be flat, so this went
+            # unnoticed. The Ultra's are not: its whole UI theme arrives as
+            # MicroDownloads, and extracting a self-wrapping archive into a
+            # directory of the same name buried it one level too deep —
+            #
+            #   Downloads/PHR1-0x00270008-200002/PHR1-0x00270008-200002/art/
+            #
+            # AssetManager then found nothing, MainPicker logged "Couldn't
+            # load asset" for every icon on the home screen, and the status
+            # bar segfaulted on the first null image.
+            extract_as "$f" "$BULK/Downloads/$pid";     n_dl=$((n_dl+1)) ;;
         LanguagePack)
             extract_to "$f" "$BULK";                    n_lang=$((n_lang+1)) ;;
         Music|MusicInfo)

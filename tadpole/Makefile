@@ -330,6 +330,38 @@ $(SHIM_OUT_Z): $(SHIM_SRC) $(SHIMLIBS_Z)/$(REAL_Z) | need-libs
 
 shimegl: $(SHIM_OUT_EGL)
 
+shimegl: $(SHIMLIBS_EGL)/$(REAL_DL) shimegl-links
+
+# THE GLES SHIM COMES ALONG, THE GL DIRECTORY DOES NOT.
+#
+# Our libEGL has libGLESv1_CM.so.1 in NEEDED and shimlibs-gl is off the path
+# for a Qt guest, so without this the shell will not start:
+#
+#     AppServer: can't load library 'libGLESv1_CM.so.1'
+#
+# Copying it is safe in a way that putting shimlibs-gl on the path is not:
+# libGLESv1_CM is GL only — it does not contain tadpole_shim.c — so it cannot
+# become a second interceptor. shimlibs-gl ALSO holds a libEGL.so, and only
+# one libEGL may win, which is the whole reason that directory stays out.
+.PHONY: shimegl-links
+shimegl-links: $(GLES_OUT)
+	@mkdir -p $(SHIMLIBS_EGL)
+	@cp $(GLES_OUT) $(SHIMLIBS_EGL)/libGLESv1_CM.so
+	@# By SONAME, which is the filename the loader looks for.
+	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libGLESv1_CM.so.1
+	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libopengles_lite.so
+
+# libdl.so.9 ALSO LIVES HERE, not only in shimlibs/.
+#
+# A Qt guest must have EXACTLY ONE impersonation variant on its
+# LD_LIBRARY_PATH — see the note in tadpole.sh — so shimlibs/ cannot be on the
+# path for it, and shimlibs/libdl.so.9 (which our libEGL has in NEEDED) would
+# then not resolve. A second copy beside the library that needs it keeps
+# shimlibs-egl self-contained.
+$(SHIMLIBS_EGL)/$(REAL_DL): $(SHIMLIBS)/$(REAL_DL)
+	@mkdir -p $(SHIMLIBS_EGL)
+	@cp $< $@ && echo "copied $@"
+
 $(SHIM_OUT_EGL): $(SHIM_SRC) $(EGL_SRC) $(GLES_OUT) $(SHIMLIBS)/$(REAL_DL) \
                  $(SHIMLIBS_EGL)/$(REAL_EGL) | need-libs
 	@mkdir -p $(SHIMLIBS_EGL)

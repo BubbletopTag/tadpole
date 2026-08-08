@@ -65,6 +65,9 @@ extern void tad_crash_install(const char *dir,
 extern void (*tad_crash_take_signal(int sig, void (*h)(int)))(int);
 
 #define RTLD_NEXT ((void *)-1L)
+/* uClibc's value for "search the global scope, from the beginning" — which is
+ * how the two-shims check below asks who actually owns a symbol. */
+#define RTLD_DEFAULT ((void *)0)
 
 #define O_RDONLY 00
 #define O_RDWR   02
@@ -300,6 +303,7 @@ static void *(*real_fopen)(const char *, const char *);
 static void *(*real_dlopen)(const char *, int);
 static char *(*real_dlerror)(void);
 static void *(*real_fopen64)(const char *, const char *);
+static int  (*real_execve)(const char *, char *const [], char *const []);
 
 /* Open <TADPOLE_LOG>.<pid>.log and park it on a high fd.
  *
@@ -390,6 +394,71 @@ static void init(void)
 	real_dlerror= dlsym(RTLD_NEXT, "dlerror");
 	real_fopen  = dlsym(RTLD_NEXT, "fopen");
 	real_fopen64= dlsym(RTLD_NEXT, "fopen64");
+	real_execve = dlsym(RTLD_NEXT, "execve");
+
+	/* DID RTLD_NEXT FIND US AGAIN?
+	 *
+	 * Every interceptor here is "do our bit, then call real_X". If dlsym
+	 * hands back OUR OWN definition, that call is a self-call and the first
+	 * open() recurses until the stack is gone. The failure is silent and
+	 * deeply unhelpful: SIGSEGV at the bottom of the guest stack, no syscalls
+	 * repeated in an strace because the recursion never reaches one, and no
+	 * crash report either — the handler needs stack it no longer has.
+	 *
+	 * It happens when TWO copies of this shim end up in one process, each
+	 * resolving RTLD_NEXT to the other. That is a live hazard now there are
+	 * four impersonation variants and a rootfs can name libEGL by an absolute
+	 * path; see the shimlibs-egl notes in the Makefile.
+	 *
+	 * So check, and say so. Falling back to a null real_open would hide the
+	 * problem; this at least names it in one line.
+	 */
+	{
+		/* Our own interceptors are defined further down this file; naming
+		 * them here needs the prototypes, not the definitions. */
+		extern int open(const char *, int, ...);
+		extern int close(int);
+		extern int ioctl(int, ulong, ...);
+		extern void _exit(int);
+		void *global_open = dlsym(RTLD_DEFAULT, "open");
+		int twice = 0;
+
+		/* CASE 1: RTLD_NEXT found US. Then real_open IS open, and the first
+		 * call recurses forever. */
+		if (real_open && real_open == (void *)open)
+			twice = 1;
+		/* CASE 2 — the one that actually happened. TWO DIFFERENT COPIES of
+		 * this shim in one process, each chaining into the other. Neither
+		 * sees itself, so case 1 never fires, and the recursion is mutual
+		 * instead of direct. Detect it by asking who owns `open` GLOBALLY: if
+		 * the winner is neither us nor something outside this file, there is
+		 * a second impersonator in the link map.
+		 *
+		 * HOW IT HAPPENS. Every variant here (libdl.so.0, libz.so.1,
+		 * libEGL.so) is the whole shim under a different name, and they are
+		 * all on LD_LIBRARY_PATH at once. That is harmless while a guest
+		 * links exactly one of those names. Qt links libEGL AND — through
+		 * libpng — libz, so it got two.
+		 *
+		 * The symptom is otherwise unreadable: SIGSEGV at the bottom of the
+		 * guest stack, no repeated syscall in an strace because the recursion
+		 * never reaches one, and no crash report because the handler needs
+		 * stack that is gone. It cost a gdb session to find; it costs four
+		 * lines to name. */
+		if (!twice && global_open && global_open != (void *)open &&
+		    real_open && global_open != real_open)
+			twice = 1;
+
+		if (twice) {
+			static const char b[] =
+			    "[tadpole] FATAL: two copies of the shim are loaded in this "
+			    "process.\n[tadpole] open() would recurse until the stack is "
+			    "gone. Put ONE impersonation\n[tadpole] variant on "
+			    "LD_LIBRARY_PATH for this guest, not several.\n";
+			write(2, b, sizeof(b) - 1);
+			_exit(70);
+		}
+	}
 
 	for (i = 0; i < MAXFD; i++) {
 		g_fb_of_fd[i] = -1;
@@ -870,6 +939,124 @@ int chdir(const char *path)
 		}
 	}
 	return real_chdir(path);
+}
+
+/* execve() — THE ONE PATH qemu-user's -L DOES NOT TRANSLATE.
+ *
+ * `-L` is not a chroot. It rewrites paths for the process qemu launched, so
+ * stat("/LF/Base/...") succeeds, but an exec is handed to the HOST kernel with
+ * the guest's path and the host has no /LF:
+ *
+ *     stat64(".../runtime/sysroot/LF/.../MainPicker")            = 0
+ *     execve("/LF/Base/Qt/Modules/MainPicker/MainPicker")        = -1 ENOENT
+ *
+ * The LeapPad2 port never hit this because AppManager is one process.
+ * AppServer is not: it launches every screen as a child, so the Ultra's home
+ * screen died instantly and AppServer relaunched it forever —
+ *
+ *     Application: '.../MainPicker' crashed, exit=0, error=0
+ *
+ * — which reads like the application failing rather than the exec never
+ * happening. docs/device-deps.md predicted this and proposed binfmt_misc,
+ * which needs root. Doing it here needs nothing: we already intercept, we
+ * know the sysroot, and re-entering qemu explicitly is what binfmt_misc would
+ * have arranged anyway.
+ *
+ * Rewrites  execve("/LF/x", argv, envp)
+ * into      execve(qemu, {qemu, "-L", sysroot, "<sysroot>/LF/x", argv...}, envp)
+ *
+ * TADPOLE_QEMU says which qemu; tadpole.sh exports it. Without it, or for a
+ * path that already resolves on the host, nothing is changed.
+ */
+int execve(const char *path, char *const argv[], char *const envp[])
+{
+	char real[512];
+	const char *qemu;
+	char *newargv[64];
+	int i, n = 0;
+
+	init();
+	if (!real_execve)
+		return -1;
+
+	dbg("[tadpole] execve hook entered\n");
+	qemu = getenv("TADPOLE_QEMU");
+	if (!path || path[0] != '/' || !g_sysroot[0] || !qemu || !qemu[0]) {
+		dbg("[tadpole] execve: pass through (no qemu/sysroot, or relative)\n");
+		return real_execve(path, argv, envp);
+	}
+	/* DO NOT ASK access() WHETHER THE HOST CAN RUN IT. access IS one of the
+	 * calls qemu-user translates, so access("/LF/...") succeeds through the
+	 * sysroot for exactly the paths execve cannot run — the test says "this
+	 * already works on the host" about every guest binary, and passes them
+	 * all straight through. That mistake cost a rebuild to spot.
+	 *
+	 * The only host binary we ever exec is qemu itself, on the re-entry
+	 * below, so name it explicitly and translate everything else. */
+	{
+		const char *a = path, *b = qemu;
+		while (*a && *a == *b) { a++; b++; }
+		if (!*a && !*b) {
+			dbg("[tadpole] execve: pass through (this is qemu)\n");
+			return real_execve(path, argv, envp);
+		}
+	}
+
+	sysrootify(real, sizeof(real), path);
+	if (real_access && real_access(real, 0 /*F_OK*/) != 0) {
+		dbg("[tadpole] execve: no guest binary at that path\n");
+		return real_execve(path, argv, envp);
+	}
+
+	newargv[n++] = (char *)qemu;
+	newargv[n++] = (char *)"-L";
+	newargv[n++] = g_sysroot;
+	newargv[n++] = real;
+	/* argv[0] is the guest's own name for itself and is dropped: qemu takes
+	 * the binary path as its first non-option argument and passes the rest
+	 * through. */
+	for (i = 1; argv && argv[i] && n < (int)(sizeof(newargv)/sizeof(newargv[0])) - 1; i++)
+		newargv[n++] = argv[i];
+	newargv[n] = 0;
+
+	dbg("[tadpole] execve -> re-entering qemu for the guest path\n");
+	return real_execve(qemu, newargv, envp);
+}
+
+/* execv() AND execvp() TOO — AND THIS IS THE PART THAT MATTERS.
+ *
+ * Overriding execve alone changed nothing, and the strace said why: the hook
+ * was never entered, yet an execve syscall still went out. uClibc's execv and
+ * execvp reach execve through an INTERNAL binding, not through the PLT, so
+ * interposing the public execve does not catch a caller that used one of the
+ * wrappers. Qt's QProcess uses the wrappers.
+ *
+ * These are the public entry points, so they are interposable, and routing
+ * them through our execve above gets the path translation for free.
+ *
+ * environ is the guest's own, which is what execv/execvp pass on.
+ */
+extern char **environ;
+
+int execv(const char *path, char *const argv[])
+{
+	return execve(path, argv, environ);
+}
+
+int execvp(const char *file, char *const argv[])
+{
+	/* Only absolute paths need us; anything to be found on PATH is a host
+	 * command and qemu's own handling is already right for it. */
+	if (file && file[0] == '/')
+		return execve(file, argv, environ);
+	init();
+	{
+		int (*real_execvp)(const char *, char *const []) =
+			dlsym(RTLD_NEXT, "execvp");
+		if (real_execvp)
+			return real_execvp(file, argv);
+	}
+	return -1;
 }
 
 /* mkstemp() creates a brand-new file, so it hits the same qemu-user trap as

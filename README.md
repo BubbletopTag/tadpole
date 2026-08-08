@@ -1,6 +1,6 @@
 # Tadpole
 
-A LeapPad2 emulator for Linux.
+A LeapPad2 and LeapPad Ultra emulator for Linux.
 
 Tadpole runs the stock LeapFrog system software — AppManager, the Brio
 framework, Flash Lite, and native Leapster titles — on a desktop, by emulating

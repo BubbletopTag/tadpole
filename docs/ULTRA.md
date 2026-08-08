@@ -267,35 +267,131 @@ guard-page fault inside Qt.
 
 ---
 
-## Where it stops now
+## It boots
 
-`AppServer` gets a long way. It loads the whole Qt stack, binds the QWS server
-socket, builds its font database into `/tmp/qtembedded-0/fonts/fontdb`, finds
-`libqgfxtransformed.so`, and the shim creates `fb0.bin` at **19,660,800 bytes
-= 1024 x 600 x 4 x 8 buffers**, which is the correct Ultra geometry.
+`shots/ultra-home.png` — the LeapPad Ultra home screen at 1024x600, green
+theme, dock, profile name, battery. Zero crashes, zero "Couldn't load asset".
 
-Then it dies:
-
-```
---- SIGSEGV {si_signo=SIGSEGV, si_code=2, si_addr=0x40000ff8} ---
+```sh
+./tadpole.sh --boot
 ```
 
-`si_code=2` is `SEGV_ACCERR` — a permissions fault, not an unmapped address —
-at `0x40000ff8`, immediately below a page boundary. That reads like a guard
-page at the bottom of a **thread** stack rather than the main one: `tadpole.sh`
-passes `qemu -s 67108864` for the main stack, and that only sizes the main
-stack. Qt starts threads. This is the next thing to chase.
+Four more things had to be fixed after the Qt stack came up. Each one is a
+class of bug worth naming, because none announced itself.
 
-`/dev/fb0` is never opened, so it is dying at or just before QWS screen
-connect.
+### 5. TWO SHIMS IN ONE PROCESS — the one that cost a gdb session
+
+`libdl.so.0`, `libz.so.1` and `libEGL.so` are the SAME SHIM under three names,
+and all three were on `LD_LIBRARY_PATH` at once. Harmless while a guest links
+exactly one of them; the LeapPad2 always did. The Ultra's Qt shell links
+libEGL **and**, through libpng, libz — so it loaded two, whose `open()` chained
+into each other and recursed until the 64 MB guest stack was gone:
+
+```
+Program received signal SIGSEGV
+#0  0x45ea0320 in ?? () from runtime/shimlibs-z/libz.so.1
+#1  0x45ea034c in ?? () from runtime/shimlibs-z/libz.so.1
+Backtrace stopped: previous frame identical to this frame (corrupt stack?)
+sp  0x40001008          <- the bottom of the stack
+```
+
+It is invisible to every cheap tool: nothing repeats in an `strace`, because
+the recursion never reaches a syscall, and no crash report is printed, because
+the handler needs stack that has gone. Only gdb through `qemu-arm -g` says
+where it is.
+
+Fixed by giving a Qt device **exactly one** variant on its path —
+`shimlibs-egl` is now self-contained, carrying its own `libdl.so.9` and GLES —
+and by leaving `/lib/libdl.so.0` as the device's own, since that route is only
+needed by AppManager. The shim also detects the condition at init now and says
+so in one line instead of dying silently.
+
+*A first attempt at a guard only caught a shim finding ITSELF via RTLD_NEXT.
+That is a different bug and it did not fire. The check had to ask who owns
+`open` globally.*
+
+### 6. `execve` is the one path `-L` does not translate
+
+`-L` is not a chroot. It rewrites paths for the process qemu launched, so
+`stat()` on a guest path succeeds — and then the exec is handed to the host
+kernel unchanged:
+
+```
+stat64(".../runtime/sysroot/LF/.../MainPicker")     = 0
+execve("/LF/Base/Qt/Modules/MainPicker/MainPicker") = -1 ENOENT
+```
+
+AppServer launches every screen as a child, so the home screen died instantly
+and AppServer relaunched it forever — reported as `MainPicker crashed,
+exit=0, error=0`, which reads like the application failing rather than the
+exec never happening. `docs/device-deps.md` predicted this and proposed
+`binfmt_misc`, which needs root. The shim does it instead: rewrite to
+`qemu -L <sysroot> <sysroot><path>`, which is what binfmt_misc would have
+arranged anyway.
+
+**Overriding `execve` alone does nothing.** uClibc's `execv` and `execvp` reach
+`execve` by an internal binding that never goes through the PLT, and Qt's
+QProcess uses the wrappers — so the hook was never entered while an `execve`
+syscall still went out. All three entry points have to be interposed.
+
+**And do not ask `access()` whether the host can run it.** `access` IS
+translated, so it answers "yes, this already works" about precisely the guest
+paths `execve` cannot run, and passes every one of them straight through.
+
+### 7. Downloads self-wrap too
+
+`install-content.sh` used `extract_as` (wrapper-aware) for Applications but
+plain `extract_to` for Downloads. The LeapPad2's downloads happen to be flat.
+The Ultra's whole UI theme arrives as MicroDownloads that self-wrap, so it
+landed one level too deep —
+
+```
+Downloads/PHR1-0x00270008-200002/PHR1-0x00270008-200002/art/global/...
+```
+
+— AssetManager found nothing, every home-screen icon logged "Couldn't load
+asset", and `libQtSystemStatus` segfaulted on the first null image.
+
+### 8. The profile format is richer than the LeapPad2's
+
+The Ultra keeps a **third** file, `profile_rio.dsc`, beside `profile.dsc` and
+`profile_private.dsc`, and `profile.dsc` itself gains `NickName`, `Badges`,
+`Tokens`, `BirthMonth`, `BirthYear`, `Gender`. The field that matters is
+
+```
+Theme=/LF/Bulk/Downloads/PHR1-0x00270008-200001/
+```
+
+— the installed theme package. `RIO_THEME_GREEN` is `-200001`, `RIO_THEME_PINK`
+is `-200002`. With `Theme=/` the shell has no dock, no battery and no icons.
+
+`tools/make-profile.sh` now takes the shell package ID from the device profile
+instead of hardcoding the LeapPad2's, but **it still writes the LeapPad2 shape**
+— the Ultra's extra files were written by hand for this boot. Teaching it the
+RIO format is the obvious next job.
+
+### And note what MainPicker alone cannot do
+
+Run standalone with `-qws` it starts, sizes itself to 1024x600 and builds its
+QML — but it only has its own `_LOCAL` art. The theme comes from AppServer, so
+a standalone MainPicker has no dock and no battery whatever the profile says.
+The home screen needs the pair.
 
 ---
 
 ## Still to do
 
-* the `SIGSEGV` above — likely thread stack size
+* **input** — nothing is wired up. `QWS_MOUSE_PROTO` resolves to
+  `TsLib:/dev/input/event2` on the device, but `tadpole.sh` disables tslib by
+  default because its module chain crashes on the first touch. Until this
+  lands the home screen renders but does not respond.
+* **`make-profile.sh` does not write the RIO profile shape** (see 8 above)
 * **VideoDaemon has no injection vector** — it links neither libdl, libz nor
   libEGL on this firmware, so nothing intercepts it yet
+* audio: `libasound.so.2` lives in `shimlibs`, which is off the path for a Qt
+  device now, so the Ultra has no audio shim
+* the GL path is untested — the home screen is QWS raster, not GL, so nothing
+  has exercised `libEGL`'s actual EGL yet
 * touch input (`QWS_MOUSE_PROTO` / tslib)
 * the Ultra has WiFi, and nothing shims it: `libWirelessMPI.so` is the one Brio
   library it has that the LeapPad2 does not, and the Qt shell links

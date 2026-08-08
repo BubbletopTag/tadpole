@@ -37,7 +37,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="${TADPOLE_PROJECT:-$(dirname "$HERE")}"
 SYSROOT="${TADPOLE_SYSROOT:-$PROJ/runtime/sysroot}"
 LOCAL="$SYSROOT/LF/Bulk/Data/Local"
-SHELL_PKG="PAD2-0x1F1E0002-100000"
+# The shell's per-profile state package is a per-DEVICE PackageID, so read it
+# from the device profile rather than hardcoding the LeapPad2's.
+if [ -r "$PROJ/runtime/device.sh" ]; then
+    ROOTFS=""
+    for cand in "$PROJ"/rootfs/*/ubi_rfs "$PROJ"/rootfs/*/*/ubi_rfs; do
+        [ -d "$cand" ] && { ROOTFS="$cand"; break; }
+    done
+    . "$PROJ/runtime/device.sh"
+    tad_load_device || true
+fi
+SHELL_PKG="${DEV_UIPKG:-PAD2-0x1F1E0002-100000}"
 
 NAME=""; GRADE=1; SLOT=""; PIC=""; LIST=0
 while [ $# -gt 0 ]; do

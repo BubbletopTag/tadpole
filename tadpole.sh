@@ -98,14 +98,34 @@ fi
 : "${TADPOLE_GL_HLE:=1}"
 if [ "$TADPOLE_GL_HLE" = 0 ]; then unset TADPOLE_GL_HLE; else export TADPOLE_GL_HLE; fi
 
-LIBS="$HERE/runtime/shimlibs-z:$HERE/runtime/shimlibs:$HERE/runtime/libs"
-[ "$TADPOLE_GL" != 0 ] && LIBS="$HERE/runtime/shimlibs-gl:$LIBS"
-# AHEAD OF shimlibs-gl, AND ONLY FOR A Qt DEVICE. Both directories contain a
-# file called libEGL.so and the loader takes the first one it finds. On the
-# Ultra we want the variant that carries the framebuffer shim, because that is
-# the only library its Qt shell links that we can intercept through at all;
-# on a LeapPad2 we want the GL one, which is what AppManager expects.
-[ "${DEV_HAS_QT:-0}" = 1 ] && LIBS="$HERE/runtime/shimlibs-egl:$LIBS"
+if [ "${DEV_HAS_QT:-0}" = 1 ]; then
+    # EXACTLY ONE IMPERSONATION VARIANT, AND THIS IS WHY.
+    #
+    # libdl.so.0, libz.so.1 and libEGL.so are all the SAME SHIM under three
+    # names, and having all three on the path is harmless only while a guest
+    # links exactly one of them. The Ultra's Qt shell links libEGL AND —
+    # through libpng — libz, so it loaded two copies, whose open() chained
+    # into each other and recursed until the 64 MB guest stack was gone:
+    #
+    #     Program received signal SIGSEGV
+    #     #0  0x45ea0320 in ?? () from runtime/shimlibs-z/libz.so.1
+    #     #1  0x45ea034c in ?? () from runtime/shimlibs-z/libz.so.1
+    #     Backtrace stopped: previous frame identical (corrupt stack?)
+    #     sp  0x40001008        <- the bottom of the stack
+    #
+    # It leaves no trace in an strace, because the recursion never reaches a
+    # syscall, and no crash report, because the handler needs stack that has
+    # gone. The shim now detects the condition at init and says so; this is
+    # what stops it arising.
+    #
+    # shimlibs-egl is self-contained (it carries its own libdl.so.9), so
+    # nothing else is needed. Note NO shimlibs-gl either: it holds a second
+    # libEGL.so, and only one may win.
+    LIBS="$HERE/runtime/shimlibs-egl:$HERE/runtime/libs"
+else
+    LIBS="$HERE/runtime/shimlibs-z:$HERE/runtime/shimlibs:$HERE/runtime/libs"
+    [ "$TADPOLE_GL" != 0 ] && LIBS="$HERE/runtime/shimlibs-gl:$LIBS"
+fi
 VIEWER="$HERE/tadpole/viewer/tadpole-view"
 export TADPOLE_DIR="${TADPOLE_DIR:-/tmp/tadpole}"
 
@@ -312,6 +332,7 @@ guest() {
            -E TADPOLE_DIR="$TADPOLE_DIR" \
            -E TADPOLE_SYSROOT="$SYSROOT" \
            -E TADPOLE_W="${DEV_LCD%x*}" -E TADPOLE_H="${DEV_LCD#*x}" \
+           -E TADPOLE_QEMU="$QEMU" \
            ${DEV_ENV_ARGS[@]+"${DEV_ENV_ARGS[@]}"} \
            $([ "$debug" = 1 ] && echo "-E TADPOLE_DEBUG=1") \
            ${TADPOLE_LOG:+-E TADPOLE_LOG="$TADPOLE_LOG"} \
