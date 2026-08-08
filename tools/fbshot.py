@@ -199,6 +199,7 @@ def main():
     args = sys.argv[1:]
     probe = None
     layers_only = False
+    stat_only = False
     i = 0
     while i < len(args):
         if args[i] == "-d":
@@ -206,6 +207,9 @@ def main():
         elif args[i] == "--probe":
             # --probe X,Y,W,H,RRGGBB — "is that patch mostly that colour?"
             probe = args[i + 1]; i += 2
+        elif args[i] == "--stat":
+            # "lit N% colours M" — see the note in main().
+            stat_only = True; i += 1
         elif args[i] == "--layers":
             # What each layer HOLDS, no PNG. See layer_report().
             layers_only = True; i += 1
@@ -216,6 +220,27 @@ def main():
     if magic != MAGIC:
         print(f"bad magic 0x{magic:08x} in {d}/state.bin", file=sys.stderr)
         return 1
+
+    if stat_only:
+        # IS THERE A PICTURE? — the question a compatibility sweep asks.
+        #
+        # Layer occupancy cannot answer it: it counts non-zero BYTES, and an
+        # opaque black screen is 25% non-zero from its alpha alone, which reads
+        # as "97% full" while showing nothing. What separates a menu from a
+        # blank is colour: how much of the frame is not near-black, and how
+        # many distinct colours are in it. A flat fill has a handful; a title
+        # screen has thousands.
+        rgb = composite(d, w, h, layers)
+        n = w * h
+        lit = 0
+        cols = set()
+        for i in range(0, n * 3, 3):
+            r, g, b = rgb[i], rgb[i + 1], rgb[i + 2]
+            if r > 24 or g > 24 or b > 24:
+                lit += 1
+            cols.add((r >> 3, g >> 3, b >> 3))
+        print("lit %d%% colours %d" % (100 * lit // n, len(cols)))
+        return 0
 
     if layers_only:
         layer_report(d, w, h, layers)

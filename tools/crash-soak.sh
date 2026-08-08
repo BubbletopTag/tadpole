@@ -73,7 +73,7 @@ reap() {
 }
 
 echo "soak -> $SOAK"
-total=0; crashed=0
+total=0; crashed=0; blank=0
 for t in "${TITLES[@]}"; do
     echo
     echo "=== $t"
@@ -84,13 +84,35 @@ for t in "${TITLES[@]}"; do
         mkdir -p "$out"; rm -rf "$TDIR"; mkdir -p "$TDIR"
 
         v="--no-viewer"; [ "$VIEWER" = 1 ] && v=""
-        # SECONDS, not minutes: this is for titles that die immediately, and a
-        # title still alive after this long is not the one being hunted. Its
-        # run is recorded as "no crash" and the loop moves on.
-        TADPOLE_DIR="$TDIR" TADPOLE_CRASHDIR="$out" \
-            timeout "${SOAK_TIMEOUT:-45}" "$PROJ/tadpole.sh" --app "$t" $v \
-            > "$out/run.log" 2>&1
-        rc=$?
+
+        # RUN IT IN THE BACKGROUND AND WATCH, rather than `timeout` and hope.
+        #
+        # Two things have to happen before the guest is killed: a crash has to
+        # be noticed as soon as it happens (so a title that dies in two seconds
+        # does not hold the sweep for forty), and a title that DOES survive has
+        # to be photographed while it is still up. "Did not crash" is a weak
+        # claim on its own — a black screen does not crash either — and the
+        # screenshot is what turns the sweep into evidence that a title
+        # actually launched.
+        TADPOLE_DIR="$TDIR" TADPOLE_CRASHDIR="$out" setsid \
+            "$PROJ/tadpole.sh" --app "$t" $v > "$out/run.log" 2>&1 < /dev/null &
+        deadline=$(( $(date +%s) + ${SOAK_TIMEOUT:-45} ))
+        while [ "$(date +%s)" -lt "$deadline" ]; do
+            sleep 2
+            [ -s "$out/crash.log" ] && break
+            running=0
+            for q in $(pgrep -x qemu-arm 2>/dev/null); do
+                dd=$(tr '\0' '\n' < "/proc/$q/environ" 2>/dev/null |
+                     grep '^TADPOLE_DIR=' | cut -d= -f2)
+                [ "$dd" = "$TDIR" ] && { running=1; break; }
+            done
+            [ "$running" = 0 ] && break
+        done
+
+        # Photograph before reaping — after the kill there is nothing to see.
+        TADPOLE_DIR="$TDIR" "$HERE/fbshot.py" "$out/screen.png" >/dev/null 2>&1
+        bright=$("$HERE/fbshot.py" -d "$TDIR" --layers 2>/dev/null |
+                 sed -n 's/.*bytes non-zero \([0-9]*\)%.*/\1/p' | sort -rn | head -1)
         reap; rm -rf "$TDIR"
         total=$((total + 1))
 
@@ -99,21 +121,21 @@ for t in "${TITLES[@]}"; do
             sig=$(sed -n 's/^  signal   *\([A-Z]*\).*/\1/p' "$out/crash.log" | head -1)
             pc=$(sed -n 's/^  pc .*  \(.*\)$/\1/p' "$out/crash.log" | head -1)
             al=$(sed -n 's/^  alive    *\([0-9]*\)s.*/\1/p' "$out/crash.log" | head -1)
-            printf '  %s  CRASH %-8s %-34s %ss\n' "$n" "${sig:-?}" "${pc:-}" "${al:-?}"
-        elif [ "$rc" = 124 ]; then
-            printf '  %s  no crash (still running at timeout)\n' "$n"
-            rm -rf "$out"
+            printf '  %s  CRASH %-8s %-32s %ss\n' "$n" "${sig:-?}" "${pc:-}" "${al:-?}"
+        elif [ "${bright:-0}" -gt 2 ]; then
+            printf '  %s  ok        drew something (%s%% of a layer)\n' "$n" "$bright"
+            [ "${SOAK_KEEP:-0}" = 1 ] || rm -rf "$out"
         else
-            # A non-zero exit with no report is its own finding: the guest died
-            # without the handler firing, or never started. Keep the log.
-            printf '  %s  no crash (exit %s)\n' "$n" "$rc"
-            [ "$rc" = 0 ] && rm -rf "$out"
+            # Alive and blank is its own failure, and the one a crash-only
+            # sweep would have called a pass.
+            blank=$((blank + 1))
+            printf '  %s  BLANK     no crash, nothing on screen\n' "$n"
         fi
     done
 done
 
 echo
-echo "$crashed of $total launch(es) crashed."
+echo "$total launch(es): $crashed crashed, $blank blank, $((total-crashed-blank)) drew something."
 echo
 "$HERE/crash-triage.py" "$SOAK"/*/crash.log 2>/dev/null || true
 echo
