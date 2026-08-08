@@ -447,17 +447,29 @@ static void init(void)
 		 * lines to name. */
 		if (!twice && global_open && global_open != (void *)open &&
 		    real_open && global_open != real_open)
-			twice = 1;
+			twice = 2;
 
-		if (twice) {
+		/* CASE 1 IS FATAL, CASE 2 ONLY WARNS.
+		 *
+		 * Self-reference cannot be anything but the recursion, so stopping is
+		 * the kindest thing. The global-owner test is a heuristic and it does
+		 * produce false positives — VideoDaemon tripped it while running
+		 * perfectly well — so it prints and continues. What actually PREVENTS
+		 * the recursion is one variant per guest on LD_LIBRARY_PATH; this is
+		 * only here so the next person does not need a gdb session to
+		 * recognise it. */
+		if (twice == 1) {
 			static const char b[] =
-			    "[tadpole] FATAL: two copies of the shim are loaded in this "
-			    "process.\n[tadpole] open() would recurse until the stack is "
-			    "gone. Put ONE impersonation\n[tadpole] variant on "
-			    "LD_LIBRARY_PATH for this guest, not several.\n";
+			    "[tadpole] FATAL: dlsym(RTLD_NEXT) returned our own open().\n"
+			    "[tadpole] Two copies of the shim are loaded; open() would "
+			    "recurse until the stack is gone.\n[tadpole] Put ONE "
+			    "impersonation variant on LD_LIBRARY_PATH for this guest.\n";
 			write(2, b, sizeof(b) - 1);
 			_exit(70);
 		}
+		if (twice == 2)
+			dbg("[tadpole] note: open() is owned by neither us nor our "
+			    "RTLD_NEXT; check for a second shim on the path\n");
 	}
 
 	for (i = 0; i < MAXFD; i++) {

@@ -308,7 +308,17 @@ fi
 
 guest() {
     local bin="$1"; shift
-    case "$bin" in /*) [ -e "$bin" ] || bin="$ROOTFS$bin" ;; esac
+    # THE ROOTFS WINS, NOT THE HOST. This used to keep the path as given
+    # whenever it existed, and only fall back to the rootfs when it did not —
+    # which silently runs the DEVELOPER'S binary for every name both systems
+    # happen to share. /usr/bin/dbus-daemon exists on most desktops, so
+    # starting the guest's bus produced
+    #     qemu-arm: /usr/bin/dbus-daemon: Invalid ELF image for this architecture
+    # and the same trap is waiting for every other common name. An absolute
+    # path here means a path INSIDE the guest; look there first.
+    case "$bin" in
+        /*) [ -e "$ROOTFS$bin" ] && bin="$ROOTFS$bin" ;;
+    esac
     ( cd "$SYSROOT"
       # -s 64MB: qemu-user's default 8MB main stack is not enough. Brio and
       # Flash Lite recurse deeply through their scene graph and printf-family
@@ -458,7 +468,44 @@ case "$mode" in
         # sed -u, not sed: the daemon double-forks and then says very little,
         # so a 4 KB block buffer holds its entire account of a failed video
         # until the process group dies. Unbuffered or not at all.
-        guest /LF/Base/bin/VideoDaemon 750 2>&1 | sed -u 's/^/[vd] /' &
+        # A D-BUS SESSION BUS, FOR A Qt DEVICE.
+        #
+        # rcS runs `/etc/init.d/dbus-1 start` and `dbus-session start`, and the
+        # Ultra's shell is built on it: RioPkgManager — which is what tells the
+        # home screen WHICH APPS EXIST — is a D-Bus proxy, and libQtDBusE is in
+        # every module's NEEDED. Without a bus the picker comes up correctly
+        # and completely empty, which looks like missing content rather than a
+        # missing service.
+        #
+        # dbus-daemon --fork detaches, so the address has to be captured from
+        # its stdout before it goes. The socket is an abstract one, so it is
+        # visible to the other qemu processes without a path in the sysroot.
+        if [ "${DEV_HAS_QT:-0}" = 1 ]; then
+            mkdir -p "$SYSROOT/var/run" "$SYSROOT/var/lib/dbus"
+            guest /usr/bin/dbus-uuidgen --ensure >/dev/null 2>&1 || true
+            dbus_addr="$(guest /usr/bin/dbus-daemon --session --print-address --fork \
+                         2>/dev/null | grep '^unix:' | head -1)"
+            if [ -n "$dbus_addr" ]; then
+                DEV_ENV_ARGS+=(-E "DBUS_SESSION_BUS_ADDRESS=$dbus_addr")
+                echo "=== dbus session bus: $dbus_addr"
+            else
+                echo "tadpole: no d-bus session bus — the home screen will be empty" >&2
+            fi
+        fi
+        # NO VideoDaemon ON A Qt DEVICE — not yet.
+        #
+        # On this firmware it links none of the three names we impersonate, so
+        # the only way the shim reaches it is transitively, and from down there
+        # its own dlsym(RTLD_NEXT, "open") comes back round to itself. The
+        # shim's own guard catches that and stops rather than recursing away
+        # the stack, which is correct and also means the daemon never runs.
+        #
+        # AppServer copes: it logs "DaemonControl socket connect failed" and
+        # carries on to a working home screen. Video playback will need this
+        # solved; the picker does not.
+        if [ "${DEV_HAS_QT:-0}" != 1 ]; then
+            guest /LF/Base/bin/VideoDaemon 750 2>&1 | sed -u 's/^/[vd] /' &
+        fi
         sleep 1
         # THE SYSTEM MENU IS NOT THE SAME PROGRAM ON EVERY DEVICE.
         # LeapPad2: AppManager, no arguments.

@@ -1778,6 +1778,59 @@ int main(int argc, char **argv)
 	while (running) {
 		SDL_Event e;
 
+		/* THE PANEL SIZE IS NOT KNOWN UNTIL A GUEST EXISTS.
+		 *
+		 * w and h are read once, before the loop, from a state.bin that on a
+		 * cold start is not there yet — so they fall back to 480x272 and the
+		 * textures are built that size. When the guest maps and it is a
+		 * LeapPad Ultra, every 1024-pixel scanline is then streamed into a
+		 * 480-pixel texture: colours right, each line further left than the
+		 * one above, which reads as violent horizontal tearing rather than as
+		 * a size mismatch. (It also overruns `pixels`, which was allocated
+		 * for the smaller panel.)
+		 *
+		 * Invisible on a LeapPad2, where the fallback happens to be the right
+		 * answer — which is why it survived until a second device existed.
+		 *
+		 * AT THE TOP OF THE FRAME LOOP, deliberately: the first version of
+		 * this sat next to the try_map() retry further down, inside a branch
+		 * that only runs while unmapped, and so never fired on the frame that
+		 * mattered. Here there is no branch to be wrong about.
+		 */
+		if (g_state && (int)g_state->width > 0 && (int)g_state->height > 0 &&
+		    ((int)g_state->width != w || (int)g_state->height != h)) {
+			int nw = (int)g_state->width, nh = (int)g_state->height;
+			void *np  = malloc((size_t)nw * nh * 4);
+			void *npt = malloc((size_t)nw * nh * 4);
+			SDL_Texture *nt  = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
+			                                     SDL_TEXTUREACCESS_STREAMING, nw, nh);
+			SDL_Texture *ntt = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
+			                                     SDL_TEXTUREACCESS_STREAMING, nw, nh);
+			if (np && npt && nt && ntt) {
+				free(pixels); free(pixels_top);
+				if (tex)     SDL_DestroyTexture(tex);
+				if (tex_top) SDL_DestroyTexture(tex_top);
+				pixels = np; pixels_top = npt;
+				tex = nt; tex_top = ntt;
+				SDL_SetTextureBlendMode(tex_top, SDL_BLENDMODE_BLEND);
+				w = nw; h = nh;
+				set_logical(ren, rotate, w, h);
+				{
+					int ww = (rotate == 90 || rotate == 270) ? h : w;
+					int wh = (rotate == 90 || rotate == 270) ? w : h;
+					SDL_SetWindowSize(win, ww * scale, (wh + UI_BAR_H) * scale);
+				}
+				printf("tadpole-view: panel is %dx%d\n", w, h);
+				fflush(stdout);
+			} else {
+				/* Out of memory mid-resize: keep what still works rather than
+				 * freeing buffers the compositor is about to read. */
+				free(np); free(npt);
+				if (nt)  SDL_DestroyTexture(nt);
+				if (ntt) SDL_DestroyTexture(ntt);
+			}
+		}
+
 		while (SDL_PollEvent(&e)) {
 			/* Chrome first. A click on the bar, an open menu or any modal
 			 * belongs to the front end and must NOT also reach the guest. */
@@ -2289,6 +2342,7 @@ int main(int argc, char **argv)
 			if (try_map())
 				ui_status("running");
 		}
+
 		ev_open_missing();
 		/* ANNOUNCE EXTERNAL POWER REPEATEDLY, NOT ONCE.
 		 *

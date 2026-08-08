@@ -50,9 +50,31 @@ tad_ui_cfg_device() {
 tad_load_device() {
     local want="${1:-}" conf
     if [ -z "$want" ]; then
+        local detected cfg
+        detected="$(tad_detect_device "${ROOTFS:-}")"
+        cfg="$(tad_ui_cfg_device)"
+        # THE INSTALLED FIRMWARE OUTRANKS THE SAVED SETTING.
+        #
+        # This used to read ui.cfg first, and a stale `device leappad2` line —
+        # written by the wizard before any firmware existed, which is exactly
+        # when the wizard asks — then beat autodetect on a LeapPad Ultra
+        # install. The result is not an error message: it is a LeapPad2 boot
+        # against an Ultra rootfs, running AppManager instead of AppServer,
+        # with the geometry a quarter of the panel. That is a miserable thing
+        # to debug, and the setting that caused it is invisible.
+        #
+        # So the saved setting only decides what there is nothing to detect
+        # FROM. $TADPOLE_DEVICE still wins outright: it is typed on purpose,
+        # for the run it is typed on.
         want="${TADPOLE_DEVICE:-}"
-        [ -n "$want" ] || want="$(tad_ui_cfg_device)"
-        [ -n "$want" ] || want="$(tad_detect_device "${ROOTFS:-}")"
+        if [ -z "$want" ]; then
+            want="$detected"
+            if [ -n "$detected" ] && [ -n "$cfg" ] && [ "$cfg" != "$detected" ]; then
+                echo "tadpole: ignoring saved device '$cfg' — the installed" \
+                     "firmware is $detected" >&2
+            fi
+        fi
+        [ -n "$want" ] || want="$cfg"
         [ -n "$want" ] || want=leappad2
     fi
     conf="$(tad_device_dir)/$want.conf"

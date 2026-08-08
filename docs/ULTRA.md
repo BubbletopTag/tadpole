@@ -379,12 +379,124 @@ The home screen needs the pair.
 
 ---
 
+## It runs in the Tadpole window, not just headless
+
+`./tadpole.sh --boot`. Two more bugs had to go first, and both were only ever
+going to show up on a device that is not 480x272.
+
+### 9. The viewer sized itself before it knew the panel
+
+`w`/`h` are read once, before the frame loop, from a `state.bin` that on a
+cold start does not exist yet — so they fell back to 480x272 and the textures
+were built that size. When the guest mapped and turned out to be 1024x600,
+every scanline was streamed into a 480-wide texture: colours right, each line
+further left than the one above, which reads as violent horizontal tearing
+rather than as a size mismatch. It also overran `pixels`, allocated for the
+smaller panel.
+
+Invisible on a LeapPad2, where the fallback happens to be the right answer —
+which is why it survived until there was a second device.
+
+The viewer now rebuilds textures, buffers, logical size and window size on the
+first frame where `g_state` disagrees, and says so:
+
+```
+tadpole-view: 480x272, scale 2x, dir /tmp/tadpole
+tadpole-view: panel is 1024x600
+```
+
+*The first attempt at this sat beside the `try_map()` retry, inside a branch
+that only runs while UNMAPPED, so it never fired on the frame that mattered.
+It is at the top of the frame loop now, where there is no branch to get wrong.*
+
+### 10. `guest()` preferred the developer's binaries
+
+`tadpole.sh`'s `guest()` kept an absolute path as given whenever it existed and
+only fell back to the rootfs when it did not — which silently runs the HOST's
+binary for every name the two systems share. Starting the guest's D-Bus daemon
+produced:
+
+```
+qemu-arm: /usr/bin/dbus-daemon: Invalid ELF image for this architecture
+```
+
+An absolute path in this project means a path inside the guest. It looks there
+first now.
+
+## D-Bus is not optional
+
+`rcS` runs `dbus-1 start` and `dbus-session start`, and the Ultra's shell is
+built on it — `libQtDBusE` is in every module's `NEEDED`, and `RioPkgManager`
+is a D-Bus proxy. `tadpole.sh` now starts a session bus for a Qt device and
+passes `DBUS_SESSION_BUS_ADDRESS` to the shell.
+
+**VideoDaemon is not started for a Qt device.** On this firmware it links none
+of the three names we impersonate, so the shim only reaches it transitively,
+and from there its own `dlsym(RTLD_NEXT, "open")` comes back round to itself.
+The shim's guard catches that and stops rather than recursing away the stack.
+AppServer copes — it logs `DaemonControl socket connect failed` and carries on.
+
+## Packages: registered, but the picker still will not show them
+
+**The Ultra does not scan `ProgramFiles`.** Traced under strace, a booted
+MainPicker opens exactly two files to find out what is installed —
+
+```
+/LF/Bulk/SharedPackageInfo.db      what is installed, and where
+/LF/Bulk/LocalPackageInfo.db       icon, state, dates + ProfileAccess
+```
+
+— and never touches `ProgramFiles` at all. So a perfectly installed package
+that is not in the databases does not exist as far as the home screen is
+concerned. On hardware they arrive already populated on the Bulk partition
+(they are in `erootfs.md5`) and `lfpkg` maintains them; we install by
+untarring, so nothing does.
+
+**The schema is recovered, not guessed.** It is in `usr/lib/liblfp.so.1.0.0`
+as literal strings — the two `CREATE TABLE Packages` (they differ between the
+two databases), `CREATE TABLE ProfileAccess`, and every INSERT and SELECT.
+Finding it meant asking which library links `libQtSqlE` at all, because
+`strings | grep -i "create table"` on the obvious candidates returns nothing.
+
+`tools/register-packages.py` writes all 26 installed packages into both
+databases. **This is necessary and not yet sufficient**: with the rows present
+the picker still comes up empty, so something in them is being filtered.
+
+Known so far:
+
+* `PreviewIcon` must be RELATIVE to `InstallDir`. An absolute path there makes
+  the reader build `InstallDir + "/LF/Bulk/..."`, and MainPicker segfaults on
+  the resulting null image — which is what it did first time.
+* `Hidden=0`, `DeviceHidden=0`, `State=1`, `DeviceAccess` from `meta.inf`, and
+  `ProfileAccess` rows for every slot in `meta.inf`'s `ProfileAccess=` (the
+  Ultra's apps say `-1,0,1,2,3`) are all set, and are not enough.
+
+Leads worth trying next, roughly in order:
+
+1. **`State`** is `LFP::PackageState`, a C++ enum — so its values are NOT in
+   the strings and `1` is a guess. Disassembling `Package::SetState` or
+   finding a real `LocalPackageInfo.db` would settle it.
+2. **The DeviceAsset may need its own row.** The apps are marked `hidden` in
+   `EnglishLeapPadUltra.xml` and their DA is not; on the LeapPad2 the DA
+   carries the home-screen icon. `install-content.sh` merges the DA INTO the
+   app directory, so there is currently no `-DA0000` row at all.
+3. `Redownload` is compared against the STRING `'true'`
+   (`SELECT PackageID FROM Packages WHERE Redownload = 'true'`) while the
+   column is NUMERIC — worth matching the device's spelling exactly.
+
 ## Still to do
 
-* **input** — nothing is wired up. `QWS_MOUSE_PROTO` resolves to
-  `TsLib:/dev/input/event2` on the device, but `tadpole.sh` disables tslib by
-  default because its module chain crashes on the first touch. Until this
-  lands the home screen renders but does not respond.
+* **icons** — see above; the packages are registered and the picker still
+  filters them out
+* **touch does not work**, confirmed by trying it in the window. Nothing is
+  wired up: the device computes
+  `QWS_MOUSE_PROTO=TsLib:$(list-input-devices | fgrep "touchscreen interface")`,
+  which is `/dev/input/event2` here, but `tadpole.sh` disables tslib by default
+  because its module chain crashes on the first touch (see the TSLIB note
+  there). So the shim delivers events to a device nothing is listening on.
+  Either give Qt a `QWS_MOUSE_PROTO` it can use without tslib, or fix tslib.
+* **the firmware installer cannot be driven from the GUI** — reported against
+  the wizard; not yet investigated
 * **`make-profile.sh` does not write the RIO profile shape** (see 8 above)
 * **VideoDaemon has no injection vector** — it links neither libdl, libz nor
   libEGL on this firmware, so nothing intercepts it yet
