@@ -2223,7 +2223,13 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 
 		switch (g_wiz_page) {
 		case WIZ_WELCOME:
-			text(r, bx, by,      "A LeapPad2 emulator.", C_TEXT);
+			/* Glasspole says cross-platform because it IS the reason it
+			 * exists: qemu-arm's user mode is Linux-only, so Tadpole cannot
+			 * follow it to Windows and Glasspole can. Tadpole keeps the plain
+			 * line rather than claiming something it does not do. */
+			text(r, bx, by, ui_brand_is_glasspole()
+			                ? "A cross-platform LeapPad2 emulator."
+			                : "A LeapPad2 emulator.", C_TEXT);
 			{
 				char line[64];
 				snprintf(line, sizeof(line),
