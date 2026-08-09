@@ -73,6 +73,7 @@ int open_flags(uint32_t f) {
     if (f & 0x80)   o |= GP_O_EXCL;
     if (f & 0x200)  o |= GP_O_TRUNC;
     if (f & 0x400)  o |= GP_O_APPEND;
+    if (f & 0x800)  o |= GP_O_NONBLOCK;
     if (f & 0x10000) o |= GP_O_DIRECTORY;
     return o;
 }

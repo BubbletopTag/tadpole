@@ -132,6 +132,12 @@ typedef struct gp_file gp_file;
 #define GP_O_EXCL     0x0080
 #define GP_O_TRUNC    0x0200
 #define GP_O_APPEND   0x0400
+/* NOT OPTIONAL, and its absence does not look like a missing flag. The shim
+ * opens its audio FIFO O_WRONLY|O_NONBLOCK; drop the flag and open() blocks
+ * forever waiting for a reader that only exists when a viewer is attached, so
+ * the guest hangs during audio init with no error anywhere. Honoured, it
+ * returns ENXIO and the guest carries on exactly as it does on the device. */
+#define GP_O_NONBLOCK 0x0800
 #define GP_O_DIRECTORY 0x10000
 
 /* Narrower than struct stat, but not as narrow as it first was. Times are

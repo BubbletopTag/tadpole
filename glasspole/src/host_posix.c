@@ -96,6 +96,7 @@ static int flags_to_posix(int f) {
     if (f & GP_O_EXCL)      o |= O_EXCL;
     if (f & GP_O_TRUNC)     o |= O_TRUNC;
     if (f & GP_O_APPEND)    o |= O_APPEND;
+    if (f & GP_O_NONBLOCK)  o |= O_NONBLOCK;
     if (f & GP_O_DIRECTORY) o |= O_DIRECTORY;
     return o;
 }
