@@ -395,6 +395,16 @@ int main(int argc, char **argv) {
     for (; i < argc; i++) {
         if (std::strcmp(argv[i], "--sysroot") == 0 && i + 1 < argc) { sysroot = argv[++i]; continue; }
         if (std::strcmp(argv[i], "--trace") == 0) { trace = true; continue; }
+        /* qemu-arm's own spelling, so this is a DROP-IN REPLACEMENT for it.
+         * tadpole.sh already picks its emulator through TADPOLE_QEMU, which
+         * means accepting these three flags hands glasspole the entire front
+         * end — the viewer, input, audio, the app launcher — for free. */
+        if (std::strcmp(argv[i], "-L") == 0 && i + 1 < argc) { sysroot = argv[++i]; continue; }
+        if (std::strcmp(argv[i], "-strace") == 0) { trace = true; continue; }
+        /* -s is qemu's guest stack size. Ours is fixed at 64 MiB, which is what
+         * tadpole.sh asks for anyway, so accept the flag and its argument
+         * rather than choking on them. */
+        if (std::strcmp(argv[i], "-s") == 0 && i + 1 < argc) { ++i; continue; }
         /* -E, spelled as qemu-arm spells it, because every script that drives
          * this already knows that flag. */
         if (std::strcmp(argv[i], "-E") == 0 && i + 1 < argc) { envs.push_back(argv[++i]); continue; }
