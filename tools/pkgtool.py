@@ -125,8 +125,61 @@ def cmd_ubi(image, dest):
         die("ubi_reader is not available to this Python (%s).\n"
             "         Run tools/fetch-deps.sh, or install ubi_reader." % e)
     os.makedirs(dest, exist_ok=True)
-    sys.argv = ["ubireader_extract_files", "-o", dest, image]
-    return main() or 0
+
+    # SYMLINKS DO NOT SURVIVE WINDOWS, unless caught here. os.symlink needs a
+    # privilege an ordinary session lacks, and ubi_reader swallows the failure
+    # per link — so the extraction "succeeds" minus every symlink in the image,
+    # which for this rootfs means /lib's SONAME chain, the ELF interpreter
+    # /lib/ld-uClibc.so.0 and about a hundred busybox applet names: nothing
+    # dynamic can load, and nothing says why. Divert to a ledger instead: try
+    # the real symlink first (Linux never reaches the ledger), then materialise
+    # each recorded link as a HARD link — same volume, no privilege, and native
+    # code reads it as the plain file it is — with a copy as the fallback.
+    # Multiple passes, because a link's target may itself be a link that a
+    # later pass creates.
+    import shutil
+    pending = []
+    real_symlink = os.symlink
+
+    def recording_symlink(src, dst, *a, **k):
+        try:
+            real_symlink(src, dst, *a, **k)
+        except (OSError, NotImplementedError):
+            pending.append((src, dst))
+
+    os.symlink = recording_symlink
+    try:
+        sys.argv = ["ubireader_extract_files", "-o", dest, image]
+        rc = main() or 0
+    finally:
+        os.symlink = real_symlink
+
+    root = os.path.abspath(dest)
+    for _ in range(8):                       # link-to-link chains, not loops
+        if not pending:
+            break
+        again = []
+        for src, dst in pending:
+            # A guest-absolute target ("/bin/busybox") is rooted in the
+            # extraction, not the host.
+            t = (os.path.join(root, src.lstrip("/\\")) if os.path.isabs(src)
+                 else os.path.join(os.path.dirname(dst), src))
+            if os.path.isdir(t):
+                shutil.copytree(t, dst, dirs_exist_ok=True)
+            elif os.path.isfile(t):
+                try:
+                    os.link(t, dst)
+                except OSError:
+                    shutil.copy2(t, dst)
+            else:
+                again.append((src, dst))     # target not made yet, or dangling
+        if len(again) == len(pending):
+            break                            # nothing progressed: all dangling
+        pending = again
+    for src, dst in pending:
+        sys.stderr.write("pkgtool: dangling symlink skipped: %s -> %s\n"
+                         % (dst, src))
+    return rc
 
 
 def main(argv):

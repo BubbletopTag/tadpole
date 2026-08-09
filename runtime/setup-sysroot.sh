@@ -26,12 +26,25 @@ CACHE="$PROJ/sources/nxp320/LFC_full/LFC_Downloads/cache"
 
 [ -d "$ROOTFS" ] || { echo "no rootfs at $ROOTFS" >&2; exit 1; }
 
+# HOW "LINK" IS SPELLED HERE. On Linux it is a symlink, as it always was. On
+# MSYS it is a COPY: MSYS's default `ln -s` writes WSL-style reparse points
+# (tag 0xA000001D) that native Win32 programs cannot follow — glasspole.exe
+# gets ENOENT straight through them — and true NTFS symlinks need a privilege
+# an ordinary session does not hold. Copying costs ~100 MB of disk and keeps
+# every property that matters: rootfs/ stays pristine, and the sysroot is
+# readable by native code. The [ -L ] re-run guards below stay correct either
+# way — a copy is not a link, so they simply never fire on MSYS.
+case "$(uname -s)" in
+    MSYS*|MINGW*) lns() { rm -rf "$2"; cp -a "$1" "$2"; } ;;
+    *)            lns() { ln -sfn "$1" "$2"; } ;;
+esac
+
 echo "==> sysroot skeleton"
 mkdir -p "$SYSROOT"
 cd "$SYSROOT"
 # read-only parts of the stock image
 for d in bin boot etc Firmware lib linuxrc mnt sbin erootfs.md5; do
-    ln -sfn "$ROOTFS/$d" "$d"
+    lns "$ROOTFS/$d" "$d"
 done
 # /LF must be real: Bulk and Cart are written to at runtime.
 # Only unlink if it is still the symlink from a previous layout — removing a
@@ -39,7 +52,7 @@ done
 # directory fails, which under `set -e` silently aborts the whole script.
 [ -L LF ] && rm -f LF
 mkdir -p LF/Bulk LF/Cart
-ln -sfn "$ROOTFS/LF/Base" LF/Base
+lns "$ROOTFS/LF/Base" LF/Base
 mkdir -p dev/input sys proc tmp flags
 
 echo "==> /usr overlay (absolute-path library lookups)"
@@ -51,13 +64,13 @@ echo "==> /usr overlay (absolute-path library lookups)"
 mkdir -p usr
 for d in "$ROOTFS"/usr/*; do
     b="$(basename "$d")"
-    [ "$b" = lib ] || ln -sfn "$d" "usr/$b"
+    [ "$b" = lib ] || lns "$d" "usr/$b"
 done
 mkdir -p usr/lib
 for src in "$ROOTFS"/usr/lib "$ROOTFS"/lib; do
     for f in "$src"/*; do
         [ -e "$f" ] || continue
-        ln -sfn "$f" "usr/lib/$(basename "$f")" 2>/dev/null || true
+        lns "$f" "usr/lib/$(basename "$f")" 2>/dev/null || true
     done
 done
 
@@ -82,8 +95,8 @@ done
 # libdl.so.9.
 SHIM_DL="$PROJ/runtime/shimlibs/libdl.so.0"
 if [ -e "$SHIM_DL" ]; then
-    ln -sfn "$SHIM_DL" lib/libdl.so.0
-    ln -sfn "$SHIM_DL" usr/lib/libdl.so.0
+    lns "$SHIM_DL" lib/libdl.so.0
+    lns "$SHIM_DL" usr/lib/libdl.so.0
 else
     echo "    WARNING: shim libdl not built yet — run 'cd tadpole && make shim'," >&2
     echo "    then re-run this script, or native apps will crash on launch." >&2
@@ -101,7 +114,7 @@ echo "==> /etc overlay (ALSA null sink)"
 mkdir -p etc
 for f in "$ROOTFS"/etc/*; do
     b="$(basename "$f")"
-    [ "$b" = asound.conf ] || ln -sfn "$f" "etc/$b"
+    [ "$b" = asound.conf ] || lns "$f" "etc/$b"
 done
 cat > etc/asound.conf <<'ASOUND'
 # Tadpole: null audio sink. See runtime/setup-sysroot.sh for why.
@@ -120,18 +133,18 @@ echo "==> /var/sounds video symlinks (rcS does this per-platform)"
 mkdir -p var
 for d in "$ROOTFS"/var/*; do
     b="$(basename "$d")"
-    [ "$b" = sounds ] || ln -sfn "$d" "var/$b"
+    [ "$b" = sounds ] || lns "$d" "var/$b"
 done
 mkdir -p var/sounds
 for f in "$ROOTFS"/var/sounds/*; do
-    ln -sfn "$f" "var/sounds/$(basename "$f")" 2>/dev/null || true
+    lns "$f" "var/sounds/$(basename "$f")" 2>/dev/null || true
 done
 for v in StartupVideo.ogg ShutdownVideo.ogg TransitionVideo.ogg; do
     [ -e "$ROOTFS/LF/Base/LpadAssets/Video/$v" ] &&
-        ln -sfn "$ROOTFS/LF/Base/LpadAssets/Video/$v" "var/sounds/$v"
+        lns "$ROOTFS/LF/Base/LpadAssets/Video/$v" "var/sounds/$v"
 done
 if [ -e "$ROOTFS/LF/Base/LpadAssets/Video/powerdown.wav" ]; then
-    ln -sfn "$ROOTFS/LF/Base/LpadAssets/Video/powerdown.wav" var/sounds/powerdown.wav
+    lns "$ROOTFS/LF/Base/LpadAssets/Video/powerdown.wav" var/sounds/powerdown.wav
 fi
 
 echo "==> sysfs (rcS branches on platform; libDisplay reads lcd_size)"
@@ -311,7 +324,7 @@ for d in /lib /usr/lib /LF/Base/lib /LF/Base/Brio/lib /LF/Base/Flash/lib; do
     [ -d "$ROOTFS$d" ] || continue
     for so in "$ROOTFS$d"/*.so*; do
         [ -e "$so" ] || continue
-        ln -sfn "$so" "$LIBDIR/$(basename "$so")"
+        lns "$so" "$LIBDIR/$(basename "$so")"
         nlib=$((nlib+1))
     done
 done
