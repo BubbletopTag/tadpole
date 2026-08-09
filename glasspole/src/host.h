@@ -69,6 +69,7 @@ extern "C" {
 #define GP_EROFS    -30
 #define GP_ENOSYS   -38
 #define GP_ENOTEMPTY -39
+#define GP_EMSGSIZE -90
 #define GP_ETIMEDOUT -110
 
 /* ---- address space ------------------------------------------------------ */
@@ -247,6 +248,27 @@ int   gp_wake(volatile uint32_t *addr, int count);
 uint64_t gp_wall_ns(void);   /* since the Unix epoch, for gettimeofday */
 uint64_t gp_mono_ns(void);   /* arbitrary origin, never steps backwards */
 void     gp_sleep_ns(uint64_t ns);
+
+/* Map a file into the guest's address space so that writes are visible to
+ * OTHER PROCESSES, at exactly `at`, replacing whatever is reserved there.
+ *
+ * THE SECOND THING THAT DOES NOT CROSS CLEANLY, and the more important one.
+ * Tadpole's shim hands the guest a descriptor onto a plain host file so the
+ * guest's own mmap is a real shared mapping of it; the native viewer maps the
+ * same file and both sides see the same pages. That is the entire pixel path,
+ * and it is why the framebuffer needs no copying.
+ *
+ * On Linux this is mmap with MAP_SHARED|MAP_FIXED inside the reservation. On
+ * Win32 placing a file view inside an existing reservation needs VirtualAlloc2
+ * and MapViewOfFile3, which are Windows 10 1803 and up — and the whole design
+ * avoids those deliberately.
+ *
+ * So the Windows backend should return GP_ENOSYS. Its answer is the one-process
+ * design: with the viewer as a thread rather than a separate process, there is
+ * nobody to share with, and the shim's files become plain guest memory that the
+ * viewer reads directly. Faking it with a private copy is the one thing NOT to
+ * do — the guest would run perfectly and the screen would stay black. */
+int   gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot);
 
 /* ---- guest faults ------------------------------------------------------- */
 /*

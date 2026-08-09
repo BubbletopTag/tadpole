@@ -40,7 +40,7 @@ else()
     set(GP_HOST src/host_posix.c)
 endif()
 
-add_executable(glasspole src/cpu.cpp src/syscall.cpp src/cp15.cpp src/elf.c ${GP_HOST})
+add_executable(glasspole src/cpu.cpp src/syscall.cpp src/cp15.cpp src/kuser.cpp src/elf.c ${GP_HOST})
 target_include_directories(glasspole PRIVATE src)
 target_link_libraries(glasspole PRIVATE dynarmic)
 if(WIN32)

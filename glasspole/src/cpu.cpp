@@ -419,6 +419,11 @@ int main(int argc, char **argv) {
     m.mmap_next = MMAP_BASE;
     m.OpenStdio();
 
+    if (gp_install_kuser_page(m) < 0) {
+        gp_log("could not map the ARM kuser helper page at 0xffff0000\n");
+        return 1;
+    }
+
     g_machine = &m;
     if (gp_install_fault_handler(on_guest_fault) < 0)
         gp_log("warning: no fault handler — a stray guest access will look like "

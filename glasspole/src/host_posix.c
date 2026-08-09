@@ -67,6 +67,15 @@ int gp_decommit(void *addr, size_t len) {
     return mprotect(addr, len, PROT_NONE) == 0 ? 0 : err();
 }
 
+int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot) {
+    /* MAP_FIXED replaces whatever part of the reservation it lands on, which is
+     * exactly what is wanted: the guest chose the address and the reservation
+     * only existed to keep the host allocator away from it. */
+    void *p = mmap(at, len, prot_to_posix(prot), MAP_SHARED | MAP_FIXED,
+                   f->fd, (off_t)off);
+    return p == MAP_FAILED ? err() : 0;
+}
+
 int gp_release(void *base, size_t size) {
     return munmap(base, size) == 0 ? 0 : err();
 }

@@ -13,6 +13,9 @@
 
 #include <array>
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <map>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -31,6 +34,26 @@ namespace A32 { class Jit; class Coprocessor; }
 
 struct Machine;
 
+/* A POSIX message queue.
+ *
+ * IMPLEMENTED HERE RATHER THAN IN host.h ON PURPOSE. Brio uses these heavily —
+ * the census counted 728 receives and 309 sends in one run — and every one of
+ * them is between threads of a SINGLE guest process. There is nothing for a
+ * host primitive to add, and Windows has no mq_* at all, so building it out of
+ * the C++ standard library means the Windows backend never needs one.
+ *
+ * Ordering is by priority, highest first, then by arrival — which is what POSIX
+ * promises and what a scheduler built on top of it will assume. */
+struct MsgQueue {
+    std::mutex mu;
+    std::condition_variable cv;
+    uint32_t maxmsg  = 10;
+    uint32_t msgsize = 8192;
+    /* Highest priority first: greater<> as the comparator, so begin() is the
+     * message to deliver. */
+    std::multimap<uint32_t, std::string, std::greater<uint32_t>> msgs;
+};
+
 /* The guest's descriptor table. Guest fd numbers are OURS — the lowest free
  * slot, exactly as Linux promises — and have no relationship to anything the
  * host numbered. That is what lets the Win32 backend hand back a HANDLE
@@ -40,6 +63,9 @@ struct GuestFd {
     gp_dir  *dir  = nullptr;
     std::string path;          /* kept for diagnostics and for fstat on dirs */
     uint32_t oflags = 0;       /* what the guest opened it with, for F_GETFL */
+    /* A message queue descriptor is a descriptor: mqd_t is an int, and the
+     * guest closes it with close(), so it lives in the same table. */
+    std::shared_ptr<MsgQueue> mq;
     bool     used = false;
 };
 
@@ -95,6 +121,10 @@ struct Machine {
     uint32_t brk_cur   = 0;
     std::vector<GuestFd> fds;
 
+    /* Named queues outlive the descriptors onto them, exactly as mq_open and
+     * mq_unlink require. Guarded by `lock`. */
+    std::map<std::string, std::shared_ptr<MsgQueue>> mqs;
+
     std::vector<std::unique_ptr<Thread>> threads;
     std::atomic<uint32_t> next_tid{ 1000 };
 
@@ -120,6 +150,10 @@ struct Machine {
 
     void ExitGroup(int st);                  /* stop every thread */
 };
+
+/* The ARM kuser helper page at 0xffff0000. See kuser.cpp — it is not optional,
+ * and its absence presents as a jump to a wild address. */
+int gp_install_kuser_page(Machine &m);
 
 /* CP15, so a thread can read its own thread pointer. See cp15.cpp. */
 std::shared_ptr<Dynarmic::A32::Coprocessor> gp_make_cp15(Thread &t);

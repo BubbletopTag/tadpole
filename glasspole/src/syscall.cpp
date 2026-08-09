@@ -15,6 +15,7 @@
 
 #include <dynarmic/interface/A32/a32.h>
 
+#include <chrono>
 #include <cstring>
 
 namespace {
@@ -42,6 +43,15 @@ enum : uint32_t {
     /* Threads. */
     SYS_clone = 120, SYS_futex = 240, SYS_gettid = 224,
     SYS_mknod = 14, SYS_ftruncate = 93, SYS_getdents64 = 217,
+    /* POSIX message queues. Brio's task communication runs on these. */
+    SYS_mq_open = 274, SYS_mq_unlink = 275, SYS_mq_timedsend = 276,
+    SYS_mq_timedreceive = 277, SYS_mq_notify = 278, SYS_mq_getsetattr = 279,
+    /* The scheduler family. Brio sets thread priorities at startup and treats
+     * a failure here as fatal. */
+    SYS_sched_setparam = 154, SYS_sched_getparam = 155,
+    SYS_sched_setscheduler = 156, SYS_sched_getscheduler = 157,
+    SYS_sched_get_priority_max = 159, SYS_sched_get_priority_min = 160,
+    SYS_kill = 37, SYS_socket = 281,
 };
 
 /* Guest open() flags, which are the same values on ARM Linux as our GP_O_*
@@ -147,6 +157,15 @@ const char *name_of(uint32_t nr) {
         case SYS_gettid: return "gettid";           case SYS_fcntl64: return "fcntl64";
         case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
         case SYS_getdents64: return "getdents64";
+        case SYS_mq_open: return "mq_open";         case SYS_mq_unlink: return "mq_unlink";
+        case SYS_mq_timedsend: return "mq_timedsend";
+        case SYS_mq_timedreceive: return "mq_timedreceive";
+        case SYS_mq_getsetattr: return "mq_getsetattr";
+        case SYS_sched_get_priority_max: return "sched_get_priority_max";
+        case SYS_sched_get_priority_min: return "sched_get_priority_min";
+        case SYS_sched_getscheduler: return "sched_getscheduler";
+        case SYS_sched_setscheduler: return "sched_setscheduler";
+        case SYS_socket: return "socket";           case SYS_kill: return "kill";
         case SYS_getuid32: return "getuid32";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
@@ -229,6 +248,181 @@ void gp_syscall(Thread &t) {
         ret = 0;
         break;
 
+    /* ---- scheduling ---- */
+    /*
+     * Accepted and largely ignored. There is one real host thread per guest
+     * thread and the host's scheduler is already running them; what matters is
+     * that the RANGE is sane, because Brio computes its own priorities from it
+     * and treats a failure as fatal. The numbers below are Linux's.
+     */
+    case SYS_sched_get_priority_max:
+        ret = (a0 == 1 /*SCHED_FIFO*/ || a0 == 2 /*SCHED_RR*/) ? 99 : 0;
+        break;
+    case SYS_sched_get_priority_min:
+        ret = (a0 == 1 || a0 == 2) ? 1 : 0;
+        break;
+    case SYS_sched_getscheduler:
+        ret = 0;      /* SCHED_OTHER */
+        break;
+    case SYS_sched_setscheduler:
+    case SYS_sched_setparam:
+        ret = 0;
+        break;
+    case SYS_sched_getparam:
+        if (a1) { uint32_t z = 0; std::memcpy(m.Ptr(a1), &z, 4); }
+        ret = 0;
+        break;
+
+    case SYS_kill:
+        /* Nothing here can deliver a signal yet. Reporting success for a
+         * signal that will never arrive is worse than refusing. */
+        gp_log("kill(%u, %u) — signals are not implemented\n", a0, a1);
+        ret = GP_EPERM;
+        break;
+
+    case SYS_socket:
+        /* AppManager's DaemonControl socket. It fails on the real device too
+         * whenever VideoDaemon is not running, and the guest carries on — see
+         * docs/STATUS.md, which warns against reading that log line as a
+         * fault. Quiet, because it is expected. */
+        ret = GP_ENOSYS;
+        break;
+
+    /* ---- message queues ---- */
+    /*
+     * Entirely ours: no host primitive is involved, because every one of these
+     * is between threads of a single guest process. Windows has no mq_* and
+     * does not need one.
+     */
+    case SYS_mq_open: {
+        /* name, oflag, mode, attr */
+        std::string name = m.Str(a0);
+        if (m.trace) tpath = name;
+        constexpr uint32_t O_CREAT = 0x40, O_EXCL = 0x80;
+
+        auto it = m.mqs.find(name);
+        if (it == m.mqs.end()) {
+            if (!(a1 & O_CREAT)) { ret = GP_ENOENT; break; }
+            auto q = std::make_shared<MsgQueue>();
+            if (a3) {
+                /* struct mq_attr is longs: flags, maxmsg, msgsize, curmsgs. */
+                const uint32_t *at = (const uint32_t *)m.Ptr(a3);
+                if (at[1]) q->maxmsg  = at[1];
+                if (at[2]) q->msgsize = at[2];
+            }
+            it = m.mqs.emplace(name, std::move(q)).first;
+        } else if ((a1 & O_CREAT) && (a1 & O_EXCL)) {
+            ret = GP_EEXIST;
+            break;
+        }
+
+        ret = m.AllocFd(nullptr, nullptr, name);
+        if (ret >= 0) {
+            m.fds[ret].mq     = it->second;
+            m.fds[ret].oflags = a1;
+        }
+        break;
+    }
+
+    case SYS_mq_unlink:
+        /* The name goes; descriptors already open keep working, because they
+         * hold a shared_ptr. That is what POSIX promises. */
+        if (m.trace) tpath = m.Str(a0);
+        ret = m.mqs.erase(m.Str(a0)) ? 0 : GP_ENOENT;
+        break;
+
+    case SYS_mq_timedsend:
+    case SYS_mq_timedreceive: {
+        /* mqdes, msg_ptr, msg_len, msg_prio(+), abs_timeout */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->mq) { ret = GP_EBADF; break; }
+        auto q = g->mq;                       /* keep it alive past the unlock */
+        const bool sending    = nr == SYS_mq_timedsend;
+        const bool nonblock   = (g->oflags & 0x800 /*O_NONBLOCK*/) != 0;
+        const uint32_t abstime = r[4];
+
+        /* An ABSOLUTE deadline, unlike futex's relative one. Converting here
+         * rather than at the wait keeps the clock read out of the lock. */
+        uint64_t deadline_ns = 0;
+        if (abstime) {
+            const uint32_t *ts = (const uint32_t *)m.Ptr(abstime);
+            deadline_ns = (uint64_t)ts[0] * 1000000000ull + ts[1];
+        }
+
+        if (sending && a2 > q->msgsize) { ret = GP_EINVAL; break; }
+
+        /* Copy in before unlocking; guest memory is stable but the descriptor
+         * table is not. */
+        std::string payload;
+        if (sending) payload.assign((const char *)m.Ptr(a1), a2);
+
+        guard.unlock();
+
+        std::unique_lock<std::mutex> qg(q->mu);
+        for (;;) {
+            if (m.exiting.load(std::memory_order_relaxed)) { ret = GP_EINTR; break; }
+
+            if (sending) {
+                if (q->msgs.size() < q->maxmsg) {
+                    q->msgs.emplace(a3, std::move(payload));
+                    q->cv.notify_all();
+                    ret = 0;
+                    break;
+                }
+            } else if (!q->msgs.empty()) {
+                auto first = q->msgs.begin();
+                const uint32_t prio = first->first;
+                const std::string msg = std::move(first->second);
+                q->msgs.erase(first);
+                q->cv.notify_all();
+                qg.unlock();
+                if (msg.size() > a2) { ret = GP_EMSGSIZE; break; }
+                std::memcpy(m.Ptr(a1), msg.data(), msg.size());
+                if (a3) { uint32_t p = prio; std::memcpy(m.Ptr(a3), &p, 4); }
+                ret = (int32_t)msg.size();
+                break;
+            }
+
+            if (nonblock) { ret = GP_EAGAIN; break; }
+
+            /* Always a timed wait, even with no deadline: a queue that is never
+             * fed would otherwise ignore exit_group and hang the process on the
+             * way out. */
+            if (deadline_ns) {
+                const uint64_t now = gp_wall_ns();
+                if (now >= deadline_ns) { ret = GP_ETIMEDOUT; break; }
+                uint64_t left = deadline_ns - now;
+                if (left > 100000000ull) left = 100000000ull;
+                q->cv.wait_for(qg, std::chrono::nanoseconds(left));
+            } else {
+                q->cv.wait_for(qg, std::chrono::milliseconds(100));
+            }
+        }
+        break;
+    }
+
+    case SYS_mq_getsetattr: {
+        /* mqdes, newattr, oldattr */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->mq) { ret = GP_EBADF; break; }
+        if (a2) {
+            std::lock_guard<std::mutex> qg(g->mq->mu);
+            uint32_t *out = (uint32_t *)m.Ptr(a2);
+            out[0] = g->oflags & 0x800;          /* mq_flags: O_NONBLOCK only */
+            out[1] = g->mq->maxmsg;
+            out[2] = g->mq->msgsize;
+            out[3] = (uint32_t)g->mq->msgs.size();
+        }
+        ret = 0;
+        break;
+    }
+
+    case SYS_mq_notify:
+        /* Nothing in the census ever registered a notification, and answering
+         * "no" is better than pretending to deliver one. */
+        ret = GP_ENOSYS;
+        break;
+
     /* ---- threads ---- */
     case SYS_clone:
         /* flags, child_stack, parent_tidptr, tls, child_tidptr */
@@ -294,6 +488,27 @@ void gp_syscall(Thread &t) {
         uint32_t at = fixed ? (a0 & ~(GP_PAGE - 1)) : m.mmap_next;
         if (!fixed) m.mmap_next = (at + len + GP_ALLOC_GRAN - 1) & ~(GP_ALLOC_GRAN - 1);
 
+        int prot = 0;
+        if (a2 & 1) prot |= GP_PROT_READ;
+        if (a2 & 2) prot |= GP_PROT_WRITE;
+        if (a2 & 4) prot |= GP_PROT_EXEC;
+
+        /* MAP_SHARED on a real file has to be a REAL shared mapping. This is
+         * the shim's pixel path: it hands the guest a descriptor onto a host
+         * file, the guest maps it, and the viewer maps the same file so both
+         * sides see one set of pages. Copying the contents in would run
+         * perfectly and leave the screen black. */
+        constexpr uint32_t MAP_SHARED = 0x01;
+        if (fd >= 0 && (flags & MAP_SHARED)) {
+            GuestFd *g = m.Fd(fd);
+            if (!g || !g->file) { ret = GP_EBADF; break; }
+            int r0 = gp_map_shared(m.Ptr(at), len, g->file,
+                                   (uint64_t)pgoff * GP_PAGE, prot);
+            if (r0 < 0) { ret = r0; break; }
+            ret = (int32_t)at;
+            break;
+        }
+
         if (m.Commit(at, len, GP_PROT_READ | GP_PROT_WRITE) < 0) { ret = GP_ENOMEM; break; }
 
         if (fd >= 0) {
@@ -310,10 +525,6 @@ void gp_syscall(Thread &t) {
             std::memset(m.Ptr(at), 0, len);
         }
 
-        int prot = 0;
-        if (a2 & 1) prot |= GP_PROT_READ;
-        if (a2 & 2) prot |= GP_PROT_WRITE;
-        if (a2 & 4) prot |= GP_PROT_EXEC;
         if (prot) m.Commit(at, len, prot);
         ret = (int32_t)at;
         break;
