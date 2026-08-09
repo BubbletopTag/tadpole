@@ -41,6 +41,7 @@ enum : uint32_t {
     SYS_ARM_set_tls = 0xf0005, SYS_ARM_cacheflush = 0xf0002,
     /* Threads. */
     SYS_clone = 120, SYS_futex = 240, SYS_gettid = 224,
+    SYS_mknod = 14, SYS_ftruncate = 93, SYS_getdents64 = 217,
 };
 
 /* Guest open() flags, which are the same values on ARM Linux as our GP_O_*
@@ -103,8 +104,8 @@ static_assert(sizeof(guest_stat) == 64, "ARM struct stat is 64 bytes");
 
 void fill_stat(const gp_statbuf &st, guest_stat *g) {
     std::memset(g, 0, sizeof *g);
-    g->st_dev     = 1;
-    g->st_ino     = 1;
+    g->st_dev     = (uint32_t)st.dev;
+    g->st_ino     = (uint32_t)st.ino;
     g->st_mode    = (uint16_t)st.mode;
     g->st_nlink   = 1;
     g->st_size    = (uint32_t)st.size;
@@ -116,8 +117,9 @@ void fill_stat(const gp_statbuf &st, guest_stat *g) {
 
 void fill_stat64(const gp_statbuf &st, guest_stat64 *g) {
     std::memset(g, 0, sizeof *g);
-    g->st_dev     = 1;
-    g->st_ino = g->__st_ino = 1;
+    g->st_dev = st.dev;
+    g->st_ino = st.ino;
+    g->__st_ino = (uint32_t)st.ino;
     g->st_mode    = st.mode;
     g->st_nlink   = 1;
     g->st_size    = (int64_t)st.size;
@@ -143,6 +145,8 @@ const char *name_of(uint32_t nr) {
         case SYS_exit_group: return "exit_group";   case SYS_getcwd: return "getcwd";
         case SYS_clone: return "clone";             case SYS_futex: return "futex";
         case SYS_gettid: return "gettid";           case SYS_fcntl64: return "fcntl64";
+        case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
+        case SYS_getdents64: return "getdents64";
         case SYS_getuid32: return "getuid32";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
@@ -158,6 +162,9 @@ void gp_syscall(Thread &t) {
     const uint32_t nr = r[7];
     const uint32_t a0 = r[0], a1 = r[1], a2 = r[2], a3 = r[3];
     int32_t ret = GP_ENOSYS;
+    /* Paths, not pointers. A trace line that prints 3fffe140 where the guest
+     * asked for a file name is an instrument hiding the fact you needed. */
+    std::string tpath;
 
     /* One lock over everything that touches shared state — the descriptor
      * table and the allocators. Taken up front rather than per case, because
@@ -334,6 +341,7 @@ void gp_syscall(Thread &t) {
     case SYS_open: {
         std::string p = m.Str(a0);
         std::string h = m.HostPath(p);
+        if (m.trace) tpath = p + " -> " + h;
         gp_file *f = nullptr;
         int r0 = gp_open(h.c_str(), open_flags(a1), a2, &f);
         if (r0 < 0) { ret = r0; break; }
@@ -412,6 +420,7 @@ void gp_syscall(Thread &t) {
     case SYS_stat:
     case SYS_lstat: {
         gp_statbuf st;
+        if (m.trace) tpath = m.Str(a0);
         int r0 = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st);
         if (r0 < 0) { ret = r0; break; }
         fill_stat(st, (guest_stat *)m.Ptr(a1));
@@ -452,6 +461,7 @@ void gp_syscall(Thread &t) {
 
     case SYS_access: {
         gp_statbuf st;
+        if (m.trace) tpath = m.Str(a0);
         ret = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st) < 0 ? GP_ENOENT : 0;
         break;
     }
@@ -462,6 +472,74 @@ void gp_syscall(Thread &t) {
          * fall through rather than retry. */
         ret = GP_EINVAL;
         break;
+
+    case SYS_mknod: {
+        /* The shim's five input event nodes. Only FIFOs appear here — a guest
+         * asking for a real device node is a fact worth hearing about, not
+         * something to quietly succeed at. */
+        constexpr uint32_t S_IFMT = 0xf000, S_IFIFO = 0x1000;
+        std::string p = m.Str(a0);
+        if (m.trace) tpath = p;
+        if ((a1 & S_IFMT) != S_IFIFO) {
+            gp_log("mknod(%s, mode %o): not a FIFO, and device nodes are not "
+                   "implemented — the shim is supposed to have absorbed those\n",
+                   p.c_str(), a1);
+            ret = GP_EPERM;
+            break;
+        }
+        ret = gp_mkfifo(m.HostPath(p).c_str(), a1 & 07777);
+        if (ret == GP_EEXIST) ret = 0;   /* a leftover FIFO is not a failure */
+        break;
+    }
+
+    case SYS_ftruncate: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        ret = gp_truncate(g->file, a1);
+        break;
+    }
+
+    case SYS_getdents64: {
+        /* fd, buf, count. The guest's struct linux_dirent64 is
+         * { u64 ino; s64 off; u16 reclen; u8 type; char name[]; }, packed, and
+         * padded so each record is 8-aligned. */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g) { ret = GP_EBADF; break; }
+        if (!g->dir) {
+            int r0 = gp_diropen(m.HostPath(g->path).c_str(), &g->dir);
+            if (r0 < 0) { ret = r0; break; }
+        }
+        uint8_t *out = m.Ptr(a1);
+        uint32_t used = 0;
+        for (;;) {
+            const char *name = nullptr;
+            uint32_t is_dir = 0;
+            int r0 = gp_dirnext(g->dir, &name, &is_dir);
+            if (r0 <= 0) { ret = r0 < 0 ? r0 : (int32_t)used; break; }
+            const uint32_t nlen = (uint32_t)std::strlen(name);
+            const uint32_t rec  = (19 + nlen + 1 + 7) & ~7u;
+            if (used + rec > a2) {
+                /* No room. The entry is lost, because this interface cannot
+                 * push one back — a real getdents64 would rewind. Files per
+                 * directory here are few and buffers are 4 KB, so say it
+                 * loudly rather than silently dropping names. */
+                gp_log("getdents64: buffer too small, dropped '%s'\n", name);
+                ret = (int32_t)used;
+                break;
+            }
+            uint8_t *e = out + used;
+            uint64_t ino = 1 + used;
+            std::memcpy(e + 0, &ino, 8);
+            int64_t off = used + rec;
+            std::memcpy(e + 8, &off, 8);
+            uint16_t reclen = (uint16_t)rec;
+            std::memcpy(e + 16, &reclen, 2);
+            e[18] = is_dir ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
+            std::memcpy(e + 19, name, nlen + 1);
+            used += rec;
+        }
+        break;
+    }
 
     case SYS_unlink: ret = gp_unlink(m.HostPath(m.Str(a0)).c_str()); break;
     case SYS_mkdir:  ret = gp_mkdir (m.HostPath(m.Str(a0)).c_str(), a1); break;
@@ -557,9 +635,13 @@ void gp_syscall(Thread &t) {
 
     /* Always carry the NUMBER as well as the name. A trace line reading "?" is
      * an instrument that hides the one fact you needed from it. */
-    if (m.trace)
-        gp_log("  [%u] %3u %-14s(%08x, %08x, %08x) = %d\n",
-               t.tid, nr, name_of(nr), a0, a1, a2, ret);
+    if (m.trace) {
+        if (!tpath.empty())
+            gp_log("  [%u] %3u %-14s %s = %d\n", t.tid, nr, name_of(nr), tpath.c_str(), ret);
+        else
+            gp_log("  [%u] %3u %-14s(%08x, %08x, %08x) = %d\n",
+                   t.tid, nr, name_of(nr), a0, a1, a2, ret);
+    }
 
     r[0] = (uint32_t)ret;
 }

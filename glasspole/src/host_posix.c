@@ -13,6 +13,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -130,6 +131,8 @@ int64_t gp_seek(gp_file *f, int64_t off, int whence) {
 
 static void fill_stat(const struct stat *s, struct gp_statbuf *st) {
     st->size     = (uint64_t)s->st_size;
+    st->dev      = (uint64_t)s->st_dev;
+    st->ino      = (uint64_t)s->st_ino;
     st->mtime_ns = (uint64_t)s->st_mtim.tv_sec * 1000000000ull + s->st_mtim.tv_nsec;
     st->mode     = s->st_mode;
     st->is_dir   = S_ISDIR(s->st_mode) ? 1 : 0;
@@ -156,6 +159,8 @@ int gp_truncate(gp_file *f, uint64_t size) {
 int gp_sync(gp_file *f) {
     return fdatasync(f->fd) == 0 ? 0 : err();
 }
+
+int gp_mkfifo(const char *p, uint32_t m) { return mkfifo(p, (mode_t)m) == 0 ? 0 : err(); }
 
 int gp_mkdir (const char *p, uint32_t m) { return mkdir(p, (mode_t)m) == 0 ? 0 : err(); }
 int gp_rmdir (const char *p)             { return rmdir(p)            == 0 ? 0 : err(); }
@@ -271,6 +276,42 @@ void gp_sleep_ns(uint64_t ns) {
     struct timespec ts = { (time_t)(ns / 1000000000ull),
                            (long)  (ns % 1000000000ull) };
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) { }
+}
+
+/* ---- guest faults ------------------------------------------------------- */
+
+static gp_fault_fn g_fault_fn;
+
+static void segv_handler(int sig, siginfo_t *si, void *uc) {
+    (void)sig; (void)uc;
+    if (g_fault_fn) g_fault_fn(si->si_addr);
+    /* Not return, and not exit(): we are on a signal stack after a memory
+     * fault, and anything that runs atexit handlers or flushes stdio may
+     * fault again and hide the message we just printed. */
+    _exit(73);
+}
+
+int gp_install_fault_handler(gp_fault_fn fn) {
+    g_fault_fn = fn;
+
+    /* An alternate stack, because the fault we most want explained is the one
+     * that ran off the end of a stack — and a handler that needs the broken
+     * stack to run on cannot report it. */
+    /* A fixed size, not SIGSTKSZ: on modern glibc that expands to a
+     * sysconf() call and is no longer a compile-time constant. 64 KB is
+     * comfortably more than this handler needs. */
+    static char altstack[65536];
+    stack_t ss = { .ss_sp = altstack, .ss_size = sizeof altstack, .ss_flags = 0 };
+    if (sigaltstack(&ss, NULL) != 0) return err();
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_sigaction = segv_handler;
+    sa.sa_flags     = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGSEGV, &sa, NULL) != 0) return err();
+    if (sigaction(SIGBUS,  &sa, NULL) != 0) return err();
+    return 0;
 }
 
 /* ---- odds and ends ------------------------------------------------------ */

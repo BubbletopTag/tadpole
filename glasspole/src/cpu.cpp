@@ -34,7 +34,11 @@ namespace {
 
 constexpr uint64_t GUEST_SPACE = 0x100000000ull;  /* the whole 32-bit range */
 constexpr uint32_t STACK_TOP   = 0x40000000;
-constexpr uint32_t STACK_SIZE  = 0x00400000;      /* 4 MiB to start with */
+/* 64 MiB, matching `qemu-arm -s 67108864` in tadpole.sh, and for the reason
+ * recorded there: the default is not enough. Brio and Flash Lite recurse deeply
+ * through their scene graphs, and both AppManager and saplayer faulted on
+ * `str r1, [sp]` at exactly 8 MB below the stack base. */
+constexpr uint32_t STACK_SIZE  = 0x04000000;
 constexpr uint32_t MMAP_BASE   = 0x50000000;
 constexpr uint32_t INTERP_BASE = 0x60000000;
 
@@ -105,6 +109,42 @@ public:
     uint64_t GetTicksRemaining() override { return t->ticks_left; }
 };
 
+/* Which guest thread this host thread is running, for the fault handler. A
+ * signal arrives on the faulting thread with no argument, so this is the only
+ * way to say WHICH guest thread ran off the end of something. */
+thread_local Thread *g_current = nullptr;
+Machine *g_machine = nullptr;
+
+/* Called from a signal handler. Almost nothing is safe here, so this prints
+ * through gp_log and stops — no attempt to recover, no attempt to unwind.
+ *
+ * The pc reported is the start of the JIT block being executed, not the exact
+ * instruction: dynarmic only writes the guest pc back at block boundaries. It
+ * still names the function, which is the question being asked. */
+void on_guest_fault(void *addr) {
+    if (!g_machine || !g_machine->base) { gp_log("FAULT before the guest existed\n"); return; }
+
+    const uint8_t *p    = static_cast<const uint8_t *>(addr);
+    const uint8_t *base = g_machine->base;
+
+    if (p < base || p >= base + GUEST_SPACE) {
+        gp_log("HOST FAULT at %p — outside the guest's address space entirely, "
+               "so this is an emulator bug rather than a guest one\n", addr);
+        return;
+    }
+
+    const uint32_t guest = static_cast<uint32_t>(p - base);
+    gp_log("GUEST FAULT: %08x was never mapped\n", guest);
+    if (g_current) {
+        gp_log("  thread %u, %llu syscalls in\n", g_current->tid,
+               (unsigned long long)g_current->syscalls);
+        if (g_current->jit)
+            gp_log("  block pc ~%08x  sp %08x  lr %08x\n",
+                   g_current->jit->Regs()[15], g_current->jit->Regs()[13],
+                   g_current->jit->Regs()[14]);
+    }
+}
+
 int commit_thunk(void *ctx, uint32_t addr, uint32_t len, int prot) {
     return static_cast<Machine *>(ctx)->Commit(addr, len, prot);
 }
@@ -159,6 +199,7 @@ void RunThread(Thread &t, const std::array<uint32_t, 16> &regs,
     Cpu cpu;
     cpu.t = &t;
     cpu.m = t.m;
+    g_current = &t;
 
     Dynarmic::A32::UserConfig conf;
     conf.callbacks = &cpu;
@@ -244,8 +285,22 @@ GuestFd *Machine::Fd(int fd) {
 }
 
 std::string Machine::HostPath(const std::string &guest) {
-    if (guest.empty() || guest[0] != '/') return sysroot + "/" + guest;
-    return sysroot + guest;
+    if (guest.empty()) return sysroot;
+    if (guest[0] != '/') return sysroot + "/" + guest;
+
+    /* qemu-user's -L semantics, and they matter more than they look. The
+     * sysroot wins when it has the file, and otherwise the path is used as it
+     * stands — which is what lets an absolute HOST path through.
+     *
+     * Tadpole depends on exactly this. LD_LIBRARY_PATH points at
+     * runtime/shimlibs on the host, and TADPOLE_DIR is /tmp/tadpole; neither
+     * exists inside the rootfs, so both have to fall through. Prepending the
+     * sysroot unconditionally would hide the shim from the guest's own linker
+     * and the failure would look like the shim simply not working. */
+    std::string in_root = sysroot + guest;
+    struct gp_statbuf st;
+    if (gp_stat(in_root.c_str(), &st) == 0) return in_root;
+    return guest;
 }
 
 void Machine::ExitGroup(int st) {
@@ -329,18 +384,24 @@ int main(int argc, char **argv) {
     const char *sysroot = nullptr;
     int i = 1;
     bool trace = false;
+    std::vector<std::string> envs;
 
     for (; i < argc; i++) {
         if (std::strcmp(argv[i], "--sysroot") == 0 && i + 1 < argc) { sysroot = argv[++i]; continue; }
         if (std::strcmp(argv[i], "--trace") == 0) { trace = true; continue; }
+        /* -E, spelled as qemu-arm spells it, because every script that drives
+         * this already knows that flag. */
+        if (std::strcmp(argv[i], "-E") == 0 && i + 1 < argc) { envs.push_back(argv[++i]); continue; }
         break;
     }
     if (i >= argc || !sysroot) {
         std::fprintf(stderr,
             "usage: glasspole --sysroot <dir> [--trace] <guest-program> [args...]\n"
             "\n"
-            "  <guest-program> absolute is a path inside the sysroot (/bin/busybox);\n"
-            "                  relative is a host path (build/thread.elf)\n");
+            "  -E KEY=VALUE    add to the guest's environment (repeatable)\n"
+            "\n"
+            "  <guest-program> absolute resolves in the sysroot first and then on the\n"
+            "                  host, as qemu-arm -L does; relative is a host path\n");
         return 2;
     }
 
@@ -358,6 +419,11 @@ int main(int argc, char **argv) {
     m.mmap_next = MMAP_BASE;
     m.OpenStdio();
 
+    g_machine = &m;
+    if (gp_install_fault_handler(on_guest_fault) < 0)
+        gp_log("warning: no fault handler — a stray guest access will look like "
+               "the emulator crashing\n");
+
     gp_guest g{ m.base, commit_thunk, &m };
     /* An ABSOLUTE path is a GUEST path and goes through the sysroot, which is
      * what /bin/busybox has to mean. A relative one is a host path, so the test
@@ -371,11 +437,34 @@ int main(int argc, char **argv) {
     /* argv as the guest sees it: the path inside the sysroot, not the host's. */
     std::vector<const char *> gargv;
     for (int a = i; a < argc; a++) gargv.push_back(argv[a]);
-    const char *genv[] = { "LD_LIBRARY_PATH=/lib:/usr/lib", "HOME=/", "PATH=/bin:/usr/bin", nullptr };
+    /* -E REPLACES a default with the same key rather than being appended after
+     * it. Appending looks like it should work and does not: uClibc's getenv
+     * returns the FIRST match, so a default LD_LIBRARY_PATH left in front of
+     * the real one wins, the guest searches only /lib and /usr/lib, and the
+     * failure reads as "the library is missing" rather than "the variable
+     * never arrived". */
+    std::vector<std::string> envstore = {
+        "LD_LIBRARY_PATH=/lib:/usr/lib", "HOME=/", "PATH=/bin:/usr/bin"
+    };
+    for (auto &e : envs) {
+        const size_t eq = e.find('=');
+        const std::string key = e.substr(0, eq == std::string::npos ? e.size() : eq);
+        for (auto it = envstore.begin(); it != envstore.end(); ) {
+            if (it->compare(0, key.size(), key) == 0 && it->size() > key.size() &&
+                (*it)[key.size()] == '=')
+                it = envstore.erase(it);
+            else
+                ++it;
+        }
+        envstore.push_back(e);
+    }
+    std::vector<const char *> genv;
+    for (auto &e : envstore) genv.push_back(e.c_str());
+    genv.push_back(nullptr);
 
     uint32_t sp = gp_elf_build_stack(&g, STACK_TOP - 4096,
                                      static_cast<int>(gargv.size()), gargv.data(),
-                                     genv, &m.image);
+                                     genv.data(), &m.image);
     if (!sp) { gp_log("could not build the initial stack\n"); return 1; }
 
     Dynarmic::ExclusiveMonitor monitor{ MAX_THREADS };

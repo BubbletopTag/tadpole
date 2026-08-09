@@ -130,12 +130,26 @@ typedef struct gp_file gp_file;
 #define GP_O_APPEND   0x0400
 #define GP_O_DIRECTORY 0x10000
 
-/* Deliberately narrower than struct stat: this is what the census shows the
- * guest actually reads back, and a field we do not carry is a field the Win32
- * backend cannot get wrong. Times are nanoseconds since the Unix epoch. */
+/* Narrower than struct stat, but not as narrow as it first was. Times are
+ * nanoseconds since the Unix epoch.
+ *
+ * `dev` AND `ino` ARE LOAD-BEARING, which was learned the hard way. The guest's
+ * dynamic linker uses the pair to decide whether a shared object is ALREADY
+ * LOADED. Returning a constant for both — which the first version did, on the
+ * reasoning that a field we do not carry is a field the backend cannot get
+ * wrong — makes every library after the first look like a duplicate of it. The
+ * linker then opens each one, stats it, closes it without mapping it, and
+ * AppManager dies on unresolved C++ ABI symbols with nothing pointing at the
+ * cause.
+ *
+ * They need only be consistent and distinct per file, not meaningful. On Win32
+ * that is GetFileInformationByHandle: dwVolumeSerialNumber for `dev`, and
+ * nFileIndexHigh/nFileIndexLow combined for `ino`. */
 struct gp_statbuf {
     uint64_t size;
     uint64_t mtime_ns;
+    uint64_t dev;
+    uint64_t ino;
     uint32_t mode;      /* Linux S_IF* bits plus permissions */
     uint32_t is_dir;
 };
@@ -164,6 +178,18 @@ int   gp_stat (const char *utf8_path, struct gp_statbuf *st);
 int   gp_fstat(gp_file *f, struct gp_statbuf *st);
 int   gp_truncate(gp_file *f, uint64_t size);
 int   gp_sync(gp_file *f);
+
+/* A named pipe. The shim creates five of them for the input event nodes and
+ * the viewer writes struct input_event into them.
+ *
+ * THIS IS THE ONE PLACE THE TWO OPERATING SYSTEMS REALLY DIVERGE. Win32 has
+ * named pipes but they are not filesystem objects that open() reaches, so the
+ * Windows backend cannot implement this as written. That is not a problem to
+ * solve here: on Windows the viewer becomes a thread in the same process, and
+ * the shim's event nodes stop being pipes between processes and become a queue
+ * in memory. Until that lands, the Windows backend should return GP_ENOSYS and
+ * say so plainly rather than fake it. */
+int   gp_mkfifo(const char *utf8_path, uint32_t mode);
 
 int   gp_mkdir (const char *utf8_path, uint32_t mode);
 int   gp_rmdir (const char *utf8_path);
@@ -221,6 +247,25 @@ int   gp_wake(volatile uint32_t *addr, int count);
 uint64_t gp_wall_ns(void);   /* since the Unix epoch, for gettimeofday */
 uint64_t gp_mono_ns(void);   /* arbitrary origin, never steps backwards */
 void     gp_sleep_ns(uint64_t ns);
+
+/* ---- guest faults ------------------------------------------------------- */
+/*
+ * A guest access to a page that was never committed lands as a HOST fault,
+ * because the memory callbacks are `base + addr` with no bounds check — which
+ * is the right shape for turning on fastmem later, and the wrong shape for
+ * finding out what happened. Without this, a guest overrunning a buffer looks
+ * like the emulator crashing.
+ *
+ * Catching it is host machinery: a SIGSEGV handler on Linux, a vectored
+ * exception handler on Windows. So the MECHANISM lives down here and the
+ * POLICY — what to print, and about which guest thread — lives above.
+ *
+ * `fn` is called on the faulting thread with the faulting host address, in a
+ * context where very little is safe: print, and do not try to recover. The
+ * backend terminates the process once it returns, so `fn` need not.
+ */
+typedef void (*gp_fault_fn)(void *fault_addr);
+int   gp_install_fault_handler(gp_fault_fn fn);
 
 /* ---- odds and ends ------------------------------------------------------ */
 int   gp_random(void *buf, size_t len);          /* /dev/urandom */
