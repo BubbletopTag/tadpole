@@ -147,18 +147,89 @@ struct gp_file {
     int     append;
 };
 
+/* ==== STOPGAP — NOT THE DESIGN =============================================
+ *
+ * gp_map_shared here is a PRIVATE mapping with a write-back at exit, and that
+ * is a stopgap in the fullest sense: it is behaviourally correct only while
+ * NOBODY ELSE IS LOOKING. There is no separate viewer process on Windows yet,
+ * so "shared with other processes" has no observer to disappoint — the guest
+ * reads back its own writes, and when it exits the pages are written into the
+ * file, so tools/fbshot.py can read the final frame out of fb0.bin.
+ *
+ * The moment a viewer wants LIVE pixels this is wrong by construction, and no
+ * amount of flushing fixes it — the real answer is the one-process design,
+ * where the file stops existing and the viewer reads guest memory directly.
+ * Placing a real file view inside our reservation would need VirtualAlloc2 /
+ * MapViewOfFile3 (Windows 10 1803+), which the design deliberately avoids.
+ * Do not extend this; replace it. */
+#define GP_MAX_SHARED 16
+static struct {
+    void    *at;
+    size_t   len;
+    HANDLE   h;          /* our own duplicate: survives the guest's close() */
+    uint64_t off;
+} g_shared[GP_MAX_SHARED];
+static int g_shared_n;
+
+static void shared_writeback(void)
+{
+    int i;
+    for (i = 0; i < g_shared_n; i++) {
+        LARGE_INTEGER p;
+        DWORD n;
+        p.QuadPart = (LONGLONG)g_shared[i].off;
+        if (SetFilePointerEx(g_shared[i].h, p, NULL, FILE_BEGIN))
+            WriteFile(g_shared[i].h, g_shared[i].at,
+                      (DWORD)g_shared[i].len, &n, NULL);
+        FlushFileBuffers(g_shared[i].h);
+    }
+}
+
+static BOOL WINAPI shared_ctrl(DWORD ev)
+{
+    (void)ev;
+    shared_writeback();
+    return FALSE;               /* then let the default handler terminate */
+}
+
 int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
 {
-    /* Placing a file view inside an existing reservation is VirtualAlloc2 /
-     * MapViewOfFile3 — Windows 10 1803+, which the design deliberately
-     * avoids. ENOSYS, exactly as host.h instructs: the real answer is the
-     * one-process design, and a private-copy fake would run the guest
-     * perfectly while the screen stayed black. */
-    (void)at; (void)len; (void)f; (void)off; (void)prot;
-    gp_log("map_shared: no cross-process mappings on Win32 — needs the "
-           "one-process design; returning ENOSYS\n");
-    return GP_ENOSYS;
+    HANDLE dup = NULL;
+    int64_t n;
+    int e;
+
+    if (g_shared_n >= GP_MAX_SHARED) return GP_ENOMEM;
+
+    /* Commit writable first — the fill below writes — then drop to the
+     * requested protection. */
+    if ((e = gp_commit(at, len, GP_PROT_READ | GP_PROT_WRITE)) < 0) return e;
+    memset(at, 0, len);
+    n = gp_pread(f, at, len, off);          /* short read = EOF; rest stays 0 */
+    if (n < 0) return (int)n;
+    if ((e = gp_protect(at, len, prot)) < 0) return e;
+
+    if (!DuplicateHandle(GetCurrentProcess(), f->h, GetCurrentProcess(),
+                         &dup, 0, FALSE, DUPLICATE_SAME_ACCESS))
+        return err();
+    if (g_shared_n == 0) {
+        atexit(shared_writeback);
+        /* Guests like a Flash title run until stopped, and a hard kill skips
+         * atexit — so the write-back also rides the console control events
+         * (Ctrl+C, window close), which give a handler a few seconds before
+         * termination. Part of the stopgap, dies with it. */
+        SetConsoleCtrlHandler(shared_ctrl, TRUE);
+    }
+    g_shared[g_shared_n].at  = at;
+    g_shared[g_shared_n].len = len;
+    g_shared[g_shared_n].h   = dup;
+    g_shared[g_shared_n].off = off;
+    g_shared_n++;
+    gp_log("map_shared: STOPGAP private mapping of %zu bytes at %p — "
+           "write-back at exit; live sharing needs the one-process design\n",
+           len, at);
+    return 0;
 }
+/* ==== end of stopgap ====================================================== */
 
 int gp_poll_readable(gp_file **fs, int n, int timeout_ms, unsigned char *ready)
 {
