@@ -80,3 +80,26 @@ AF_UNIX socket that two threads poll at 1 Hz. A five-minute diff of traces
 at the divergence point should name the carrier; this box can then either
 provide that carrier honestly or wait for the one-process design, whichever
 the answer implies.
+
+## POSTSCRIPT, same day: it renders
+
+The Linux side's trace answered the question and reframed it: Pet Pad rests at
+vsync=2 on BOTH platforms — the engine was never stuck, and "zero ioctls in
+steady state" was this title's normal shape, not a missing kick. The black
+frame was the stopgap's structural failure: fb0.bin is mapped at TWO guest
+addresses, MAP_SHARED views alias on Linux, and private copies cannot — the
+guest rendered into one copy while the write-back flushed the other.
+
+The fix is real shared views on Windows 7 API: the guest's 4 GiB is now
+reserved as 64 KB chunks (one VirtualAlloc each — MEM_RELEASE cannot split a
+single reservation, and that unsplittability was the entire obstacle), and
+gp_map_shared releases exactly the covering chunks and MapViewOfFileEx's into
+the hole. Views of one local file alias through its single section object, so
+the double mapping behaves exactly as Linux's MAP_SHARED — and coherence
+means tools/fbshot.py reads LIVE pixels from a running guest, no write-back,
+nothing to flush. The release-then-map race window is accepted and fails
+loudly if it ever fires.
+
+Two frames captured 20 seconds apart from the live guest show the dog
+walking. A LeapPad Flash title, rendering and animating on Windows, through
+an ARM JIT and a hand-written syscall layer. The stopgap is deleted.

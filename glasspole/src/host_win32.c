@@ -84,14 +84,87 @@ static int widen(const char *u8, WCHAR *w, int cap)
 
 /* ---- address space ------------------------------------------------------- */
 
+/* THE RESERVATION IS CHUNKED, and that is what makes real shared mappings
+ * possible on Windows 7. A single 4 GiB MEM_RESERVE cannot be broken up —
+ * MEM_RELEASE frees all of it or none, and MapViewOfFileEx cannot place a
+ * view inside it. Pre-1803 Windows has no placeholders. So the guest's space
+ * is reserved as one 64 KB VirtualAlloc per chunk: same address span, same
+ * protection against the host allocator, but any chunk can individually be
+ * released and a file view mapped over it. That is how gp_map_shared gets
+ * genuine aliasing — Pet Pad maps its framebuffer at two guest addresses and
+ * renders through one while reading the other, which no private copy can
+ * reproduce.
+ *
+ * The cost: one syscall per chunk at reserve time (65,536 for 4 GiB, tens of
+ * milliseconds, once), and commit/protect/decommit must walk chunk by chunk
+ * because none of the Virtual* calls may span separate allocations.
+ *
+ * ONE live chunked reservation is supported, because exactly one exists — the
+ * guest space. A second gp_reserve while one is live falls back to a plain
+ * unsplittable reservation and says so.
+ *
+ * The release-then-map window in gp_map_shared is a real race against any
+ * other thread of OUR process allocating (dynarmic's code cache included).
+ * It is accepted: the guest maps its framebuffers during early boot, the
+ * window is microseconds, and this is how emulators lived before Windows 10.
+ * A lost race fails loudly rather than mapping elsewhere. */
+#define GP_CHUNK       GP_ALLOC_GRAN
+#define GP_MAX_VIEWS   32
+
+static uint8_t *g_res_base;
+static size_t   g_res_chunks;
+static uint8_t *g_chunk_is_view;    /* one byte per chunk, calloc'd at reserve */
+
+static struct { void *at; size_t chunks; HANDLE hmap; } g_view[GP_MAX_VIEWS];
+static int g_view_n;
+
+static int chunk_of(void *p)
+{
+    if (!g_res_base || (uint8_t *)p < g_res_base
+        || (uint8_t *)p >= g_res_base + g_res_chunks * (size_t)GP_CHUNK)
+        return -1;
+    return (int)(((uint8_t *)p - g_res_base) / GP_CHUNK);
+}
+
 void *gp_reserve(void *at, size_t size)
 {
-    /* MEM_RESERVE claims address space and commits nothing; a touch faults
-     * until gp_commit says otherwise — the exact analogue of the POSIX
-     * backend's PROT_NONE + MAP_NORESERVE. With a non-NULL hint VirtualAlloc
-     * either delivers that address or fails, so the posix backend's
-     * "hint means exactly there" check comes free. */
-    return VirtualAlloc(at, size, MEM_RESERVE, PAGE_NOACCESS);
+    /* Find a hole first with one big probe, then re-take it chunk by chunk.
+     * Between the free and the loop another thread could steal a chunk; that
+     * is the same accepted window as in gp_map_shared, and it is rolled back
+     * loudly rather than papered over. */
+    void *probe;
+    uint8_t *b;
+    size_t n, i;
+
+    if (g_res_base)     /* the one chunked reservation is taken — see above */
+        return VirtualAlloc(at, size, MEM_RESERVE, PAGE_NOACCESS);
+
+    probe = VirtualAlloc(at, size, MEM_RESERVE, PAGE_NOACCESS);
+    if (!probe) return NULL;
+    if (at && probe != at) { VirtualFree(probe, 0, MEM_RELEASE); return NULL; }
+    VirtualFree(probe, 0, MEM_RELEASE);
+
+    b = probe;
+    n = (size + GP_CHUNK - 1) / GP_CHUNK;
+    for (i = 0; i < n; i++) {
+        if (!VirtualAlloc(b + i * (size_t)GP_CHUNK, GP_CHUNK,
+                          MEM_RESERVE, PAGE_NOACCESS)) {
+            gp_log("reserve: lost chunk %zu of %zu to a racing allocation\n",
+                   i, n);
+            while (i--)
+                VirtualFree(b + i * (size_t)GP_CHUNK, 0, MEM_RELEASE);
+            return NULL;
+        }
+    }
+    g_chunk_is_view = calloc(n, 1);
+    if (!g_chunk_is_view) {
+        for (i = 0; i < n; i++)
+            VirtualFree(b + i * (size_t)GP_CHUNK, 0, MEM_RELEASE);
+        return NULL;
+    }
+    g_res_base   = b;
+    g_res_chunks = n;
+    return b;
 }
 
 static DWORD prot_to_win(int prot)
@@ -110,33 +183,78 @@ static DWORD prot_to_win(int prot)
     }
 }
 
-int gp_commit(void *addr, size_t len, int prot)
+/* Apply one operation across [addr, addr+len) without ever spanning two
+ * allocations — chunk by chunk inside the chunked reservation, one call
+ * outside it. op: 0 commit, 1 protect, 2 decommit. */
+static int mem_walk(void *addr, size_t len, int prot, int op)
 {
-    /* Also the re-protect path: committing an already-committed page with a
-     * new protection is documented to just apply the protection. */
-    return VirtualAlloc(addr, len, MEM_COMMIT, prot_to_win(prot)) ? 0 : err();
+    uint8_t *p   = addr;
+    uint8_t *end = p + len;
+
+    if (chunk_of(addr) < 0) {           /* not ours: the old single calls */
+        DWORD old;
+        switch (op) {
+        case 0:  return VirtualAlloc(addr, len, MEM_COMMIT, prot_to_win(prot)) ? 0 : err();
+        case 1:  return VirtualProtect(addr, len, prot_to_win(prot), &old) ? 0 : err();
+        default: return VirtualFree(addr, len, MEM_DECOMMIT) ? 0 : err();
+        }
+    }
+    while (p < end) {
+        uint8_t *cend = g_res_base
+            + ((size_t)(chunk_of(p) + 1)) * (size_t)GP_CHUNK;
+        size_t piece = (size_t)((cend < end ? cend : end) - p);
+        int view = g_chunk_is_view[chunk_of(p)];
+        DWORD old;
+
+        switch (op) {
+        case 0:
+            /* A view's pages are committed by the section itself; commit
+             * there means "give it this protection". */
+            if (view) {
+                if (!VirtualProtect(p, piece, prot_to_win(prot), &old))
+                    return err();
+            } else if (!VirtualAlloc(p, piece, MEM_COMMIT, prot_to_win(prot)))
+                return err();
+            break;
+        case 1:
+            if (!VirtualProtect(p, piece, prot_to_win(prot), &old))
+                return err();
+            break;
+        default:
+            /* Decommitting a view is not a thing; go dark instead, which is
+             * what the guest's munmap observably wanted. */
+            if (view) {
+                if (!VirtualProtect(p, piece, PAGE_NOACCESS, &old))
+                    return err();
+            } else if (!VirtualFree(p, piece, MEM_DECOMMIT))
+                return err();
+            break;
+        }
+        p += piece;
+    }
+    return 0;
 }
 
-int gp_protect(void *addr, size_t len, int prot)
-{
-    DWORD old;
-    return VirtualProtect(addr, len, prot_to_win(prot), &old) ? 0 : err();
-}
-
-int gp_decommit(void *addr, size_t len)
-{
-    /* MEM_DECOMMIT returns the pages but keeps the range reserved, which is
-     * the entire point — see host.h. */
-    return VirtualFree(addr, len, MEM_DECOMMIT) ? 0 : err();
-}
+int gp_commit(void *addr, size_t len, int prot)   { return mem_walk(addr, len, prot, 0); }
+int gp_protect(void *addr, size_t len, int prot)  { return mem_walk(addr, len, prot, 1); }
+int gp_decommit(void *addr, size_t len)           { return mem_walk(addr, len, 0, 2); }
 
 int gp_release(void *base, size_t size)
 {
-    /* MEM_RELEASE demands the reservation's base and a size of ZERO — passing
-     * the real size is an error. The parameter exists for the POSIX backend,
-     * whose munmap needs it. */
-    (void)size;
-    return VirtualFree(base, 0, MEM_RELEASE) ? 0 : err();
+    size_t i;
+    if (base != g_res_base)
+        { (void)size; return VirtualFree(base, 0, MEM_RELEASE) ? 0 : err(); }
+    for (i = 0; i < (size_t)g_view_n; i++) {
+        UnmapViewOfFile(g_view[i].at);
+        CloseHandle(g_view[i].hmap);
+    }
+    g_view_n = 0;
+    for (i = 0; i < g_res_chunks; i++)
+        if (!g_chunk_is_view[i])
+            VirtualFree(g_res_base + i * (size_t)GP_CHUNK, 0, MEM_RELEASE);
+    free(g_chunk_is_view);
+    g_res_base = NULL; g_res_chunks = 0; g_chunk_is_view = NULL;
+    return 0;
 }
 
 /* ---- files --------------------------------------------------------------- */
@@ -147,89 +265,77 @@ struct gp_file {
     int     append;
 };
 
-/* ==== STOPGAP — NOT THE DESIGN =============================================
+/* REAL shared views, on Windows 7 API. The stopgap that lived here — a
+ * private copy with a write-back at exit — could not survive contact with
+ * Pet Pad, which maps its framebuffer at TWO guest addresses and renders
+ * through one while reading the other. Private copies cannot alias; the
+ * write-back flushed the copy nothing drew into, and the screenshot was
+ * black while the engine ran perfectly.
  *
- * gp_map_shared here is a PRIVATE mapping with a write-back at exit, and that
- * is a stopgap in the fullest sense: it is behaviourally correct only while
- * NOBODY ELSE IS LOOKING. There is no separate viewer process on Windows yet,
- * so "shared with other processes" has no observer to disappoint — the guest
- * reads back its own writes, and when it exits the pages are written into the
- * file, so tools/fbshot.py can read the final frame out of fb0.bin.
+ * The chunked reservation (see gp_reserve) is what makes the real thing
+ * possible without VirtualAlloc2: release exactly the covering chunks and
+ * MapViewOfFileEx into the hole. Views of one local file alias through the
+ * file's single section, whichever handles they came from — so the guest's
+ * double mapping behaves exactly as MAP_SHARED does on Linux, other
+ * processes reading the file see live pages, and there is nothing to flush.
  *
- * The moment a viewer wants LIVE pixels this is wrong by construction, and no
- * amount of flushing fixes it — the real answer is the one-process design,
- * where the file stops existing and the viewer reads guest memory directly.
- * Placing a real file view inside our reservation would need VirtualAlloc2 /
- * MapViewOfFile3 (Windows 10 1803+), which the design deliberately avoids.
- * Do not extend this; replace it. */
-#define GP_MAX_SHARED 16
-static struct {
-    void    *at;
-    size_t   len;
-    HANDLE   h;          /* our own duplicate: survives the guest's close() */
-    uint64_t off;
-} g_shared[GP_MAX_SHARED];
-static int g_shared_n;
-
-static void shared_writeback(void)
-{
-    int i;
-    for (i = 0; i < g_shared_n; i++) {
-        LARGE_INTEGER p;
-        DWORD n;
-        p.QuadPart = (LONGLONG)g_shared[i].off;
-        if (SetFilePointerEx(g_shared[i].h, p, NULL, FILE_BEGIN))
-            WriteFile(g_shared[i].h, g_shared[i].at,
-                      (DWORD)g_shared[i].len, &n, NULL);
-        FlushFileBuffers(g_shared[i].h);
-    }
-}
-
-static BOOL WINAPI shared_ctrl(DWORD ev)
-{
-    (void)ev;
-    shared_writeback();
-    return FALSE;               /* then let the default handler terminate */
-}
-
+ * Both length and the covering hole are rounded up to whole chunks: a view
+ * shorter than its chunk span would leave a sub-64 KB tail of unreserved
+ * space inside the guest, which MEM_RESERVE cannot take back (it rounds to
+ * granularity) and the host allocator eventually would. The file grows to
+ * match, which for the shim's ftruncated arenas means at most a chunk of
+ * zero tail. */
 int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
 {
-    HANDLE dup = NULL;
-    int64_t n;
-    int e;
+    size_t first, n, i;
+    HANDLE hmap;
+    void *v;
+    uint64_t end;
 
-    if (g_shared_n >= GP_MAX_SHARED) return GP_ENOMEM;
+    (void)prot;   /* census maps are RW; the view is RW; mprotect may narrow */
 
-    /* Commit writable first — the fill below writes — then drop to the
-     * requested protection. */
-    if ((e = gp_commit(at, len, GP_PROT_READ | GP_PROT_WRITE)) < 0) return e;
-    memset(at, 0, len);
-    n = gp_pread(f, at, len, off);          /* short read = EOF; rest stays 0 */
-    if (n < 0) return (int)n;
-    if ((e = gp_protect(at, len, prot)) < 0) return e;
+    if (g_view_n >= GP_MAX_VIEWS) return GP_ENOMEM;
+    if (chunk_of(at) < 0 || ((uintptr_t)at % GP_CHUNK) != 0
+        || (off % GP_CHUNK) != 0)
+        return GP_EINVAL;
 
-    if (!DuplicateHandle(GetCurrentProcess(), f->h, GetCurrentProcess(),
-                         &dup, 0, FALSE, DUPLICATE_SAME_ACCESS))
-        return err();
-    if (g_shared_n == 0) {
-        atexit(shared_writeback);
-        /* Guests like a Flash title run until stopped, and a hard kill skips
-         * atexit — so the write-back also rides the console control events
-         * (Ctrl+C, window close), which give a handler a few seconds before
-         * termination. Part of the stopgap, dies with it. */
-        SetConsoleCtrlHandler(shared_ctrl, TRUE);
+    first = (size_t)chunk_of(at);
+    n     = (len + GP_CHUNK - 1) / GP_CHUNK;
+    len   = n * (size_t)GP_CHUNK;
+    for (i = 0; i < n; i++)
+        if (g_chunk_is_view[first + i]) {
+            gp_log("map_shared: %p already carries a view — unmap first\n",
+                   (void *)((uint8_t *)at + i * GP_CHUNK));
+            return GP_EINVAL;
+        }
+
+    end = off + len;
+    hmap = CreateFileMappingW(f->h, NULL, PAGE_READWRITE,
+                              (DWORD)(end >> 32), (DWORD)end, NULL);
+    if (!hmap) return err();
+
+    for (i = 0; i < n; i++)
+        VirtualFree((uint8_t *)at + i * (size_t)GP_CHUNK, 0, MEM_RELEASE);
+    v = MapViewOfFileEx(hmap, FILE_MAP_READ | FILE_MAP_WRITE,
+                        (DWORD)(off >> 32), (DWORD)off, len, at);
+    if (!v) {
+        int e = err();
+        gp_log("map_shared: lost %p to a racing allocation — the accepted "
+               "window, but it fired; re-reserving\n", at);
+        for (i = 0; i < n; i++)
+            VirtualAlloc((uint8_t *)at + i * (size_t)GP_CHUNK, GP_CHUNK,
+                         MEM_RESERVE, PAGE_NOACCESS);
+        CloseHandle(hmap);
+        return e;
     }
-    g_shared[g_shared_n].at  = at;
-    g_shared[g_shared_n].len = len;
-    g_shared[g_shared_n].h   = dup;
-    g_shared[g_shared_n].off = off;
-    g_shared_n++;
-    gp_log("map_shared: STOPGAP private mapping of %zu bytes at %p — "
-           "write-back at exit; live sharing needs the one-process design\n",
-           len, at);
+    for (i = 0; i < n; i++)
+        g_chunk_is_view[first + i] = 1;
+    g_view[g_view_n].at     = at;
+    g_view[g_view_n].chunks = n;
+    g_view[g_view_n].hmap   = hmap;
+    g_view_n++;
     return 0;
 }
-/* ==== end of stopgap ====================================================== */
 
 int gp_poll_readable(gp_file **fs, int n, int timeout_ms, unsigned char *ready)
 {
