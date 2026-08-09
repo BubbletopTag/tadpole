@@ -47,16 +47,91 @@
  * interfaces read better with a tight palette than with gradients.
  */
 #define C_VOID      0x0C1E14U     /* behind everything */
-#define C_BAR       0x14301FU     /* menu bar */
-#define C_BAR_HI    0x2A6642U     /* hovered/open bar item */
-#define C_PANEL     0x14301FU     /* dropdown + dialog body */
-#define C_PANEL_HI  0x2A6642U
-#define C_EDGE_LT   0x4E9C6BU     /* bevel light */
-#define C_EDGE_DK   0x08180FU     /* bevel dark */
-#define C_TEXT      0xD8F5E4U
-#define C_TEXT_DIM  0x6E9B80U
-#define C_ACCENT    0x8CE0A6U
-#define C_SHADOW    0x030806U
+/* TWO PALETTES, ONE CODEBASE.
+ *
+ * Tadpole runs the LeapPad's software under qemu-arm. Glasspole runs it under
+ * our own ARM emulator, which is the only option on Windows. They are the same
+ * application and the same viewer, but they are NOT the same product: their
+ * compatibility differs, and a user who is told "Tadpole runs this title"
+ * should not be looking at a screen driven by the other one.
+ *
+ * So the window says which it is, and the chrome changes colour with it —
+ * green for Tadpole, blue for Glasspole. Every call site below is unchanged;
+ * the C_* names now read through the active palette instead of being
+ * compile-time constants, so there is exactly one copy of this code and no
+ * possibility of the two drifting apart.
+ *
+ * The blue is the green rotated towards cyan at the same lightness, so the
+ * layout, contrast and bevels behave identically. */
+struct palette {
+	unsigned bar, bar_hi, panel, panel_hi, edge_lt, edge_dk;
+	unsigned text, text_dim, accent, shadow;
+};
+
+static const struct palette pal_tadpole = {
+	0x14301FU, 0x2A6642U, 0x14301FU, 0x2A6642U, 0x4E9C6BU, 0x08180FU,
+	0xD8F5E4U, 0x6E9B80U, 0x8CE0A6U, 0x030806U
+};
+
+static const struct palette pal_glasspole = {
+	0x142A30U, 0x2A5A66U, 0x142A30U, 0x2A5A66U, 0x4E8C9CU, 0x081418U,
+	0xD8EEF5U, 0x6E8F9BU, 0x8CCFE0U, 0x030608U
+};
+
+static const struct palette *g_pal = &pal_tadpole;
+
+#define C_BAR       (g_pal->bar)      /* menu bar */
+#define C_BAR_HI    (g_pal->bar_hi)   /* hovered/open bar item */
+#define C_PANEL     (g_pal->panel)    /* dropdown + dialog body */
+#define C_PANEL_HI  (g_pal->panel_hi)
+#define C_EDGE_LT   (g_pal->edge_lt)  /* bevel light */
+#define C_EDGE_DK   (g_pal->edge_dk)  /* bevel dark */
+#define C_TEXT      (g_pal->text)
+#define C_TEXT_DIM  (g_pal->text_dim)
+#define C_ACCENT    (g_pal->accent)
+#define C_SHADOW    (g_pal->shadow)
+
+/* WHICH PRODUCT IS THIS?
+ *
+ * Decided once, at startup, from what is actually going to run the guest:
+ *
+ *   1. TADPOLE_BRAND, if set, wins. An escape hatch for testing either look.
+ *   2. On Windows it is always Glasspole. qemu-arm's user mode cannot exist
+ *      there, so there is nothing else it could be.
+ *   3. TADPOLE_QEMU naming a glasspole binary — that is how tadpole.sh selects
+ *      the emulator, so it is the most direct statement of intent available.
+ *   4. Otherwise Tadpole, which is the historical default and stays the
+ *      default: a source checkout with qemu installed behaves as it always has.
+ */
+int ui_brand_is_glasspole(void)
+{
+	static int cached = -1;
+	if (cached >= 0) return cached;
+
+	const char *b = getenv("TADPOLE_BRAND");
+	if (b && *b) {
+		cached = (strcmp(b, "glasspole") == 0);
+		return cached;
+	}
+#ifdef _WIN32
+	cached = 1;
+	return cached;
+#else
+	const char *q = getenv("TADPOLE_QEMU");
+	cached = (q && *q && strstr(q, "glasspole") != NULL);
+	return cached;
+#endif
+}
+
+const char *ui_brand_name(void)
+{
+	return ui_brand_is_glasspole() ? "Glasspole" : "Tadpole";
+}
+
+void ui_brand_apply(void)
+{
+	g_pal = ui_brand_is_glasspole() ? &pal_glasspole : &pal_tadpole;
+}
 
 struct rgb { Uint8 r, g, b; };
 
@@ -465,6 +540,28 @@ static void prereq_check(struct prereq *p)
 			if (access(cand, X_OK) == 0) p->fwtools = 1;
 		}
 	}
+	/* GLASSPOLE COUNTS AS AN EMULATOR. Without this the wizard is correct but
+	 * useless on Windows: qemu-arm's user mode cannot exist there, so the
+	 * check failed, and a machine that could run every Flash title was told it
+	 * was missing a dependency it can never have.
+	 *
+	 * TADPOLE_QEMU is honoured first because that is how tadpole.sh chooses,
+	 * then the build directory, with and without the .exe suffix. */
+	if (!p->qemu) {
+		const char *q = getenv("TADPOLE_QEMU");
+		if (q && *q && access(q, X_OK) == 0) p->qemu = 1;
+	}
+	if (!p->qemu) {
+		char cand[PATHMAX * 2];
+		snprintf(cand, sizeof(cand), "%s/glasspole/build/glasspole", g_proj);
+		if (access(cand, X_OK) == 0) p->qemu = 1;
+		if (!p->qemu) {
+			snprintf(cand, sizeof(cand), "%s/glasspole/build/glasspole.exe", g_proj);
+			if (access(cand, X_OK) == 0) p->qemu = 1;
+		}
+	}
+	if (!p->qemu)
+		p->qemu = which_exists("glasspole");
 	if (!p->qemu)
 		p->qemu = which_exists("qemu-arm");
 	if (!p->fwtools)
@@ -1314,8 +1411,15 @@ void ui_init(SDL_Renderer *ren, const char *project_dir)
 	snprintf(g_proj, sizeof(g_proj), "%s", project_dir);
 	font_build(ren);
 	menu_layout();
-	path_join(p, sizeof(p), g_proj, "tadpole.png");
+	/* One logo per brand, beside each other at the project root. */
+	path_join(p, sizeof(p), g_proj,
+	          ui_brand_is_glasspole() ? "glasspole.png" : "tadpole.png");
 	logo_load(ren, p);
+	if (!g_logo && ui_brand_is_glasspole()) {
+		/* Rather than draw nothing if the Glasspole art is missing. */
+		path_join(p, sizeof(p), g_proj, "tadpole.png");
+		logo_load(ren, p);
+	}
 	snprintf(g_status, sizeof(g_status), "idle");
 	/* SDL delivers SDL_TEXTINPUT only while text input is started. Enabled
 	 * once, here, rather than toggled per field: the name box is the only
@@ -1861,7 +1965,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			SDL_Rect dst = { lx, ly, 52, 52 };
 			SDL_RenderCopy(r, g_logo, NULL, &dst);
 		}
-		text(r, lx + 62, ly + 2,  "Tadpole", C_ACCENT);
+		text(r, lx + 62, ly + 2,  ui_brand_name(), C_ACCENT);
 		text(r, lx + 62, ly + 14, "LeapPad2 emulator", C_TEXT);
 		text(r, lx + 62, ly + 26, "NXP3200 / VALENCIA", C_TEXT_DIM);
 		/* WHICH BUILD THIS IS. Without it, "check for updates said I am up to
@@ -2081,10 +2185,12 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_WIZARD: {
 		struct prereq pq;
 		int bx = d.x + 62, by = d.y + 20, i2;
-		static const char *TITLES[WIZ_PAGES] = {
-			"Welcome to Tadpole", "System files", "Who is playing?",
+		char welcome[48];
+		const char *TITLES[WIZ_PAGES] = {
+			welcome, "System files", "Who is playing?",
 			"Games", "Ready"
 		};
+		snprintf(welcome, sizeof(welcome), "Welcome to %s", ui_brand_name());
 		prereq_check(&pq);
 
 		/* Banner down the left — the wizard's whole visual signature. */
@@ -2093,7 +2199,19 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			SDL_Rect dst = { d.x + 8, d.y + 20, 40, 40 };
 			SDL_RenderCopy(r, g_logo, NULL, &dst);
 		}
-		text(r, d.x + 6, d.y + 66, "TADPOLE", C_ACCENT);
+		{
+			/* CENTRED, not fixed at +6. The banner is 56px and the wordmark
+			 * is now variable: TADPOLE is seven glyphs, GLASSPOLE is nine,
+			 * and at GLYPH_ADV the longer one ran past the banner edge. */
+			char mark[16]; size_t mi; int mw, mx;
+			snprintf(mark, sizeof(mark), "%s", ui_brand_name());
+			for (mi = 0; mark[mi]; mi++)
+				if (mark[mi] >= 'a' && mark[mi] <= 'z') mark[mi] -= 32;
+			mw = (int)strlen(mark) * GLYPH_ADV;
+			mx = d.x + 1 + (56 - mw) / 2;
+			if (mx < d.x + 1) mx = d.x + 1;
+			text(r, mx, d.y + 66, mark, C_ACCENT);
+		}
 		for (i2 = 0; i2 < WIZ_PAGES; i2++)
 			text(r, d.x + 8, d.y + 80 + i2 * 9,
 			     i2 == g_wiz_page ? GL_SUB : " ",
@@ -2106,7 +2224,12 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		switch (g_wiz_page) {
 		case WIZ_WELCOME:
 			text(r, bx, by,      "A LeapPad2 emulator.", C_TEXT);
-			text(r, bx, by + 14, "Tadpole contains NO LeapFrog code.", C_TEXT);
+			{
+				char line[64];
+				snprintf(line, sizeof(line),
+				         "%s contains NO LeapFrog code.", ui_brand_name());
+				text(r, bx, by + 14, line, C_TEXT);
+			}
 			text(r, bx, by + 24, "You supply the system files and", C_TEXT_DIM);
 			text(r, bx, by + 34, "games, from hardware you own.", C_TEXT_DIM);
 			text(r, bx, by + 50, "Two steps, and this wizard does", C_TEXT_DIM);
@@ -2561,7 +2684,13 @@ void ui_draw_idle(SDL_Renderer *ren, int lw, int lh)
 		SDL_Rect dst = { lw / 2 - 32, cy - 46, 64, 64 };
 		SDL_RenderCopy(ren, g_logo, NULL, &dst);
 	}
-	text_c(ren, 0, lw, cy + 26, "TADPOLE", C_ACCENT);
+	{
+		char mark[16]; size_t mi;
+		snprintf(mark, sizeof(mark), "%s", ui_brand_name());
+		for (mi = 0; mark[mi]; mi++)
+			if (mark[mi] >= 'a' && mark[mi] <= 'z') mark[mi] -= 32;
+		text_c(ren, 0, lw, cy + 26, mark, C_ACCENT);
+	}
 	text_c(ren, 0, lw, cy + 40, "File " GL_SUB " Run System Menu", C_TEXT_DIM);
 }
 

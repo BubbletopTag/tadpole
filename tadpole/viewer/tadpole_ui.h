@@ -169,4 +169,15 @@ void  ui_draw_idle(SDL_Renderer *ren, int lw, int lh);
  * tadpole_ui.c. Used by --ui-shot. */
 void  ui_debug_state(const char *spec);
 
+/* WHICH PRODUCT THIS IS PRESENTING ITSELF AS.
+ *
+ * Tadpole runs the guest under qemu-arm; Glasspole runs it under our own ARM
+ * emulator, which is the only option on Windows. Same viewer, same code, but
+ * different compatibility — so the window title and the chrome colour say
+ * which one is actually behind the picture. See tadpole_ui.c for how it is
+ * decided. Call ui_brand_apply() before drawing anything. */
+int         ui_brand_is_glasspole(void);
+const char *ui_brand_name(void);
+void        ui_brand_apply(void);
+
 #endif /* TADPOLE_UI_H */

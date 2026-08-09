@@ -2004,7 +2004,8 @@ int main(int argc, char **argv)
 	{
 		int ww = (rotate == 90 || rotate == 270) ? h : w;
 		int wh = (rotate == 90 || rotate == 270) ? w : h;
-		win = SDL_CreateWindow("Tadpole", SDL_WINDOWPOS_CENTERED,
+		ui_brand_apply();
+		win = SDL_CreateWindow(ui_brand_name(), SDL_WINDOWPOS_CENTERED,
 		                       SDL_WINDOWPOS_CENTERED,
 		                       ww * scale, (wh + UI_BAR_H) * scale,
 		                       SDL_WINDOW_RESIZABLE);
