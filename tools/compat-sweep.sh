@@ -27,7 +27,11 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(dirname "$HERE")"
-PF="$PROJ/runtime/sysroot/LF/Bulk/ProgramFiles"
+# A worker gets its own sysroot so concurrent guests do not share /tmp,
+# /flags and save data — see tools/worker-sysroot.sh for why that matters.
+SYSROOT="${COMPAT_SYSROOT:-$PROJ/runtime/sysroot}"
+PF="$SYSROOT/LF/Bulk/ProgramFiles"
+TDIR="/tmp/tadpole-compat-$$"
 
 EARLY="${COMPAT_EARLY:-12}"
 LATE="${COMPAT_LATE:-35}"
@@ -53,7 +57,10 @@ reap() {
     for p in $(pgrep -x qemu-arm 2>/dev/null); do
         d=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null |
             grep '^TADPOLE_DIR=' | cut -d= -f2)
-        case "$d" in /tmp/tadpole-compat-*) kill -9 "$p" 2>/dev/null ;; esac
+        # EXACT match, not a prefix. A prefix would make every worker reap
+        # every other worker's guests, which is the one way a parallel sweep
+        # can quietly produce nonsense instead of failing.
+        [ "$d" = "$TDIR" ] && kill -9 "$p" 2>/dev/null
     done
 }
 trap 'reap; exit 130' INT TERM
@@ -85,11 +92,10 @@ for d in "$PF"/*/; do
     if [ "$RESUME" = 1 ] && cut -f1 "$TSV" | grep -qx "$pkg"; then continue; fi
 
     total=$((total + 1))
-    TDIR="/tmp/tadpole-compat-$$"
     cd="$OUT/shots/$pkg"; mkdir -p "$cd"
     reap; rm -rf "$TDIR"; mkdir -p "$TDIR"
 
-    TADPOLE_DIR="$TDIR" TADPOLE_CRASHDIR="$cd" setsid \
+    TADPOLE_DIR="$TDIR" TADPOLE_CRASHDIR="$cd" TADPOLE_SYSROOT="$SYSROOT" setsid \
         "$PROJ/tadpole.sh" --app "$pkg" --no-viewer \
         > "$cd/run.log" 2>&1 < /dev/null &
 
@@ -102,6 +108,24 @@ for d in "$PF"/*/; do
         sleep $((LATE - EARLY))
         read -r ll lc <<<"$(stat_of "$TDIR")"
         "$HERE/fbshot.py" -d "$TDIR" "$cd/late.png" >/dev/null 2>&1
+
+        # GIVE A SLOW TITLE MORE TIME BEFORE CALLING IT BLANK.
+        #
+        # The deadline is wall-clock, but how far a title has got by then is
+        # not: running four guests at once put Clam Prix at 3445 colours where
+        # it reaches 8637 on its own — still loading, not blank. A fixed clock
+        # therefore turns contention into false verdicts, and the more workers
+        # the worse it reads. So only when the picture still looks empty, wait
+        # again and re-sample; a title that was already drawing costs nothing.
+        if [ "${lc:-0}" -lt 64 ] || [ "${ll:-0}" -lt 3 ]; then
+            local_wait=$(( (LATE - EARLY) * 2 ))
+            sleep "$local_wait"
+            read -r ll2 lc2 <<<"$(stat_of "$TDIR")"
+            if [ "${lc2:-0}" -gt "${lc:-0}" ]; then
+                ll="$ll2"; lc="$lc2"
+                "$HERE/fbshot.py" -d "$TDIR" "$cd/late.png" >/dev/null 2>&1
+            fi
+        fi
     fi
     reap; rm -rf "$TDIR"
 

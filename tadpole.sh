@@ -296,6 +296,18 @@ guest() {
       # TADPOLE_STRACE=1 prints every GUEST SYSCALL. Needed because the shim
       # only sees open/fopen — stat, access and opendir bypass it, so "the
       # guest never opened X" is NOT a conclusion the shim log can support.
+      # NO CORE DUMPS BY DEFAULT.
+      #
+      # A crashing guest drops a qemu core into its cwd, which is the sysroot.
+      # 87 of them had accumulated here — 7.6 GB — and none had ever been
+      # opened, because the shim writes its own symbolised report and gdb
+      # cannot read these anyway: every r-x segment comes out with
+      # p_filesz == 0 and there is no NT_FILE note to map them back (see
+      # tadpole_crash.c). Running many instances at once would multiply that
+      # by the worker count.
+      #
+      # TADPOLE_CORES=1 restores them for anyone who does want to try.
+      [ -n "${TADPOLE_CORES:-}" ] || ulimit -c 0 2>/dev/null || true
       exec "$QEMU" -s 67108864 -L "$SYSROOT" ${TADPOLE_STRACE:+-strace} \
            ${TADPOLE_TSLIB:+-E TSLIB_REAL=1} \
            ${TADPOLE_TSLIB:--E TSLIB_CONFFILE=/nonexistent-ts.conf} \
