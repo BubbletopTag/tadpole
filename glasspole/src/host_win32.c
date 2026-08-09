@@ -293,31 +293,43 @@ static uint32_t synth_mode(DWORD attr)
          | ((attr & FILE_ATTRIBUTE_READONLY) ? 0555u : 0755u);
 }
 
-int gp_stat(const char *path, struct gp_statbuf *st)
-{
-    WCHAR w[GP_WPATH];
-    WIN32_FILE_ATTRIBUTE_DATA fad;
-    int e;
-    if ((e = widen(path, w, GP_WPATH)) < 0) return e;
-    if (!GetFileAttributesExW(w, GetFileExInfoStandard, &fad)) return err();
-    st->size     = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
-    st->mtime_ns = ft_ns(fad.ftLastWriteTime);
-    st->mode     = synth_mode(fad.dwFileAttributes);
-    st->is_dir   = (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
-    if (st->is_dir) st->size = 0;
-    return 0;
-}
-
-int gp_fstat(gp_file *f, struct gp_statbuf *st)
+/* (dev, ino) are load-bearing — see host.h. On Windows file identity lives on
+ * HANDLES, not paths: GetFileAttributesExW cannot produce the volume serial or
+ * file index, so even the path-based stat opens a handle. Zero desired access
+ * makes it an attribute-only open that needs no read permission, and
+ * BACKUP_SEMANTICS lets it open directories. */
+static int fill_from_handle(HANDLE h, struct gp_statbuf *st)
 {
     BY_HANDLE_FILE_INFORMATION bi;
-    if (!GetFileInformationByHandle(f->h, &bi)) return err();
+    if (!GetFileInformationByHandle(h, &bi)) return err();
     st->size     = ((uint64_t)bi.nFileSizeHigh << 32) | bi.nFileSizeLow;
     st->mtime_ns = ft_ns(bi.ftLastWriteTime);
+    st->dev      = bi.dwVolumeSerialNumber;
+    st->ino      = ((uint64_t)bi.nFileIndexHigh << 32) | bi.nFileIndexLow;
     st->mode     = synth_mode(bi.dwFileAttributes);
     st->is_dir   = (bi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
     if (st->is_dir) st->size = 0;
     return 0;
+}
+
+int gp_stat(const char *path, struct gp_statbuf *st)
+{
+    WCHAR w[GP_WPATH];
+    HANDLE h;
+    int e;
+    if ((e = widen(path, w, GP_WPATH)) < 0) return e;
+    h = CreateFileW(w, 0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (h == INVALID_HANDLE_VALUE) return err();
+    e = fill_from_handle(h, st);
+    CloseHandle(h);
+    return e;
+}
+
+int gp_fstat(gp_file *f, struct gp_statbuf *st)
+{
+    return fill_from_handle(f->h, st);
 }
 
 int gp_truncate(gp_file *f, uint64_t size)
@@ -334,6 +346,19 @@ int gp_truncate(gp_file *f, uint64_t size)
 int gp_sync(gp_file *f)
 {
     return FlushFileBuffers(f->h) ? 0 : err();
+}
+
+int gp_mkfifo(const char *path, uint32_t mode)
+{
+    /* Deliberately not implemented — see host.h. Win32 named pipes live in
+     * \\.\pipe\, not on the filesystem where the guest's open() will look, so
+     * a FIFO here would be a lie with a delayed failure. The real answer is
+     * the one-process design, where the shim's event nodes become an
+     * in-memory queue. Until then, honesty: */
+    (void)mode;
+    gp_log("mkfifo(%s): no FIFOs on Win32 — needs the one-process input "
+           "queue; returning ENOSYS\n", path);
+    return GP_ENOSYS;
 }
 
 int gp_mkdir(const char *path, uint32_t mode)
@@ -600,6 +625,37 @@ void gp_sleep_ns(uint64_t ns)
     if (!period_set) { timeBeginPeriod(1); period_set = 1; }
     ms = (ns + 999999u) / 1000000u;
     Sleep(ms > 0x7ffffffeu ? 0x7ffffffeu : (DWORD)ms);
+}
+
+/* ---- guest faults --------------------------------------------------------
+ * The Windows shape of host_posix.c's SIGSEGV handler. A vectored handler
+ * sees the exception before any frame-based (__try) handling, on the faulting
+ * thread's own stack — which is intact, because a GUEST stack overrun is an
+ * ordinary access violation inside the 4 GiB reservation, not a host stack
+ * fault, so no alternate stack is needed where POSIX required one. A host
+ * EXCEPTION_STACK_OVERFLOW is not ours to explain and is passed on. */
+
+static gp_fault_fn g_fault_fn;
+
+static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *xp)
+{
+    if (xp->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
+        return EXCEPTION_CONTINUE_SEARCH;
+    if (g_fault_fn)
+        g_fault_fn((void *)(uintptr_t)xp->ExceptionRecord->ExceptionInformation[1]);
+    /* TerminateProcess, not exit(): atexit handlers and stdio flushing after
+     * a memory fault can fault again and hide what was just printed — the
+     * same reasoning as the POSIX backend's _exit(). */
+    TerminateProcess(GetCurrentProcess(), 73);
+    return EXCEPTION_CONTINUE_SEARCH;   /* unreachable */
+}
+
+int gp_install_fault_handler(gp_fault_fn fn)
+{
+    g_fault_fn = fn;
+    /* LAST in the chain (First = 0), reserving the front for the day
+     * dynarmic's fastmem handler needs to claim its own faults before us. */
+    return AddVectoredExceptionHandler(0, fault_veh) ? 0 : GP_EINVAL;
 }
 
 /* ---- odds and ends ------------------------------------------------------- */
