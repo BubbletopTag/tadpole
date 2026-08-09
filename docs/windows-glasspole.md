@@ -81,14 +81,26 @@ supported, so expect that part to just work.
 
 ### What you can and cannot test there
 
-You **can** build and run the ARM test program:
+You **can** build and run the ARM test programs. Note these are `.elf`, not
+`.bin` — the flat-binary loader is gone, replaced by the real ELF loader:
 
 ```
-./build/glasspole.exe build/hello.bin
+./build/glasspole.exe --sysroot . build/hello.elf
+./build/glasspole.exe --sysroot . build/thread.elf
 ```
 
-It should print `hello from an ARM guest` and exit 0. That exercises reserve,
-commit, file open/read/stat, console write and the whole JIT path.
+`hello.elf` prints `hello from an ARM guest` and exits 0. That exercises
+reserve, commit, file open/read/stat, console write and the whole JIT path.
+
+`thread.elf` prints `child thread ran` then `parent saw the child exit`. That
+one is the real test of your backend: it exercises `gp_thread_create`,
+`gp_wait_on` and `gp_wake` — the three functions where Windows differs most
+from Linux, and where the Windows 7 floor is decided. If your condition-variable
+implementation of `gp_wait_on` is wrong, this hangs; if it is right, it prints
+both lines and exits 0.
+
+A relative program path is a HOST path; an absolute one goes through the
+sysroot. That is why `--sysroot .` works above.
 
 You **cannot** run busybox: the rootfs is not in git and never will be, since it
 is LeapFrog's firmware. So "hello.bin runs" is the bar for this task. If you
