@@ -293,7 +293,16 @@ GuestFd *Machine::Fd(int fd) {
 }
 
 std::string Machine::HostPath(const std::string &guest) {
-    if (guest.empty()) return sysroot;
+    /* AN EMPTY PATH IS NOT THE SYSROOT. It used to return it, which made
+     * stat("") succeed — because the sysroot is a directory and it certainly
+     * exists — where every real system answers ENOENT.
+     *
+     * That one line cost most of a day. BaseUtils::FileExists("") came back
+     * true, so CAppManager::LoadNewApp believed a Leapster view frame was
+     * present, wrapped the home screen in it, and asserted in LightningJSON
+     * shortly after. Identical syscalls to qemu, identical files, and a
+     * different answer to a question about a path that was not there. */
+    if (guest.empty()) return std::string();
     /* Relative paths resolve against the guest's cwd, not against the sysroot
      * root. Getting this wrong is invisible until a title chdirs. */
     if (guest[0] != '/') {
