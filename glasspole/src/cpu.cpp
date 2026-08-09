@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <dynarmic/interface/A32/a32.h>
@@ -208,6 +209,11 @@ void RunThread(Thread &t, const std::array<uint32_t, 16> &regs,
      * real hardware rejected, which surfaces months later as one title behaving
      * oddly for no visible reason. */
     conf.arch_version     = Dynarmic::A32::ArchVersion::v7;
+    /* GLASSPOLE_NO_OPT=1 turns every dynarmic optimisation off. A bug that
+     * disappears here is a JIT miscompilation rather than anything this
+     * emulator did, which is otherwise very hard to tell apart. */
+    if (const char *e = std::getenv("GLASSPOLE_NO_OPT"); e && *e == '1')
+        conf.optimizations = Dynarmic::no_optimizations;
     conf.global_monitor   = t.m->monitor;
     conf.processor_id     = processor_id;
     /* Per thread, and pointed at THIS thread's tls fields. */

@@ -53,7 +53,7 @@ enum : uint32_t {
     SYS_sched_setscheduler = 156, SYS_sched_getscheduler = 157,
     SYS_sched_get_priority_max = 159, SYS_sched_get_priority_min = 160,
     SYS_kill = 37, SYS_poll = 168, SYS_sysinfo = 116,
-    SYS_fdatasync = 148, SYS_fsync = 118, SYS_newselect = 142,
+    SYS_fdatasync = 148, SYS_fsync = 118, SYS_newselect = 142, SYS_statfs = 99,
     /* AF_UNIX sockets, implemented in-process. ARM has direct socket calls
      * rather than the old socketcall multiplexer. */
     SYS_socket = 281, SYS_bind = 282, SYS_connect = 283, SYS_listen = 284,
@@ -181,6 +181,7 @@ const char *name_of(uint32_t nr) {
         case SYS_poll: return "poll";               case SYS_sysinfo: return "sysinfo";
         case SYS_fdatasync: return "fdatasync";     case SYS_fsync: return "fsync";
         case SYS_newselect: return "_newselect";     case SYS_rename: return "rename";
+        case SYS_statfs: return "statfs";
         case SYS_getuid32: return "getuid32";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
@@ -1184,6 +1185,28 @@ void gp_syscall(Thread &t) {
     }
 
     case SYS_sched_yield: gp_thread_yield(); ret = 0; break;
+
+    case SYS_statfs: {
+        /* struct statfs, 32-bit ARM: type, bsize, blocks, bfree, bavail,
+         * files, ffree, fsid[2], namelen, frsize, flags, spare[4].
+         *
+         * The numbers describe the CONSOLE's storage rather than the host's,
+         * for the same reason sysinfo does: the guest decides whether it has
+         * room to install or save from these, and reporting a 2 TB host disk
+         * invites it to believe things that are not true on real hardware. */
+        uint32_t *sf = (uint32_t *)m.Ptr(a1);
+        std::memset(sf, 0, 64);
+        sf[0] = 0x858458f6;                  /* RAMFS_MAGIC, near enough */
+        sf[1] = 4096;                        /* bsize */
+        sf[2] = 1024u * 1024;                /* blocks: 4 GB */
+        sf[3] = 512u * 1024;                 /* bfree:  2 GB */
+        sf[4] = 512u * 1024;                 /* bavail */
+        sf[5] = 100000;                      /* files */
+        sf[6] = 50000;                       /* ffree */
+        sf[9] = 255;                         /* namelen */
+        ret = 0;
+        break;
+    }
 
     case SYS_sysinfo: {
         /* struct sysinfo, 32-bit ARM: uptime, loads[3], totalram, freeram,
