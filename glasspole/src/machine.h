@@ -147,6 +147,12 @@ struct Machine {
 
     /* Where the next anonymous mapping goes. A bump allocator is honest about
      * what it is; nothing here is worth more until munmap needs to reuse. */
+    /* The guest's working directory, as a GUEST path. Native titles chdir into
+     * their package and then open relative paths — Data/BookConfig.xml and the
+     * like — so without this they all resolve against / and the title renders
+     * nothing while reporting only that a config failed to load. */
+    std::string cwd = "/";
+
     uint32_t mmap_next = 0;
     uint32_t brk_cur   = 0;
     std::vector<GuestFd> fds;

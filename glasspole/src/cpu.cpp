@@ -292,7 +292,13 @@ GuestFd *Machine::Fd(int fd) {
 
 std::string Machine::HostPath(const std::string &guest) {
     if (guest.empty()) return sysroot;
-    if (guest[0] != '/') return sysroot + "/" + guest;
+    /* Relative paths resolve against the guest's cwd, not against the sysroot
+     * root. Getting this wrong is invisible until a title chdirs. */
+    if (guest[0] != '/') {
+        std::string base = cwd;
+        if (base.empty() || base.back() != '/') base += '/';
+        return sysroot + base + guest;
+    }
 
     /* qemu-user's -L semantics, and they matter more than they look. The
      * sysroot wins when it has the file, and otherwise the path is used as it

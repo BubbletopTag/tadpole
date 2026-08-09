@@ -181,7 +181,7 @@ const char *name_of(uint32_t nr) {
         case SYS_poll: return "poll";               case SYS_sysinfo: return "sysinfo";
         case SYS_fdatasync: return "fdatasync";     case SYS_fsync: return "fsync";
         case SYS_newselect: return "_newselect";     case SYS_rename: return "rename";
-        case SYS_statfs: return "statfs";
+        case SYS_statfs: return "statfs";            case SYS_chdir: return "chdir";
         case SYS_getuid32: return "getuid32";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
@@ -1180,11 +1180,29 @@ void gp_syscall(Thread &t) {
     }
 
     case SYS_getcwd: {
-        const char *cwd = "/";
-        size_t n = std::strlen(cwd) + 1;
+        const size_t n = m.cwd.size() + 1;
         if (a1 < n) { ret = GP_EINVAL; break; }
-        std::memcpy(m.Ptr(a0), cwd, n);
+        std::memcpy(m.Ptr(a0), m.cwd.c_str(), n);
         ret = (int32_t)n;
+        break;
+    }
+
+    case SYS_chdir: {
+        /* Guest-relative chdir is resolved through the CURRENT cwd before it
+         * replaces it, so `chdir("Data")` from a package directory works. */
+        std::string want = m.Str(a0);
+        if (m.trace) tpath = want;
+        std::string target = want;
+        if (!target.empty() && target[0] != '/') {
+            target = m.cwd;
+            if (target.empty() || target.back() != '/') target += '/';
+            target += want;
+        }
+        gp_statbuf st;
+        if (gp_stat(m.HostPath(target).c_str(), &st) < 0) { ret = GP_ENOENT; break; }
+        if (!st.is_dir) { ret = GP_ENOTDIR; break; }
+        m.cwd = target;
+        ret = 0;
         break;
     }
 
