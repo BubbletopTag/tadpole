@@ -788,9 +788,20 @@ int64_t gp_console_write(int fd, const void *buf, size_t len)
 
 void gp_log(const char *fmt, ...)
 {
+    /* msvcrt's unbuffered stderr writes CHARACTER AT A TIME, which turns a
+     * --trace run into an I/O benchmark: ~23 traced syscalls/second, i.e. the
+     * tracer costing three orders of magnitude more than the thing it traces.
+     * Line-buffer it once. The POSIX backend needs none of this — glibc's
+     * unbuffered stderr still writes whole calls. */
+    static int buffered;
     va_list ap;
+    if (!buffered) {
+        setvbuf(stderr, NULL, _IOFBF, 1 << 16);
+        buffered = 1;
+    }
     va_start(ap, fmt);
     fputs("[glasspole] ", stderr);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
+    fflush(stderr);
 }
