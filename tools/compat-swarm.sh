@@ -101,7 +101,7 @@ for i in $(seq 1 "$N"); do
             [ $(( (j - 1) % N + 1 )) = "$i" ] && mine+=("$pkg")
         done
         [ ${#mine[@]} -gt 0 ] || exit 0
-        COMPAT_SYSROOT="$sr" COMPAT_OUT="$OUT/w$i" \
+        COMPAT_SYSROOT="$sr" COMPAT_OUT="$OUT/w$i" COMPAT_EXACT=1 \
             "$HERE/compat-sweep.sh" "${mine[@]}" > "$OUT/w$i.log" 2>&1
         "$HERE/worker-sysroot.sh" --rm "$sr" 2>/dev/null
     ) &

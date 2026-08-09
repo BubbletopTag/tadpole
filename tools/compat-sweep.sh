@@ -70,12 +70,24 @@ stat_of() {                                   # $1 = TADPOLE_DIR -> "lit col"
         sed -n 's/lit \([0-9]*\)% colours \([0-9]*\)/\1 \2/p'
 }
 
+# COMPAT_EXACT=1 matches the whole PackageID instead of any substring of it.
+#
+# Substring matching is right for a human typing "Trolls", and wrong for the
+# swarm, which passes each worker its shard as a list of PackageIDs: one ID or
+# name containing another makes two workers run the same title. It did —
+# "GalleryWidget" is a substring of "StoryGalleryWidget", so 110 titles came
+# back as 111 rows, one of them tested twice and the other worker's slot
+# wasted.
 want() {                                      # $1 = pkg  $2 = name
     [ ${#FILTER[@]} -eq 0 ] && return 0
     local f
     for f in "${FILTER[@]}"; do
-        case "$1" in *"$f"*) return 0 ;; esac
-        case "$2" in *"$f"*) return 0 ;; esac
+        if [ -n "${COMPAT_EXACT:-}" ]; then
+            [ "$1" = "$f" ] && return 0
+        else
+            case "$1" in *"$f"*) return 0 ;; esac
+            case "$2" in *"$f"*) return 0 ;; esac
+        fi
     done
     return 1
 }
