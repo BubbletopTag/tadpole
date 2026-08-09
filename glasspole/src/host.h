@@ -149,8 +149,10 @@ int64_t gp_read (gp_file *f, void *buf, size_t len);
 int64_t gp_write(gp_file *f, const void *buf, size_t len);
 
 /* Positional I/O, so a mapping refill or a readahead never disturbs the file
- * position the guest believes in. Windows has no pread; the backend saves and
- * restores, under its own lock. */
+ * position the guest believes in. Windows has no pread; the backend takes the
+ * offset from an OVERLAPPED, but MEASURED on a synchronous handle that still
+ * moves the file pointer afterwards — so it saves and restores too, under its
+ * own lock. */
 int64_t gp_pread(gp_file *f, void *buf, size_t len, uint64_t off);
 
 #define GP_SEEK_SET 0

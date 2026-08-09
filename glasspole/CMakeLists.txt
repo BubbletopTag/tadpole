@@ -43,7 +43,13 @@ endif()
 add_executable(glasspole src/cpu.cpp src/syscall.cpp src/cp15.cpp src/elf.c ${GP_HOST})
 target_include_directories(glasspole PRIVATE src)
 target_link_libraries(glasspole PRIVATE dynarmic)
-if(NOT WIN32)
+if(WIN32)
+    # bcrypt: gp_random. winmm: timeBeginPeriod, so nanosleep is ~1 ms rather
+    # than ~15.6. Both are system DLLs on every Windows since 7.
+    target_link_libraries(glasspole PRIVATE bcrypt winmm)
+    # Static runtime: one file someone can copy, with no MinGW DLLs beside it.
+    target_link_options(glasspole PRIVATE -static)
+else()
     find_package(Threads REQUIRED)
     target_link_libraries(glasspole PRIVATE Threads::Threads)
 endif()

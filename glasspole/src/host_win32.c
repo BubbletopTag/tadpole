@@ -1,0 +1,635 @@
+/* Glasspole — the Win32 backend of host.h.
+ *
+ * The other half of the bet host.h makes: everything above it is untouched, and
+ * every Linux-ism ends here. GetLastError() becomes a negative Linux errno in
+ * exactly one function; UTF-8 paths widen to UTF-16 and go to the W entry
+ * points, never the A ones; and nothing below calls anything newer than
+ * Windows 7 SP1 — which concretely means no WaitOnAddress (Win8) and no
+ * VirtualAlloc2 (Win10 1803), each avoided the way host.h's comments already
+ * prescribe.
+ *
+ * MEASURED, NOT ASSUMED: on a synchronous handle, ReadFile with an OVERLAPPED
+ * offset honours the offset but MOVES the handle's file pointer afterwards
+ * (verified on this machine, and MSDN agrees: "the system updates the
+ * OVERLAPPED offset and the file pointer"). So gp_pread takes the offset from
+ * OVERLAPPED — one seek fewer than seek/read/seek-back — but still saves and
+ * restores the pointer under the file's lock, or a mapping refill would move
+ * the position the guest believes in.
+ */
+#define WIN32_LEAN_AND_MEAN
+#include "host.h"
+
+#include <windows.h>
+#include <timeapi.h>   /* timeBeginPeriod; LEAN_AND_MEAN strips it from windows.h */
+#include <bcrypt.h>
+#include <process.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* ---- GetLastError() -> the number the guest should see -------------------
+ * The one table the whole interface exists to contain. Grown from what the
+ * calls in this file can actually raise; default EIO, because an error we have
+ * not classified is closer to "the device did something wrong" than to any
+ * more specific claim. */
+static int err_from(DWORD e)
+{
+    switch (e) {
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND:
+    case ERROR_INVALID_NAME:
+    case ERROR_INVALID_DRIVE:
+    case ERROR_BAD_NETPATH:          return GP_ENOENT;
+    case ERROR_ACCESS_DENIED:        return GP_EACCES;
+    case ERROR_SHARING_VIOLATION:
+    case ERROR_LOCK_VIOLATION:
+    case ERROR_BUSY:                 return GP_EBUSY;
+    case ERROR_FILE_EXISTS:
+    case ERROR_ALREADY_EXISTS:       return GP_EEXIST;
+    case ERROR_DIR_NOT_EMPTY:        return GP_ENOTEMPTY;
+    case ERROR_DIRECTORY:            return GP_ENOTDIR;
+    case ERROR_INVALID_HANDLE:       return GP_EBADF;
+    case ERROR_NOT_ENOUGH_MEMORY:
+    case ERROR_OUTOFMEMORY:
+    case ERROR_COMMITMENT_LIMIT:     return GP_ENOMEM;
+    case ERROR_INVALID_PARAMETER:
+    case ERROR_INVALID_FUNCTION:
+    case ERROR_NEGATIVE_SEEK:        return GP_EINVAL;
+    case ERROR_HANDLE_DISK_FULL:
+    case ERROR_DISK_FULL:            return GP_ENOSPC;
+    case ERROR_WRITE_PROTECT:        return GP_EROFS;
+    case ERROR_TOO_MANY_OPEN_FILES:  return GP_EMFILE;
+    case ERROR_NOT_SUPPORTED:
+    case ERROR_CALL_NOT_IMPLEMENTED: return GP_ENOSYS;
+    case ERROR_INVALID_ADDRESS:      return GP_EFAULT;
+    case ERROR_OPERATION_ABORTED:    return GP_EINTR;
+    default:                         return GP_EIO;
+    }
+}
+static int err(void) { return err_from(GetLastError()); }
+
+/* ---- paths ---------------------------------------------------------------
+ * UTF-8 in, UTF-16 out, W entry points only. MB_ERR_INVALID_CHARS on purpose:
+ * a byte sequence that is not UTF-8 names no file this backend can reach, and
+ * ENOENT is the honest answer rather than whatever the ANSI codepage would
+ * have guessed. */
+#define GP_WPATH 4096
+static int widen(const char *u8, WCHAR *w, int cap)
+{
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, u8, -1, w, cap))
+        return GP_ENOENT;
+    return 0;
+}
+
+/* ---- address space ------------------------------------------------------- */
+
+void *gp_reserve(void *at, size_t size)
+{
+    /* MEM_RESERVE claims address space and commits nothing; a touch faults
+     * until gp_commit says otherwise — the exact analogue of the POSIX
+     * backend's PROT_NONE + MAP_NORESERVE. With a non-NULL hint VirtualAlloc
+     * either delivers that address or fails, so the posix backend's
+     * "hint means exactly there" check comes free. */
+    return VirtualAlloc(at, size, MEM_RESERVE, PAGE_NOACCESS);
+}
+
+static DWORD prot_to_win(int prot)
+{
+    /* PAGE_* protections are an enumeration, not a bitmask, and there is no
+     * write-without-read: W rounds up to RW, WX to RWX. The guest cannot tell
+     * — ARM Linux rounds the same way. */
+    switch (prot & (GP_PROT_READ | GP_PROT_WRITE | GP_PROT_EXEC)) {
+    case 0:                                        return PAGE_NOACCESS;
+    case GP_PROT_READ:                             return PAGE_READONLY;
+    case GP_PROT_WRITE:
+    case GP_PROT_READ | GP_PROT_WRITE:             return PAGE_READWRITE;
+    case GP_PROT_EXEC:                             return PAGE_EXECUTE;
+    case GP_PROT_READ | GP_PROT_EXEC:              return PAGE_EXECUTE_READ;
+    default:                                       return PAGE_EXECUTE_READWRITE;
+    }
+}
+
+int gp_commit(void *addr, size_t len, int prot)
+{
+    /* Also the re-protect path: committing an already-committed page with a
+     * new protection is documented to just apply the protection. */
+    return VirtualAlloc(addr, len, MEM_COMMIT, prot_to_win(prot)) ? 0 : err();
+}
+
+int gp_protect(void *addr, size_t len, int prot)
+{
+    DWORD old;
+    return VirtualProtect(addr, len, prot_to_win(prot), &old) ? 0 : err();
+}
+
+int gp_decommit(void *addr, size_t len)
+{
+    /* MEM_DECOMMIT returns the pages but keeps the range reserved, which is
+     * the entire point — see host.h. */
+    return VirtualFree(addr, len, MEM_DECOMMIT) ? 0 : err();
+}
+
+int gp_release(void *base, size_t size)
+{
+    /* MEM_RELEASE demands the reservation's base and a size of ZERO — passing
+     * the real size is an error. The parameter exists for the POSIX backend,
+     * whose munmap needs it. */
+    (void)size;
+    return VirtualFree(base, 0, MEM_RELEASE) ? 0 : err();
+}
+
+/* ---- files --------------------------------------------------------------- */
+
+struct gp_file {
+    HANDLE  h;
+    SRWLOCK lock;    /* orders pread's save/restore against read/write/seek */
+    int     append;
+};
+
+int gp_open(const char *path, int flags, uint32_t mode, gp_file **out)
+{
+    WCHAR w[GP_WPATH];
+    DWORD access = 0, create, fattr = FILE_ATTRIBUTE_NORMAL;
+    DWORD attr;
+    int e, isdir;
+    HANDLE h;
+    gp_file *f;
+
+    (void)mode;   /* permission bits stop meaning anything at this boundary */
+    if ((e = widen(path, w, GP_WPATH)) < 0) return e;
+
+    attr  = GetFileAttributesW(w);
+    isdir = attr != INVALID_FILE_ATTRIBUTES
+         && (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    if ((flags & GP_O_DIRECTORY) && attr != INVALID_FILE_ATTRIBUTES && !isdir)
+        return GP_ENOTDIR;
+    if (isdir && (flags & 3) != GP_O_RDONLY)
+        return GP_EISDIR;             /* Linux: open(dir, O_WRONLY) == EISDIR */
+
+    switch (flags & 3) {
+    case GP_O_WRONLY: access = GENERIC_WRITE; break;
+    case GP_O_RDWR:   access = GENERIC_READ | GENERIC_WRITE; break;
+    default:          access = GENERIC_READ; break;
+    }
+    if (flags & GP_O_CREAT)
+        create = (flags & GP_O_EXCL)  ? CREATE_NEW
+               : (flags & GP_O_TRUNC) ? CREATE_ALWAYS : OPEN_ALWAYS;
+    else
+        create = (flags & GP_O_TRUNC) ? TRUNCATE_EXISTING : OPEN_EXISTING;
+    if (isdir)
+        fattr |= FILE_FLAG_BACKUP_SEMANTICS;   /* the only way to open a dir */
+
+    /* Full sharing, because the guest is a Linux program: it expects to open
+     * a file twice, or rename over one that is open. Windows' default of
+     * "exclusive unless stated" is the wrong default for it. */
+    h = CreateFileW(w, access,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    NULL, create, fattr, NULL);
+    if (h == INVALID_HANDLE_VALUE) return err();
+
+    f = calloc(1, sizeof *f);
+    if (!f) { CloseHandle(h); return GP_ENOMEM; }
+    f->h = h;
+    InitializeSRWLock(&f->lock);
+    f->append = (flags & GP_O_APPEND) != 0;
+    *out = f;
+    return 0;
+}
+
+int gp_close(gp_file *f)
+{
+    int r;
+    if (!f) return GP_EBADF;
+    r = CloseHandle(f->h) ? 0 : err();
+    free(f);
+    return r;
+}
+
+int64_t gp_read(gp_file *f, void *buf, size_t len)
+{
+    DWORD n;
+    BOOL ok;
+    if (len > 0x7fffffffu) len = 0x7fffffffu;
+    AcquireSRWLockExclusive(&f->lock);
+    ok = ReadFile(f->h, buf, (DWORD)len, &n, NULL);
+    ReleaseSRWLockExclusive(&f->lock);
+    if (!ok) return err();
+    return n;      /* EOF is TRUE with n == 0, exactly read()'s 0 */
+}
+
+int64_t gp_write(gp_file *f, const void *buf, size_t len)
+{
+    DWORD n;
+    BOOL ok;
+    if (len > 0x7fffffffu) len = 0x7fffffffu;
+    AcquireSRWLockExclusive(&f->lock);
+    if (f->append) {
+        LARGE_INTEGER end; end.QuadPart = 0;
+        SetFilePointerEx(f->h, end, NULL, FILE_END);
+    }
+    ok = WriteFile(f->h, buf, (DWORD)len, &n, NULL);
+    ReleaseSRWLockExclusive(&f->lock);
+    if (!ok) return err();
+    return n;
+}
+
+int64_t gp_pread(gp_file *f, void *buf, size_t len, uint64_t off)
+{
+    OVERLAPPED ov;
+    LARGE_INTEGER save, zero;
+    DWORD n, e = 0;
+    BOOL ok;
+
+    if (len > 0x7fffffffu) len = 0x7fffffffu;
+    memset(&ov, 0, sizeof ov);
+    ov.Offset     = (DWORD)(off & 0xffffffffu);
+    ov.OffsetHigh = (DWORD)(off >> 32);
+    zero.QuadPart = 0;
+
+    AcquireSRWLockExclusive(&f->lock);
+    SetFilePointerEx(f->h, zero, &save, FILE_CURRENT);
+    ok = ReadFile(f->h, buf, (DWORD)len, &n, &ov);
+    if (!ok) e = GetLastError();
+    SetFilePointerEx(f->h, save, NULL, FILE_BEGIN);   /* see file header */
+    ReleaseSRWLockExclusive(&f->lock);
+
+    if (!ok) {
+        if (e == ERROR_HANDLE_EOF) return 0;   /* pread past EOF reads 0 */
+        return err_from(e);
+    }
+    return n;
+}
+
+int64_t gp_seek(gp_file *f, int64_t off, int whence)
+{
+    LARGE_INTEGER want, got;
+    DWORD method = whence == GP_SEEK_CUR ? FILE_CURRENT
+                 : whence == GP_SEEK_END ? FILE_END : FILE_BEGIN;
+    BOOL ok;
+    want.QuadPart = off;
+    AcquireSRWLockExclusive(&f->lock);
+    ok = SetFilePointerEx(f->h, want, &got, method);
+    ReleaseSRWLockExclusive(&f->lock);
+    return ok ? got.QuadPart : err();
+}
+
+/* FILETIME is 100 ns ticks since 1601; the guest's epoch is 1970. */
+static uint64_t ft_ns(FILETIME ft)
+{
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return (t - 116444736000000000ull) * 100u;
+}
+
+/* NTFS has no mode bits, so the guest gets a synthesized but self-consistent
+ * story: directories 0755, files 0755 minus write when the read-only attribute
+ * is set. Exec on everything, because the guest's binaries arrive by rootfs
+ * copy and losing the x bit in transit must not make them unrunnable. */
+static uint32_t synth_mode(DWORD attr)
+{
+    if (attr & FILE_ATTRIBUTE_DIRECTORY)
+        return 0040000u | 0755u;                       /* S_IFDIR */
+    return 0100000u                                    /* S_IFREG */
+         | ((attr & FILE_ATTRIBUTE_READONLY) ? 0555u : 0755u);
+}
+
+int gp_stat(const char *path, struct gp_statbuf *st)
+{
+    WCHAR w[GP_WPATH];
+    WIN32_FILE_ATTRIBUTE_DATA fad;
+    int e;
+    if ((e = widen(path, w, GP_WPATH)) < 0) return e;
+    if (!GetFileAttributesExW(w, GetFileExInfoStandard, &fad)) return err();
+    st->size     = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+    st->mtime_ns = ft_ns(fad.ftLastWriteTime);
+    st->mode     = synth_mode(fad.dwFileAttributes);
+    st->is_dir   = (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+    if (st->is_dir) st->size = 0;
+    return 0;
+}
+
+int gp_fstat(gp_file *f, struct gp_statbuf *st)
+{
+    BY_HANDLE_FILE_INFORMATION bi;
+    if (!GetFileInformationByHandle(f->h, &bi)) return err();
+    st->size     = ((uint64_t)bi.nFileSizeHigh << 32) | bi.nFileSizeLow;
+    st->mtime_ns = ft_ns(bi.ftLastWriteTime);
+    st->mode     = synth_mode(bi.dwFileAttributes);
+    st->is_dir   = (bi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+    if (st->is_dir) st->size = 0;
+    return 0;
+}
+
+int gp_truncate(gp_file *f, uint64_t size)
+{
+    /* SetFileInformationByHandle(FileEndOfFileInfo) is Vista+, inside the
+     * floor, and unlike the SetFilePointer/SetEndOfFile dance it does not
+     * touch the file position — ftruncate does not either. */
+    FILE_END_OF_FILE_INFO info;
+    info.EndOfFile.QuadPart = (LONGLONG)size;
+    return SetFileInformationByHandle(f->h, FileEndOfFileInfo,
+                                      &info, sizeof info) ? 0 : err();
+}
+
+int gp_sync(gp_file *f)
+{
+    return FlushFileBuffers(f->h) ? 0 : err();
+}
+
+int gp_mkdir(const char *path, uint32_t mode)
+{
+    WCHAR w[GP_WPATH];
+    int e;
+    (void)mode;
+    if ((e = widen(path, w, GP_WPATH)) < 0) return e;
+    return CreateDirectoryW(w, NULL) ? 0 : err();
+}
+
+int gp_rmdir(const char *path)
+{
+    WCHAR w[GP_WPATH];
+    int e;
+    if ((e = widen(path, w, GP_WPATH)) < 0) return e;
+    return RemoveDirectoryW(w) ? 0 : err();
+}
+
+int gp_unlink(const char *path)
+{
+    WCHAR w[GP_WPATH];
+    DWORD attr;
+    int e;
+    if ((e = widen(path, w, GP_WPATH)) < 0) return e;
+    if (DeleteFileW(w)) return 0;
+    e = err();
+    /* Linux says EISDIR for unlink on a directory; Windows says access
+     * denied, which would send the guest down the wrong retry path. */
+    attr = GetFileAttributesW(w);
+    if (e == GP_EACCES && attr != INVALID_FILE_ATTRIBUTES
+        && (attr & FILE_ATTRIBUTE_DIRECTORY))
+        return GP_EISDIR;
+    return e;
+}
+
+int gp_rename(const char *from, const char *to)
+{
+    WCHAR wf[GP_WPATH], wt[GP_WPATH];
+    int e;
+    if ((e = widen(from, wf, GP_WPATH)) < 0) return e;
+    if ((e = widen(to,   wt, GP_WPATH)) < 0) return e;
+    /* REPLACE_EXISTING because rename(2) replaces, always. */
+    return MoveFileExW(wf, wt, MOVEFILE_REPLACE_EXISTING) ? 0 : err();
+}
+
+/* ---- directories --------------------------------------------------------- */
+
+struct gp_dir {
+    HANDLE find;
+    WIN32_FIND_DATAW fd;
+    int    pending;      /* FindFirstFileW's entry, not yet handed out */
+    char   name[1024];   /* UTF-8 of the last entry; dies with the next call */
+};
+
+int gp_diropen(const char *path, gp_dir **out)
+{
+    WCHAR w[GP_WPATH];
+    DWORD attr;
+    size_t n;
+    int e;
+    gp_dir *d;
+
+    if ((e = widen(path, w, GP_WPATH)) < 0) return e;
+    attr = GetFileAttributesW(w);
+    if (attr == INVALID_FILE_ATTRIBUTES) return err();
+    if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) return GP_ENOTDIR;
+
+    n = wcslen(w);
+    if (n + 3 >= GP_WPATH) return GP_ENOENT;
+    w[n] = L'\\'; w[n + 1] = L'*'; w[n + 2] = 0;
+
+    d = calloc(1, sizeof *d);
+    if (!d) return GP_ENOMEM;
+    d->find = FindFirstFileW(w, &d->fd);
+    if (d->find == INVALID_HANDLE_VALUE) { e = err(); free(d); return e; }
+    d->pending = 1;      /* "." — FindFirstFileW yields it, like readdir */
+    *out = d;
+    return 0;
+}
+
+int gp_dirnext(gp_dir *d, const char **name, uint32_t *is_dir)
+{
+    if (!d->pending) {
+        if (!FindNextFileW(d->find, &d->fd)) {
+            DWORD e = GetLastError();
+            return e == ERROR_NO_MORE_FILES ? 0 : err_from(e);
+        }
+    }
+    d->pending = 0;
+    if (!WideCharToMultiByte(CP_UTF8, 0, d->fd.cFileName, -1,
+                             d->name, sizeof d->name, NULL, NULL))
+        return GP_EIO;   /* a name we cannot spell is a name we cannot serve */
+    *name   = d->name;
+    *is_dir = (d->fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+    return 1;
+}
+
+int gp_dirclose(gp_dir *d)
+{
+    int r = FindClose(d->find) ? 0 : err();
+    free(d);
+    return r;
+}
+
+/* ---- threads ------------------------------------------------------------- */
+
+struct gp_thread { HANDLE h; void (*entry)(void *); void *arg; };
+
+static unsigned __stdcall thread_trampoline(void *p)
+{
+    gp_thread *t = p;
+    t->entry(t->arg);
+    return 0;
+}
+
+int gp_thread_create(void (*entry)(void *), void *arg, gp_thread **out)
+{
+    /* _beginthreadex rather than CreateThread so the C runtime sets up its
+     * per-thread state; with a static CRT that is not optional. */
+    uintptr_t h;
+    gp_thread *t = calloc(1, sizeof *t);
+    if (!t) return GP_ENOMEM;
+    t->entry = entry;
+    t->arg   = arg;
+    h = _beginthreadex(NULL, 0, thread_trampoline, t, 0, NULL);
+    if (!h) { free(t); return GP_EAGAIN; }
+    t->h = (HANDLE)h;
+    *out = t;
+    return 0;
+}
+
+int gp_thread_join(gp_thread *t)
+{
+    if (WaitForSingleObject(t->h, INFINITE) != WAIT_OBJECT_0) return GP_EINVAL;
+    CloseHandle(t->h);
+    free(t);
+    return 0;
+}
+
+int gp_thread_detach(gp_thread *t)
+{
+    CloseHandle(t->h);
+    free(t);
+    return 0;
+}
+
+void gp_thread_exit(void)  { _endthreadex(0); }
+void gp_thread_yield(void) { SwitchToThread(); }
+
+uint32_t gp_thread_id(void) { return (uint32_t)GetCurrentThreadId(); }
+
+/* ---- waiting -------------------------------------------------------------
+ * The sixty lines host.h promised. An address hashes to a bucket holding an
+ * SRWLOCK and a CONDITION_VARIABLE; gp_wait_on re-checks the word under the
+ * bucket lock, which is the same lock gp_wake takes, so the compare and the
+ * sleep are atomic against the wake — the futex guarantee.
+ *
+ * gp_wake wakes the WHOLE bucket even for count == 1. Addresses share
+ * buckets, and a single wake could land on a waiter for a different address,
+ * which would swallow the wake and leave the intended waiter asleep — a lost
+ * wakeup, the one bug this interface exists to prevent. Waking everyone is
+ * merely a thundering herd within one bucket: each waiter returns 0, its
+ * caller re-checks its word, and the ones woken by accident go back to sleep.
+ * A spurious wake is a legal wake; a lost one is not.
+ *
+ * Both types initialise to all-zero, so a zeroed static array is already a
+ * valid table and no once-guard is needed. */
+#define GP_WAIT_BUCKETS 64
+static struct {
+    SRWLOCK lock;
+    CONDITION_VARIABLE cv;
+} g_wait[GP_WAIT_BUCKETS];
+
+static unsigned bucket_of(volatile uint32_t *addr)
+{
+    uintptr_t a = (uintptr_t)addr >> 2;
+    return (unsigned)((a ^ (a >> 8)) & (GP_WAIT_BUCKETS - 1));
+}
+
+int gp_wait_on(volatile uint32_t *addr, uint32_t expected, uint64_t timeout_ns)
+{
+    unsigned b = bucket_of(addr);
+    DWORD ms = INFINITE;
+    BOOL ok;
+
+    if (timeout_ns) {
+        uint64_t m = (timeout_ns + 999999u) / 1000000u;
+        ms = m > 0x7ffffffeu ? 0x7ffffffeu : (DWORD)m;
+    }
+    AcquireSRWLockExclusive(&g_wait[b].lock);
+    if (*addr != expected) {
+        ReleaseSRWLockExclusive(&g_wait[b].lock);
+        return GP_EAGAIN;
+    }
+    ok = SleepConditionVariableSRW(&g_wait[b].cv, &g_wait[b].lock, ms, 0);
+    ReleaseSRWLockExclusive(&g_wait[b].lock);
+    if (!ok)
+        return GetLastError() == ERROR_TIMEOUT ? GP_ETIMEDOUT : err();
+    return 0;
+}
+
+int gp_wake(volatile uint32_t *addr, int count)
+{
+    unsigned b = bucket_of(addr);
+    (void)count;                       /* see the block comment above */
+    AcquireSRWLockExclusive(&g_wait[b].lock);
+    WakeAllConditionVariable(&g_wait[b].cv);
+    ReleaseSRWLockExclusive(&g_wait[b].lock);
+    /* A condition variable cannot say how many it woke, so unlike the futex
+     * backend this cannot report a count. Nothing above uses it yet; when the
+     * futex syscall lands, this is the place that decides what it returns. */
+    return 0;
+}
+
+/* ---- time ----------------------------------------------------------------
+ * The hot one — no lock and no allocation below this line. The one-time
+ * resolutions race benignly: every thread computes and stores identical
+ * values. */
+
+typedef VOID (WINAPI *precise_time_fn)(LPFILETIME);
+static precise_time_fn g_precise;
+static int g_time_ready;
+
+uint64_t gp_wall_ns(void)
+{
+    FILETIME ft;
+    if (!g_time_ready) {
+        /* GetSystemTimePreciseAsFileTime is Windows 8+, better than the
+         * ~15.6 ms tick of the plain call, and the guest calls gettimeofday
+         * 381,096 times a run — resolve it if it exists, live without it on
+         * Windows 7. GetProcAddress, not a link-time import, is what keeps
+         * the floor at 7. */
+        g_precise = (precise_time_fn)(void (*)(void))GetProcAddress(
+            GetModuleHandleW(L"kernel32.dll"), "GetSystemTimePreciseAsFileTime");
+        g_time_ready = 1;
+    }
+    if (g_precise) g_precise(&ft);
+    else           GetSystemTimeAsFileTime(&ft);
+    return ft_ns(ft);
+}
+
+uint64_t gp_mono_ns(void)
+{
+    static LARGE_INTEGER freq;   /* constant after boot; benign race */
+    LARGE_INTEGER c;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&c);
+    /* Split to dodge the overflow in ticks * 1e9, which arrives after only
+     * ~15 minutes of uptime at a 10 MHz QPC. */
+    return (uint64_t)(c.QuadPart / freq.QuadPart) * 1000000000ull
+         + (uint64_t)(c.QuadPart % freq.QuadPart) * 1000000000ull
+           / (uint64_t)freq.QuadPart;
+}
+
+void gp_sleep_ns(uint64_t ns)
+{
+    /* Sleep rounds to the scheduler tick, ~15.6 ms by default — uselessly
+     * coarse for a guest pacing frames with nanosleep. timeBeginPeriod(1)
+     * pulls it to ~1 ms, process-lifetime, undone by the OS at exit; every
+     * emulator ships this call. Benign race, same as above. */
+    static int period_set;
+    uint64_t ms;
+    if (!period_set) { timeBeginPeriod(1); period_set = 1; }
+    ms = (ns + 999999u) / 1000000u;
+    Sleep(ms > 0x7ffffffeu ? 0x7ffffffeu : (DWORD)ms);
+}
+
+/* ---- odds and ends ------------------------------------------------------- */
+
+int gp_random(void *buf, size_t len)
+{
+    /* The system RNG without naming an algorithm; Vista+, inside the floor. */
+    return BCryptGenRandom(NULL, buf, (ULONG)len,
+                           BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0 ? 0 : GP_EIO;
+}
+
+int64_t gp_console_write(int fd, const void *buf, size_t len)
+{
+    HANDLE h = GetStdHandle(fd == 2 ? STD_ERROR_HANDLE : STD_OUTPUT_HANDLE);
+    DWORD n;
+    if (h == NULL || h == INVALID_HANDLE_VALUE) return GP_EBADF;
+    if (len > 0x7fffffffu) len = 0x7fffffffu;
+    /* WriteFile serves both a console and a redirection. The console decodes
+     * bytes in its output codepage, so non-ASCII guest output can mojibake on
+     * screen while staying byte-exact through a pipe — the pipe is what the
+     * qemu-arm diffing harness reads, and byte-exact there is what matters. */
+    if (!WriteFile(h, buf, (DWORD)len, &n, NULL)) return err();
+    return n;
+}
+
+void gp_log(const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    fputs("[glasspole] ", stderr);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}

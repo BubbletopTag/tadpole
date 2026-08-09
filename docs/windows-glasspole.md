@@ -40,6 +40,9 @@ design defect worth knowing about, not something to work around.
 
 ```
 pacman -S mingw-w64-x86_64-clang mingw-w64-x86_64-lld   # for the ARM test program
+pacman -S mingw-w64-x86_64-llvm                         # llvm-objcopy — GNU objcopy is x86-only,
+                                                        # same story as GNU ld in CMakeLists.txt
+pacman -S mingw-w64-x86_64-boost                        # dynarmic wants Boost headers
 cd glasspole && ./fetch-deps.sh
 cmake -S . -B build -G Ninja && ninja -C build
 ```
