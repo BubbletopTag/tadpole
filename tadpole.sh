@@ -267,6 +267,12 @@ fi
 #
 # XDG_STATE_HOME is the right variable for this: it is for data that should
 # persist between restarts but is not something the user edits or would miss.
+# The no-auto-power-off flag, for sysroots built before it existed.
+# setup-sysroot.sh writes this, but an existing install never re-runs it, and
+# an update that only helps people who reinstall is not much of an update.
+[ -d "$SYSROOT/flags" ] && [ ! -e "$SYSROOT/flags/poweron" ] && \
+    : > "$SYSROOT/flags/poweron" 2>/dev/null
+
 CRASHDIR="${TADPOLE_CRASHDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tadpole/crashes/$(date +%Y%m%d-%H%M%S)}"
 mkdir -p "$CRASHDIR" 2>/dev/null || CRASHDIR="$TADPOLE_DIR"
 export TADPOLE_CRASHDIR="$CRASHDIR"

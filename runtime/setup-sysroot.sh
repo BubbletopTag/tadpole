@@ -246,6 +246,16 @@ printf '0 65536 0 0 0 65536 65536\n' > flags/pointercal
 # here and some code paths check it.
 : > flags/developer
 
+# /flags/poweron STOPS THE DEVICE SWITCHING ITSELF OFF.
+#
+# libLightningBase reads it beside /tmp/shutdown and /flags/apprelaunch — the
+# inactivity machinery — and without it the emulator powers down after about a
+# minute of no input, which on a desktop reads as "it crashed" rather than "a
+# battery-powered toy saved its battery". MfgTest/ResetUnit.sh deletes it as
+# part of a factory reset, which is the tell that it is a persistent flag like
+# /flags/developer above rather than something set at runtime.
+: > flags/poweron
+
 # Touchscreen tuning, mirroring /flags/set-ts.sh on the device
 mkdir -p sys/devices/platform/lf2000-touchscreen
 printf '23'    > sys/devices/platform/lf2000-touchscreen/max_tnt_down
