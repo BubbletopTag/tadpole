@@ -2594,6 +2594,9 @@ void ui_debug_state(const char *spec)
 	else if (!strcmp(name, "debug"))   g_modal = M_DEBUG;
 	else if (!strcmp(name, "system"))  g_modal = M_SYSTEM;
 	else if (!strcmp(name, "about"))   g_modal = M_ABOUT;
+	/* `apps@x,y` renders the launcher with the pointer at x,y, so a row can be
+	 * shown highlighted without anyone touching a mouse. */
+	else if (!strcmp(name, "apps"))    { ap_reload(); g_modal = M_APPS; }
 	else if (!strcmp(name, "games")) {
 		ui_games_reload();
 		if (!g_gm_dir[0] && g_cfg.games_dir[0])
