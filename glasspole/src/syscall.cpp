@@ -1046,7 +1046,7 @@ void gp_syscall(Thread &t) {
         std::memset(si, 0, 64);
         si[0]  = (uint32_t)(gp_mono_ns() / 1000000000ull);   /* uptime */
         si[4]  = 128u * 1024 * 1024;                          /* totalram */
-        si[5]  =  48u * 1024 * 1024;                          /* freeram */
+        si[5]  =  96u * 1024 * 1024;                          /* freeram */
         si[9]  = 1;                                           /* procs */
         si[12] = 1;                                           /* mem_unit */
         ret = 0;
