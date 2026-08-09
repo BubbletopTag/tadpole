@@ -324,7 +324,26 @@ void gp_syscall(Thread &t) {
             if (rev) hits++;
         }
 
-        if (hits || hn == 0) { ret = hits; break; }
+        if (hits) { ret = hits; break; }
+
+        /* Nothing ready, and nothing backed by a real file to wait on — every
+         * descriptor was a socket or the console. Returning 0 here would be the
+         * same false timeout fixed below, AND a busy loop: the guest asks for a
+         * second, gets "expired" instantly, and asks again. Sleep out the real
+         * timeout instead. */
+        if (hn == 0) {
+            const int32_t ms = (int32_t)a2;
+            guard.unlock();
+            if (ms < 0) {
+                while (!m.exiting.load(std::memory_order_relaxed)) gp_sleep_ns(50000000ull);
+            } else {
+                const uint64_t deadline0 = gp_mono_ns() + (uint64_t)ms * 1000000ull;
+                while (!m.exiting.load(std::memory_order_relaxed) && gp_mono_ns() < deadline0)
+                    gp_sleep_ns(20000000ull);
+            }
+            ret = 0;
+            break;
+        }
 
         /* Nothing ready yet, and real files to wait on.
          *
@@ -880,6 +899,7 @@ void gp_syscall(Thread &t) {
     case SYS_lstat64:
     case SYS_stat64: {
         gp_statbuf st;
+        if (m.trace) tpath = m.Str(a0);
         int r0 = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st);
         if (r0 < 0) { ret = r0; break; }
         fill_stat64(st, (guest_stat64 *)m.Ptr(a1));
