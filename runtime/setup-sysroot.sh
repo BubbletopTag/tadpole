@@ -35,7 +35,13 @@ CACHE="$PROJ/sources/nxp320/LFC_full/LFC_Downloads/cache"
 # readable by native code. The [ -L ] re-run guards below stay correct either
 # way — a copy is not a link, so they simply never fire on MSYS.
 case "$(uname -s)" in
-    MSYS*|MINGW*) lns() { rm -rf "$2"; cp -a "$1" "$2"; } ;;
+    MSYS*|MINGW*) lns() {
+        # A dangling link is legal; a missing copy SOURCE under set -e would
+        # abort the whole script (linuxrc, whose target never materialises on
+        # Windows, did exactly that). Note it and carry on.
+        [ -e "$1" ] || { echo "    (no $1 — skipped)"; return 0; }
+        rm -rf "$2"; cp -a "$1" "$2"
+    } ;;
     *)            lns() { ln -sfn "$1" "$2"; } ;;
 esac
 
