@@ -69,7 +69,10 @@ extern "C" {
 #define GP_EROFS    -30
 #define GP_ENOSYS   -38
 #define GP_ENOTEMPTY -39
+#define GP_EPIPE    -32
 #define GP_EMSGSIZE -90
+#define GP_EAFNOSUPPORT -97
+#define GP_ECONNREFUSED -111
 #define GP_ETIMEDOUT -110
 
 /* ---- address space ------------------------------------------------------ */
@@ -269,6 +272,18 @@ void     gp_sleep_ns(uint64_t ns);
  * viewer reads directly. Faking it with a private copy is the one thing NOT to
  * do — the guest would run perfectly and the screen would stay black. */
 int   gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot);
+
+/* Wait until at least one of `n` files is readable, or `timeout_ms` passes.
+ * Sets ready[i] non-zero for each readable one and returns how many. A negative
+ * timeout waits forever.
+ *
+ * This exists for the shim's event FIFOs, which the viewer writes into from
+ * another process. On Windows, once the viewer is a thread rather than a
+ * process, those become an in-memory queue and this is only ever asked about
+ * real files — which are always readable. A backend that answers "always
+ * ready" for regular files is correct; one that blocks forever on a FIFO it
+ * cannot poll is not. */
+int   gp_poll_readable(gp_file **fs, int n, int timeout_ms, unsigned char *ready);
 
 /* ---- guest faults ------------------------------------------------------- */
 /*

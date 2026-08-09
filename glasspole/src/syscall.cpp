@@ -51,7 +51,12 @@ enum : uint32_t {
     SYS_sched_setparam = 154, SYS_sched_getparam = 155,
     SYS_sched_setscheduler = 156, SYS_sched_getscheduler = 157,
     SYS_sched_get_priority_max = 159, SYS_sched_get_priority_min = 160,
-    SYS_kill = 37, SYS_socket = 281,
+    SYS_kill = 37, SYS_poll = 168,
+    /* AF_UNIX sockets, implemented in-process. ARM has direct socket calls
+     * rather than the old socketcall multiplexer. */
+    SYS_socket = 281, SYS_bind = 282, SYS_connect = 283, SYS_listen = 284,
+    SYS_accept = 285, SYS_send = 289, SYS_recv = 291, SYS_shutdown = 293,
+    SYS_setsockopt = 294, SYS_getsockopt = 295, SYS_sendto = 290, SYS_recvfrom = 292,
 };
 
 /* Guest open() flags, which are the same values on ARM Linux as our GP_O_*
@@ -166,6 +171,10 @@ const char *name_of(uint32_t nr) {
         case SYS_sched_getscheduler: return "sched_getscheduler";
         case SYS_sched_setscheduler: return "sched_setscheduler";
         case SYS_socket: return "socket";           case SYS_kill: return "kill";
+        case SYS_bind: return "bind";               case SYS_connect: return "connect";
+        case SYS_listen: return "listen";           case SYS_accept: return "accept";
+        case SYS_send: return "send";               case SYS_recv: return "recv";
+        case SYS_poll: return "poll";
         case SYS_getuid32: return "getuid32";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
@@ -280,12 +289,193 @@ void gp_syscall(Thread &t) {
         ret = GP_EPERM;
         break;
 
-    case SYS_socket:
-        /* AppManager's DaemonControl socket. It fails on the real device too
-         * whenever VideoDaemon is not running, and the guest carries on — see
-         * docs/STATUS.md, which warns against reading that log line as a
-         * fault. Quiet, because it is expected. */
-        ret = GP_ENOSYS;
+    case SYS_poll: {
+        /* struct pollfd is { int fd; short events; short revents; } — 8 bytes.
+         * Sockets are answered from our own buffers; anything backed by a real
+         * file goes to the host, because the shim's event FIFOs are written by
+         * the viewer in another process. */
+        const uint32_t nfds = a1;
+        if (nfds > 64) { ret = GP_EINVAL; break; }
+        uint8_t *p = m.Ptr(a0);
+
+        gp_file *hf[64] = {};
+        int hidx[64];
+        int hn = 0;
+        int hits = 0;
+
+        for (uint32_t i = 0; i < nfds; i++) {
+            int32_t fd; std::memcpy(&fd, p + i * 8, 4);
+            uint16_t rev = 0;
+            GuestFd *g = m.Fd(fd);
+            if (!g) {
+                rev = 0x20;                     /* POLLNVAL */
+            } else if (g->sock) {
+                std::lock_guard<std::mutex> sg(g->sock->mu);
+                if (!g->sock->rx.empty()) rev = 0x01;   /* POLLIN */
+            } else if (g->file) {
+                hf[hn] = g->file; hidx[hn] = (int)i; hn++;
+            } else {
+                rev = 0x01;                     /* the console: always ready */
+            }
+            std::memcpy(p + i * 8 + 6, &rev, 2);
+            if (rev) hits++;
+        }
+
+        if (hits || hn == 0) { ret = hits; break; }
+
+        /* Nothing ready yet and real files to wait on. Never hold the lock
+         * across the wait, and cap it so exit_group is noticed. */
+        int timeout = (int32_t)a2;
+        if (timeout < 0 || timeout > 100) timeout = 100;
+        guard.unlock();
+        unsigned char ready[64] = {};
+        int r0 = gp_poll_readable(hf, hn, timeout, ready);
+        if (r0 < 0) { ret = r0; break; }
+        for (int i = 0; i < hn; i++) {
+            if (!ready[i]) continue;
+            uint16_t rev = 0x01;
+            std::memcpy(p + hidx[i] * 8 + 6, &rev, 2);
+            hits++;
+        }
+        ret = hits;
+        break;
+    }
+
+    /* ---- AF_UNIX sockets ---- */
+    case SYS_socket: {
+        /* domain, type, protocol. Only AF_UNIX matters: nothing in this
+         * workload talks to a network, and pretending to would be worse than
+         * refusing. */
+        constexpr uint32_t AF_UNIX = 1;
+        if (a0 != AF_UNIX) { ret = GP_EAFNOSUPPORT; break; }
+        auto sk = std::make_shared<UnixSocket>();
+        ret = m.AllocFd(nullptr, nullptr, "<socket>");
+        if (ret >= 0) m.fds[ret].sock = std::move(sk);
+        break;
+    }
+
+    case SYS_bind: {
+        /* fd, sockaddr_un*, len. sockaddr_un is { u16 family; char path[108] }. */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        std::string name((const char *)m.Ptr(a1 + 2));
+        if (m.trace) tpath = name;
+        g->sock->name = name;
+        m.bound[name] = g->sock;
+        /* The guest expects a filesystem entry to appear; some code stats it.
+         * A regular file is close enough and unlinks the same way. */
+        gp_file *touch = nullptr;
+        if (gp_open(m.HostPath(name).c_str(), GP_O_WRONLY | GP_O_CREAT, 0666, &touch) == 0)
+            gp_close(touch);
+        ret = 0;
+        break;
+    }
+
+    case SYS_listen: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        g->sock->listening = true;
+        ret = 0;
+        break;
+    }
+
+    case SYS_connect: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        std::string name((const char *)m.Ptr(a1 + 2));
+        if (m.trace) tpath = name;
+
+        auto it = m.bound.find(name);
+        std::shared_ptr<UnixSocket> server = it == m.bound.end() ? nullptr : it->second.lock();
+        if (!server || !server->listening) {
+            /* The documented benign case: DaemonControl with no VideoDaemon
+             * behind it. ECONNREFUSED is what the guest is used to seeing. */
+            ret = GP_ECONNREFUSED;
+            break;
+        }
+
+        /* A fresh socket for the server's end, cross-linked with the client's. */
+        auto server_end = std::make_shared<UnixSocket>();
+        server_end->peer = g->sock;
+        g->sock->peer    = server_end;
+        {
+            std::lock_guard<std::mutex> sg(server->mu);
+            server->backlog.push_back(server_end);
+        }
+        server->cv.notify_all();
+        ret = 0;
+        break;
+    }
+
+    case SYS_accept: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        auto server = g->sock;
+        guard.unlock();
+
+        std::shared_ptr<UnixSocket> conn;
+        {
+            std::unique_lock<std::mutex> sg(server->mu);
+            while (server->backlog.empty()) {
+                if (m.exiting.load(std::memory_order_relaxed)) break;
+                server->cv.wait_for(sg, std::chrono::milliseconds(100));
+            }
+            if (!server->backlog.empty()) {
+                conn = server->backlog.front();
+                server->backlog.pop_front();
+            }
+        }
+        if (!conn) { ret = GP_EINTR; break; }
+
+        guard.lock();
+        ret = m.AllocFd(nullptr, nullptr, "<accepted>");
+        if (ret >= 0) m.fds[ret].sock = std::move(conn);
+        break;
+    }
+
+    case SYS_send:
+    case SYS_sendto: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        auto peer = g->sock->peer.lock();
+        if (!peer) { ret = GP_EPIPE; break; }
+        std::string payload((const char *)m.Ptr(a1), a2);
+        {
+            std::lock_guard<std::mutex> sg(peer->mu);
+            peer->rx.push_back(std::move(payload));
+        }
+        peer->cv.notify_all();
+        ret = (int32_t)a2;
+        break;
+    }
+
+    case SYS_recv:
+    case SYS_recvfrom: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        auto sk = g->sock;
+        guard.unlock();
+
+        std::string msg;
+        {
+            std::unique_lock<std::mutex> sg(sk->mu);
+            while (sk->rx.empty() && !sk->closed) {
+                if (m.exiting.load(std::memory_order_relaxed)) break;
+                sk->cv.wait_for(sg, std::chrono::milliseconds(100));
+            }
+            if (!sk->rx.empty()) { msg = std::move(sk->rx.front()); sk->rx.pop_front(); }
+        }
+        if (msg.empty()) { ret = 0; break; }        /* peer gone: end of stream */
+        const uint32_t n = msg.size() < a2 ? (uint32_t)msg.size() : a2;
+        std::memcpy(m.Ptr(a1), msg.data(), n);
+        ret = (int32_t)n;
+        break;
+    }
+
+    case SYS_shutdown:
+    case SYS_setsockopt:
+    case SYS_getsockopt:
+        ret = 0;
         break;
 
     /* ---- message queues ---- */

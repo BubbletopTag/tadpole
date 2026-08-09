@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -67,6 +68,14 @@ int gp_decommit(void *addr, size_t len) {
     return mprotect(addr, len, PROT_NONE) == 0 ? 0 : err();
 }
 
+int gp_release(void *base, size_t size) {
+    return munmap(base, size) == 0 ? 0 : err();
+}
+
+/* ---- files -------------------------------------------------------------- */
+
+struct gp_file { int fd; };
+
 int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot) {
     /* MAP_FIXED replaces whatever part of the reservation it lands on, which is
      * exactly what is wanted: the guest chose the address and the reservation
@@ -75,14 +84,6 @@ int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot) {
                    f->fd, (off_t)off);
     return p == MAP_FAILED ? err() : 0;
 }
-
-int gp_release(void *base, size_t size) {
-    return munmap(base, size) == 0 ? 0 : err();
-}
-
-/* ---- files -------------------------------------------------------------- */
-
-struct gp_file { int fd; };
 
 static int flags_to_posix(int f) {
     int o = 0;
@@ -285,6 +286,21 @@ void gp_sleep_ns(uint64_t ns) {
     struct timespec ts = { (time_t)(ns / 1000000000ull),
                            (long)  (ns % 1000000000ull) };
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) { }
+}
+
+int gp_poll_readable(gp_file **fs, int n, int timeout_ms, unsigned char *ready) {
+    struct pollfd pfd[64];
+    if (n > 64) n = 64;
+    for (int i = 0; i < n; i++) {
+        pfd[i].fd      = fs[i] ? fs[i]->fd : -1;
+        pfd[i].events  = POLLIN;
+        pfd[i].revents = 0;
+    }
+    int r = poll(pfd, (nfds_t)n, timeout_ms);
+    if (r < 0) return errno == EINTR ? 0 : err();
+    for (int i = 0; i < n; i++)
+        ready[i] = (pfd[i].revents & (POLLIN | POLLHUP | POLLERR)) ? 1 : 0;
+    return r;
 }
 
 /* ---- guest faults ------------------------------------------------------- */

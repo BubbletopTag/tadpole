@@ -54,6 +54,28 @@ struct MsgQueue {
     std::multimap<uint32_t, std::string, std::greater<uint32_t>> msgs;
 };
 
+/* An AF_UNIX socket, entirely ours.
+ *
+ * Same reasoning as MsgQueue: every socket in this workload is between parts of
+ * one guest — AppManager's cartridge task, the DaemonControl channel, the
+ * VideoDaemon event socket — so there is nothing for a host socket to add, and
+ * Windows never needs Winsock for any of it.
+ *
+ * It also fixes a real divergence. Returning ENOSYS from socket() is NOT the
+ * same failure the guest is used to: under qemu the socket is CREATED and the
+ * later connect() is what fails, which the guest is documented to tolerate.
+ * Failing earlier takes it down a path nothing tested. */
+struct UnixSocket {
+    std::mutex mu;
+    std::condition_variable cv;
+    std::string name;                                  /* bound path, if any */
+    bool listening = false;
+    bool closed    = false;
+    std::deque<std::shared_ptr<UnixSocket>> backlog;   /* server: pending peers */
+    std::weak_ptr<UnixSocket>               peer;      /* client/server: the far end */
+    std::deque<std::string>                 rx;        /* bytes waiting to be read */
+};
+
 /* The guest's descriptor table. Guest fd numbers are OURS — the lowest free
  * slot, exactly as Linux promises — and have no relationship to anything the
  * host numbered. That is what lets the Win32 backend hand back a HANDLE
@@ -65,7 +87,8 @@ struct GuestFd {
     uint32_t oflags = 0;       /* what the guest opened it with, for F_GETFL */
     /* A message queue descriptor is a descriptor: mqd_t is an int, and the
      * guest closes it with close(), so it lives in the same table. */
-    std::shared_ptr<MsgQueue> mq;
+    std::shared_ptr<MsgQueue>   mq;
+    std::shared_ptr<UnixSocket> sock;
     bool     used = false;
 };
 
@@ -124,6 +147,10 @@ struct Machine {
     /* Named queues outlive the descriptors onto them, exactly as mq_open and
      * mq_unlink require. Guarded by `lock`. */
     std::map<std::string, std::shared_ptr<MsgQueue>> mqs;
+
+    /* Bound socket names. Weak, so a listener that is closed stops answering
+     * without needing every name unbound by hand. Guarded by `lock`. */
+    std::map<std::string, std::weak_ptr<UnixSocket>> bound;
 
     std::vector<std::unique_ptr<Thread>> threads;
     std::atomic<uint32_t> next_tid{ 1000 };
