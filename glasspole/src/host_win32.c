@@ -147,6 +147,40 @@ struct gp_file {
     int     append;
 };
 
+int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
+{
+    /* Placing a file view inside an existing reservation is VirtualAlloc2 /
+     * MapViewOfFile3 — Windows 10 1803+, which the design deliberately
+     * avoids. ENOSYS, exactly as host.h instructs: the real answer is the
+     * one-process design, and a private-copy fake would run the guest
+     * perfectly while the screen stayed black. */
+    (void)at; (void)len; (void)f; (void)off; (void)prot;
+    gp_log("map_shared: no cross-process mappings on Win32 — needs the "
+           "one-process design; returning ENOSYS\n");
+    return GP_ENOSYS;
+}
+
+int gp_poll_readable(gp_file **fs, int n, int timeout_ms, unsigned char *ready)
+{
+    /* Everything a gp_file can hold on Windows is a regular file, and a
+     * regular file is always readable — which host.h blesses as the correct
+     * answer. The FIFOs this call exists for do not exist here; when the
+     * one-process queue replaces them, it will not arrive through this
+     * interface. */
+    int i, cnt = 0;
+    for (i = 0; i < n; i++) {
+        ready[i] = (fs[i] != NULL);
+        if (ready[i]) cnt++;
+    }
+    /* Nothing to watch: honour the timeout rather than spin. "Forever" gets
+     * a bounded nap instead — poll callers re-loop by construction, and a
+     * guest waiting forever on zero files is already dead. */
+    if (cnt == 0 && timeout_ms != 0)
+        gp_sleep_ns((timeout_ms < 0 ? 100u
+                                    : (unsigned)timeout_ms) * 1000000ull);
+    return cnt;
+}
+
 int gp_open(const char *path, int flags, uint32_t mode, gp_file **out)
 {
     WCHAR w[GP_WPATH];
