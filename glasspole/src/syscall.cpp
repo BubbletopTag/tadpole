@@ -28,7 +28,8 @@ enum : uint32_t {
     SYS_brk = 45, SYS_ioctl = 54, SYS_fcntl = 55, SYS_gettimeofday = 78,
     SYS_munmap = 91, SYS_uname = 122, SYS_mprotect = 125, SYS_llseek = 140,
     SYS_writev = 146, SYS_rt_sigaction = 174, SYS_rt_sigprocmask = 175,
-    SYS_ugetrlimit = 191, SYS_mmap2 = 192, SYS_stat64 = 195, SYS_fstat64 = 197,
+    SYS_ugetrlimit = 191, SYS_mmap2 = 192, SYS_stat64 = 195, SYS_lstat64 = 196,
+    SYS_fstat64 = 197,
     SYS_getuid32 = 199, SYS_getgid32 = 200, SYS_geteuid32 = 201,
     SYS_getegid32 = 202, SYS_fcntl64 = 221, SYS_exit_group = 248,
     SYS_set_tid_address = 256, SYS_clock_gettime = 263, SYS_readlink = 85,
@@ -153,6 +154,7 @@ const char *name_of(uint32_t nr) {
         case SYS_ioctl: return "ioctl";             case SYS_mmap2: return "mmap2";
         case SYS_munmap: return "munmap";           case SYS_mprotect: return "mprotect";
         case SYS_stat64: return "stat64";           case SYS_fstat64: return "fstat64";
+        case SYS_lstat64: return "lstat64";
         case SYS_uname: return "uname";             case SYS_llseek: return "_llseek";
         case SYS_gettimeofday: return "gettimeofday";
         case SYS_clock_gettime: return "clock_gettime";
@@ -863,6 +865,19 @@ void gp_syscall(Thread &t) {
         break;
     }
 
+    /* lstat64 deliberately FOLLOWS symlinks here, which is not what lstat
+     * means anywhere else.
+     *
+     * runtime/sysroot is a symlink farm: /LF/Base and /bin point at the real
+     * rootfs on the host. Answering truthfully — "that is a symlink to
+     * /home/..." — hands the guest a host path it cannot use, and anything
+     * walking the tree sees links instead of directories. Following them is
+     * what makes the sysroot look like a filesystem to the guest.
+     *
+     * Its absence is what sent AppManager down the CriticalDoom path: `ls`
+     * and every directory scan got ENOSYS, so the firmware looked like it was
+     * not installed at all. */
+    case SYS_lstat64:
     case SYS_stat64: {
         gp_statbuf st;
         int r0 = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st);
