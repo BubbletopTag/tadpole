@@ -216,12 +216,23 @@ uint32_t gp_elf_build_stack(gp_guest *g, uint32_t stack_top,
 
     /* Strings first, at the very top, then the pointer arrays below them —
      * this is the layout the kernel produces and ld.so walks it by hand. */
-    uint32_t argp[64], envp_addr[64];
-    if (argc > 63) return 0;
+    /* 512, not 64. The host environment is passed through as qemu does, and a
+     * desktop session has around seventy variables — the old limit of 63 was
+     * hit the moment that started working, and it failed SILENTLY, returning
+     * zero with no explanation. Both the size and the message are the fix. */
+    enum { GP_MAX_VEC = 512 };
+    static uint32_t argp[GP_MAX_VEC], envp_addr[GP_MAX_VEC];
+    if (argc >= GP_MAX_VEC) {
+        gp_log("stack: %d arguments is more than %d\n", argc, GP_MAX_VEC);
+        return 0;
+    }
 
     int envc = 0;
     while (envp && envp[envc]) envc++;
-    if (envc > 63) return 0;
+    if (envc >= GP_MAX_VEC) {
+        gp_log("stack: %d environment entries is more than %d\n", envc, GP_MAX_VEC);
+        return 0;
+    }
 
     for (int i = envc - 1; i >= 0; i--) {
         size_t n = strlen(envp[i]) + 1;

@@ -25,6 +25,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+
+extern char **environ;
 #include <cstring>
 
 #include <dynarmic/interface/A32/a32.h>
@@ -464,15 +466,33 @@ int main(int argc, char **argv) {
     /* argv as the guest sees it: the path inside the sysroot, not the host's. */
     std::vector<const char *> gargv;
     for (int a = i; a < argc; a++) gargv.push_back(argv[a]);
-    /* -E REPLACES a default with the same key rather than being appended after
+    /* THE HOST'S ENVIRONMENT IS PASSED THROUGH, as qemu-arm does. This is not
+     * a nicety: qemu hands the guest every variable the host has — around
+     * seventy of them — and glasspole was handing it three. LANG among them,
+     * and locale is already known to be delicate here; the qemu compatibility
+     * sweep has nineteen titles aborting in _S_create_c_locale.
+     *
+     * A guest that sees a different environment can take a different branch
+     * while making identical syscalls, which is the hardest kind of difference
+     * to find and exactly what was being hunted.
+     *
+     * -E REPLACES a default with the same key rather than being appended after
      * it. Appending looks like it should work and does not: uClibc's getenv
      * returns the FIRST match, so a default LD_LIBRARY_PATH left in front of
      * the real one wins, the guest searches only /lib and /usr/lib, and the
      * failure reads as "the library is missing" rather than "the variable
      * never arrived". */
-    std::vector<std::string> envstore = {
-        "LD_LIBRARY_PATH=/lib:/usr/lib", "HOME=/", "PATH=/bin:/usr/bin"
-    };
+    std::vector<std::string> envstore;
+    for (char **e = environ; e && *e; e++) envstore.push_back(*e);
+    for (const char *d : { "LD_LIBRARY_PATH=/lib:/usr/lib", "HOME=/", "PATH=/bin:/usr/bin" }) {
+        const std::string ds(d);
+        const std::string key = ds.substr(0, ds.find('='));
+        bool have = false;
+        for (auto &e : envstore)
+            if (e.compare(0, key.size(), key) == 0 && e.size() > key.size() && e[key.size()] == '=')
+                { have = true; break; }
+        if (!have) envstore.push_back(ds);
+    }
     for (auto &e : envs) {
         const size_t eq = e.find('=');
         const std::string key = e.substr(0, eq == std::string::npos ? e.size() : eq);
