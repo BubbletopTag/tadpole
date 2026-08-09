@@ -25,6 +25,9 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <sys/mman.h>
+#else
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>       /* map_file: MapViewOfFile of the guest's arena */
 #endif
 #include "tadpole_ui.h"
 #include "tadpole_hle.h"
@@ -373,13 +376,34 @@ static void *map_file(const char *path, size_t *len_out)
 		*len_out = (size_t)st.st_size;
 	return p;
 #else
-	/* A shared mapping is how the guest's framebuffer reaches us, and there
-	 * is no guest in this build. NULL is the same answer the POSIX side
-	 * gives before a guest starts, and every caller already handles it.
-	 * Deliberately NOT CreateFileMapping: sharing memory with the emulator
-	 * on Windows is the one-process design's job, not a viewer patch. */
-	(void)path; (void)len_out;
-	return NULL;
+	/* The guest (glasspole) maps these files as REAL shared views since its
+	 * chunked-reservation change, so their pages are live — and mapping them
+	 * here needs none of the placement gymnastics the emulator needed: our
+	 * own address space, any address, plain MapViewOfFile, Windows 7 API.
+	 * This is the Linux architecture reproduced, not a new one; the
+	 * one-process design remains the plan of record and deletes this too. */
+	HANDLE f, m;
+	LARGE_INTEGER sz;
+	void *p;
+
+	f = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+	                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (f == INVALID_HANDLE_VALUE)
+		return NULL;
+	if (!GetFileSizeEx(f, &sz) || sz.QuadPart == 0) {
+		CloseHandle(f);
+		return NULL;
+	}
+	m = CreateFileMappingA(f, NULL, PAGE_READWRITE, 0, 0, NULL);
+	CloseHandle(f);
+	if (!m)
+		return NULL;
+	p = MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+	CloseHandle(m);                     /* the view keeps the section alive */
+	if (p && len_out)
+		*len_out = (size_t)sz.QuadPart;
+	return p;
 #endif
 }
 
