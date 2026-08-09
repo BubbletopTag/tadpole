@@ -187,12 +187,27 @@ int gp_elf_load_program(gp_guest *g, const char *path, const char *sysroot,
 #define AT_CLKTCK 17
 #define AT_SECURE 23
 #define AT_RANDOM 25
+#define AT_HWCAP2 26
+#define AT_EXECFN 31
+#define AT_PLATFORM 15
 
-/* ARM HWCAP bits the guest was built for: half-word loads, thumb, fast
- * multiply, VFP, EDSP, VFPv3. uClibc and libgcc consult these to pick code
- * paths, so claiming something dynarmic will not execute is a way to be handed
- * instructions we cannot run. */
-#define GP_HWCAP (1u<<1 | 1u<<2 | 1u<<4 | 1u<<6 | 1u<<7 | 1u<<13)
+/* EXACTLY WHAT qemu-arm REPORTS, and that is the point: it was measured rather
+ * than chosen. The first version of this was a guess — half-word loads, thumb,
+ * fast multiply, VFP, EDSP, VFPv3 — which came to 0x20d6 against qemu's
+ * 0x0fdfb0d7, missing TLS, NEON, VFPv4, integer divide and SWP among others.
+ *
+ * HWCAP_TLS (bit 15) is the one that matters most: libc and libgcc read it to
+ * decide whether the thread pointer can be fetched straight from CP15 or has
+ * to go through the kernel helper page. Every other bit steers a code path
+ * too, which is how a wrong value here produces a guest that makes identical
+ * syscalls and behaves differently — the hardest kind of difference to see.
+ *
+ * Claiming a feature obliges dynarmic to execute it. These are the same bits
+ * qemu claims and the same guest runs there, so the instruction set is
+ * already known to be covered. Regenerate with tests/auxv.S under both if this
+ * ever needs revisiting. */
+#define GP_HWCAP  0x0fdfb0d7u
+#define GP_HWCAP2 0x0000007fu
 
 uint32_t gp_elf_build_stack(gp_guest *g, uint32_t stack_top,
                             int argc, const char *const *argv,
@@ -221,6 +236,15 @@ uint32_t gp_elf_build_stack(gp_guest *g, uint32_t stack_top,
         argp[i] = p;
     }
 
+    /* AT_PLATFORM and AT_EXECFN are strings the guest may read; they live up
+     * here with the rest of the string area. */
+    static const char platform[] = "v7l";
+    p -= sizeof platform;
+    uint32_t at_platform = p;
+    memcpy(g->base + p, platform, sizeof platform);
+
+    uint32_t at_execfn = argc > 0 ? argp[0] : at_platform;
+
     /* AT_RANDOM: sixteen bytes ld.so uses to seed the stack guard. Real
      * randomness, because a fixed value here is a defect that never shows up
      * as one. */
@@ -234,14 +258,19 @@ uint32_t gp_elf_build_stack(gp_guest *g, uint32_t stack_top,
      * built downwards, so laid out here in reverse of how the guest reads it. */
     struct { uint32_t k, v; } aux[] = {
         { AT_NULL,   0 },
+        { AT_PLATFORM, at_platform },
+        { AT_EXECFN, at_execfn },
+        { AT_HWCAP2, GP_HWCAP2 },
         { AT_RANDOM, at_random },
         { AT_SECURE, 0 },
         { AT_CLKTCK, 100 },
         { AT_HWCAP,  GP_HWCAP },
-        { AT_EGID,   0 },
-        { AT_GID,    0 },
-        { AT_EUID,   0 },
-        { AT_UID,    0 },
+        /* 1000, as qemu-arm reports, not 0. A guest that believes it is root
+         * takes different branches in anything that checks. */
+        { AT_EGID,   1000 },
+        { AT_GID,    1000 },
+        { AT_EUID,   1000 },
+        { AT_UID,    1000 },
         { AT_ENTRY,  img->exec_entry },
         { AT_FLAGS,  0 },
         { AT_BASE,   img->interp_base },
