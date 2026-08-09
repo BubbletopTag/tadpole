@@ -25,7 +25,6 @@
  *    the conversion in one place; the cost is a per-draw copy of a few hundred
  *    vertices, which is nothing next to the 78 ms it replaces.
  */
-#define GL_GLEXT_PROTOTYPES 1
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <stdio.h>
@@ -37,6 +36,90 @@
 
 #include "../shim/tadpole_glcmd.h"
 #include "tadpole_hle.h"
+
+/* ---- OpenGL past 1.1, resolved at runtime -------------------------------
+ *
+ * Mesa's libGL exports every entry point, which is why a GL_GLEXT_PROTOTYPES
+ * build ever linked. Windows' opengl32.dll exports only OpenGL 1.1;
+ * glActiveTexture and the whole framebuffer-object family live behind
+ * wglGetProcAddress and do not link at all. So the fourteen post-1.1 entry
+ * points this file uses are fetched through SDL_GL_GetProcAddress once the
+ * context exists — on every platform, because a driver that cannot supply one
+ * (Windows' GDI OpenGL-1.1 fallback) should mean "HLE unavailable; software
+ * raster", not a link error on somebody else's machine. The PFN typedefs come
+ * from SDL_opengl_glext.h.
+ *
+ * Everything else this file calls is core 1.1 and binds at link time. A NEW
+ * call past 1.1 must be added to the table, the defines and gl_resolve()
+ * together — and the compiler enforces the first: without GL_GLEXT_PROTOTYPES
+ * there is no prototype for it to quietly fall back on. */
+static struct {
+	PFNGLACTIVETEXTUREPROC                  ActiveTexture;
+	PFNGLGENFRAMEBUFFERSPROC                GenFramebuffers;
+	PFNGLBINDFRAMEBUFFERPROC                BindFramebuffer;
+	PFNGLDELETEFRAMEBUFFERSPROC             DeleteFramebuffers;
+	PFNGLGENRENDERBUFFERSPROC               GenRenderbuffers;
+	PFNGLBINDRENDERBUFFERPROC               BindRenderbuffer;
+	PFNGLDELETERENDERBUFFERSPROC            DeleteRenderbuffers;
+	PFNGLRENDERBUFFERSTORAGEPROC            RenderbufferStorage;
+	PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC RenderbufferStorageMultisample;
+	PFNGLFRAMEBUFFERTEXTURE2DPROC           FramebufferTexture2D;
+	PFNGLFRAMEBUFFERRENDERBUFFERPROC        FramebufferRenderbuffer;
+	PFNGLCHECKFRAMEBUFFERSTATUSPROC         CheckFramebufferStatus;
+	PFNGLBLITFRAMEBUFFERPROC                BlitFramebuffer;
+} g_gl;
+
+/* Call sites keep the real GL names; these defines are the loader's whole
+ * footprint on the rest of the file. */
+#define glActiveTexture                  g_gl.ActiveTexture
+#define glGenFramebuffers                g_gl.GenFramebuffers
+#define glBindFramebuffer                g_gl.BindFramebuffer
+#define glDeleteFramebuffers             g_gl.DeleteFramebuffers
+#define glGenRenderbuffers               g_gl.GenRenderbuffers
+#define glBindRenderbuffer               g_gl.BindRenderbuffer
+#define glDeleteRenderbuffers            g_gl.DeleteRenderbuffers
+#define glRenderbufferStorage            g_gl.RenderbufferStorage
+#define glRenderbufferStorageMultisample g_gl.RenderbufferStorageMultisample
+#define glFramebufferTexture2D           g_gl.FramebufferTexture2D
+#define glFramebufferRenderbuffer        g_gl.FramebufferRenderbuffer
+#define glCheckFramebufferStatus         g_gl.CheckFramebufferStatus
+#define glBlitFramebuffer                g_gl.BlitFramebuffer
+
+/* Fill the table against the CURRENT context. Zero on any miss, and every
+ * miss is named: one absent entry point usually means a whole family is
+ * absent, and the full list says which at a glance. */
+static int gl_resolve(void)
+{
+	const struct { const char *name; void **slot; } tab[] = {
+		{ "glActiveTexture",         (void **)&g_gl.ActiveTexture },
+		{ "glGenFramebuffers",       (void **)&g_gl.GenFramebuffers },
+		{ "glBindFramebuffer",       (void **)&g_gl.BindFramebuffer },
+		{ "glDeleteFramebuffers",    (void **)&g_gl.DeleteFramebuffers },
+		{ "glGenRenderbuffers",      (void **)&g_gl.GenRenderbuffers },
+		{ "glBindRenderbuffer",      (void **)&g_gl.BindRenderbuffer },
+		{ "glDeleteRenderbuffers",   (void **)&g_gl.DeleteRenderbuffers },
+		{ "glRenderbufferStorage",   (void **)&g_gl.RenderbufferStorage },
+		{ "glRenderbufferStorageMultisample",
+		                             (void **)&g_gl.RenderbufferStorageMultisample },
+		{ "glFramebufferTexture2D",  (void **)&g_gl.FramebufferTexture2D },
+		{ "glFramebufferRenderbuffer",
+		                             (void **)&g_gl.FramebufferRenderbuffer },
+		{ "glCheckFramebufferStatus",(void **)&g_gl.CheckFramebufferStatus },
+		{ "glBlitFramebuffer",       (void **)&g_gl.BlitFramebuffer },
+	};
+	unsigned int i;
+	int missing = 0;
+
+	for (i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+		*tab[i].slot = SDL_GL_GetProcAddress(tab[i].name);
+		if (!*tab[i].slot) {
+			fprintf(stderr, "hle: %s did not resolve — driver stops at"
+			        " OpenGL 1.1?\n", tab[i].name);
+			missing++;
+		}
+	}
+	return missing == 0;
+}
 
 /* GLES1 enums that differ from, or are absent on, the desktop. */
 #define GLES_FIXED  0x140C
@@ -629,6 +712,10 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	if (!g_ctx) { fprintf(stderr, "hle: no GL context: %s\n", SDL_GetError()); return 0; }
 	SDL_GL_SetSwapInterval(0);
 
+	if (!gl_resolve()) {
+		fprintf(stderr, "hle: OpenGL past 1.1 unavailable on this driver\n");
+		return 0;
+	}
 	if (!make_target(w, h, samples, scale)) {
 		fprintf(stderr, "hle: incomplete framebuffer object\n");
 		return 0;
