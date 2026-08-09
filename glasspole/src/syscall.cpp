@@ -43,7 +43,7 @@ enum : uint32_t {
     SYS_ARM_set_tls = 0xf0005, SYS_ARM_cacheflush = 0xf0002,
     /* Threads. */
     SYS_clone = 120, SYS_futex = 240, SYS_gettid = 224,
-    SYS_mknod = 14, SYS_ftruncate = 93, SYS_getdents64 = 217,
+    SYS_mknod = 14, SYS_ftruncate = 93, SYS_getdents64 = 217, SYS_getdents = 141,
     /* POSIX message queues. Brio's task communication runs on these. */
     SYS_mq_open = 274, SYS_mq_unlink = 275, SYS_mq_timedsend = 276,
     SYS_mq_timedreceive = 277, SYS_mq_notify = 278, SYS_mq_getsetattr = 279,
@@ -164,7 +164,7 @@ const char *name_of(uint32_t nr) {
         case SYS_clone: return "clone";             case SYS_futex: return "futex";
         case SYS_gettid: return "gettid";           case SYS_fcntl64: return "fcntl64";
         case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
-        case SYS_getdents64: return "getdents64";
+        case SYS_getdents64: return "getdents64";   case SYS_getdents: return "getdents";
         case SYS_mq_open: return "mq_open";         case SYS_mq_unlink: return "mq_unlink";
         case SYS_mq_timedsend: return "mq_timedsend";
         case SYS_mq_timedreceive: return "mq_timedreceive";
@@ -955,6 +955,44 @@ void gp_syscall(Thread &t) {
         GuestFd *g = m.Fd((int)a0);
         if (!g || !g->file) { ret = GP_EBADF; break; }
         ret = gp_truncate(g->file, a1);
+        break;
+    }
+
+    /* The 32-bit getdents, which qemu-arm shows the guest still using in four
+     * places. struct linux_dirent is { u32 ino; u32 off; u16 reclen; char
+     * name[]; } with the type byte AFTER the name — an oddity of the old call
+     * that is easy to get wrong by analogy with getdents64. */
+    case SYS_getdents: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g) { ret = GP_EBADF; break; }
+        if (!g->dir) {
+            int r0 = gp_diropen(m.HostPath(g->path).c_str(), &g->dir);
+            if (r0 < 0) { ret = r0; break; }
+        }
+        uint8_t *out = m.Ptr(a1);
+        uint32_t used = 0;
+        for (;;) {
+            const char *name = nullptr;
+            uint32_t is_dir = 0;
+            int r0 = gp_dirnext(g->dir, &name, &is_dir);
+            if (r0 <= 0) { ret = r0 < 0 ? r0 : (int32_t)used; break; }
+            const uint32_t nlen = (uint32_t)std::strlen(name);
+            const uint32_t rec  = (10 + nlen + 1 + 1 + 3) & ~3u;
+            if (used + rec > a2) {
+                gp_log("getdents: buffer too small, dropped '%s'\n", name);
+                ret = (int32_t)used;
+                break;
+            }
+            uint8_t *e = out + used;
+            uint32_t ino = 1 + used, off = used + rec;
+            std::memcpy(e + 0, &ino, 4);
+            std::memcpy(e + 4, &off, 4);
+            uint16_t reclen = (uint16_t)rec;
+            std::memcpy(e + 8, &reclen, 2);
+            std::memcpy(e + 10, name, nlen + 1);
+            e[rec - 1] = is_dir ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
+            used += rec;
+        }
         break;
     }
 
