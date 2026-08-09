@@ -5647,3 +5647,92 @@ If hardware answers `en-us` too, then the device runs these titles with the
 same string ours chokes on, the difference is somewhere else entirely, and the
 locale data theory is dead before it costs a day. See "LeapDog — differential
 tracing against real hardware" above for getting a shell on it.
+
+## 2026-08-09 — Glasspole: AppManager's home screen, narrowed to one call
+
+Glasspole runs the LeapPad's software without qemu. Flash titles work: 14 of 15
+render, Pet Pad matching qemu to 99% of pixels, and `LPAD/main.swf` driven
+straight through `saplayer` produces the Sign In screen. What does NOT work is
+AppManager bringing that screen up itself, and this entry is about where that
+stops, so the next person does not re-walk the same ground.
+
+### The symptom
+
+After `UI loaded`, glasspole prints two lines qemu-arm never prints:
+
+```
+[0x280] LoadNewApp: loading ViewFrame
+[0x280] CGameViewFrame::Enter
+<ASSERT>: Value::asMap() Type is not a map (LightningJSON/Src/json_value.cpp:528)
+```
+
+and draws the Leapster control frame — grey chrome, black game area, one green
+button — instead of the Flash home screen. qemu at the same point constructs
+`DidjPlayer`, creates the player, sets the framebuffer, and loads the movie.
+
+### Where it is, exactly
+
+`CAppManager::LoadNewApp` in `LF/Base/lib/libLightningBase.so`. The library is
+stripped, so this was found by resolving GCC's ARM PIC pattern — `ldr rX,[pc,#N]`
+followed by `add rX,pc,rX` — back to the string each pair addresses. The code at
+`0x42320`–`0x42438` is:
+
+```
+    path = <app dir> + "/GameInfo.json"     @ 0x42340, literal -> '/GameInfo.json'
+    LTM::CJSonFile json(path, 0)            @ 0x42350
+    json.Load()                             @ 0x42360
+    if (!json.isMember("ViewFrame"))        @ 0x42370, literal -> 'ViewFrame'
+        goto 0x4279c                        @ 0x42378 — the branch qemu takes
+    name = value.asString()                 @ 0x423a0
+    if (!BaseUtils::FileExists(name))       @ 0x42404
+        goto 0x42598
+    DebugOut("%s: loading ViewFrame %s")    @ 0x42430
+```
+
+**The divergence is `LTM::Value::isMember("ViewFrame")` at 0x42370.** It returns
+false under qemu and true under glasspole. Everything downstream — the Emerald
+path construction, the view frame, the asMap assert — follows from that one
+answer.
+
+`GameInfo.json` DOES NOT EXIST for LPAD. Both emulators stat it and get ENOENT,
+so `Load()` fails in both and `isMember` is being asked about a Value that was
+never populated. Creating a valid empty `{}` at that path does NOT change the
+outcome, which is worth knowing: it is not simply "the load failed".
+
+### Ruled out, each by measurement rather than argument
+
+Ten candidates, none of them it:
+
+* **Missing syscalls.** There are none left in a whole boot.
+* **The FlashApp.so dlopen chain.** Both load the same twenty libraries in the
+  same order, `libflashdidj.so` included.
+* **JIT miscompilation.** Identical behaviour with every dynarmic optimisation
+  disabled (`GLASSPOLE_NO_OPT=1`).
+* **The doom flag.** qemu logs `HasDoomPackageCritical: global doom file
+  detected` on the same sysroot and still works. It is advisory. On real
+  hardware it routes to "waiting for tuneup"; under Tadpole there is no tuneup
+  flow to enter, so AppManager notes it and carries on.
+* **Truncated directory listings.** Was a real bug — getdents dropped entries
+  that did not fit — and fixing it did not move this.
+* **The auxiliary vector.** Was also wrong: AT_HWCAP 0x20d6 against qemu's
+  0x0fdfb0d7. Fixed, no change.
+* **The environment.** Also wrong: three variables against qemu's sixty-six,
+  LANG among the missing. Fixed, no change.
+* **sysinfo's memory figures, and argv[0] being a guest or host path.**
+* **The stat of main.swf.** Both do exactly two — doubled path fails, clean
+  path succeeds.
+
+### What that leaves
+
+Identical syscalls, identical file contents, deterministic per emulator,
+independent of JIT settings, and a wrong answer from a function reading state
+the guest never initialised. That points at guest memory whose CONTENTS differ
+between the two emulators rather than at anything either emulator does wrong —
+the initial stack sits at a different address, so every frame below it inherits
+different residue.
+
+If that is right, this is a latent bug in LeapFrog's code that qemu happens to
+survive and glasspole happens to trip, and the fix is not to match qemu byte for
+byte but to make the guest's fresh memory deterministic. Worth testing before
+believing: zero the guest's stack region at startup and see whether the answer
+changes. That experiment has not been run.
