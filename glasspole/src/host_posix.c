@@ -128,21 +128,21 @@ int64_t gp_seek(gp_file *f, int64_t off, int whence) {
     return n < 0 ? err() : n;
 }
 
-static void fill_stat(const struct stat *s, struct gp_stat *st) {
+static void fill_stat(const struct stat *s, struct gp_statbuf *st) {
     st->size     = (uint64_t)s->st_size;
     st->mtime_ns = (uint64_t)s->st_mtim.tv_sec * 1000000000ull + s->st_mtim.tv_nsec;
     st->mode     = s->st_mode;
     st->is_dir   = S_ISDIR(s->st_mode) ? 1 : 0;
 }
 
-int gp_stat(const char *path, struct gp_stat *st) {
+int gp_stat(const char *path, struct gp_statbuf *st) {
     struct stat s;
     if (stat(path, &s) != 0) return err();
     fill_stat(&s, st);
     return 0;
 }
 
-int gp_fstat(gp_file *f, struct gp_stat *st) {
+int gp_fstat(gp_file *f, struct gp_statbuf *st) {
     struct stat s;
     if (fstat(f->fd, &s) != 0) return err();
     fill_stat(&s, st);

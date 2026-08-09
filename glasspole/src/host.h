@@ -133,7 +133,7 @@ typedef struct gp_file gp_file;
 /* Deliberately narrower than struct stat: this is what the census shows the
  * guest actually reads back, and a field we do not carry is a field the Win32
  * backend cannot get wrong. Times are nanoseconds since the Unix epoch. */
-struct gp_stat {
+struct gp_statbuf {
     uint64_t size;
     uint64_t mtime_ns;
     uint32_t mode;      /* Linux S_IF* bits plus permissions */
@@ -158,8 +158,8 @@ int64_t gp_pread(gp_file *f, void *buf, size_t len, uint64_t off);
 #define GP_SEEK_END 2
 int64_t gp_seek(gp_file *f, int64_t off, int whence);
 
-int   gp_stat (const char *utf8_path, struct gp_stat *st);
-int   gp_fstat(gp_file *f, struct gp_stat *st);
+int   gp_stat (const char *utf8_path, struct gp_statbuf *st);
+int   gp_fstat(gp_file *f, struct gp_statbuf *st);
 int   gp_truncate(gp_file *f, uint64_t size);
 int   gp_sync(gp_file *f);
 
