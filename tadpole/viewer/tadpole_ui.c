@@ -15,7 +15,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#include <pwd.h>
+#include "tadpole_port.h"
 
 /* Long enough for any real path; the browser can walk anywhere. */
 #define PATHMAX 1024
@@ -292,11 +292,14 @@ static void mkdir_p(const char *path)
 	snprintf(tmp, sizeof(tmp), "%s", path);
 	for (p = tmp + 1; *p; p++) {
 		if (*p != '/') continue;
+		/* "C:/" — a drive root is not ours to create, and trying returns
+		 * EACCES rather than the EEXIST a Unix "/" gives. Skip it. */
+		if (p > tmp + 1 && p[-1] == ':') continue;
 		*p = 0;
-		mkdir(tmp, 0755);
+		tp_mkdir(tmp);
 		*p = '/';
 	}
-	mkdir(tmp, 0755);
+	tp_mkdir(tmp);
 }
 
 /* dst = a + "/" + b, always NUL-terminated, never warns about truncation
@@ -766,14 +769,21 @@ static enum modal_kind g_gm_return;   /* where Close goes: wizard, or nowhere */
 
 static void games_cache_dir(char *out, size_t n)
 {
+	/* XDG override, then Windows' app-data directory, then ~/.cache. The
+	 * chain is environment-driven rather than #ifdef-driven: LOCALAPPDATA
+	 * and USERPROFILE exist on every Windows and on no Linux, so each
+	 * platform simply falls through to its own answer. (USERPROFILE also
+	 * replaces the old getpwuid() fallback — pwd.h has no Windows form,
+	 * and a Linux session with neither HOME nor USERPROFILE set lands on
+	 * /tmp exactly as it did before.) */
 	const char *x = getenv("XDG_CACHE_HOME");
+	const char *la = getenv("LOCALAPPDATA");
 	const char *home = getenv("HOME");
-	if (!home) {
-		struct passwd *pw = getpwuid(getuid());
-		home = pw ? pw->pw_dir : "/tmp";
-	}
-	if (x && *x) snprintf(out, n, "%s/tadpole/games", x);
-	else         snprintf(out, n, "%s/.cache/tadpole/games", home);
+	if (!home) home = getenv("USERPROFILE");
+	if (!home) home = "/tmp";
+	if (x && *x)        snprintf(out, n, "%s/tadpole/games", x);
+	else if (la && *la) snprintf(out, n, "%s/Tadpole/cache/games", la);
+	else                snprintf(out, n, "%s/.cache/tadpole/games", home);
 }
 
 /* Installed means "a package directory with this PackageID exists in the
@@ -955,14 +965,15 @@ static int games_write_list(char *out, size_t n)
  * checkboxes appeared to do nothing at all. */
 static void cfg_path(char *out, size_t n)
 {
+	/* Same chain as games_cache_dir, and for the same reason. */
 	const char *x = getenv("XDG_CONFIG_HOME");
+	const char *la = getenv("LOCALAPPDATA");
 	const char *home = getenv("HOME");
-	if (!home) {
-		struct passwd *pw = getpwuid(getuid());
-		home = pw ? pw->pw_dir : "/tmp";
-	}
-	if (x && *x) snprintf(out, n, "%s/tadpole", x);
-	else         snprintf(out, n, "%s/.config/tadpole", home);
+	if (!home) home = getenv("USERPROFILE");
+	if (!home) home = "/tmp";
+	if (x && *x)        snprintf(out, n, "%s/tadpole", x);
+	else if (la && *la) snprintf(out, n, "%s/Tadpole/config", la);
+	else                snprintf(out, n, "%s/.config/tadpole", home);
 	mkdir_p(out);
 	{
 		size_t l = strlen(out);

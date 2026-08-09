@@ -18,12 +18,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+/* Guest supervision (fork/wait/kill) and the shared mappings — the two things
+ * with no Windows spelling. Their users are stubbed out below on Windows;
+ * see "guest supervision" for why they are stubs and not ports. */
 #include <sys/wait.h>
 #include <signal.h>
-#include <libgen.h>
+#include <sys/mman.h>
+#endif
 #include "tadpole_ui.h"
 #include "tadpole_hle.h"
-#include <sys/mman.h>
+#include "tadpole_port.h"
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -230,6 +235,7 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
 
 static void audio_open_fifo(void)
 {
+#ifndef _WIN32
 	char path[512];
 
 	snprintf(path, sizeof(path), "%s/audio", g_dir);
@@ -237,6 +243,12 @@ static void audio_open_fifo(void)
 	/* O_RDWR on a FIFO never blocks and never sees EOF, so we can hold the
 	 * read end open whether or not the guest has started writing. */
 	g_afd = open(path, O_RDWR | O_NONBLOCK);
+#else
+	/* No FIFOs on Win32 and no guest to feed one. g_afd stays -1 and every
+	 * pump already checks it. The real replacement is the one-process
+	 * design's in-memory ring, which arrives with the emulator, not here. */
+	g_afd = -1;
+#endif
 }
 
 /* Open (or reopen) the SDL device when the guest publishes a format. */
@@ -342,6 +354,7 @@ static void audio_pump(void)
 
 static void *map_file(const char *path, size_t *len_out)
 {
+#ifndef _WIN32
 	struct stat st;
 	void *p;
 	int fd = open(path, O_RDWR);
@@ -359,6 +372,15 @@ static void *map_file(const char *path, size_t *len_out)
 	if (len_out)
 		*len_out = (size_t)st.st_size;
 	return p;
+#else
+	/* A shared mapping is how the guest's framebuffer reaches us, and there
+	 * is no guest in this build. NULL is the same answer the POSIX side
+	 * gives before a guest starts, and every caller already handles it.
+	 * Deliberately NOT CreateFileMapping: sharing memory with the emulator
+	 * on Windows is the one-process design's job, not a viewer patch. */
+	(void)path; (void)len_out;
+	return NULL;
+#endif
 }
 
 static void send_event(int dev, uint16_t type, uint16_t code, int32_t value)
@@ -1231,10 +1253,15 @@ static void find_project_dir(const char *argv0)
 			return;
 		}
 	}
-	if (!realpath(argv0, buf)) {
+	if (!tp_realpath(argv0, buf, sizeof(buf))) {
 		snprintf(g_projdir, sizeof(g_projdir), "%s", ".");
 		return;
 	}
+	/* One separator convention below this line. Win32 APIs accept forward
+	 * slashes everywhere, so normalise rather than teach every strrchr
+	 * about backslashes. A no-op on Linux. */
+	for (i = 0; buf[i]; i++)
+		if (buf[i] == '\\') buf[i] = '/';
 	for (i = 0; i < 3; i++) {
 		char *slash = strrchr(buf, '/');
 		if (!slash || slash == buf) break;
@@ -1250,6 +1277,7 @@ static void find_project_dir(const char *argv0)
  * THE DEBUG LEVEL EXPANDS HERE, in one place, so that "level 2" has exactly
  * one meaning. See the table in tadpole_ui.h.
  */
+#ifndef _WIN32
 static void guest_setenv(const struct ui_settings *c)
 {
 	char buf[32];
@@ -1287,6 +1315,7 @@ static void guest_setenv(const struct ui_settings *c)
 	}
 	setenv("TADPOLE_DIR", g_dir, 1);
 }
+#endif  /* !_WIN32 — only spawn_script's child calls this */
 
 /* ---- where the guest's output goes ---------------------------------------
  *
@@ -1306,11 +1335,17 @@ static FILE *g_glog_file;
 
 static void guest_log_path(char *out, size_t n)
 {
+	/* XDG override, then the platform's app-data directory, then ~/.local.
+	 * LOCALAPPDATA is just an environment variable — set on every Windows,
+	 * never set on Linux — so this chain needs no #ifdef to be right on
+	 * both. */
 	const char *x = getenv("XDG_STATE_HOME");
+	const char *la = getenv("LOCALAPPDATA");
 	const char *home = getenv("HOME");
 	char *p;
-	if (x && *x) snprintf(out, n, "%s/tadpole", x);
-	else         snprintf(out, n, "%s/.local/state/tadpole", home ? home : "/tmp");
+	if (x && *x)        snprintf(out, n, "%s/tadpole", x);
+	else if (la && *la) snprintf(out, n, "%s/Tadpole/state", la);
+	else                snprintf(out, n, "%s/.local/state/tadpole", home ? home : "/tmp");
 	/* EVERY level of it. ~/.local/state does not exist on a fresh account, and
 	 * one mkdir() of a path whose parent is missing fails with ENOENT — which
 	 * is exactly how the first log file went nowhere, silently, while the
@@ -1318,10 +1353,10 @@ static void guest_log_path(char *out, size_t n)
 	for (p = out + 1; *p; p++) {
 		if (*p != '/') continue;
 		*p = 0;
-		mkdir(out, 0755);
+		tp_mkdir(out);
 		*p = '/';
 	}
-	mkdir(out, 0755);
+	tp_mkdir(out);
 	{
 		size_t l = strlen(out);
 		snprintf(out + l, n - l, "/tadpole.log");
@@ -1370,6 +1405,45 @@ static void guest_log_close(void)
  * to $TADPOLE_DIR/.lock and refuses a second instance on the same dir. Without
  * this the menu would offer "Run System Menu" against a live guest and the
  * launch would just fail on the lock. */
+#ifdef _WIN32
+/* ---- guest supervision, Windows --------------------------------------------
+ *
+ * There is no guest to supervise: the emulator is not wired up on Windows
+ * yet, and the supervision itself is fork-shaped — process groups, SIGTERM
+ * escalation, pipes to the child's stdio — with no faithful Win32 analogue
+ * short of the one-process design, which is a cross-machine decision and
+ * must not arrive by the back door of a viewer port.
+ *
+ * So these are STUBS, not ports. spawn_script fails, and every caller
+ * already turns that failure into an honest message ("launch failed",
+ * "<tool> could not start") because spawn can fail on Linux too. The one
+ * thing added is a status line saying WHY, once, so a greyed-out button is
+ * a fact about this build rather than a mystery. */
+static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
+                          int *outfd, int silent)
+{
+	(void)argv; (void)as_guest; (void)silent;
+	if (outfd) *outfd = -1;
+	fprintf(stderr, "tadpole-view: cannot run %s — no emulator in this "
+	        "Windows build yet\n", script);
+	ui_status("no emulator in this Windows build yet");
+	return -1;
+}
+
+static int  guest_external(void) { return 0; }   /* none can exist */
+static int  guest_alive(void)    { return 0; }
+static void guest_stop(void)     { }
+
+/* tool_poll's reap, stubbed to "still running" — unreachable, since no tool
+ * can ever start. */
+static int tool_reap(pid_t pid, int *exited_ok)
+{
+	(void)pid; (void)exited_ok;
+	return 0;
+}
+
+#else  /* POSIX guest supervision */
+
 static int guest_external(void)
 {
 	char path[600];
@@ -1464,6 +1538,17 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 	}
 	return pid;
 }
+
+/* Nonblocking reap: 1 with *exited_ok set when pid has finished, else 0. */
+static int tool_reap(pid_t pid, int *exited_ok)
+{
+	int st;
+	if (waitpid(pid, &st, WNOHANG) != pid) return 0;
+	*exited_ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+	return 1;
+}
+
+#endif  /* guest supervision */
 
 static void guest_launch_ui(void)
 {
@@ -1642,10 +1727,10 @@ static void tool_drain(void)
 
 static void tool_poll(void)
 {
-	int st, ok;
+	int ok = 0;
 	if (g_tool <= 0) return;
 	tool_drain();
-	if (waitpid(g_tool, &st, WNOHANG) != g_tool) return;
+	if (!tool_reap(g_tool, &ok)) return;
 	tool_drain();                      /* anything written just before exit */
 	if (g_tool_len) {
 		g_tool_buf[g_tool_len] = 0;
@@ -1654,7 +1739,6 @@ static void tool_poll(void)
 	}
 	g_tool_len = 0;
 	if (g_tool_fd >= 0) { close(g_tool_fd); g_tool_fd = -1; }
-	ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
 
 	/* THE UPDATE CHECK OWNS ITS OWN ENDING. It never opened a progress panel
 	 * — a check that flashes a dialog at every launch is worse than no check —
@@ -1787,6 +1871,23 @@ int main(int argc, char **argv)
 	ui_preload_settings();
 	scale  = ui_cfg()->scale;
 	rotate = ui_cfg()->rotate;
+	/* The compiled-in default is /tmp/tadpole, which is meaningless on
+	 * Windows. LOCALAPPDATA is the Windows spelling of "per-user writable app
+	 * data" and is never set on Linux, so checking the environment — rather
+	 * than the platform — keeps this one chain correct on both. An explicit
+	 * TADPOLE_DIR still wins, as it always has. */
+	{
+		static char defdir[600];
+		const char *la = getenv("LOCALAPPDATA");
+		if (la && *la) {
+			snprintf(defdir, sizeof(defdir), "%s/Tadpole", la);
+			tp_mkdir(defdir);
+			snprintf(defdir + strlen(defdir), sizeof(defdir) - strlen(defdir),
+			         "/run");
+			tp_mkdir(defdir);
+			g_dir = defdir;
+		}
+	}
 	if ((env = getenv("TADPOLE_DIR")) != NULL)
 		g_dir = env;
 	g_touch_debug = getenv("TADPOLE_TOUCH_DEBUG") != NULL;

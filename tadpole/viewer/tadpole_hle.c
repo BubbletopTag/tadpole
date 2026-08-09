@@ -32,7 +32,9 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/mman.h>
+#ifndef _WIN32
+#include <sys/mman.h>   /* the shared GL ring; see hle_host_init */
+#endif
 
 #include "../shim/tadpole_glcmd.h"
 #include "tadpole_hle.h"
@@ -686,6 +688,7 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	void *m;
 
 	g_w = w; g_h = h;
+#ifndef _WIN32
 	snprintf(path, sizeof(path), "%s/glcmd.bin", dir);
 	fd = open(path, O_RDWR | O_CREAT, 0666);
 	if (fd < 0) { fprintf(stderr, "hle: cannot open %s\n", path); return 0; }
@@ -693,6 +696,16 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	m = mmap(NULL, TADGL_FILE_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	close(fd);
 	if (m == MAP_FAILED) { fprintf(stderr, "hle: cannot map glcmd.bin\n"); return 0; }
+#else
+	/* The ring exists to be SHARED with the guest's GL shim, and this build
+	 * has no guest — plain memory carries the same header and rings and is
+	 * the honest version of "nobody on the other side". Deliberately not
+	 * CreateFileMapping: cross-process sharing on Windows is the one-process
+	 * design's question, and it does not get answered inside a viewer port. */
+	(void)path; (void)fd;
+	m = calloc(1, TADGL_FILE_BYTES);
+	if (!m) { fprintf(stderr, "hle: cannot allocate the GL ring\n"); return 0; }
+#endif
 
 	g_ring = m;
 	g_data = TADGL_DATA(g_ring);
