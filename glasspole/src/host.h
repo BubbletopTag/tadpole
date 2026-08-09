@@ -50,6 +50,7 @@ extern "C" {
 #define GP_ENOENT   -2
 #define GP_EINTR    -4
 #define GP_EIO      -5
+#define GP_ENXIO    -6   /* O_WRONLY|O_NONBLOCK on a FIFO with no reader */
 #define GP_EBADF    -9
 #define GP_EAGAIN   -11
 #define GP_ENOMEM   -12

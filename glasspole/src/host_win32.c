@@ -263,7 +263,93 @@ struct gp_file {
     HANDLE  h;
     SRWLOCK lock;    /* orders pread's save/restore against read/write/seek */
     int     append;
+    int     pipe;    /* a FIFO stand-in — see the named-pipe table below */
 };
+
+/* ---- FIFOs as named pipes -------------------------------------------------
+ *
+ * Win32 HAS pipes with FIFO semantics; they are just not filesystem objects
+ * an open() can reach. So the mapping lives HERE: gp_mkfifo records the path
+ * in a table and gp_open consults it — a registered path opens
+ * \\.\pipe\tadpole-<basename> instead of a file, and everything above host.h
+ * keeps thinking it is a file, which is the contract.
+ *
+ * The name is derived from the BASENAME because the two ends of a pipe are
+ * different processes that may spell the directory differently (the viewer's
+ * TADPOLE_DIR against the guest's drive-relative rewrite). One Tadpole per
+ * machine is assumed, as it already is by the .lock file.
+ *
+ * Ordering and non-blocking, both of which Linux gives for free:
+ *   - the two ends start in either order, so whichever opens FOR READING
+ *     first becomes the pipe server and the writer connects as a client;
+ *   - a writer with no reader must get ENXIO, not a block — the shim's audio
+ *     path opens O_WRONLY|O_NONBLOCK and depends on failing fast, retrying
+ *     each period, and discarding on pace;
+ *   - reads and writes never block (PIPE_NOWAIT): an empty pipe reads as
+ *     EAGAIN, a full one writes as EAGAIN, and a vanished peer reads as EOF.
+ *     PIPE_NOWAIT is old and deprecated in favour of overlapped I/O, and it
+ *     is also EXACTLY the semantics O_NONBLOCK promises, in one flag. */
+#define GP_MAX_FIFOS 12
+static struct { char path[512]; char pipe[80]; } g_fifo[GP_MAX_FIFOS];
+static int g_fifo_n;
+
+static const char *fifo_lookup(const char *path)
+{
+    int i;
+    for (i = 0; i < g_fifo_n; i++)
+        if (strcmp(g_fifo[i].path, path) == 0)
+            return g_fifo[i].pipe;
+    return NULL;
+}
+
+int gp_mkfifo(const char *path, uint32_t mode)
+{
+    const char *base = strrchr(path, '/');
+    (void)mode;
+    base = base ? base + 1 : path;
+    if (fifo_lookup(path))
+        return GP_EEXIST;               /* callers treat this as "fine" */
+    if (g_fifo_n >= GP_MAX_FIFOS)
+        return GP_ENOMEM;
+    snprintf(g_fifo[g_fifo_n].path, sizeof(g_fifo[g_fifo_n].path), "%s", path);
+    snprintf(g_fifo[g_fifo_n].pipe, sizeof(g_fifo[g_fifo_n].pipe),
+             "\\\\.\\pipe\\tadpole-%s", base);
+    g_fifo_n++;
+    return 0;
+}
+
+static int fifo_open(const char *pipename, int flags, gp_file **out)
+{
+    HANDLE h;
+    gp_file *f;
+    DWORD access = (flags & 3) == GP_O_WRONLY ? GENERIC_WRITE
+                 : (flags & 3) == GP_O_RDONLY ? GENERIC_READ
+                 : GENERIC_READ | GENERIC_WRITE;
+
+    h = CreateFileA(pipename, access, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD e = GetLastError();
+        if (e == ERROR_PIPE_BUSY)
+            return GP_EBUSY;
+        if ((flags & 3) == GP_O_WRONLY)
+            return GP_ENXIO;            /* no reader: Linux's exact answer */
+        /* First reader creates the pipe and serves it. */
+        h = CreateNamedPipeA(pipename,
+                             PIPE_ACCESS_DUPLEX,
+                             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
+                             1, 64 << 10, 64 << 10, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE)
+            return err();
+        ConnectNamedPipe(h, NULL);      /* NOWAIT: arms, never blocks */
+    }
+    f = calloc(1, sizeof *f);
+    if (!f) { CloseHandle(h); return GP_ENOMEM; }
+    f->h = h;
+    f->pipe = 1;
+    InitializeSRWLock(&f->lock);
+    *out = f;
+    return 0;
+}
 
 /* REAL shared views, on Windows 7 API. The stopgap that lived here — a
  * private copy with a write-back at exit — could not survive contact with
@@ -368,6 +454,14 @@ int gp_open(const char *path, int flags, uint32_t mode, gp_file **out)
     gp_file *f;
 
     (void)mode;   /* permission bits stop meaning anything at this boundary */
+
+    /* A path gp_mkfifo registered is a pipe wearing a filename. */
+    {
+        const char *pn = fifo_lookup(path);
+        if (pn)
+            return fifo_open(pn, flags, out);
+    }
+
     if ((e = widen(path, w, GP_WPATH)) < 0) return e;
 
     attr  = GetFileAttributesW(w);
@@ -417,6 +511,19 @@ int gp_close(gp_file *f)
     return r;
 }
 
+/* GetLastError -> the FIFO-shaped errno a pipe end expects. NOWAIT pipes
+ * speak in these three: empty (or not-yet-connected) is EAGAIN — the same
+ * answer O_NONBLOCK gives — and a departed peer is EOF on read, EPIPE-ish on
+ * write, for which EIO is the closest number the table carries. */
+static int64_t pipe_err(DWORD e, int reading)
+{
+    if (e == ERROR_NO_DATA || e == ERROR_PIPE_LISTENING)
+        return reading ? GP_EAGAIN : GP_EAGAIN;
+    if (e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED)
+        return reading ? 0 : GP_EIO;   /* reader: EOF; writer: gone */
+    return err_from(e);
+}
+
 int64_t gp_read(gp_file *f, void *buf, size_t len)
 {
     DWORD n;
@@ -425,8 +532,15 @@ int64_t gp_read(gp_file *f, void *buf, size_t len)
     AcquireSRWLockExclusive(&f->lock);
     ok = ReadFile(f->h, buf, (DWORD)len, &n, NULL);
     ReleaseSRWLockExclusive(&f->lock);
-    if (!ok) return err();
-    return n;      /* EOF is TRUE with n == 0, exactly read()'s 0 */
+    if (!ok) {
+        DWORD e = GetLastError();
+        return f->pipe ? pipe_err(e, 1) : err_from(e);
+    }
+    /* A NOWAIT pipe "succeeds" with 0 bytes when empty; that is EAGAIN, not
+     * EOF — EOF is the peer actually leaving, reported above. */
+    if (f->pipe && n == 0 && len > 0)
+        return GP_EAGAIN;
+    return n;      /* file EOF is TRUE with n == 0, exactly read()'s 0 */
 }
 
 int64_t gp_write(gp_file *f, const void *buf, size_t len)
@@ -435,13 +549,20 @@ int64_t gp_write(gp_file *f, const void *buf, size_t len)
     BOOL ok;
     if (len > 0x7fffffffu) len = 0x7fffffffu;
     AcquireSRWLockExclusive(&f->lock);
-    if (f->append) {
+    if (f->append && !f->pipe) {
         LARGE_INTEGER end; end.QuadPart = 0;
         SetFilePointerEx(f->h, end, NULL, FILE_END);
     }
     ok = WriteFile(f->h, buf, (DWORD)len, &n, NULL);
     ReleaseSRWLockExclusive(&f->lock);
-    if (!ok) return err();
+    if (!ok) {
+        DWORD e = GetLastError();
+        return f->pipe ? pipe_err(e, 0) : err_from(e);
+    }
+    /* NOWAIT again: a full pipe "writes" 0 bytes. EAGAIN, so the shim's
+     * bounded retry paces the writer exactly as it does on Linux. */
+    if (f->pipe && n == 0 && len > 0)
+        return GP_EAGAIN;
     return n;
 }
 
@@ -452,6 +573,7 @@ int64_t gp_pread(gp_file *f, void *buf, size_t len, uint64_t off)
     DWORD n, e = 0;
     BOOL ok;
 
+    if (f->pipe) return GP_ESPIPE;
     if (len > 0x7fffffffu) len = 0x7fffffffu;
     memset(&ov, 0, sizeof ov);
     ov.Offset     = (DWORD)(off & 0xffffffffu);
@@ -478,6 +600,7 @@ int64_t gp_seek(gp_file *f, int64_t off, int whence)
     DWORD method = whence == GP_SEEK_CUR ? FILE_CURRENT
                  : whence == GP_SEEK_END ? FILE_END : FILE_BEGIN;
     BOOL ok;
+    if (f->pipe) return GP_ESPIPE;
     want.QuadPart = off;
     AcquireSRWLockExclusive(&f->lock);
     ok = SetFilePointerEx(f->h, want, &got, method);
@@ -540,6 +663,15 @@ int gp_stat(const char *path, struct gp_statbuf *st)
 
 int gp_fstat(gp_file *f, struct gp_statbuf *st)
 {
+    if (f->pipe) {
+        /* Pipes have no file information; say S_IFIFO and be done, which is
+         * also everything fstat on a Linux FIFO usefully says. */
+        memset(st, 0, sizeof *st);
+        st->mode = 0010000u | 0644u;
+        st->dev  = 0;
+        st->ino  = (uint64_t)(uintptr_t)f;
+        return 0;
+    }
     return fill_from_handle(f->h, st);
 }
 
@@ -557,19 +689,6 @@ int gp_truncate(gp_file *f, uint64_t size)
 int gp_sync(gp_file *f)
 {
     return FlushFileBuffers(f->h) ? 0 : err();
-}
-
-int gp_mkfifo(const char *path, uint32_t mode)
-{
-    /* Deliberately not implemented — see host.h. Win32 named pipes live in
-     * \\.\pipe\, not on the filesystem where the guest's open() will look, so
-     * a FIFO here would be a lie with a delayed failure. The real answer is
-     * the one-process design, where the shim's event nodes become an
-     * in-memory queue. Until then, honesty: */
-    (void)mode;
-    gp_log("mkfifo(%s): no FIFOs on Win32 — needs the one-process input "
-           "queue; returning ENOSYS\n", path);
-    return GP_ENOSYS;
 }
 
 int gp_mkdir(const char *path, uint32_t mode)

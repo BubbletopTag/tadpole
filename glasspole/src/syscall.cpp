@@ -34,7 +34,7 @@ enum : uint32_t {
     SYS_getegid32 = 202, SYS_fcntl64 = 221, SYS_exit_group = 248,
     SYS_set_tid_address = 256, SYS_clock_gettime = 263, SYS_readlink = 85,
     SYS_set_robust_list = 338, SYS_getcwd = 183, SYS_nanosleep = 162,
-    SYS_sched_yield = 158,
+    SYS_sched_yield = 158, SYS_setitimer = 104,
     /* The pre-64-bit stat family. uClibc's ld.so uses THESE, not the *64
      * variants — which is why leaving them out makes every library lookup come
      * back "no such file" and the linker report a missing libc.so.0. */
@@ -183,6 +183,7 @@ const char *name_of(uint32_t nr) {
         case SYS_newselect: return "_newselect";     case SYS_rename: return "rename";
         case SYS_statfs: return "statfs";            case SYS_chdir: return "chdir";
         case SYS_getuid32: return "getuid32";
+        case SYS_setitimer: return "setitimer";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
         default: return "?";
@@ -260,6 +261,18 @@ void gp_syscall(Thread &t) {
         /* Accepted and ignored. dynarmic manages its own code cache, and the
          * signal calls matter only once something can deliver one. */
         ret = 0;
+        break;
+
+    case SYS_setitimer:
+        /* Refused without the per-call log spam of the default case. The
+         * timer's whole product is a SIGALRM and nothing can deliver one;
+         * the one known caller — libsiimpl's ualarm(), which uClibc spells
+         * with setitimer — tolerates the refusal and the title runs. An
+         * accepted-and-ignored 0 here is UNTESTED against that caller (a
+         * first attempt at it drowned in a broken test harness before it
+         * measured anything), so honesty keeps the burden of proof where
+         * it belongs: on whoever brings signal delivery. */
+        ret = GP_ENOSYS;
         break;
 
     case SYS_ARM_set_tls:

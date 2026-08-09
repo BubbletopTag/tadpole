@@ -87,22 +87,18 @@ if ($Swf) {
 }
 
 # ---- the shared directory -------------------------------------------------
-# DELIBERATELY NO ev0..ev5 AND NO audio FILE. Making the event nodes openable
-# sends libEvent down its raw-interface path, which arms a poll timer with
-# setitimer(2) -- ENOSYS in glasspole today, and on that failure the whole
-# event manager shuts down and the title exits. Absent nodes take the proven
-# no-input path instead: the title runs and renders, touchless, until
-# setitimer and signal delivery exist in the emulator. The audio file is
-# omitted for the same shape of reason -- with no viewer-side reader the
-# shim's paced discard is correct, and an ever-growing file is not.
+# The event and audio FIFOs are named pipes now (glasspole's gp_mkfifo and
+# the viewer's tp_fifo_fd carry the two ends); any plain ev*/audio files
+# here are leftovers from before that worked, and stale ones would shadow
+# the real path, so clear them.
 $RunDir = Join-Path $Proj "build\tadpole-run"
 New-Item -ItemType Directory -Force $RunDir | Out-Null
 foreach ($n in 0..5) {
     $f = Join-Path $RunDir "ev$n"
     if (Test-Path $f) { Remove-Item $f -Force }
 }
-$audio = Join-Path $RunDir "audio"
-if (Test-Path $audio) { Remove-Item $audio -Force }
+$audioFile = Join-Path $RunDir "audio"
+if (Test-Path $audioFile) { Remove-Item $audioFile -Force }
 
 $R = DriveRel $Proj
 $env:TADPOLE_DIR = (DriveRel $RunDir)
@@ -122,6 +118,10 @@ Write-Host "guest pid $($guest.Id); logs in build\tadpole-run\"
 
 if ($NoViewer) { exit 0 }
 
+# RUN THIS SCRIPT FROM A REAL TERMINAL, not through a detached
+# Start-Process wrapper: a guest whose wrapper chain detaches loses its
+# console lineage and exits within seconds, which cost this project an
+# evening of phantom "emulator bugs" before the harness confessed.
 Start-Sleep 3          # let the shim create state.bin/fb0.bin first
 $view = Start-Process -FilePath $Viewer -ArgumentList @("-s", "$Scale") `
     -WorkingDirectory $Proj -PassThru

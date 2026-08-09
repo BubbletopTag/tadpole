@@ -28,6 +28,38 @@
 #else
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>       /* map_file: MapViewOfFile of the guest's arena */
+#include <io.h>            /* _open_osfhandle: pipe HANDLEs as CRT fds */
+
+/* The FIFO stand-ins, viewer end. glasspole's gp_mkfifo maps a FIFO path to
+ * the named pipe \\.\pipe\tadpole-<basename>; this is the other half of that
+ * contract (see host_win32.c for the whole of it). Reader creates the pipe,
+ * writer connects — the viewer reads audio and writes events, the guest the
+ * reverse, and whichever end is late retries: the shim per audio period, us
+ * through ev_open_missing() every frame. The HANDLE is wrapped into a CRT fd
+ * so every read()/write() above stays exactly as Linux wrote it. */
+static int tp_fifo_fd(const char *path, int want_read)
+{
+	char name[128];
+	const char *base = strrchr(path, '/');
+	HANDLE h;
+
+	base = base ? base + 1 : path;
+	snprintf(name, sizeof(name), "\\\\.\\pipe\\tadpole-%s", base);
+	h = CreateFileA(name,
+	                want_read ? GENERIC_READ | GENERIC_WRITE : GENERIC_WRITE,
+	                0, NULL, OPEN_EXISTING, 0, NULL);
+	if (h == INVALID_HANDLE_VALUE) {
+		if (!want_read)
+			return -1;             /* no reader yet: retry, as on Linux */
+		h = CreateNamedPipeA(name, PIPE_ACCESS_DUPLEX,
+		                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
+		                     1, 64 << 10, 64 << 10, 0, NULL);
+		if (h == INVALID_HANDLE_VALUE)
+			return -1;
+		ConnectNamedPipe(h, NULL);     /* NOWAIT: arms, never blocks */
+	}
+	return _open_osfhandle((intptr_t)h, _O_RDWR | _O_BINARY);
+}
 #endif
 #include "tadpole_ui.h"
 #include "tadpole_hle.h"
@@ -247,10 +279,11 @@ static void audio_open_fifo(void)
 	 * read end open whether or not the guest has started writing. */
 	g_afd = open(path, O_RDWR | O_NONBLOCK);
 #else
-	/* No FIFOs on Win32 and no guest to feed one. g_afd stays -1 and every
-	 * pump already checks it. The real replacement is the one-process
-	 * design's in-memory ring, which arrives with the emulator, not here. */
-	g_afd = -1;
+	/* The reader end of the audio pipe — we create it, the shim's writer
+	 * connects when it starts (or retries per period if we were late). */
+	char path[512];
+	snprintf(path, sizeof(path), "%s/audio", g_dir);
+	g_afd = tp_fifo_fd(path, 1);
 #endif
 }
 
@@ -1206,7 +1239,11 @@ static void ev_open_missing(void)
 		if (g_evfd[i] >= 0)
 			continue;
 		snprintf(path, sizeof(path), "%s/ev%d", g_dir, i);
+#ifndef _WIN32
 		g_evfd[i] = open(path, O_RDWR | O_NONBLOCK);
+#else
+		g_evfd[i] = tp_fifo_fd(path, 0);   /* writer end; guest serves */
+#endif
 	}
 }
 
@@ -1953,7 +1990,11 @@ int main(int argc, char **argv)
 	 * hold the write end open whether or not the guest is reading yet. */
 	for (i = 0; i < NUM_EV; i++) {
 		snprintf(path, sizeof(path), "%s/ev%d", g_dir, i);
+#ifndef _WIN32
 		g_evfd[i] = open(path, O_RDWR | O_NONBLOCK);
+#else
+		g_evfd[i] = tp_fifo_fd(path, 0);   /* writer end; guest serves */
+#endif
 	}
 
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
