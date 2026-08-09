@@ -1328,6 +1328,21 @@ static void find_project_dir(const char *argv0)
 		if (!slash || slash == buf) break;
 		*slash = 0;
 	}
+	/* Strip-three is right for <proj>/tadpole/viewer/tadpole-view and one
+	 * short for the CMake layout's viewer/build/tadpole-view.exe — where it
+	 * lands on <proj>/tadpole, every prerequisite looks missing, and the
+	 * wizard tells a fully-installed machine to start over. So verify the
+	 * guess the way tadpole.exe does: the project root is wherever
+	 * tadpole.sh is, walking up if need be. */
+	for (i = 0; i < 3; i++) {
+		char probe[1100];
+		char *slash;
+		snprintf(probe, sizeof(probe), "%s/tadpole.sh", buf);
+		if (access(probe, F_OK) == 0) break;
+		slash = strrchr(buf, '/');
+		if (!slash || slash == buf) break;
+		*slash = 0;
+	}
 	snprintf(g_projdir, sizeof(g_projdir), "%s", buf);
 }
 
