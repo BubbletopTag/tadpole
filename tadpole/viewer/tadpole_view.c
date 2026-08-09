@@ -1485,6 +1485,32 @@ static void guest_launch_ui(void)
 
 /* A .swf is run by the guest's Flash player, so the path has to be one the
  * GUEST can see: sysroot-relative, not a host path. */
+/* Start an installed app by PackageID.
+ *
+ * tadpole.sh --app resolves the entry point out of the package's meta.inf and
+ * takes both kinds: a .swf goes to saplayer, a native App.so goes to
+ * AppManager with TADPOLE_LAUNCH set. That distinction is exactly what the
+ * old "Launch .swf" browser could not make, so it could only ever start half
+ * the library. */
+static void guest_launch_app(const char *pkg)
+{
+	char *av[6];
+	int i = 0;
+
+	if (!pkg || !pkg[0])
+		return;
+	av[i++] = (char *)"tadpole.sh";
+	av[i++] = (char *)"--app";
+	av[i++] = (char *)pkg;
+	av[i] = NULL;
+	guest_stop();
+	guest_log_close();
+	guest_log_open();
+	g_guest = spawn_script("tadpole.sh", av, 1, &g_glog_fd, 0);
+	if (g_guest > 0) ui_status("%s", pkg);
+	else             ui_status("could not start %s", pkg);
+}
+
 static void guest_launch_swf(const char *hostpath)
 {
 	char sysroot[1100], *av[8];
@@ -2516,6 +2542,7 @@ int main(int argc, char **argv)
 		switch (ui_take_action(actpath, sizeof(actpath))) {
 		case UI_ACT_RUN_UI:  guest_launch_ui();  power_announced = 0; break;
 		case UI_ACT_RUN_SWF: guest_launch_swf(actpath); power_announced = 0; break;
+		case UI_ACT_RUN_APP: guest_launch_app(actpath); power_announced = 0; break;
 		case UI_ACT_STOP:
 			guest_stop();
 			ui_set_running(0);

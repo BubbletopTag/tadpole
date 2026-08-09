@@ -72,6 +72,7 @@ enum ui_action {
 	UI_ACT_NONE = 0,
 	UI_ACT_RUN_UI,           /* boot AppManager — the system menu */
 	UI_ACT_RUN_SWF,          /* path filled in */
+	UI_ACT_RUN_APP,          /* path = PackageID of an installed app */
 	UI_ACT_INSTALL_PKG,      /* path filled in */
 	UI_ACT_SETUP_FIRMWARE,   /* path filled in */
 	UI_ACT_ERASE_FW,         /* wipe the installed system files */

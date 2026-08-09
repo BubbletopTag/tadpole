@@ -133,7 +133,7 @@ static int  g_hot_item  = -1;
 
 /* modal */
 enum modal_kind { M_NONE = 0, M_ABOUT, M_UPDATE, M_GFX, M_AUDIO, M_PAD, M_DEBUG, M_SYSTEM,
-                  M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES };
+                  M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES, M_APPS };
 static enum modal_kind g_modal;
 
 /* ---- update check state -------------------------------------------------
@@ -512,7 +512,8 @@ static int paeth(int a, int b, int c)
 extern int uncompress(unsigned char *dest, unsigned long *destLen,
                       const unsigned char *source, unsigned long sourceLen);
 
-static void logo_load(SDL_Renderer *ren, const char *path)
+static SDL_Texture *png_texture(SDL_Renderer *ren, const char *path,
+                                int *out_w, int *out_h, Uint32 **out_px)
 {
 	FILE *f = fopen(path, "rb");
 	unsigned char *file = NULL, *idat = NULL, *raw = NULL;
@@ -521,10 +522,14 @@ static void logo_load(SDL_Renderer *ren, const char *path)
 	unsigned pos = 8, idatn = 0, w = 0, h = 0;
 	int bpp = 4, ok = 0;
 
-	if (!f) return;
+	SDL_Texture *tex = NULL;
+
+	if (!f) return NULL;
 	fseek(f, 0, SEEK_END); len = ftell(f); fseek(f, 0, SEEK_SET);
 	if (len < 16 || !(file = malloc((size_t)len)) ||
-	    fread(file, 1, (size_t)len, f) != (size_t)len) { fclose(f); free(file); return; }
+	    fread(file, 1, (size_t)len, f) != (size_t)len) {
+		fclose(f); free(file); return NULL;
+	}
 	fclose(f);
 
 	while (pos + 8 <= (unsigned)len) {
@@ -572,20 +577,158 @@ static void logo_load(SDL_Renderer *ren, const char *path)
 					((Uint32)cur[x*4+3] << 24) | ((Uint32)cur[x*4] << 16) |
 					((Uint32)cur[x*4+1] << 8) | cur[x*4+2];
 		}
-		g_logo = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
-		                           SDL_TEXTUREACCESS_STATIC, (int)w, (int)h);
-		if (g_logo) {
-			SDL_UpdateTexture(g_logo, NULL, px, (int)w * 4);
-			SDL_SetTextureBlendMode(g_logo, SDL_BLENDMODE_BLEND);
-			g_logo_w = (int)w; g_logo_h = (int)h;
-			g_logo_px = px;
-			px = NULL;                 /* owned by g_logo_px now */
+		tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
+		                        SDL_TEXTUREACCESS_STATIC, (int)w, (int)h);
+		if (tex) {
+			SDL_UpdateTexture(tex, NULL, px, (int)w * 4);
+			SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+			if (out_w) *out_w = (int)w;
+			if (out_h) *out_h = (int)h;
+			if (out_px) { *out_px = px; px = NULL; }   /* caller owns it */
 			ok = 1;
 		}
 	}
 done:
 	(void)ok;
 	free(file); free(idat); free(raw); free(px);
+	return tex;
+}
+
+/* The logo is simply the first user of the decoder above. */
+static void logo_load(SDL_Renderer *ren, const char *path)
+{
+	g_logo = png_texture(ren, path, &g_logo_w, &g_logo_h, &g_logo_px);
+}
+
+/* ---- installed apps, for File -> Launch App -----------------------------
+ *
+ * This replaced a file browser filtered to .swf, which asked the user to know
+ * where inside the guest filesystem a title's entry point lives — and could
+ * not start a native title at all, because those need AppManager rather than
+ * saplayer. The list is read from the installed packages' own meta.inf.
+ */
+#define AP_MAX 160
+struct ap_entry {
+	char pkg[64];
+	char name[72];
+	char version[24];
+	char icon[PATHMAX];      /* absolute path to the package's own PNG */
+	SDL_Texture *tex;
+	int tw, th, tried;
+};
+static struct ap_entry g_ap[AP_MAX];
+static int g_ap_n, g_ap_top, g_ap_rows = 6;
+
+/* WHAT IS WORTH OFFERING TO LAUNCH.
+ *
+ * Not everything under ProgramFiles is something anyone means to start. The
+ * *Widget packages are components another screen opens — KeyboardWidget is the
+ * on-screen keyboard — and starting one alone gets you a crash or an empty
+ * window, which reads as a broken emulator rather than as a misuse. Judged on
+ * the package name because that is what LeapFrog named them by.
+ */
+static int ap_is_launchable(const char *pkg)
+{
+	size_t n = strlen(pkg);
+	return !(n >= 6 && !strcmp(pkg + n - 6, "Widget"));
+}
+
+static void ap_free(void)
+{
+	int i;
+	for (i = 0; i < g_ap_n; i++)
+		if (g_ap[i].tex) { SDL_DestroyTexture(g_ap[i].tex); g_ap[i].tex = NULL; }
+	g_ap_n = 0;
+}
+
+/* Copy one quoted meta.inf field into a fixed buffer.
+ *
+ * COPYING IMMEDIATELY IS THE POINT. The first version of this kept pointers
+ * into the fgets buffer and used them only once every field had been seen — by
+ * which time later lines had overwritten it. Every name came out empty while
+ * the list was plainly populated: "1-15 of 104" in the corner, rows
+ * highlighting under the pointer, and no text in any of them.
+ */
+static int meta_field(const char *line, const char *key, char *out, size_t n)
+{
+	const char *p = line, *q;
+	size_t klen = strlen(key);
+
+	/* ANCHORED TO THE START OF THE LINE, not found anywhere in it. meta.inf
+	 * opens with MetaVersion="1.0", which contains Version=" as a substring —
+	 * so a plain strstr reported every title in the library as version 1.0
+	 * instead of its own. */
+	while (*p == ' ' || *p == '\t') p++;
+	if (strncmp(p, key, klen) != 0) return 0;
+	p += klen;
+	if (!(q = strchr(p, '"'))) return 0;
+	if ((size_t)(q - p) >= n) return 0;
+	memcpy(out, p, (size_t)(q - p));
+	out[q - p] = 0;
+	return out[0] != 0;
+}
+
+static void ap_reload(void)
+{
+	char dir[PATHMAX], meta[PATHMAX + 32], line[512], icon[128];
+	DIR *d;
+	struct dirent *de;
+
+	ap_free();
+	g_ap_top = 0;
+	snprintf(dir, sizeof(dir), "%s/runtime/sysroot/LF/Bulk/ProgramFiles", g_proj);
+	if (!(d = opendir(dir)))
+		return;
+	while ((de = readdir(d)) && g_ap_n < AP_MAX) {
+		FILE *f;
+		struct ap_entry e;
+		int have_name = 0, have_so = 0;
+
+		if (de->d_name[0] == '.' || !ap_is_launchable(de->d_name))
+			continue;
+		snprintf(meta, sizeof(meta), "%s/%s/meta.inf", dir, de->d_name);
+		if (!(f = fopen(meta, "r")))
+			continue;
+		memset(&e, 0, sizeof(e));
+		icon[0] = 0;
+		while (fgets(line, sizeof(line), f)) {
+			if (!have_name)
+				have_name = meta_field(line, "Name=\"", e.name, sizeof(e.name));
+			if (!have_so && strstr(line, "AppSo=\""))
+				have_so = 1;
+			if (!e.version[0])
+				meta_field(line, "Version=\"", e.version, sizeof(e.version));
+			if (!icon[0])
+				meta_field(line, "Icon=\"", icon, sizeof(icon));
+		}
+		fclose(f);
+		/* No entry point, nothing to start; no name, nothing to show. */
+		if (!have_name || !have_so)
+			continue;
+		snprintf(e.pkg, sizeof(e.pkg), "%s", de->d_name);
+		if (icon[0])
+			snprintf(e.icon, sizeof(e.icon), "%s/%s/%s", dir, de->d_name, icon);
+		g_ap[g_ap_n++] = e;
+	}
+	closedir(d);
+	{
+		int i, j;
+		for (i = 1; i < g_ap_n; i++) {
+			struct ap_entry t = g_ap[i];
+			for (j = i - 1; j >= 0 && strcasecmp(g_ap[j].name, t.name) > 0; j--)
+				g_ap[j + 1] = g_ap[j];
+			g_ap[j + 1] = t;
+		}
+	}
+}
+
+/* One decode attempt per entry, however it goes: a package with a missing or
+ * unreadable Icon= should cost one failed open, not one every frame. */
+static void ap_icon(SDL_Renderer *r, struct ap_entry *e)
+{
+	if (e->tex || e->tried || !e->icon[0]) return;
+	e->tried = 1;
+	e->tex = png_texture(r, e->icon, &e->tw, &e->th, NULL);
 }
 
 /* ---- the game library ----------------------------------------------------
@@ -936,7 +1079,7 @@ static const struct mitem FILE_ITEMS[] = {
 	 * of missing-path errors in a terminal the user may not even be looking at,
 	 * which is precisely what the wizard exists to prevent. */
 	{ "Run System Menu",        IT_RUN_UI, 0, 1, 1 },
-	{ "Launch .swf...",         IT_SWF,    0, 1, 1 },
+	{ "Launch App...",          IT_SWF,    0, 1, 1 },
 	{ "",                       0,         0, 0, 0 },
 	/* FIRST, and named after what it is for. Picking a .tar out of a file list
 	 * is still there underneath, but it is not how anyone should have to meet
@@ -1334,8 +1477,8 @@ static void activate(int id)
 	case IT_STOP:   g_action = UI_ACT_STOP;   break;
 	case IT_QUIT:   g_action = UI_ACT_QUIT;   break;
 	case IT_SWF:
-		path_join(start, sizeof(start), g_proj, "runtime/sysroot/LF");
-		fb_open("Launch .swf", start, ".swf", UI_ACT_RUN_SWF);
+		ap_reload();
+		g_modal = M_APPS;
 		break;
 	case IT_PKG:
 		if (g_cfg.games_dir[0])
@@ -1404,6 +1547,8 @@ static struct dlg cur_dlg(int lw, int lh)
 {
 	switch (g_modal) {
 	case M_ABOUT: return dlg_fit(lw, lh, 210, 144);
+	/* Room for icons and two lines per row. */
+	case M_APPS:  return dlg_fit(lw, lh, 340, 232);
 	/* Wide and tall: this is a changelog, and a release body wrapped
 	 * into 30 columns would be unreadable. */
 	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
@@ -1577,6 +1722,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_PROGRESS: title = g_prog_title; break;
 	case M_MSG:   title = g_msg_title; break;
 	case M_UPDATE: title = "Update available"; break;
+	case M_APPS:  title = "Launch App"; break;
 	default: break;
 	}
 
@@ -1591,6 +1737,52 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	text(r, d.x + 6, d.y + 3, title, C_ACCENT);
 
 	switch (g_modal) {
+	case M_APPS: {
+		int x = d.x + 10, y = d.y + 20, i, row = 30;
+		int listh = d.h - 30 - 22, vis = listh / row;
+		char line[128];
+
+		if (vis < 1) vis = 1;
+		g_ap_rows = vis;
+		if (g_ap_top > g_ap_n - vis) g_ap_top = g_ap_n - vis;
+		if (g_ap_top < 0) g_ap_top = 0;
+
+		if (!g_ap_n) {
+			text(r, x, y + 10, "No apps installed yet.", C_TEXT);
+			text(r, x, y + 26, "File > Game Library installs your", C_TEXT_DIM);
+			text(r, x, y + 36, "cartridge backups. Help > Setup", C_TEXT_DIM);
+			text(r, x, y + 46, "Wizard fetches the system files.", C_TEXT_DIM);
+			break;
+		}
+		for (i = 0; i < vis && g_ap_top + i < g_ap_n; i++) {
+			struct ap_entry *e = &g_ap[g_ap_top + i];
+			int yy = y + i * row;
+			int hot = inside(g_mx, g_my, x - 2, yy - 2, d.w - 16, row - 2);
+
+			if (hot) fill(r, x - 2, yy - 2, d.w - 16, row - 2, C_BAR_HI);
+			ap_icon(r, e);
+			if (e->tex) {
+				SDL_Rect dst = { x, yy, 26, 26 };
+				SDL_RenderCopy(r, e->tex, NULL, &dst);
+			} else {
+				fill(r, x, yy, 26, 26, C_PANEL);
+				bevel(r, x, yy, 26, 26, 0);
+			}
+			snprintf(line, sizeof(line), "%.40s", e->name);
+			text(r, x + 32, yy + 3, line, hot ? C_ACCENT : C_TEXT);
+			snprintf(line, sizeof(line), "%s%s%.28s",
+			         e->version[0] ? "v" : "", e->version,
+			         e->version[0] ? "" : e->pkg);
+			text(r, x + 32, yy + 15, line, C_TEXT_DIM);
+		}
+		if (g_ap_n > vis) {
+			snprintf(line, sizeof(line), "%d-%d of %d", g_ap_top + 1,
+			         g_ap_top + vis < g_ap_n ? g_ap_top + vis : g_ap_n, g_ap_n);
+			text(r, d.x + d.w - 12 - text_w(line), d.y + d.h - 26, line, C_TEXT_DIM);
+		}
+		text(r, x, d.y + d.h - 26, "Install apps to see them here.", C_TEXT_DIM);
+		break;
+	}
 	case M_UPDATE: {
 		int x = d.x + 10, y = d.y + 20, i;
 		int listy, listh, row = FONT_H + 2, vis;
@@ -2451,6 +2643,20 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	struct dlg d = cur_dlg(lw, lh);
 	SDL_Rect cb = close_rect(&d);
 
+	if (g_modal == M_APPS && g_ap_n) {
+		int x = d.x + 10, y = d.y + 20, i, row = 30;
+		int listh = d.h - 30 - 22, vis = listh / row;
+		for (i = 0; i < vis && g_ap_top + i < g_ap_n; i++) {
+			if (!inside(mx, my, x - 2, y + i * row - 2, d.w - 16, row - 2))
+				continue;
+			snprintf(g_action_path, sizeof(g_action_path), "%s",
+			         g_ap[g_ap_top + i].pkg);
+			g_action = UI_ACT_RUN_APP;
+			g_modal = M_NONE;
+			return 1;
+		}
+	}
+
 	if (g_modal == M_UPDATE) {
 		SDL_Rect b0 = up_btn(&d, 0), b1 = up_btn(&d, 1);
 		if (g_up_asset[0] && inside(mx, my, b0.x, b0.y, b0.w, b0.h)) {
@@ -2816,6 +3022,12 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 			g_gm_top -= e->wheel.y * 2;
 			if (g_gm_top > g_gm_n - g_gm_rows) g_gm_top = g_gm_n - g_gm_rows;
 			if (g_gm_top < 0) g_gm_top = 0;
+			return 1;
+		}
+		if (g_modal == M_APPS) {
+			g_ap_top -= e->wheel.y * 2;
+			if (g_ap_top > g_ap_n - g_ap_rows) g_ap_top = g_ap_n - g_ap_rows;
+			if (g_ap_top < 0) g_ap_top = 0;
 			return 1;
 		}
 		if (g_modal == M_UPDATE) {
