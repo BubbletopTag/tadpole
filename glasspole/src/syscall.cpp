@@ -39,6 +39,8 @@ enum : uint32_t {
     SYS_stat = 106, SYS_lstat = 107, SYS_fstat = 108,
     /* ARM private range. */
     SYS_ARM_set_tls = 0xf0005, SYS_ARM_cacheflush = 0xf0002,
+    /* Threads. */
+    SYS_clone = 120, SYS_futex = 240, SYS_gettid = 224,
 };
 
 /* Guest open() flags, which are the same values on ARM Linux as our GP_O_*
@@ -139,27 +141,58 @@ const char *name_of(uint32_t nr) {
         case SYS_ARM_set_tls: return "set_tls";     case SYS_writev: return "writev";
         case SYS_access: return "access";           case SYS_readlink: return "readlink";
         case SYS_exit_group: return "exit_group";   case SYS_getcwd: return "getcwd";
+        case SYS_clone: return "clone";             case SYS_futex: return "futex";
+        case SYS_gettid: return "gettid";           case SYS_fcntl64: return "fcntl64";
+        case SYS_getuid32: return "getuid32";
+        case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
+        case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
         default: return "?";
     }
 }
 
 }  // namespace
 
-void gp_syscall(Machine &m) {
-    auto &r = m.jit->Regs();
+void gp_syscall(Thread &t) {
+    Machine &m = *t.m;
+    auto &r = t.jit->Regs();
     const uint32_t nr = r[7];
     const uint32_t a0 = r[0], a1 = r[1], a2 = r[2], a3 = r[3];
     int32_t ret = GP_ENOSYS;
+
+    /* One lock over everything that touches shared state — the descriptor
+     * table and the allocators. Taken up front rather than per case, because
+     * "which cases need it" is exactly the question a future edit gets wrong.
+     *
+     * It is NOT held across anything that blocks: futex and nanosleep unlock
+     * first, or one sleeping thread would stop every other thread from making
+     * a syscall. gettimeofday is 85% of all calls and takes it uncontended;
+     * if that ever shows up in a profile, split it out then, with a
+     * measurement rather than a guess. */
+    std::unique_lock<std::mutex> guard(m.lock);
 
     switch (nr) {
 
     /* ---- process ---- */
     case SYS_exit:
+        /* ONE thread stops. CLONE_CHILD_CLEARTID is how pthread_join finds
+         * out: zero the guest word the parent is waiting on, then wake it.
+         * Skip this and every join hangs forever. */
+        if (t.clear_child_tid) {
+            uint32_t zero = 0;
+            std::memcpy(m.Ptr(t.clear_child_tid), &zero, 4);
+            gp_wake(reinterpret_cast<volatile uint32_t *>(m.Ptr(t.clear_child_tid)),
+                    0x7fffffff);
+        }
+        t.Halt();
+        return;
+
     case SYS_exit_group:
-        m.Halt((int)a0);
+        guard.unlock();          /* ExitGroup takes the lock itself */
+        m.ExitGroup((int)a0);
         return;
 
     case SYS_getpid:    ret = 1000; break;
+    case SYS_gettid:    ret = (int32_t)t.tid; break;
     case SYS_getuid32:
     case SYS_geteuid32:
     case SYS_getgid32:
@@ -178,7 +211,7 @@ void gp_syscall(Machine &m) {
     case SYS_ARM_set_tls:
         /* The kernel's ARM TLS helper. dynarmic keeps TPIDRURO for us, and
          * uClibc reads it through the c15 coprocessor path. */
-        m.tls = a0;
+        t.tls = a0;
         ret = 0;
         break;
 
@@ -188,6 +221,40 @@ void gp_syscall(Machine &m) {
         if (a1) { uint32_t *p = (uint32_t *)m.Ptr(a1); p[0] = 0xffffffffu; p[1] = 0xffffffffu; }
         ret = 0;
         break;
+
+    /* ---- threads ---- */
+    case SYS_clone:
+        /* flags, child_stack, parent_tidptr, tls, child_tidptr */
+        guard.unlock();          /* spawning takes the lock itself */
+        ret = gp_spawn_thread(t, a0, a1, a2, a3, r[4]);
+        break;
+
+    case SYS_futex: {
+        /* uaddr, op, val, timeout, uaddr2, val3. Only WAIT and WAKE appear in
+         * the census, and only the PRIVATE variants — the guest is one process,
+         * so there is nothing for the shared ones to be shared with. */
+        constexpr uint32_t FUTEX_WAIT = 0, FUTEX_WAKE = 1, FUTEX_PRIVATE = 128;
+        const uint32_t op = a1 & ~(FUTEX_PRIVATE | 256u /* CLOCK_REALTIME */);
+        auto *addr = reinterpret_cast<volatile uint32_t *>(m.Ptr(a0));
+
+        if (op == FUTEX_WAIT) {
+            uint64_t ns = 0;
+            if (a3) {
+                const uint32_t *ts = (const uint32_t *)m.Ptr(a3);
+                ns = (uint64_t)ts[0] * 1000000000ull + ts[1];
+                if (!ns) ns = 1;     /* 0 means "forever" to gp_wait_on */
+            }
+            /* MUST NOT hold the lock while blocking. */
+            guard.unlock();
+            ret = gp_wait_on(addr, a2, ns);
+        } else if (op == FUTEX_WAKE) {
+            ret = gp_wake(addr, (int)a2);
+        } else {
+            gp_log("futex op %u is not implemented\n", a1);
+            ret = GP_ENOSYS;
+        }
+        break;
+    }
 
     /* ---- memory ---- */
     case SYS_brk: {
@@ -456,7 +523,9 @@ void gp_syscall(Machine &m) {
 
     case SYS_nanosleep: {
         const uint32_t *ts = (const uint32_t *)m.Ptr(a0);
-        gp_sleep_ns((uint64_t)ts[0] * 1000000000ull + ts[1]);
+        uint64_t ns = (uint64_t)ts[0] * 1000000000ull + ts[1];
+        guard.unlock();          /* never sleep holding the lock */
+        gp_sleep_ns(ns);
         ret = 0;
         break;
     }
@@ -489,8 +558,8 @@ void gp_syscall(Machine &m) {
     /* Always carry the NUMBER as well as the name. A trace line reading "?" is
      * an instrument that hides the one fact you needed from it. */
     if (m.trace)
-        gp_log("  %3u %-14s(%08x, %08x, %08x) = %d\n",
-               nr, name_of(nr), a0, a1, a2, ret);
+        gp_log("  [%u] %3u %-14s(%08x, %08x, %08x) = %d\n",
+               t.tid, nr, name_of(nr), a0, a1, a2, ret);
 
     r[0] = (uint32_t)ret;
 }

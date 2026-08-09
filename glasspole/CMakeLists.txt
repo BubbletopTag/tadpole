@@ -60,23 +60,26 @@ if(GP_CLANG AND GP_OBJCOPY)
     # multi-target by construction, so this needs no cross-binutils install.
     set(GP_ARMFLAGS --target=armv7-unknown-linux-gnueabi
                     -march=armv7-a -mfpu=vfp -mfloat-abi=softfp -fuse-ld=lld)
+    foreach(gp_test hello thread)
     add_custom_command(
-        OUTPUT  ${CMAKE_CURRENT_BINARY_DIR}/hello.bin
+        OUTPUT  ${CMAKE_CURRENT_BINARY_DIR}/${gp_test}.bin
         COMMAND ${GP_CLANG} ${GP_ARMFLAGS} -nostdlib -static
                 -Wl,-Ttext=0x00010000 -Wl,-e,_start
-                -o ${CMAKE_CURRENT_BINARY_DIR}/hello.elf
-                ${CMAKE_CURRENT_SOURCE_DIR}/tests/hello.S
+                -o ${CMAKE_CURRENT_BINARY_DIR}/${gp_test}.elf
+                ${CMAKE_CURRENT_SOURCE_DIR}/tests/${gp_test}.S
         # -j .text, and it matters. Without it objcopy also carries
         # .ARM.attributes, which sits at VMA 0, so the flat binary comes out
         # with 64 KB of zeros ahead of the code — and those zeros decode as
         # `andeq r0, r0, r0`. The guest then runs a 16,384-instruction NOP sled
         # and falls into _start by luck. It works, which is the problem.
         COMMAND ${GP_OBJCOPY} -O binary -j .text
-                ${CMAKE_CURRENT_BINARY_DIR}/hello.elf
-                ${CMAKE_CURRENT_BINARY_DIR}/hello.bin
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/hello.S
-        COMMENT "Assembling the ARM guest test program")
-    add_custom_target(gp-tests ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/hello.bin)
+                ${CMAKE_CURRENT_BINARY_DIR}/${gp_test}.elf
+                ${CMAKE_CURRENT_BINARY_DIR}/${gp_test}.bin
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tests/${gp_test}.S
+        COMMENT "Assembling the ARM guest test program ${gp_test}")
+    list(APPEND gp_test_bins ${CMAKE_CURRENT_BINARY_DIR}/${gp_test}.bin)
+    endforeach()
+    add_custom_target(gp-tests ALL DEPENDS ${gp_test_bins})
 else()
     message(WARNING "clang or objcopy missing — guest test programs will not build")
 endif()

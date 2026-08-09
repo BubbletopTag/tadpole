@@ -15,6 +15,8 @@
  * of every threaded program, and a function call per TLS access would be a
  * tax on everything.
  *
+ * The registers live in Thread, not Machine. See gp_make_cp15 below.
+ *
  * Only registers real userspace can reach are answered. Everything else falls
  * through to std::monostate and still raises the exception, because a guest
  * poking at a system register is a fact worth learning about rather than
@@ -37,7 +39,7 @@ uint64_t barrier(void *, uint32_t, uint32_t) { return 0; }
 
 class Cp15 final : public Dynarmic::A32::Coprocessor {
 public:
-    explicit Cp15(Machine &m) : m_(m) {}
+    explicit Cp15(Thread &t) : t_(t) {}
 
     std::optional<Callback> CompileInternalOperation(bool, unsigned, CoprocReg,
                                                      CoprocReg, CoprocReg,
@@ -56,7 +58,7 @@ public:
 
         /* TPIDRURW — the thread pointer userspace may write. */
         if (opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0 && opc2 == 2)
-            return &m_.tls_rw;
+            return &t_.tls_rw;
 
         return std::monostate{};
     }
@@ -70,8 +72,8 @@ public:
         if (two) return std::monostate{};
 
         if (opc1 == 0 && CRn == CoprocReg::C13 && CRm == CoprocReg::C0) {
-            if (opc2 == 2) return &m_.tls_rw;   /* TPIDRURW */
-            if (opc2 == 3) return &m_.tls;      /* TPIDRURO — what set_tls sets */
+            if (opc2 == 2) return &t_.tls_rw;   /* TPIDRURW */
+            if (opc2 == 3) return &t_.tls;      /* TPIDRURO — what set_tls sets */
         }
         return std::monostate{};
     }
@@ -91,9 +93,13 @@ public:
     }
 
 private:
-    Machine &m_;
+    Thread &t_;
 };
 
-std::shared_ptr<Dynarmic::A32::Coprocessor> gp_make_cp15(Machine &m) {
-    return std::make_shared<Cp15>(m);
+/* One per thread, not one per process. dynarmic compiles a direct load from
+ * the address returned below, so a shared instance would give every thread the
+ * main thread's thread pointer — and errno, being a __thread variable, would
+ * be shared between them. */
+std::shared_ptr<Dynarmic::A32::Coprocessor> gp_make_cp15(Thread &t) {
+    return std::make_shared<Cp15>(t);
 }
