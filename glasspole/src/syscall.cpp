@@ -53,6 +53,7 @@ enum : uint32_t {
     SYS_sched_setscheduler = 156, SYS_sched_getscheduler = 157,
     SYS_sched_get_priority_max = 159, SYS_sched_get_priority_min = 160,
     SYS_kill = 37, SYS_poll = 168, SYS_sysinfo = 116,
+    SYS_fdatasync = 148, SYS_fsync = 118, SYS_newselect = 142,
     /* AF_UNIX sockets, implemented in-process. ARM has direct socket calls
      * rather than the old socketcall multiplexer. */
     SYS_socket = 281, SYS_bind = 282, SYS_connect = 283, SYS_listen = 284,
@@ -178,6 +179,8 @@ const char *name_of(uint32_t nr) {
         case SYS_listen: return "listen";           case SYS_accept: return "accept";
         case SYS_send: return "send";               case SYS_recv: return "recv";
         case SYS_poll: return "poll";               case SYS_sysinfo: return "sysinfo";
+        case SYS_fdatasync: return "fdatasync";     case SYS_fsync: return "fsync";
+        case SYS_newselect: return "_newselect";     case SYS_rename: return "rename";
         case SYS_getuid32: return "getuid32";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
@@ -951,6 +954,72 @@ void gp_syscall(Thread &t) {
         break;
     }
 
+    case SYS_fsync:
+    case SYS_fdatasync: {
+        /* CAtomicFile writes a temp file, syncs it and renames. Without this
+         * it logs "fdatasync failed; returning -1" on every save, and the
+         * atomic-rename contract it is built on quietly stops holding. */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        ret = gp_sync(g->file);
+        break;
+    }
+
+    case SYS_newselect: {
+        /* nfds, readfds, writefds, exceptfds, timeout. Only the read set is
+         * ever non-empty here, so it is answered through the same path as
+         * poll rather than growing a second implementation of the same idea. */
+        const uint32_t nfds = a0;
+        uint32_t *rfds = a1 ? (uint32_t *)m.Ptr(a1) : nullptr;
+        if (!rfds || nfds == 0) {
+            /* A pure sleep, which is what select with no descriptors is. */
+            uint64_t ns = 0;
+            if (r[4]) {
+                const uint32_t *tv = (const uint32_t *)m.Ptr(r[4]);
+                ns = (uint64_t)tv[0] * 1000000000ull + (uint64_t)tv[1] * 1000ull;
+            }
+            guard.unlock();
+            const uint64_t deadline0 = gp_mono_ns() + ns;
+            while (!m.exiting.load(std::memory_order_relaxed) && gp_mono_ns() < deadline0)
+                gp_sleep_ns(ns < 20000000ull ? ns : 20000000ull);
+            ret = 0;
+            break;
+        }
+
+        gp_file *hf[64] = {};
+        int hidx[64], hn = 0, hits = 0;
+        for (uint32_t fd = 0; fd < nfds && fd < 64; fd++) {
+            if (!(rfds[fd / 32] & (1u << (fd % 32)))) continue;
+            GuestFd *g = m.Fd((int)fd);
+            if (g && g->sock) {
+                std::lock_guard<std::mutex> sg(g->sock->mu);
+                if (!g->sock->rx.empty()) { hits++; continue; }
+            } else if (g && g->file) {
+                hf[hn] = g->file; hidx[hn] = (int)fd; hn++;
+                continue;
+            } else if (g) {
+                hits++; continue;              /* the console: always ready */
+            }
+            rfds[fd / 32] &= ~(1u << (fd % 32));
+        }
+        if (hits || hn == 0) { ret = hits; break; }
+
+        int ms = 100;
+        if (r[4]) {
+            const uint32_t *tv = (const uint32_t *)m.Ptr(r[4]);
+            const uint64_t want = (uint64_t)tv[0] * 1000ull + tv[1] / 1000ull;
+            if (want < 100) ms = (int)want;
+        }
+        guard.unlock();
+        unsigned char ready[64] = {};
+        int r0 = gp_poll_readable(hf, hn, ms, ready);
+        if (r0 < 0) { ret = r0; break; }
+        for (int i = 0; i < hn; i++)
+            if (ready[i]) hits++; else rfds[hidx[i] / 32] &= ~(1u << (hidx[i] % 32));
+        ret = hits;
+        break;
+    }
+
     case SYS_ftruncate: {
         GuestFd *g = m.Fd((int)a0);
         if (!g || !g->file) { ret = GP_EBADF; break; }
@@ -1039,6 +1108,15 @@ void gp_syscall(Thread &t) {
     }
 
     case SYS_unlink: ret = gp_unlink(m.HostPath(m.Str(a0)).c_str()); break;
+    case SYS_rename: {
+        /* CAtomicFile's whole contract: write a temp, sync it, rename over the
+         * target. The enum had this number from the start and the case did not
+         * exist, so every atomic save was failing at the last step. */
+        std::string from = m.Str(a0), to = m.Str(a1);
+        if (m.trace) tpath = from + " -> " + to;
+        ret = gp_rename(m.HostPath(from).c_str(), m.HostPath(to).c_str());
+        break;
+    }
     case SYS_mkdir:  ret = gp_mkdir (m.HostPath(m.Str(a0)).c_str(), a1); break;
     case SYS_rmdir:  ret = gp_rmdir (m.HostPath(m.Str(a0)).c_str()); break;
 
