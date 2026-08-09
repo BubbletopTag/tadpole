@@ -54,6 +54,7 @@ enum : uint32_t {
     SYS_sched_get_priority_max = 159, SYS_sched_get_priority_min = 160,
     SYS_kill = 37, SYS_poll = 168, SYS_sysinfo = 116,
     SYS_fdatasync = 148, SYS_fsync = 118, SYS_newselect = 142, SYS_statfs = 99,
+    SYS_madvise = 220,
     /* AF_UNIX sockets, implemented in-process. ARM has direct socket calls
      * rather than the old socketcall multiplexer. */
     SYS_socket = 281, SYS_bind = 282, SYS_connect = 283, SYS_listen = 284,
@@ -154,6 +155,7 @@ const char *name_of(uint32_t nr) {
         case SYS_close: return "close";             case SYS_brk: return "brk";
         case SYS_ioctl: return "ioctl";             case SYS_mmap2: return "mmap2";
         case SYS_munmap: return "munmap";           case SYS_mprotect: return "mprotect";
+        case SYS_madvise: return "madvise";
         case SYS_stat64: return "stat64";           case SYS_fstat64: return "fstat64";
         case SYS_lstat64: return "lstat64";
         case SYS_uname: return "uname";             case SYS_llseek: return "_llseek";
@@ -792,6 +794,13 @@ void gp_syscall(Thread &t) {
         ret = (int32_t)at;
         break;
     }
+
+    case SYS_madvise:
+        /* Advice, and we are entitled to ignore it — which is what the name
+         * means. The guest says a range is finished with; acting on that would
+         * mean decommitting pages it may well touch again. */
+        ret = 0;
+        break;
 
     case SYS_munmap:
         /* Deliberately a no-op for now. Returning the pages is correct but the
