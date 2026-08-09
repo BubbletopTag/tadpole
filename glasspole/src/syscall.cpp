@@ -241,6 +241,18 @@ void gp_syscall(Thread &t) {
     case SYS_getegid32: ret = 0; break;
 
     case SYS_set_tid_address:
+        /* RETURNS THE CALLER'S TID, and that is not a detail. uClibc's threads
+         * learn their own identity from it, so answering 0 makes every thread
+         * believe its id is zero — and pthread_join then sees the thread it is
+         * joining as itself and refuses with EDEADLK, "Resource deadlock
+         * avoided", from somewhere that looks nothing like thread setup.
+         *
+         * It also sets clear_child_tid, which is how a thread that was NOT
+         * created with CLONE_CHILD_CLEARTID still gets its exit noticed. */
+        t.clear_child_tid = a0;
+        ret = (int32_t)t.tid;
+        break;
+
     case SYS_set_robust_list:
     case SYS_rt_sigaction:
     case SYS_rt_sigprocmask:
@@ -1044,15 +1056,25 @@ void gp_syscall(Thread &t) {
         for (;;) {
             const char *name = nullptr;
             uint32_t is_dir = 0;
-            int r0 = gp_dirnext(g->dir, &name, &is_dir);
-            if (r0 <= 0) { ret = r0 < 0 ? r0 : (int32_t)used; break; }
+            std::string held;
+            if (g->has_pending) {
+                held   = g->pending_name;
+                name   = held.c_str();
+                is_dir = g->pending_is_dir;
+            } else {
+                int r0 = gp_dirnext(g->dir, &name, &is_dir);
+                if (r0 <= 0) { ret = r0 < 0 ? r0 : (int32_t)used; break; }
+            }
             const uint32_t nlen = (uint32_t)std::strlen(name);
             const uint32_t rec  = (10 + nlen + 1 + 1 + 3) & ~3u;
             if (used + rec > a2) {
-                gp_log("getdents: buffer too small, dropped '%s'\n", name);
-                ret = (int32_t)used;
+                g->pending_name   = name;
+                g->pending_is_dir = is_dir;
+                g->has_pending    = true;
+                ret = used ? (int32_t)used : GP_EINVAL;
                 break;
             }
+            g->has_pending = false;
             uint8_t *e = out + used;
             uint32_t ino = 1 + used, off = used + rec;
             std::memcpy(e + 0, &ino, 4);
@@ -1081,19 +1103,31 @@ void gp_syscall(Thread &t) {
         for (;;) {
             const char *name = nullptr;
             uint32_t is_dir = 0;
-            int r0 = gp_dirnext(g->dir, &name, &is_dir);
-            if (r0 <= 0) { ret = r0 < 0 ? r0 : (int32_t)used; break; }
+            std::string held;
+            if (g->has_pending) {
+                held   = g->pending_name;
+                name   = held.c_str();
+                is_dir = g->pending_is_dir;
+            } else {
+                int r0 = gp_dirnext(g->dir, &name, &is_dir);
+                if (r0 <= 0) { ret = r0 < 0 ? r0 : (int32_t)used; break; }
+            }
             const uint32_t nlen = (uint32_t)std::strlen(name);
             const uint32_t rec  = (19 + nlen + 1 + 7) & ~7u;
             if (used + rec > a2) {
-                /* No room. The entry is lost, because this interface cannot
-                 * push one back — a real getdents64 would rewind. Files per
-                 * directory here are few and buffers are 4 KB, so say it
-                 * loudly rather than silently dropping names. */
-                gp_log("getdents64: buffer too small, dropped '%s'\n", name);
-                ret = (int32_t)used;
+                /* No room. HOLD the entry for the next call rather than losing
+                 * it: /LF/Bulk/ProgramFiles has over a hundred packages and
+                 * cannot fit in one 4 KB buffer, so dropping the overflow makes
+                 * the guest see a truncated filesystem with no error anywhere.
+                 * If nothing fits at all the buffer is too small for a single
+                 * name, which is EINVAL. */
+                g->pending_name   = name;
+                g->pending_is_dir = is_dir;
+                g->has_pending    = true;
+                ret = used ? (int32_t)used : GP_EINVAL;
                 break;
             }
+            g->has_pending = false;
             uint8_t *e = out + used;
             uint64_t ino = 1 + used;
             std::memcpy(e + 0, &ino, 8);

@@ -87,6 +87,13 @@ struct GuestFd {
     uint32_t oflags = 0;       /* what the guest opened it with, for F_GETFL */
     /* A message queue descriptor is a descriptor: mqd_t is an int, and the
      * guest closes it with close(), so it lives in the same table. */
+    /* An entry read from the directory but not yet delivered, because the
+     * guest's buffer was full. Without this, getdents DROPS it — and a
+     * directory with 110 packages in it does not fit in one 4 KB buffer, so
+     * the guest silently sees a truncated filesystem. */
+    std::string pending_name;
+    uint32_t    pending_is_dir = 0;
+    bool        has_pending    = false;
     std::shared_ptr<MsgQueue>   mq;
     std::shared_ptr<UnixSocket> sock;
     bool     used = false;
