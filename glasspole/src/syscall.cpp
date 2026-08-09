@@ -51,7 +51,7 @@ enum : uint32_t {
     SYS_sched_setparam = 154, SYS_sched_getparam = 155,
     SYS_sched_setscheduler = 156, SYS_sched_getscheduler = 157,
     SYS_sched_get_priority_max = 159, SYS_sched_get_priority_min = 160,
-    SYS_kill = 37, SYS_poll = 168,
+    SYS_kill = 37, SYS_poll = 168, SYS_sysinfo = 116,
     /* AF_UNIX sockets, implemented in-process. ARM has direct socket calls
      * rather than the old socketcall multiplexer. */
     SYS_socket = 281, SYS_bind = 282, SYS_connect = 283, SYS_listen = 284,
@@ -175,7 +175,7 @@ const char *name_of(uint32_t nr) {
         case SYS_bind: return "bind";               case SYS_connect: return "connect";
         case SYS_listen: return "listen";           case SYS_accept: return "accept";
         case SYS_send: return "send";               case SYS_recv: return "recv";
-        case SYS_poll: return "poll";
+        case SYS_poll: return "poll";               case SYS_sysinfo: return "sysinfo";
         case SYS_getuid32: return "getuid32";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
@@ -324,21 +324,43 @@ void gp_syscall(Thread &t) {
 
         if (hits || hn == 0) { ret = hits; break; }
 
-        /* Nothing ready yet and real files to wait on. Never hold the lock
-         * across the wait, and cap it so exit_group is noticed. */
-        int timeout = (int32_t)a2;
-        if (timeout < 0 || timeout > 100) timeout = 100;
+        /* Nothing ready yet, and real files to wait on.
+         *
+         * THE WAIT IS SLICED BUT THE TIMEOUT IS NOT. Slicing lets exit_group be
+         * noticed instead of slept through; returning 0 at the end of a slice
+         * would tell the guest its wait EXPIRED, which is a lie — poll returning
+         * 0 means the full timeout elapsed, and a state machine keyed on that
+         * will act on a timeout that never happened. So loop until the real
+         * deadline, and only then report zero. */
+        const int32_t want = (int32_t)a2;
+        const uint64_t deadline = want < 0 ? 0 : gp_mono_ns() + (uint64_t)want * 1000000ull;
         guard.unlock();
-        unsigned char ready[64] = {};
-        int r0 = gp_poll_readable(hf, hn, timeout, ready);
-        if (r0 < 0) { ret = r0; break; }
-        for (int i = 0; i < hn; i++) {
-            if (!ready[i]) continue;
-            uint16_t rev = 0x01;
-            std::memcpy(p + hidx[i] * 8 + 6, &rev, 2);
-            hits++;
+
+        for (;;) {
+            if (m.exiting.load(std::memory_order_relaxed)) { ret = 0; break; }
+
+            int slice = 100;
+            if (deadline) {
+                const uint64_t now = gp_mono_ns();
+                if (now >= deadline) { ret = 0; break; }
+                const uint64_t left_ms = (deadline - now) / 1000000ull;
+                if (left_ms < 100) slice = (int)left_ms + 1;
+            }
+
+            unsigned char ready[64] = {};
+            int r0 = gp_poll_readable(hf, hn, slice, ready);
+            if (r0 < 0) { ret = r0; break; }
+            if (r0 == 0) continue;              /* slice expired, deadline has not */
+
+            for (int i = 0; i < hn; i++) {
+                if (!ready[i]) continue;
+                uint16_t rev = 0x01;
+                std::memcpy(p + hidx[i] * 8 + 6, &rev, 2);
+                hits++;
+            }
+            ret = hits;
+            break;
         }
-        ret = hits;
         break;
     }
 
@@ -1011,6 +1033,25 @@ void gp_syscall(Thread &t) {
     }
 
     case SYS_sched_yield: gp_thread_yield(); ret = 0; break;
+
+    case SYS_sysinfo: {
+        /* struct sysinfo, 32-bit ARM: uptime, loads[3], totalram, freeram,
+         * sharedram, bufferram, totalswap, freeswap, procs, pad, totalhigh,
+         * freehigh, mem_unit, then padding to 64 bytes.
+         *
+         * The device had 128 MB and the guest sizes caches from this, so the
+         * numbers are the console's rather than the host's — reporting 32 GB
+         * of host RAM would have it allocate accordingly. */
+        uint32_t *si = (uint32_t *)m.Ptr(a0);
+        std::memset(si, 0, 64);
+        si[0]  = (uint32_t)(gp_mono_ns() / 1000000000ull);   /* uptime */
+        si[4]  = 128u * 1024 * 1024;                          /* totalram */
+        si[5]  =  48u * 1024 * 1024;                          /* freeram */
+        si[9]  = 1;                                           /* procs */
+        si[12] = 1;                                           /* mem_unit */
+        ret = 0;
+        break;
+    }
 
     case SYS_uname: {
         /* Six 65-byte fields. The guest checks the release string to decide
