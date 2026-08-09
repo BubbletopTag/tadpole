@@ -27,6 +27,11 @@ foreach(t tadpole-view hle-probe)
 endforeach()
 
 if(WIN32)
+    # The double-click: a tiny GUI-subsystem exe that finds the tree and
+    # starts the viewer. Copy it to the repo root as tadpole.exe.
+    add_executable(tadpole WIN32 tadpole_launcher.c)
+    target_link_options(tadpole PRIVATE -static -municode)
+
     # Static SDL2 and a static runtime: one copyable .exe, no MinGW or SDL
     # DLLs beside it — same policy as glasspole. opengl32 supplies the GL-1.1
     # entry points still bound at link time; everything newer resolves through
