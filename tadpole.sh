@@ -370,11 +370,9 @@ case "$mode" in
                 guest /LF/Base/Flash/bin/saplayer "$guestpath" ;;
             *)
                 # A NATIVE TITLE. It cannot be exec'd — CreateApp has to be
-                # called by CAppManager — so hand it to AppManager and tell the
-                # shim to push it instead of the home screen. See TADPOLE_LAUNCH
-                # in tadpole/shim/tadpole_shim.c.
+                # called by CAppManager — so hand it to AppManager, which takes
+                # the app as argv[1] and the player as argv[2].
                 echo "=== $name — $guestpath (direct) ==="
-                export TADPOLE_LAUNCH="$guestpath"
                 # SIGN A PLAYER IN, the way the home screen would.
                 #
                 # CAppManager::Run reads argv[2] as a player ID and calls
@@ -398,7 +396,12 @@ case "$mode" in
                 fi
                 : "${pid:=0}"
                 echo "    player $pid"
-                guest /LF/Base/bin/AppManager tadpole "$pid" ;;
+                # AppManager TAKES THE APP AS argv[1] and the player as argv[2].
+                # CAppManager::Run only falls back to pushing LPAD/main.swf
+                # when it is given nothing to run, so passing a path both
+                # launches the title and skips the home screen — no shim hook,
+                # no substitution, no reading anyone else's ABI.
+                guest /LF/Base/bin/AppManager "$guestpath" "$pid" ;;
         esac ;;
     shell)
         # A SHELL THAT ACTUALLY LOOKS AT THE GUEST.
