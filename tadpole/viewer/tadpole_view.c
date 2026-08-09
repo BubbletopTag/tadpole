@@ -1768,6 +1768,10 @@ int main(int argc, char **argv)
 	int gl_have = 0;                  /* tex_gl holds a current frame */
 	Uint32 gl_stamp = 0;              /* when that frame arrived */
 	int gl_rx = 0, gl_ry = 0, gl_rw = 0, gl_rh = 0;   /* where it belongs */
+	Uint32 fps_at = 0;                /* clock at the last frame-rate sample */
+	unsigned long fps_frames = 0, fps_packets = 0;    /* counters at that sample */
+	int fps_primed = 0;               /* fps_at/fps_frames hold a real reading */
+	int fps_shown = 0;                /* the status line is ours to clear */
 	char path[512];
 	int scale = 2, w, h, i, running = 1, touching = 0;
 	int rotate = 0;   /* degrees CW; portrait apps need 90 */
@@ -2515,27 +2519,72 @@ int main(int argc, char **argv)
 		}
 		if (g_guest > 0 && !guest_alive()) {
 			ui_status("stopped");
+			fps_shown = 0;         /* "stopped" says more than "HLE idle" would */
 			guest_log_close();     /* flush the tail of a boot that just died */
 		}
 		ui_set_running(g_guest > 0 || guest_external());
 		g_touch_debug = ui_cfg()->touch_debug;
-		if (hle_host_ready()) {
-			static Uint32 last;
-			static unsigned long prev_frames;
+		/* A FRAME RATE IS A MEASUREMENT — ONLY PRINT ONE THAT WAS TAKEN.
+		 *
+		 * "Never show a bare frame rate once the guest has given up" was only
+		 * half the problem. The other half is that the replayer is brought up
+		 * before any guest exists and stays up after one dies, so the bar sat
+		 * at "HLE 0 fps" whenever nothing was being rendered through it — and
+		 * that reads as "the emulator is broken" rather than "nothing is being
+		 * measured right now" (reported by FairPlay137).
+		 *
+		 * COMPLETED FRAMES ARE THE EVIDENCE, not a live guest. g_guest and
+		 * guest_external() are no use here: under `tadpole.sh --boot` the guest
+		 * is our SIBLING and the lock holds the script's own pid, so the viewer
+		 * believes nothing is running while a title renders at 60 fps. Gating
+		 * on those would blank the number in the commonest boot path.
+		 *
+		 * Frames also beat the fallback flag, which lives in the ring and is
+		 * only cleared by hle_host_init() — one title giving up would otherwise
+		 * leave the banner there for every title after it, viewer-lifetime.
+		 *
+		 * Packets tell "producing nothing" apart from "not being asked for
+		 * anything": commands arriving with no frame out of them in a whole
+		 * second is a real zero, and hiding that would hide a genuine stall. */
+		if (!hle_host_ready()) {
+			fps_primed = 0;
+		} else {
 			Uint32 now2 = SDL_GetTicks();
-			if (now2 - last >= 1000) {
+			if (!fps_primed) {
+				/* g_frames is cumulative and starts wherever the replayer
+				 * happens to be, so the first tick only takes a baseline —
+				 * subtracting from zero would report a whole session's frames
+				 * as one second of them. */
+				hle_host_stats(&fps_frames, &fps_packets);
+				fps_at = now2;
+				fps_primed = 1;
+			} else if (now2 - fps_at >= 1000) {
 				unsigned long f, pk;
+				/* Divide by the window we actually got. The pump is paced by
+				 * the frame cap and by whatever the guest is doing, so a tick
+				 * that lands at 1400 ms would otherwise overstate by 40%. */
+				Uint32 dt = now2 - fps_at;
 				hle_host_stats(&f, &pk);
-				/* Never show a bare frame rate once the guest has given up:
-				 * "HLE 0 fps" reads as "HLE is broken" when the truth is
-				 * "HLE stopped being used". Say which. */
-				if (hle_guest_fell_back())
+				if (f > fps_frames) {
+					ui_status("HLE %lu fps",
+					          ((f - fps_frames) * 1000 + dt / 2) / dt);
+					fps_shown = 1;
+				} else if (hle_guest_fell_back()) {
 					ui_status("HLE FELL BACK - software");
-				else
-					ui_status("HLE %lu fps", f - prev_frames);
-				prev_frames = f;
-				last = now2;
-				(void)pk;
+					fps_shown = 1;
+				} else if (pk > fps_packets) {
+					ui_status("HLE 0 fps");
+					fps_shown = 1;
+				} else if (fps_shown) {
+					/* Nothing came through in that second. Say so rather than
+					 * leaving the last number on the bar, where it would be
+					 * read as current. */
+					ui_status("HLE idle");
+					fps_shown = 0;
+				}
+				fps_frames = f;
+				fps_packets = pk;
+				fps_at = now2;
 			}
 		}
 
@@ -2547,6 +2596,7 @@ int main(int argc, char **argv)
 			guest_stop();
 			ui_set_running(0);
 			ui_status("stopped");
+			fps_shown = 0;
 			break;
 		case UI_ACT_QUIT: running = 0; break;
 		case UI_ACT_INSTALL_PKG:
