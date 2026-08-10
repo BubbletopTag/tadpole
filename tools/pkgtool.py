@@ -118,6 +118,30 @@ def cmd_extract(path, dest):
     return 0
 
 
+def merge_tree(src, dst):
+    """Copy a directory over one that may already exist.
+
+    shutil.copytree's dirs_exist_ok does this in one line AND IS PYTHON 3.8.
+    The bundled interpreter on Windows is 3.7 — deliberately, because 3.8
+    cannot load a .pyd on an unpatched Windows 7 (see tools/build-windows.sh)
+    — so that one keyword raised TypeError on the one platform this branch
+    exists for. Nothing on Linux ever reached it, which is exactly why it
+    survived: the symlink ledger above only replays on hosts that cannot make
+    symlinks.
+    """
+    import shutil as _sh
+    os.makedirs(dst, exist_ok=True)
+    for name in os.listdir(src):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.isdir(s) and not os.path.islink(s):
+            merge_tree(s, d)
+        elif not os.path.exists(d):
+            try:
+                os.link(s, d)          # same volume, no privilege needed
+            except OSError:
+                _sh.copy2(s, d)
+
+
 def cmd_ubi(image, dest):
     try:
         from ubireader.scripts.ubireader_extract_files import main
@@ -165,7 +189,7 @@ def cmd_ubi(image, dest):
             t = (os.path.join(root, src.lstrip("/\\")) if os.path.isabs(src)
                  else os.path.join(os.path.dirname(dst), src))
             if os.path.isdir(t):
-                shutil.copytree(t, dst, dirs_exist_ok=True)
+                merge_tree(t, dst)
             elif os.path.isfile(t):
                 try:
                     os.link(t, dst)

@@ -218,19 +218,42 @@ done
 # and then had nothing to install them with, which is the worst possible place
 # to stop. So the interpreter comes in the box.
 #
-# 3.8.10 SPECIFICALLY, and the version is the interesting part: it is the last
-# CPython that runs on Windows 7, which is the floor Glasspole targets. Newer
-# embeddables refuse to start there with a missing-API error that names a DLL
-# and not the real cause.
+# 3.7.9 SPECIFICALLY, AND 3.8 IS NOT A SUBSTITUTE. This was 3.8.10 and it did
+# not work on Windows 7 — the interpreter started and then could not import a
+# single extension module:
 #
-# Two wheels on top of it, and only two, because ubi_reader 0.8.9 is the last
-# release before it grew a cryptography/zstandard tail it does not need for
-# this. lzallright ships abi3, so one binary covers every CPython from 3.8 up
-# — nothing here is pinned to the interpreter's exact minor version.
+#     ImportError: DLL load failed while importing _socket:
+#                  The parameter is incorrect.
+#
+# Python 3.8 loads every .pyd with LoadLibraryExW and the flags
+# LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR. Those
+# flags do not exist on Windows 7 without KB2533623, and LoadLibraryExW
+# rejects them with ERROR_INVALID_PARAMETER — which the import machinery
+# reports, unhelpfully, as the message above. _socket and _bz2 were only the
+# first two it happened to need. python38.dll references AddDllDirectory;
+# python37.dll does not reference it at all and loads .pyd files the old way,
+# which an unpatched Windows 7 supports.
+#
+# Requiring a Microsoft update would have worked and was the wrong answer:
+# "install this KB first" is the same wall as "install Python first", on a
+# machine whose Windows Update no longer reliably runs.
+#
+# WHAT THE VERSION DROP COSTS, and how each part is paid for:
+#
+#   ubi_reader 0.8.9 declares Requires-Python >=3.8. Its metadata does; its
+#   code does not — all 29 files parse against the 3.7 grammar, and the wheel
+#   is py3-none-any. Wheels are installed here by unzipping, which never
+#   consults that field, so the same ubi_reader Linux uses runs on 3.7.
+#   Dropping to 0.8.2 instead would have changed the API pkgtool calls.
+#
+#   lzallright has no cp37 wheel — only cp38-abi3. python-lzo does, and it is
+#   the same algorithm, so tools/win-lzallright.py goes in beside it as
+#   lzallright.py and translates. See that file for why the byte format is
+#   known rather than guessed.
 #
 # It lands in build/deps/python because tadpole-view already probes exactly
 # that path ahead of PATH, so no viewer code had to learn about this.
-PY_VER="${PY_VER:-3.8.10}"
+PY_VER="${PY_VER:-3.7.9}"
 PYDIR="$OUT/winpython"
 if [ ! -f "$PYDIR/python.exe" ]; then
     echo "==> fetching Python $PY_VER for Windows, with ubi_reader"
@@ -261,17 +284,30 @@ if [ ! -f "$PYDIR/python.exe" ]; then
         # has one via ensurepip and costs a second.
         $PIPPY -m venv "$OUT/pipenv" >/dev/null 2>&1 || true
         [ -x "$OUT/pipenv/bin/python" ] && PIPPY="$OUT/pipenv/bin/python"
-        $PIPPY -m pip download -q --only-binary=:all: \
+        # TWO DOWNLOADS, TWO PYTHON VERSIONS, on purpose. ubi_reader is asked
+        # for as 3.8 because that is what its metadata demands and the wheel
+        # it hands back is py3-none-any — the same file either way. --no-deps
+        # so pip does not chase lzallright, which has no cp37 wheel and is
+        # replaced below. python-lzo is asked for as 3.7 because it is a real
+        # extension and the ABI has to match the interpreter.
+        $PIPPY -m pip download -q --only-binary=:all: --no-deps \
             --platform win_amd64 --python-version 38 -d "$WH" \
-            "ubi_reader==0.8.9" "lzallright" || {
-                echo "could not download the Python wheels — the firmware" >&2
-                echo "installer will not work on Windows without them." >&2; }
+            "ubi_reader==0.8.9" || {
+                echo "could not download ubi_reader — the firmware installer" >&2
+                echo "will not work on Windows without it." >&2; }
+        $PIPPY -m pip download -q --only-binary=:all: --no-deps \
+            --platform win_amd64 --python-version 37 -d "$WH" \
+            "python-lzo" || {
+                echo "could not download python-lzo — UBIFS volumes will not" >&2
+                echo "decompress on Windows without it." >&2; }
     fi
     for w in "$WH"/*.whl; do
         [ -f "$w" ] || continue
         unzip -qo "$w" -d "$PYDIR/Lib/site-packages"
     done
     rm -rf "$WH"
+    # The bridge from what ubi_reader imports to what is actually installed.
+    cp "$HERE/win-lzallright.py" "$PYDIR/Lib/site-packages/lzallright.py"
 fi
 if [ -f "$PYDIR/python.exe" ]; then
     mkdir -p "$STAGE/build/deps"
@@ -281,9 +317,24 @@ if [ -f "$PYDIR/python.exe" ]; then
     find "$STAGE/build/deps/python" -name __pycache__ -type d \
          -exec rm -rf {} + 2>/dev/null || true
     echo "    bundled Python $PY_VER ($(du -sh "$STAGE/build/deps/python" | cut -f1))"
-    [ -d "$STAGE/build/deps/python/Lib/site-packages/ubireader" ] || {
-        echo "WARNING: ubi_reader is missing from the bundle — firmware" >&2
-        echo "         install will fail on Windows." >&2; }
+    # EVERY PIECE, CHECKED SEPARATELY. Any one of these missing produces the
+    # same symptom on the user's machine — the firmware installer stops with
+    # an ImportError — and the build is the only place that can tell them
+    # apart, because here we know what was supposed to be there.
+    SP_="$STAGE/build/deps/python/Lib/site-packages"
+    [ -d "$SP_/ubireader" ] || {
+        echo "WARNING: ubi_reader missing — firmware install will fail." >&2; }
+    ls "$SP_"/lzo*.pyd >/dev/null 2>&1 || {
+        echo "WARNING: python-lzo missing — UBIFS will not decompress." >&2; }
+    [ -f "$SP_/lzallright.py" ] || {
+        echo "WARNING: the lzallright shim is missing — ubi_reader will not" >&2
+        echo "         import." >&2; }
+    # The whole reason for 3.7: a .pyd here must load on an unpatched Win7.
+    case "$PY_VER" in
+      3.7.*) ;;
+      *) echo "WARNING: Python $PY_VER loads extension modules with flags that" >&2
+         echo "         Windows 7 rejects without KB2533623." >&2 ;;
+    esac
 fi
 
 echo "$VERSION" > "$STAGE/.tadpole-version"
