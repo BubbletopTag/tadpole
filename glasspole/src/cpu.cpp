@@ -258,6 +258,7 @@ void RunLoop(Thread &t, Dynarmic::A32::Jit &jit) {
              t.m->quit_gen.load(std::memory_order_relaxed) != t.quit_seen) &&
             gp_signal_deliver(t)) {
             quiet_slices = 0;
+            reported     = false;   /* progress, so the next quiet stretch is a new one */
             continue;
         }
 
