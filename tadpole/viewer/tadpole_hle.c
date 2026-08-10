@@ -697,14 +697,34 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	close(fd);
 	if (m == MAP_FAILED) { fprintf(stderr, "hle: cannot map glcmd.bin\n"); return 0; }
 #else
-	/* The ring exists to be SHARED with the guest's GL shim, and this build
-	 * has no guest — plain memory carries the same header and rings and is
-	 * the honest version of "nobody on the other side". Deliberately not
-	 * CreateFileMapping: cross-process sharing on Windows is the one-process
-	 * design's question, and it does not get answered inside a viewer port. */
-	(void)path; (void)fd;
-	m = calloc(1, TADGL_FILE_BYTES);
-	if (!m) { fprintf(stderr, "hle: cannot allocate the GL ring\n"); return 0; }
+	/* The ring is SHARED with the guest's GL shim, which maps glcmd.bin as a
+	 * real view now — so the viewer maps the same file, and the two alias
+	 * exactly as MAP_SHARED does on Linux. (A calloc'd private buffer here
+	 * was the STALL: the guest wrote GL commands to the file while the
+	 * replayer read an empty copy nobody filled.) Own address space, any
+	 * address, plain MapViewOfFile — none of the placement gymnastics the
+	 * emulator's in-reservation views needed. */
+	{
+		HANDLE fh, mh;
+		(void)fd;
+		snprintf(path, sizeof(path), "%s/glcmd.bin", dir);
+		fh = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+		                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		                 NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (fh == INVALID_HANDLE_VALUE) {
+			fprintf(stderr, "hle: cannot open %s\n", path); return 0;
+		}
+		/* Size it so the mapping covers the whole ring even if we win the
+		 * race to create the file before the guest does. */
+		mh = CreateFileMappingA(fh, NULL, PAGE_READWRITE,
+		                        (DWORD)((uint64_t)TADGL_FILE_BYTES >> 32),
+		                        (DWORD)(TADGL_FILE_BYTES & 0xffffffffu), NULL);
+		CloseHandle(fh);
+		if (!mh) { fprintf(stderr, "hle: cannot map glcmd.bin\n"); return 0; }
+		m = MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, TADGL_FILE_BYTES);
+		CloseHandle(mh);
+		if (!m) { fprintf(stderr, "hle: cannot view glcmd.bin\n"); return 0; }
+	}
 #endif
 
 	g_ring = m;

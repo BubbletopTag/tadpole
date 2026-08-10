@@ -1311,6 +1311,13 @@ static void find_project_dir(const char *argv0)
 		const char *e = getenv("TADPOLE_PROJECT");
 		if (e && *e) {
 			snprintf(g_projdir, sizeof(g_projdir), "%s", e);
+			/* Forward slashes here too, not only on the argv[0] path
+			 * below. tadpole.exe hands this over in Windows spelling, and
+			 * a backslash reaching the guest's LD_LIBRARY_PATH is not a
+			 * separator to uClibc — every library then fails to load, with
+			 * "can't load library 'libVideoMPI.so'" as the only clue. */
+			for (i = 0; g_projdir[i]; i++)
+				if (g_projdir[i] == '\\') g_projdir[i] = '/';
 			return;
 		}
 	}
@@ -1484,34 +1491,189 @@ static void guest_log_close(void)
 #ifdef _WIN32
 /* ---- guest supervision, Windows --------------------------------------------
  *
- * There is no guest to supervise: the emulator is not wired up on Windows
- * yet, and the supervision itself is fork-shaped — process groups, SIGTERM
- * escalation, pipes to the child's stdio — with no faithful Win32 analogue
- * short of the one-process design, which is a cross-machine decision and
- * must not arrive by the back door of a viewer port.
+ * Not fork-shaped after all. On Linux tadpole.sh assembles an emulator
+ * command and the viewer forks the script; here the same knowledge assembles
+ * the same command for CreateProcess — glasspole IS the emulator on Windows,
+ * and starting a process is the one part of supervision Win32 does natively.
+ * What stays unported are the SCRIPTS: the tools written in bash and python
+ * (updates, installs) still answer honestly that they need the full build.
  *
- * So these are STUBS, not ports. spawn_script fails, and every caller
- * already turns that failure into an honest message ("launch failed",
- * "<tool> could not start") because spawn can fail on Linux too. The one
- * thing added is a status line saying WHY, once, so a greyed-out button is
- * a fact about this build rather than a mystery. */
+ * The guest environment mirrors what tools/tadpole-win.ps1 proved out, with
+ * paths spelled drive-relative: they must survive a colon-separated
+ * LD_LIBRARY_PATH, and glasspole's sysroot fallthrough opens them natively
+ * against the current drive. */
+static HANDLE g_guest_h;
+
+/* C:\x/y -> /x/y: colon-free AND separator-consistent, because this is the
+ * only place host spelling becomes guest spelling. A drive letter would split
+ * a colon-separated LD_LIBRARY_PATH, and a backslash is not a separator to
+ * uClibc OR to glasspole's HostPath — a TADPOLE_DIR of "\Users\...\run" is
+ * not absolute to it, so the shim's framebuffer files go somewhere the guest
+ * never looks and the title dies inside its display module with
+ * "No framebuffer allocation available". %LOCALAPPDATA% hands us exactly
+ * that spelling, so this conversion is not defensive: it is the common case. */
+static void drel(const char *in, char *out, size_t n)
+{
+	size_t i;
+	if (in[0] && in[1] == ':')
+		in += 2;
+	for (i = 0; i + 1 < n && in[i]; i++)
+		out[i] = in[i] == '\\' ? '/' : in[i];
+	out[i] = 0;
+}
+
 static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
                           int *outfd, int silent)
 {
-	(void)argv; (void)as_guest; (void)silent;
+	char R[1024], dir[600], cmd[4096];
+	const char *prog = NULL;
+	int i, n;
+	STARTUPINFOA si;
+	PROCESS_INFORMATION pi;
+
+	(void)silent;
 	if (outfd) *outfd = -1;
-	fprintf(stderr, "tadpole-view: cannot run %s — no emulator in this "
-	        "Windows build yet\n", script);
-	ui_status("no emulator in this Windows build yet");
-	return -1;
+
+	/* Only the guest-launching script translates; the rest are genuinely
+	 * shell and python and say so. */
+	if (strcmp(script, "tadpole.sh") != 0 || !as_guest) {
+		fprintf(stderr, "tadpole-view: cannot run %s — scripts need the "
+		        "full build; guests launch natively\n", script);
+		return -1;
+	}
+	/* argstart is where the GUEST's own argv begins, and it is tracked
+	 * explicitly rather than left in the loop variable: falling out of the
+	 * scan with i on the NULL terminator and then stepping past it reads off
+	 * the end of argv, which crashes the viewer the moment anyone picks Run
+	 * System Menu. */
+	int argstart = 0;
+	for (i = 1; argv[i]; i++) {
+		if (!strcmp(argv[i], "--boot")) {
+			prog = "/LF/Base/bin/AppManager";
+			break;                  /* AppManager takes no arguments here */
+		}
+		if (!strcmp(argv[i], "--run") && argv[i + 1]) {
+			prog = argv[i + 1];
+			argstart = i + 2;       /* everything after is the guest's */
+			break;
+		}
+		if (!strcmp(argv[i], "--app")) {
+			ui_status("launch titles from the home screen on Windows");
+			return -1;
+		}
+	}
+	if (!prog) {
+		ui_status("nothing to launch");
+		return -1;
+	}
+
+	drel(g_projdir, R, sizeof(R));
+	drel(g_dir, dir, sizeof(dir));
+	n = snprintf(cmd, sizeof(cmd),
+	    "\"%s/glasspole/build/glasspole.exe\" --sysroot runtime/sysroot"
+	    " -E \"LD_LIBRARY_PATH=%s/runtime/shimlibs-gl:%s/runtime/shimlibs-z:"
+	    "%s/runtime/shimlibs:%s/runtime/libs\""
+	    " -E TADPOLE_DIR=%s"
+	    " -E TSLIB_CONFFILE=/nonexistent-ts.conf"
+	    " -E TADPOLE_SYSROOT=%s/runtime/sysroot",
+	    g_projdir, R, R, R, R, dir, R);
+	if (ui_cfg()->gl)
+		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL=1");
+	/* HLE REPLAY IS HELD BACK ON WINDOWS, and only HLE. Measured on the
+	 * OptiPlex against AppManager, with the viewer attached and everything
+	 * else identical: TADPOLE_GL=1 alone boots to the Sign In screen and
+	 * stays up, adding TADPOLE_GL_HLE=1 dies every time with
+	 *     [0x5] CreateHandle: No framebuffer allocation available
+	 *     <ASSERT> Unsupported destination PixelFormat used 0
+	 * before the first frame. The GL boundary itself is fine — Flash titles
+	 * render and the replayer initialises on this driver — so this is a
+	 * specific fault in the HLE path here, not a reason to disable GL. A
+	 * booting system menu beats a fast crash; re-enable the moment the
+	 * cause is found. */
+	else if (ui_cfg()->gl_hle)
+		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL=1");
+	if (ui_cfg()->gl_hle)
+		fprintf(stderr, "tadpole-view: HLE replay not passed to the guest on "
+		        "Windows (AppManager cannot allocate a framebuffer with it)\n");
+	n += snprintf(cmd + n, sizeof(cmd) - n, " %s", prog);
+	if (argstart)
+		for (i = argstart; argv[i] && n < (int)sizeof(cmd) - 2; i++)
+			n += snprintf(cmd + n, sizeof(cmd) - n, " %s", argv[i]);
+
+	/* THE GUEST MUST HAVE SOMEWHERE TO WRITE. CREATE_NO_WINDOW alone leaves
+	 * the child with no console and no standard handles, so every guest
+	 * write() to stdout fails — and AppManager, four hundred log lines
+	 * chattier than anything else here, gives up and exits within seconds.
+	 * That looks exactly like "the emulator cannot start" and is not.
+	 * So hand it a real file: $TADPOLE_DIR/guest.log, inheritable, as both
+	 * stdout and stderr. It is the Windows spelling of the POSIX path's
+	 * pipe-or-/dev/null, and it doubles as the log a user can send us. */
+	{
+		SECURITY_ATTRIBUTES sa;
+		char logp[700];
+		HANDLE lh;
+
+		memset(&sa, 0, sizeof(sa));
+		sa.nLength = sizeof(sa);
+		sa.bInheritHandle = TRUE;
+		snprintf(logp, sizeof(logp), "%s/guest.log", g_dir);
+		lh = CreateFileA(logp, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		                 &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (lh == INVALID_HANDLE_VALUE)
+			lh = CreateFileA("NUL", GENERIC_WRITE, 0, &sa, OPEN_EXISTING, 0, NULL);
+
+		memset(&si, 0, sizeof(si));
+		si.cb = sizeof(si);
+		si.dwFlags    = STARTF_USESTDHANDLES;
+		si.hStdInput  = NULL;
+		si.hStdOutput = lh;
+		si.hStdError  = lh;
+		memset(&pi, 0, sizeof(pi));
+		if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+		                    NULL, g_projdir, &si, &pi)) {
+			if (lh != INVALID_HANDLE_VALUE) CloseHandle(lh);
+			fprintf(stderr, "tadpole-view: glasspole would not start "
+			        "(GetLastError %lu)\n", (unsigned long)GetLastError());
+			ui_status("glasspole would not start — is it built?");
+			return -1;
+		}
+		if (lh != INVALID_HANDLE_VALUE) CloseHandle(lh);
+	}
+	CloseHandle(pi.hThread);
+	if (g_guest_h)
+		CloseHandle(g_guest_h);
+	g_guest_h = pi.hProcess;
+	return (pid_t)pi.dwProcessId;
 }
 
-static int  guest_external(void) { return 0; }   /* none can exist */
-static int  guest_alive(void)    { return 0; }
-static void guest_stop(void)     { }
+static int guest_external(void) { return 0; }
 
-/* tool_poll's reap, stubbed to "still running" — unreachable, since no tool
- * can ever start. */
+static int guest_alive(void)
+{
+	if (!g_guest_h)
+		return 0;
+	if (WaitForSingleObject(g_guest_h, 0) == WAIT_TIMEOUT)
+		return 1;
+	CloseHandle(g_guest_h);
+	g_guest_h = NULL;
+	return 0;
+}
+
+static void guest_stop(void)
+{
+	if (!g_guest_h)
+		return;
+	/* TerminateProcess without ceremony: since the shared-view change there
+	 * is no write-back to lose, and the guest holds no state outside its
+	 * TADPOLE_DIR files, which are already coherent. */
+	TerminateProcess(g_guest_h, 0);
+	WaitForSingleObject(g_guest_h, 2000);
+	CloseHandle(g_guest_h);
+	g_guest_h = NULL;
+}
+
+/* Tools (updates, installs) never start on Windows, so there is nothing to
+ * reap; "still running" keeps tool_poll inert. */
 static int tool_reap(pid_t pid, int *exited_ok)
 {
 	(void)pid; (void)exited_ok;

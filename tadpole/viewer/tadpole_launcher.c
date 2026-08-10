@@ -39,11 +39,12 @@ static int exists(const WCHAR *p)
 int WINAPI wWinMain(HINSTANCE hi, HINSTANCE hp, PWSTR cmd, int show)
 {
     WCHAR root[MAX_PATH], probe[MAX_PATH + 32], viewer[MAX_PATH + 64];
+    WCHAR line[MAX_PATH + 256];
     STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     int up;
 
-    (void)hi; (void)hp; (void)cmd; (void)show;
+    (void)hi; (void)hp; (void)show;
 
     GetModuleFileNameW(NULL, root, MAX_PATH);
     dirname_inplace(root);
@@ -72,9 +73,14 @@ int WINAPI wWinMain(HINSTANCE hi, HINSTANCE hp, PWSTR cmd, int show)
 
     SetEnvironmentVariableW(L"TADPOLE_PROJECT", root);
 
+    /* Anything given to the launcher goes straight to the viewer, so a
+     * shortcut with --boot lands on the system menu instead of the front
+     * end, and -s 3 opens bigger. */
+    wsprintfW(line, L"\"%s\" %s", viewer, cmd ? cmd : L"");
+
     ZeroMemory(&si, sizeof si);
     si.cb = sizeof si;
-    if (!CreateProcessW(viewer, NULL, NULL, NULL, FALSE, 0, NULL, root,
+    if (!CreateProcessW(viewer, line, NULL, NULL, FALSE, 0, NULL, root,
                         &si, &pi))
         fail(L"The viewer would not start.");
     CloseHandle(pi.hThread);
