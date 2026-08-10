@@ -36,22 +36,34 @@ Every installed title, launched in turn and screenshotted:
 ```sh
 ./tools/compat-sweep.sh          # launch each one, capture it, record a verdict
 ./tools/compat-report.py         # -> build/compat/<date>/index.html
+COMPAT_EMU=glasspole/build/glasspole ./tools/compat-sweep.sh    # the other engine
+./tools/compat-compare.py --a <qemu-run> --b <glasspole-run>    # both, side by side
 ```
 
-The most recent run, 110 titles:
+The most recent run, 110 titles, both engines swept sequentially on the same
+firmware the same hour:
 
-| | |
-|---|---|
-| Launches to a real screen | 75 |
-| Crashes before drawing | 28 |
-| Runs, draws nothing | 6 |
-| Draws, then stops | 1 |
+| | qemu-arm | Glasspole |
+|---|---|---|
+| Launches to a real screen | 82 | 85 |
+| Crashes before drawing | 16 | 17 |
+| Runs, draws nothing | 12 | 8 |
+| — of which Flash | 14/15 | 14/15 |
+| — of which native Brio | 68/95 | 71/95 |
 
-**28 failures are not 28 bugs.** Nineteen of them abort in the same place with
-the same message; two further groups of three crash at one shared offset each,
-which is one engine build and one bug per group, not six. Six distinct fault
-sites account for all 28, and the report puts that above the table for exactly
-this reason.
+**The two engines are effectively one-to-one on this catalogue.** Glasspole is
+the from-scratch ARM JIT (see `glasspole/`); qemu-arm is the reference. Three
+titles either way is inside the run-to-run spread — the guest's own dynamic
+loader has an unlocked `dlopen`, so a title that loads two libraries at once
+can fault on one run and reach its menu on the next, and each engine dodges
+that race on different runs. Treat the two columns as the same number.
+
+**The failures are not one bug each.** They cluster: a handful of distinct
+fault sites account for nearly all of them, and the report puts that above the
+table for exactly this reason. Chasing the clusters is what took Glasspole from
+56 to 85 in a day — one of those clusters was a single `chdir` that made every
+relative open resolve under the sysroot twice, and it alone was wearing three
+disguises across 21 titles.
 
 **And every one of those launches had no player signed in.** The sweep starts
 titles directly, with no home screen, because that is what makes a hundred
