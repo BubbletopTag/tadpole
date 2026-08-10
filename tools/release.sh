@@ -65,8 +65,13 @@ if [ "$DRY" = 1 ]; then
 fi
 
 # ---- publish ---------------------------------------------------------------
-# The body is the commit message this release is being cut from, verbatim.
-BODY="$(git log -1 --format=%B)"
+# The body is the commit message this release is being cut from — minus its
+# trailers, which are the one part not written for this audience. Co-Authored-By
+# and friends are repository bookkeeping; on a release page they are the last
+# thing under the changelog, addressed to nobody.
+BODY="$(git log -1 --format=%B | sed -E '/^(Co-Authored-By|Co-authored-by|Signed-off-by|Claude-Session|Generated-with):/d')"
+# Trailing blank lines left behind by the deletion above.
+BODY="$(printf '%s\n' "$BODY" | sed -E ':a; /^[[:space:]]*$/{ $d; N; ba; }')"
 git tag -a "$TAG" -m "$TAG" 2>/dev/null || echo "  (tag exists, reusing)"
 git push origin "$TAG"
 gh release create "$TAG" --title "$TAG" --notes "$BODY" \
