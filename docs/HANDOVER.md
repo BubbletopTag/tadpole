@@ -5736,3 +5736,88 @@ survive and glasspole happens to trip, and the fix is not to match qemu byte for
 byte but to make the guest's fresh memory deterministic. Worth testing before
 believing: zero the guest's stack region at startup and see whether the answer
 changes. That experiment has not been run.
+
+## 2026-08-09 — Glasspole: a differential rig, and what it found in an hour
+
+`glasspole/tools/gp-diff.sh` runs the guest's own busybox under both `qemu-arm`
+and glasspole and diffs the output. That is the whole idea. The stock rootfs
+ships an ARM busybox that exercises most of the syscall surface, qemu sits next
+to us as a known-correct implementation, and nobody had ever pointed one at the
+other.
+
+Within minutes of existing it found four things that had survived a working
+home screen:
+
+```
+             qemu-arm                          glasspole
+ls -l        547484                            17592186044416
+ls -ld       drwxr-xr-x 8 user1000 user1000    drwxr-xr-x 1 root root
+id           uid=1000 gid=1000 groups=984,…    uid=0(root) … can't get groups
+free         Swap: 3536892 244108 3292784      Swap: 0 4194303 0
+sh -c '… >&2'  err on stderr                   21.9 MB of ENOSYS in 20 seconds
+```
+
+Each is a different bug and none of them looked like one from inside.
+
+**`struct stat64` was 96 bytes and the ARM EABI says 104.** `#pragma pack(1)`
+removed padding the kernel's declaration does not name: the EABI aligns
+`long long` to 8, so there are implicit holes before `st_size`, `st_blocks` and
+`st_ino` on top of the `__pad0`/`__pad3` that are written out. Everything from
+`st_size` onward sat four bytes early and the last eight were never written.
+17592186044416 is 4096 << 32 — the guest reading `st_blksize` as `st_size`'s
+high word. The fix names every pad and asserts every offset.
+
+That one has a tail worth knowing about. `sh -c pwd` matched qemu BEFORE the fix
+and differs after, and the new behaviour is the correct one: ash checks that
+`$PWD` and `.` are the same directory by comparing `st_dev`/`st_ino`, and
+`st_ino` was landing outside the short struct, so both stats read the same stack
+garbage and agreed. Glasspole virtualises the working directory and qemu does
+not, so `/` here against the host's directory there is the honest answer.
+
+**`dup2` did not exist**, and `fcntl(F_DUPFD)` fell into an accepted-and-ignored
+`ret = 0`, which does not merely fail — it hands the guest descriptor zero.
+busybox ash asks for `>&2`, gets ENOSYS and retries forever. Shell redirection
+is not exotic; the device's own init scripts are full of it.
+
+Implementing it exposed a second layer: `write()` short-circuited fd 1 and fd 2
+by NUMBER before consulting the descriptor table, so the `dup2` landed correctly
+and the write went to stdout anyway. The standard descriptors are in the table
+like everything else now, and carry which console stream they are.
+
+**Reporting a real uid exposed a third layer.** Making `getuid32` agree with the
+auxiliary vector (which has claimed 1000 since the auxv work) meant busybox
+stopped believing it was root and started dropping privileges on every applet —
+`setgid32`, which did not exist. "md5sum: setgid: Function not implemented".
+
+**Thread slots never came back.** The processor id handed to each new thread was
+`m.threads.size()`, and that vector only grew, so the thirty-second CREATION
+exhausted the ExclusiveMonitor however few threads were alive.
+`tests/threads-many.S` makes and retires 96 threads against a monitor sized for
+32: it prints `FAIL: clone ran out of slots` on the old binary and
+`96 threads made and retired` on the new one.
+
+### The home screen boot is FLAKY, and it was already
+
+Worth writing down before someone bisects it into a change that did not cause
+it. Booting AppManager to `UI loaded` fails roughly two times in five, always
+the same way:
+
+```
+[glasspole] GUEST FAULT: 00000044 was never mapped
+[glasspole]   thread 1000, ~5340 syscalls in
+[glasspole]   block pc ~60001a4c  sp 3fffc7a0  lr 60001a4c
+```
+
+Measured on the PRISTINE tree at 3 ok / 2 faulted out of 5, and with the fixes
+above at 5 ok / 3 faulted out of 8 — the same rate, which is how the fixes were
+cleared of causing it. `pc ~60001a4c` is inside `ld-uClibc.so.0`
+(`INTERP_BASE` is 0x60000000) during `CAppManager::LoadNewApp`'s dlopen, and the
+faulting address is a null pointer plus 0x44.
+
+**It disappears under `-strace`**, which is the most useful fact about it: this
+is a race, not a wrong answer, and anything that changes timing hides it. Two
+guest threads are live at that moment — the main one and `ButtonPowerUSBTask`,
+which is doing its second tslib probe — and the interleaving differs between a
+run that boots and one that does not.
+
+It is not new. It is simply that nobody had run the boot five times in a row.

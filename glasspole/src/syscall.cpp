@@ -16,6 +16,7 @@
 #include <dynarmic/interface/A32/a32.h>
 
 #include <chrono>
+#include <cstddef>      /* offsetof, for the guest struct layout assertions */
 #include <cstring>
 
 namespace {
@@ -32,6 +33,13 @@ enum : uint32_t {
     SYS_fstat64 = 197,
     SYS_getuid32 = 199, SYS_getgid32 = 200, SYS_geteuid32 = 201,
     SYS_getegid32 = 202, SYS_fcntl64 = 221, SYS_exit_group = 248,
+    /* Setting the ids, which only became reachable once GETTING them stopped
+     * answering 0. A process that believes it is root never drops privileges;
+     * one that knows it is not does, and busybox does it on EVERY applet —
+     * "md5sum: setgid: Function not implemented" and exit 1. */
+    SYS_setuid32 = 213, SYS_setgid32 = 214,
+    SYS_getgroups32 = 205, SYS_setgroups32 = 206,
+    SYS_setuid = 23, SYS_setgid = 46,
     SYS_set_tid_address = 256, SYS_clock_gettime = 263, SYS_readlink = 85,
     SYS_set_robust_list = 338, SYS_getcwd = 183, SYS_nanosleep = 162,
     SYS_sched_yield = 158, SYS_setitimer = 104,
@@ -44,6 +52,11 @@ enum : uint32_t {
     /* Threads. */
     SYS_clone = 120, SYS_futex = 240, SYS_gettid = 224,
     SYS_mknod = 14, SYS_ftruncate = 93, SYS_getdents64 = 217, SYS_getdents = 141,
+    /* Descriptor duplication. Missing entirely until it was measured: busybox
+     * ash asks for `>&2`, gets ENOSYS, and RETRIES FOREVER — 21.9 MB of
+     * "sh: 0: Function not implemented" in twenty seconds. Shell redirection
+     * is not exotic; the device's own init scripts are full of it. */
+    SYS_dup = 41, SYS_dup2 = 63,
     /* POSIX message queues. Brio's task communication runs on these. */
     SYS_mq_open = 274, SYS_mq_unlink = 275, SYS_mq_timedsend = 276,
     SYS_mq_timedreceive = 277, SYS_mq_notify = 278, SYS_mq_getsetattr = 279,
@@ -84,27 +97,62 @@ int open_flags(uint32_t f) {
 /* ARM EABI struct stat64. Laid out by hand with explicit padding because this
  * is the GUEST's layout, not the host's — a host struct stat copied in would
  * be right on Linux and wrong on Windows, which is the entire class of bug
- * this project is built to avoid. */
+ * this project is built to avoid.
+ *
+ * IT IS 104 BYTES, AND THE PADDING IS NOT ONLY WHERE THE KERNEL NAMES IT.
+ * ARM's EABI aligns every 64-bit type to 8. The kernel's declaration spells
+ * out __pad0 and __pad3, which reads as though those were the only holes —
+ * but the compiler then inserts THREE MORE of its own, before st_size, before
+ * st_blocks, and before st_ino. Under `pack(1)` those vanish, the struct comes
+ * to 96 bytes, everything from st_size on sits four bytes early, and the last
+ * eight bytes of the guest's buffer are never written at all.
+ *
+ * Which is exactly what happened, and it survived a working home screen:
+ *
+ *     qemu-arm:  -rwxr-xr-x 1 user1000 user1000         547484 /bin/busybox
+ *     glasspole: -rwxr-xr-x 1 root     root     17592186044416 /bin/busybox
+ *
+ * 17592186044416 is 4096 << 32 — the guest reading st_blksize as st_size's
+ * high word. Anything that mallocs or reads st_size bytes fails on a 16 TB
+ * answer, and nothing points at stat.
+ *
+ * The holes are therefore written out as named padding and the offsets are
+ * asserted individually below. `pack(1)` stays, so the layout is stated here
+ * rather than inherited from whatever the host compiler would have chosen. */
 #pragma pack(push, 1)
 struct guest_stat64 {
-    uint64_t st_dev;
-    uint8_t  pad0[4];
-    uint32_t __st_ino;
-    uint32_t st_mode;
-    uint32_t st_nlink;
-    uint32_t st_uid;
-    uint32_t st_gid;
-    uint64_t st_rdev;
-    uint8_t  pad3[4];
-    int64_t  st_size;
-    uint32_t st_blksize;
-    uint64_t st_blocks;
-    uint32_t st_atime_, st_atime_nsec;
-    uint32_t st_mtime_, st_mtime_nsec;
-    uint32_t st_ctime_, st_ctime_nsec;
-    uint64_t st_ino;
+    uint64_t st_dev;                     /*  0 */
+    uint8_t  pad0[4];                    /*  8 */
+    uint32_t __st_ino;                   /* 12 */
+    uint32_t st_mode;                    /* 16 */
+    uint32_t st_nlink;                   /* 20 */
+    uint32_t st_uid;                     /* 24 */
+    uint32_t st_gid;                     /* 28 */
+    uint64_t st_rdev;                    /* 32 */
+    uint8_t  pad3[4];                    /* 40 */
+    uint8_t  pad_size[4];                /* 44 — EABI's own, before st_size */
+    int64_t  st_size;                    /* 48 */
+    uint32_t st_blksize;                 /* 56 */
+    uint8_t  pad_blocks[4];              /* 60 — likewise, before st_blocks */
+    uint64_t st_blocks;                  /* 64 */
+    uint32_t st_atime_, st_atime_nsec;   /* 72, 76 */
+    uint32_t st_mtime_, st_mtime_nsec;   /* 80, 84 */
+    uint32_t st_ctime_, st_ctime_nsec;   /* 88, 92 */
+    uint64_t st_ino;                     /* 96 */
 };
 #pragma pack(pop)
+static_assert(sizeof(guest_stat64) == 104, "ARM struct stat64 is 104 bytes");
+/* Individually, not just the total: a compensating pair of mistakes adds up to
+ * 104 and still puts every field in the wrong place. */
+static_assert(offsetof(guest_stat64, st_mode)    == 16, "stat64 st_mode");
+static_assert(offsetof(guest_stat64, st_nlink)   == 20, "stat64 st_nlink");
+static_assert(offsetof(guest_stat64, st_uid)     == 24, "stat64 st_uid");
+static_assert(offsetof(guest_stat64, st_rdev)    == 32, "stat64 st_rdev");
+static_assert(offsetof(guest_stat64, st_size)    == 48, "stat64 st_size");
+static_assert(offsetof(guest_stat64, st_blksize) == 56, "stat64 st_blksize");
+static_assert(offsetof(guest_stat64, st_blocks)  == 64, "stat64 st_blocks");
+static_assert(offsetof(guest_stat64, st_mtime_)  == 80, "stat64 st_mtime");
+static_assert(offsetof(guest_stat64, st_ino)     == 96, "stat64 st_ino");
 
 /* The original ARM struct stat — 64 bytes, and note how many fields are
  * `short`. Nothing about it can be derived from the stat64 layout above. */
@@ -121,12 +169,27 @@ struct guest_stat {
 #pragma pack(pop)
 static_assert(sizeof(guest_stat) == 64, "ARM struct stat is 64 bytes");
 
+/* WHO THE GUEST IS, in one place, because two places disagreed. elf.c builds
+ * an auxiliary vector saying AT_UID/AT_GID 1000 — deliberately, "as qemu-arm
+ * reports, not 0: a guest that believes it is root takes different branches in
+ * anything that checks" — while getuid32 answered 0 and every stat came back
+ * owned by root. The guest could therefore read its own identity two ways and
+ * get two answers:
+ *
+ *     qemu-arm:  uid=1000(user1000) gid=1000(user1000) groups=998,1000
+ *     glasspole: uid=0(root) gid=0(root)id: can't get groups
+ */
+constexpr uint32_t GUEST_UID = 1000;
+constexpr uint32_t GUEST_GID = 1000;
+
 void fill_stat(const gp_statbuf &st, guest_stat *g) {
     std::memset(g, 0, sizeof *g);
     g->st_dev     = (uint32_t)st.dev;
     g->st_ino     = (uint32_t)st.ino;
     g->st_mode    = (uint16_t)st.mode;
-    g->st_nlink   = 1;
+    g->st_nlink   = (uint16_t)(st.nlink ? st.nlink : 1);
+    g->st_uid     = (uint16_t)GUEST_UID;
+    g->st_gid     = (uint16_t)GUEST_GID;
     g->st_size    = (uint32_t)st.size;
     g->st_blksize = 4096;
     g->st_blocks  = (uint32_t)((st.size + 511) / 512);
@@ -140,12 +203,99 @@ void fill_stat64(const gp_statbuf &st, guest_stat64 *g) {
     g->st_ino = st.ino;
     g->__st_ino = (uint32_t)st.ino;
     g->st_mode    = st.mode;
-    g->st_nlink   = 1;
+    /* Carried from the host now rather than answered 1. A directory's count is
+     * 2 plus its subdirectories, and that is how a tree walker knows when it
+     * has found them all. */
+    g->st_nlink   = st.nlink ? st.nlink : 1;
+    g->st_uid     = GUEST_UID;
+    g->st_gid     = GUEST_GID;
     g->st_size    = (int64_t)st.size;
     g->st_blksize = 4096;
     g->st_blocks  = (st.size + 511) / 512;
     g->st_mtime_  = (uint32_t)(st.mtime_ns / 1000000000ull);
     g->st_atime_  = g->st_ctime_ = g->st_mtime_;
+}
+
+/* ---- descriptors -------------------------------------------------------- */
+
+/* Put a copy of `src` at the lowest free descriptor >= `from`, which is what
+ * dup(), dup2() and F_DUPFD all reduce to once the target slot is decided.
+ *
+ * `src` IS TAKEN BY VALUE ON PURPOSE. The table is a std::vector, so growing
+ * it reallocates, and a GuestFd& pointing into it does not survive that — the
+ * copy is made before anything can move. */
+int place_dup(Machine &m, GuestFd src, int from) {
+    if (from < 0) return GP_EINVAL;
+    src.used = true;
+    for (size_t i = (size_t)from; i < m.fds.size(); i++)
+        if (!m.fds[i].used) { m.fds[i] = std::move(src); return (int)i; }
+    while (m.fds.size() < (size_t)from) m.fds.emplace_back();
+    m.fds.push_back(std::move(src));
+    return (int)m.fds.size() - 1;
+}
+
+/* Release one descriptor. The underlying file is closed by the LAST one onto
+ * it and by no other — see GuestFd::share.
+ *
+ * A socket's far end is told, which it was not before: recv() waits on its own
+ * `closed` flag, so without this the peer sat in its hundred-millisecond retry
+ * loop until exit_group rather than seeing end of stream. */
+void close_fd(GuestFd *g) {
+    const bool last = !g->share || g->share.use_count() == 1;
+    if (last && g->sock) {
+        if (auto peer = g->sock->peer.lock()) {
+            std::lock_guard<std::mutex> sg(peer->mu);
+            peer->closed = true;
+            peer->cv.notify_all();
+        }
+        std::lock_guard<std::mutex> sg(g->sock->mu);
+        g->sock->closed = true;
+        g->sock->cv.notify_all();
+    }
+    if (last) {
+        if (g->file) gp_close(g->file);
+        if (g->dir)  gp_dirclose(g->dir);
+    }
+    *g = GuestFd{};
+}
+
+/* ---- AF_UNIX transfer --------------------------------------------------- */
+/*
+ * Shared by recv()/send() and by read()/write(), because a guest that opened a
+ * socket is entitled to use either pair on it and ours used to answer EBADF to
+ * the second. `guard` is the machine lock and sock_recv RELEASES it: the wait
+ * is the one place a syscall blocks, and holding the lock there would stop
+ * every other thread from making any syscall at all.
+ */
+int32_t sock_recv(Machine &m, std::unique_lock<std::mutex> &guard,
+                  const std::shared_ptr<UnixSocket> &sk, uint32_t buf, uint32_t len) {
+    guard.unlock();
+    std::string msg;
+    {
+        std::unique_lock<std::mutex> sg(sk->mu);
+        while (sk->rx.empty() && !sk->closed) {
+            if (m.exiting.load(std::memory_order_relaxed)) break;
+            sk->cv.wait_for(sg, std::chrono::milliseconds(100));
+        }
+        if (!sk->rx.empty()) { msg = std::move(sk->rx.front()); sk->rx.pop_front(); }
+    }
+    if (msg.empty()) return 0;                  /* peer gone: end of stream */
+    const uint32_t n = msg.size() < len ? (uint32_t)msg.size() : len;
+    std::memcpy(m.Ptr(buf), msg.data(), n);
+    return (int32_t)n;
+}
+
+int32_t sock_send(Machine &m, const std::shared_ptr<UnixSocket> &sk,
+                  uint32_t buf, uint32_t len) {
+    auto peer = sk->peer.lock();
+    if (!peer) return GP_EPIPE;
+    std::string payload((const char *)m.Ptr(buf), len);
+    {
+        std::lock_guard<std::mutex> sg(peer->mu);
+        peer->rx.push_back(std::move(payload));
+    }
+    peer->cv.notify_all();
+    return (int32_t)len;
 }
 
 const char *name_of(uint32_t nr) {
@@ -166,6 +316,7 @@ const char *name_of(uint32_t nr) {
         case SYS_exit_group: return "exit_group";   case SYS_getcwd: return "getcwd";
         case SYS_clone: return "clone";             case SYS_futex: return "futex";
         case SYS_gettid: return "gettid";           case SYS_fcntl64: return "fcntl64";
+        case SYS_dup: return "dup";                 case SYS_dup2: return "dup2";
         case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
         case SYS_getdents64: return "getdents64";   case SYS_getdents: return "getdents";
         case SYS_mq_open: return "mq_open";         case SYS_mq_unlink: return "mq_unlink";
@@ -238,10 +389,36 @@ void gp_syscall(Thread &t) {
 
     case SYS_getpid:    ret = 1000; break;
     case SYS_gettid:    ret = (int32_t)t.tid; break;
+    /* The same numbers elf.c puts in AT_UID/AT_GID. See GUEST_UID above for
+     * what answering 0 here cost. */
     case SYS_getuid32:
-    case SYS_geteuid32:
+    case SYS_geteuid32: ret = (int32_t)GUEST_UID; break;
     case SYS_getgid32:
-    case SYS_getegid32: ret = 0; break;
+    case SYS_getegid32: ret = (int32_t)GUEST_GID; break;
+
+    /* Becoming who you already are is the only change an unprivileged process
+     * is allowed, and it is the only one anything here asks for: busybox drops
+     * to its real ids at startup, which on a system with one identity is a
+     * no-op that must nevertheless SUCCEED. Anything else is EPERM, which is
+     * what Linux would say and what the caller is prepared for. */
+    case SYS_setuid32:
+    case SYS_setuid: ret = (a0 == GUEST_UID) ? 0 : GP_EPERM; break;
+    case SYS_setgid32:
+    case SYS_setgid: ret = (a0 == GUEST_GID) ? 0 : GP_EPERM; break;
+    case SYS_setgroups32:
+        /* Accepted: the list can only be the one group we have. */
+        ret = 0;
+        break;
+
+    case SYS_getgroups32: {
+        /* size, list. Size 0 asks only for the count. One supplementary group,
+         * which is the primary one — without this `id` reports "can't get
+         * groups" and anything checking membership sees none. */
+        if (a0 == 0) { ret = 1; break; }
+        if (a1) { uint32_t g0 = GUEST_GID; std::memcpy(m.Ptr(a1), &g0, 4); }
+        ret = 1;
+        break;
+    }
 
     case SYS_set_tid_address:
         /* RETURNS THE CALLER'S TID, and that is not a detail. uClibc's threads
@@ -512,15 +689,7 @@ void gp_syscall(Thread &t) {
     case SYS_sendto: {
         GuestFd *g = m.Fd((int)a0);
         if (!g || !g->sock) { ret = GP_EBADF; break; }
-        auto peer = g->sock->peer.lock();
-        if (!peer) { ret = GP_EPIPE; break; }
-        std::string payload((const char *)m.Ptr(a1), a2);
-        {
-            std::lock_guard<std::mutex> sg(peer->mu);
-            peer->rx.push_back(std::move(payload));
-        }
-        peer->cv.notify_all();
-        ret = (int32_t)a2;
+        ret = sock_send(m, g->sock, a1, a2);
         break;
     }
 
@@ -528,22 +697,7 @@ void gp_syscall(Thread &t) {
     case SYS_recvfrom: {
         GuestFd *g = m.Fd((int)a0);
         if (!g || !g->sock) { ret = GP_EBADF; break; }
-        auto sk = g->sock;
-        guard.unlock();
-
-        std::string msg;
-        {
-            std::unique_lock<std::mutex> sg(sk->mu);
-            while (sk->rx.empty() && !sk->closed) {
-                if (m.exiting.load(std::memory_order_relaxed)) break;
-                sk->cv.wait_for(sg, std::chrono::milliseconds(100));
-            }
-            if (!sk->rx.empty()) { msg = std::move(sk->rx.front()); sk->rx.pop_front(); }
-        }
-        if (msg.empty()) { ret = 0; break; }        /* peer gone: end of stream */
-        const uint32_t n = msg.size() < a2 ? (uint32_t)msg.size() : a2;
-        std::memcpy(m.Ptr(a1), msg.data(), n);
-        ret = (int32_t)n;
+        ret = sock_recv(m, guard, g->sock, a1, a2);
         break;
     }
 
@@ -837,24 +991,55 @@ void gp_syscall(Thread &t) {
     case SYS_close: {
         GuestFd *g = m.Fd((int)a0);
         if (!g) { ret = GP_EBADF; break; }
-        if (g->file) gp_close(g->file);
-        if (g->dir)  gp_dirclose(g->dir);
-        *g = GuestFd{};
+        close_fd(g);
         ret = 0;
+        break;
+    }
+
+    /* dup(oldfd) — the lowest free descriptor.
+     * dup2(oldfd, newfd) — that one exactly, closing whatever was there. */
+    case SYS_dup:
+    case SYS_dup2: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g) { ret = GP_EBADF; break; }
+        if (nr == SYS_dup2) {
+            const int newfd = (int)a1;
+            if (newfd < 0) { ret = GP_EBADF; break; }
+            /* dup2 onto itself is a no-op that must NOT close anything —
+             * getting this wrong closes the descriptor the guest was asking
+             * to keep. */
+            if (newfd == (int)a0) { ret = newfd; break; }
+            if (GuestFd *old = m.Fd(newfd)) close_fd(old);
+            g = m.Fd((int)a0);            /* close_fd cannot move it, but say so */
+            ret = place_dup(m, *g, newfd);
+            /* place_dup takes the lowest free slot >= newfd, and newfd is now
+             * free, so it lands exactly there. */
+            break;
+        }
+        ret = place_dup(m, *g, 0);
         break;
     }
 
     case SYS_read: {
         GuestFd *g = m.Fd((int)a0);
-        if (!g || !g->file) { ret = GP_EBADF; break; }
+        if (!g) { ret = GP_EBADF; break; }
+        if (g->sock) { ret = sock_recv(m, guard, g->sock, a1, a2); break; }
+        /* Nothing feeds the guest's stdin, and end of file is what a program
+         * reading from a closed console is built to handle. */
+        if (g->console >= 0) { ret = 0; break; }
+        if (!g->file) { ret = GP_EBADF; break; }
         ret = (int32_t)gp_read(g->file, m.Ptr(a1), a2);
         break;
     }
 
     case SYS_write: {
-        if (a0 == 1 || a0 == 2) { ret = (int32_t)gp_console_write((int)a0, m.Ptr(a1), a2); break; }
+        /* THE TABLE FIRST, then the console. The other order is what made
+         * `>&2` a no-op — see GuestFd::console. */
         GuestFd *g = m.Fd((int)a0);
-        if (!g || !g->file) { ret = GP_EBADF; break; }
+        if (!g) { ret = GP_EBADF; break; }
+        if (g->console >= 0) { ret = (int32_t)gp_console_write(g->console, m.Ptr(a1), a2); break; }
+        if (g->sock) { ret = sock_send(m, g->sock, a1, a2); break; }
+        if (!g->file) { ret = GP_EBADF; break; }
         ret = (int32_t)gp_write(g->file, m.Ptr(a1), a2);
         break;
     }
@@ -867,13 +1052,12 @@ void gp_syscall(Thread &t) {
             uint32_t bufp = iov[i * 2], lenp = iov[i * 2 + 1];
             if (!lenp) continue;
             int64_t n;
-            if (a0 == 1 || a0 == 2) {
-                n = gp_console_write((int)a0, m.Ptr(bufp), lenp);
-            } else {
-                GuestFd *g = m.Fd((int)a0);
-                if (!g || !g->file) { n = GP_EBADF; }
-                else n = gp_write(g->file, m.Ptr(bufp), lenp);
-            }
+            GuestFd *g = m.Fd((int)a0);
+            if (!g)                   n = GP_EBADF;
+            else if (g->console >= 0) n = gp_console_write(g->console, m.Ptr(bufp), lenp);
+            else if (g->sock)         n = sock_send(m, g->sock, bufp, lenp);
+            else if (!g->file)        n = GP_EBADF;
+            else                      n = gp_write(g->file, m.Ptr(bufp), lenp);
             if (n < 0) { total = n; break; }
             total += n;
         }
@@ -957,9 +1141,16 @@ void gp_syscall(Thread &t) {
     }
 
     case SYS_access: {
+        /* The mode argument is still not checked — the guest is one uid
+         * against a host filesystem whose permissions we do not model, and a
+         * W_OK that guesses is worse than one that is not asked. What DID need
+         * fixing is the error: every failure was flattened to ENOENT, so a
+         * path whose parent is a file, or one the host refuses, was reported
+         * as simply absent and the guest went looking for the wrong cause. */
         gp_statbuf st;
         if (m.trace) tpath = m.Str(a0);
-        ret = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st) < 0 ? GP_ENOENT : 0;
+        int r0 = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st);
+        ret = r0 < 0 ? r0 : 0;
         break;
     }
 
@@ -1188,13 +1379,25 @@ void gp_syscall(Thread &t) {
     case SYS_fcntl64: {
         /* F_GETFL is the one that matters: uClibc's stdio asks it to decide
          * whether a stream may be written, and answering 0 for stdout says
-         * O_RDONLY. Standard descriptors are not in the table yet, so they are
-         * answered directly here rather than pretended about. */
+         * O_RDONLY. The standard descriptors are in the table like everything
+         * else — OpenStdio put them there — so they are answered from it
+         * rather than by number, which is what lets a dup'd one answer for
+         * the stream it now carries. */
         const uint32_t cmd = a1;
         if (cmd == 3 /*F_GETFL*/) {
-            if (a0 == 0)                 ret = 0;   /* O_RDONLY */
-            else if (a0 == 1 || a0 == 2) ret = 1;   /* O_WRONLY */
-            else { GuestFd *g = m.Fd((int)a0); ret = g ? (int32_t)g->oflags : GP_EBADF; }
+            GuestFd *g = m.Fd((int)a0);
+            ret = g ? (int32_t)g->oflags : GP_EBADF;
+            break;
+        }
+        /* F_DUPFD, and F_DUPFD_CLOEXEC which differs only in a flag nothing
+         * here can act on. These used to fall into the accepted-and-ignored
+         * `ret = 0` below — which does not merely fail to duplicate, it hands
+         * the guest DESCRIPTOR ZERO as the answer, so the next write goes to
+         * what the guest believes is stdin. */
+        if (cmd == 0 /*F_DUPFD*/ || cmd == 1030 /*F_DUPFD_CLOEXEC*/) {
+            GuestFd *g = m.Fd((int)a0);
+            if (!g) { ret = GP_EBADF; break; }
+            ret = place_dup(m, *g, (int)a2);
             break;
         }
         ret = 0;   /* F_GETFD, F_SETFD, F_SETFL: accepted */
@@ -1290,13 +1493,24 @@ void gp_syscall(Thread &t) {
          * The device had 128 MB and the guest sizes caches from this, so the
          * numbers are the console's rather than the host's — reporting 32 GB
          * of host RAM would have it allocate accordingly. */
+        /* THE INDICES WERE OFF BY ONE FIELD AND THEN BY THREE. procs is a u16
+         * pair with its padding, so it is si[10], not si[9] — si[9] is
+         * freeswap. mem_unit is si[13], not si[12] — si[12] is freehigh. Which
+         * left mem_unit at ZERO, and every total the guest computes as
+         * ram * mem_unit with it. busybox happens to clamp a zero to 1 and so
+         * looked plausible; it gave away the other end instead, reporting
+         * 4194303 of swap in use on a machine reporting none.
+         *
+         *   qemu-arm:  Swap:  3536892  244108  3292784
+         *   glasspole: Swap:        0 4194303         0
+         */
         uint32_t *si = (uint32_t *)m.Ptr(a0);
         std::memset(si, 0, 64);
         si[0]  = (uint32_t)(gp_mono_ns() / 1000000000ull);   /* uptime */
         si[4]  = 128u * 1024 * 1024;                          /* totalram */
         si[5]  =  96u * 1024 * 1024;                          /* freeram */
-        si[9]  = 1;                                           /* procs */
-        si[12] = 1;                                           /* mem_unit */
+        si[10] = 1;                                           /* procs (+pad) */
+        si[13] = 1;                                           /* mem_unit */
         ret = 0;
         break;
     }

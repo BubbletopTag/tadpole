@@ -147,6 +147,7 @@ static void fill_stat(const struct stat *s, struct gp_statbuf *st) {
     st->mtime_ns = (uint64_t)s->st_mtim.tv_sec * 1000000000ull + s->st_mtim.tv_nsec;
     st->mode     = s->st_mode;
     st->is_dir   = S_ISDIR(s->st_mode) ? 1 : 0;
+    st->nlink    = (uint32_t)s->st_nlink;
 }
 
 int gp_stat(const char *path, struct gp_statbuf *st) {

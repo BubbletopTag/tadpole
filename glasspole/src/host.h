@@ -163,6 +163,15 @@ struct gp_statbuf {
     uint64_t ino;
     uint32_t mode;      /* Linux S_IF* bits plus permissions */
     uint32_t is_dir;
+    /* `nlink` IS LOAD-BEARING FOR DIRECTORIES, which is why it is carried
+     * rather than synthesized above. A directory's link count is 2 plus its
+     * subdirectory count, and tree walkers use that to know when they have
+     * seen every subdirectory and can stop calling stat on the rest. The
+     * syscall layer used to answer a flat 1, which is neither true nor a value
+     * the heuristic recognises as unusable — qemu-arm reports 8 for /LF/Bulk
+     * and we reported 1. Both backends have it for free: st_nlink on Linux,
+     * nNumberOfLinks on Win32. */
+    uint32_t nlink;
 };
 
 int   gp_open(const char *utf8_path, int flags, uint32_t mode, gp_file **out);
@@ -194,12 +203,19 @@ int   gp_sync(gp_file *f);
  * the viewer writes struct input_event into them.
  *
  * THIS IS THE ONE PLACE THE TWO OPERATING SYSTEMS REALLY DIVERGE. Win32 has
- * named pipes but they are not filesystem objects that open() reaches, so the
- * Windows backend cannot implement this as written. That is not a problem to
- * solve here: on Windows the viewer becomes a thread in the same process, and
- * the shim's event nodes stop being pipes between processes and become a queue
- * in memory. Until that lands, the Windows backend should return GP_ENOSYS and
- * say so plainly rather than fake it. */
+ * named pipes with the right semantics; they are simply not filesystem objects
+ * that open() can reach. The Windows backend therefore keeps a table mapping a
+ * registered path to \\.\pipe\tadpole-<basename>, and gp_open consults it — so
+ * everything above this header goes on believing it holds a file.
+ *
+ * ONE THING THE CALLER MUST NOT ASSUME: that two descriptors onto the same
+ * FIFO are independent readers. On Linux they are, and the kernel splits the
+ * stream between them. On Windows they share one pipe instance, because the
+ * alternative is what shipped first — the guest's second open connecting to
+ * the guest's OWN server, spending the single instance, and locking the viewer
+ * out of the event nodes for the life of the process. Nothing in the shim
+ * depends on two independent readers; this is written down because the day
+ * something does, the symptom will be silence rather than an error. */
 int   gp_mkfifo(const char *utf8_path, uint32_t mode);
 
 int   gp_mkdir (const char *utf8_path, uint32_t mode);

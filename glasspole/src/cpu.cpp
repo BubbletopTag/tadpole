@@ -222,21 +222,38 @@ void RunThread(Thread &t, const std::array<uint32_t, 16> &regs,
     conf.coprocessors[15] = gp_make_cp15(t);
 
     Dynarmic::A32::Jit jit{ conf };
-    t.jit = &jit;
 
     jit.Regs()    = regs;
     jit.ExtRegs() = ext;
     jit.SetCpsr(cpsr);
     jit.SetFpscr(fpscr);
 
+    /* PUBLISHED AND WITHDRAWN UNDER THE LOCK. `jit` lives on this stack frame
+     * and ExitGroup halts threads by reaching through this pointer from
+     * another one; without the lock on both sides, a thread finishing while
+     * exit_group runs is a dereference of a frame that has already gone. */
+    { std::lock_guard<std::mutex> g(t.m->lock); t.jit = &jit; }
     RunLoop(t, jit);
-    t.jit = nullptr;
+    { std::lock_guard<std::mutex> g(t.m->lock); t.jit = nullptr; }
 }
 
 void thread_entry(void *arg) {
     Spawn *s = static_cast<Spawn *>(arg);
-    RunThread(*s->t, s->regs, s->ext, s->cpsr, s->fpscr, s->processor_id);
-    s->t->exited = true;
+    Thread  *t = s->t;
+    Machine &m = *t->m;
+    RunThread(*t, s->regs, s->ext, s->cpsr, s->fpscr, s->processor_id);
+    t->exited = true;
+    /* Nothing may name this thread after it retires, the fault handler's
+     * thread-local pointer included. */
+    g_current = nullptr;
+    m.RetireThread(t);
+    /* `s` and its gp_thread are NOT freed, and that is a known leak of a few
+     * dozen bytes per guest thread. Fixing it needs an owner for the
+     * gp_thread: gp_thread_create writes the handle into the caller's
+     * variable AFTER the thread may already have run, so the child cannot
+     * free the block the parent is still about to write to, and the parent
+     * has nowhere to do it either without a join it must not perform. That is
+     * a host.h conversation, recorded rather than half-done here. */
 }
 
 }  // namespace
@@ -261,10 +278,11 @@ int Machine::AllocFd(gp_file *f, gp_dir *d, const std::string &path) {
      * silently mis-assigns the moment a member is added in the middle — which
      * it was, and every descriptor came back invalid. */
     GuestFd e;
-    e.file = f;
-    e.dir  = d;
-    e.path = path;
-    e.used = true;
+    e.file  = f;
+    e.dir   = d;
+    e.path  = path;
+    e.share = std::make_shared<int>(0);   /* see GuestFd::share */
+    e.used  = true;
 
     /* Lowest free slot, exactly as Linux promises — programs do rely on it. */
     for (size_t i = 0; i < fds.size(); i++) {
@@ -280,10 +298,12 @@ int Machine::AllocFd(gp_file *f, gp_dir *d, const std::string &path) {
 void Machine::OpenStdio() {
     fds.resize(3);
     for (int i = 0; i < 3; i++) {
-        fds[i].used   = true;
-        fds[i].file   = nullptr;      /* the console is not a gp_file */
-        fds[i].path   = i == 0 ? "/dev/stdin" : (i == 1 ? "/dev/stdout" : "/dev/stderr");
-        fds[i].oflags = i == 0 ? 0u : 1u;
+        fds[i].used    = true;
+        fds[i].file    = nullptr;     /* the console is not a gp_file */
+        fds[i].console = i;           /* ...but it is still a stream, see GuestFd */
+        fds[i].share   = std::make_shared<int>(0);
+        fds[i].path    = i == 0 ? "/dev/stdin" : (i == 1 ? "/dev/stdout" : "/dev/stderr");
+        fds[i].oflags  = i == 0 ? 0u : 1u;
     }
 }
 
@@ -324,6 +344,13 @@ std::string Machine::HostPath(const std::string &guest) {
     struct gp_statbuf st;
     if (gp_stat(in_root.c_str(), &st) == 0) return in_root;
     return guest;
+}
+
+void Machine::RetireThread(Thread *t) {
+    std::lock_guard<std::mutex> g(lock);
+    if (t->processor_id < proc_used.size()) proc_used[t->processor_id] = 0;
+    for (auto it = threads.begin(); it != threads.end(); ++it)
+        if (it->get() == t) { threads.erase(it); return; }
 }
 
 void Machine::ExitGroup(int st) {
@@ -383,20 +410,38 @@ int gp_spawn_thread(Thread &parent, uint32_t flags, uint32_t child_stack,
     if (flags & GP_CLONE_CHILD_SETTID)  std::memcpy(m.Ptr(child_tidptr),  &t->tid, 4);
 
     const uint32_t tid = t->tid;
+    Thread *tp = t.get();
     {
         std::lock_guard<std::mutex> g(m.lock);
-        if (m.threads.size() >= MAX_THREADS) {
-            gp_log("clone: already %zu threads, which is the ExclusiveMonitor's "
-                   "size — raise MAX_THREADS\n", m.threads.size());
+        /* The LOWEST FREE monitor slot, not the thread count. A retired thread
+         * hands its slot back, so this is a limit on threads ALIVE AT ONCE —
+         * which is what the ExclusiveMonitor's size actually constrains. */
+        size_t slot = m.proc_used.size();
+        for (size_t i = 0; i < m.proc_used.size(); i++)
+            if (!m.proc_used[i]) { slot = i; break; }
+        if (slot >= m.proc_used.size()) {
+            gp_log("clone: %zu threads are already running, which is the "
+                   "ExclusiveMonitor's size — raise MAX_THREADS\n",
+                   m.proc_used.size());
             return GP_EAGAIN;
         }
-        s->processor_id = m.threads.size();
+        m.proc_used[slot] = 1;
+        tp->processor_id  = slot;
+        s->processor_id   = slot;
         m.threads.push_back(std::move(t));
     }
 
     Spawn *raw = s.release();     /* outlives this call; the thread owns it */
     int r = gp_thread_create(thread_entry, raw, &raw->host);
-    if (r < 0) { gp_log("clone: host thread creation failed (%d)\n", r); return r; }
+    if (r < 0) {
+        /* The thread never started, so nothing else can be holding either the
+         * slot or the table entry — and leaving them taken would make a
+         * transient failure permanent. */
+        gp_log("clone: host thread creation failed (%d)\n", r);
+        m.RetireThread(tp);
+        delete raw;
+        return r;
+    }
 
     return static_cast<int>(tid);
 }
@@ -493,15 +538,19 @@ int main(int argc, char **argv) {
      * never arrived". */
     std::vector<std::string> envstore;
     for (char **e = environ; e && *e; e++) envstore.push_back(*e);
-    for (const char *d : { "LD_LIBRARY_PATH=/lib:/usr/lib", "HOME=/", "PATH=/bin:/usr/bin" }) {
-        const std::string ds(d);
-        const std::string key = ds.substr(0, ds.find('='));
-        bool have = false;
-        for (auto &e : envstore)
-            if (e.compare(0, key.size(), key) == 0 && e.size() > key.size() && e[key.size()] == '=')
-                { have = true; break; }
-        if (!have) envstore.push_back(ds);
-    }
+    /* AND NOTHING INVENTED ON TOP. This used to add LD_LIBRARY_PATH, HOME and
+     * PATH when the host had none, which reads as helpful and is the same
+     * mistake in miniature as the three-variable environment above: the kernel
+     * adds nothing, qemu-arm adds nothing, and a variable that exists here and
+     * nowhere else is a branch the guest can take under one emulator only.
+     * Measured — it was the last remaining difference between the two:
+     *
+     *     $ diff <(qemu-arm … env -u _|sort) <(glasspole … env -u _|sort)
+     *     > LD_LIBRARY_PATH=/lib:/usr/lib
+     *
+     * The default was never load-bearing: /lib and /usr/lib are already
+     * ld-uClibc's own search path, and every real launch comes through
+     * tadpole.sh, which sets LD_LIBRARY_PATH to the shim directories itself. */
     for (auto &e : envs) {
         const size_t eq = e.find('=');
         const std::string key = e.substr(0, eq == std::string::npos ? e.size() : eq);
@@ -526,6 +575,9 @@ int main(int argc, char **argv) {
     Dynarmic::ExclusiveMonitor monitor{ MAX_THREADS };
     m.monitor = &monitor;
 
+    m.proc_used.assign(MAX_THREADS, 0);
+    m.proc_used[0] = 1;                       /* the initial thread's slot */
+
     auto main_thread = std::make_unique<Thread>();
     main_thread->m   = &m;
     main_thread->tid = m.next_tid.fetch_add(1, std::memory_order_relaxed);
@@ -535,15 +587,40 @@ int main(int argc, char **argv) {
     std::array<uint32_t, 16> regs{};
     std::array<uint32_t, 64> ext{};
     regs[13] = sp;
-    regs[15] = m.image.entry;
 
-    gp_log("entering guest at %08x with sp=%08x\n", m.image.entry, sp);
-    RunThread(*mt, regs, ext, 0x10 /* user mode, ARM state */, 0, 0);
+    /* BIT 0 OF THE ENTRY ADDRESS IS THE INSTRUCTION SET, not part of the
+     * address: an odd entry means Thumb, and the T bit has to be set in CPSR
+     * with the bit cleared from the pc. This rootfs's ld-uClibc.so.0 enters in
+     * ARM state, so nothing here exercises it today — which is exactly why it
+     * is worth fixing now rather than when some title's interpreter does and
+     * the symptom is a wild jump. */
+    uint32_t entry = m.image.entry;
+    uint32_t cpsr  = 0x10;                    /* user mode */
+    if (entry & 1) { cpsr |= 0x20; entry &= ~1u; }
+
+    gp_log("entering guest at %08x with sp=%08x\n", entry, sp);
+    regs[15] = entry;
+    RunThread(*mt, regs, ext, cpsr, 0, 0);
 
     /* The main thread returning is exit_group whether or not the guest said so:
      * nothing else can make progress once it is gone. */
     m.exiting.store(true, std::memory_order_relaxed);
-
     gp_log("guest exited with status %d\n", m.status);
-    return m.status;
+
+    /* AND THE PROCESS ENDS HERE, without unwinding. Returning from main runs
+     * static destructors and destroys `monitor` and `m` — both of which the
+     * guest's other threads still hold pointers to, and some of them may be
+     * inside jit.Run() at that moment.
+     *
+     * Joining them instead is the obvious alternative and it is worse: a guest
+     * thread parked in an untimed FUTEX_WAIT is waiting for a wake that now
+     * will never come, so the join would hang a process whose guest has
+     * already exited. The threads poll `exiting` on every timed wait, so a
+     * short grace period lets anything mid-syscall notice and finish its own
+     * output, and then _Exit leaves without touching anything shared.
+     *
+     * Nothing is buffered on our side: gp_log flushes, and the guest's console
+     * writes go straight to the host. */
+    gp_sleep_ns(100000000ull);
+    std::_Exit(m.status);
 }

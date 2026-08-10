@@ -96,6 +96,27 @@ struct GuestFd {
     bool        has_pending    = false;
     std::shared_ptr<MsgQueue>   mq;
     std::shared_ptr<UnixSocket> sock;
+
+    /* Which console stream this is, or -1. The standard descriptors are not
+     * gp_files — on Windows a console handle is not a file handle — so they
+     * were recognised by NUMBER, and write() short-circuited fd 1 and fd 2
+     * before it ever looked in this table. Which meant `echo err >&2` did the
+     * dup2 correctly and then wrote to stdout anyway: the redirection was
+     * invisible because the table it edited was not consulted. Naming the
+     * stream here lets a duplicate carry it. */
+    int console = -1;
+
+    /* WHO CLOSES THE FILE. dup(), dup2() and F_DUPFD hand the guest a second
+     * descriptor onto ONE open file, and closing either must not close the
+     * other — that is the whole meaning of the call. `file` stays a raw
+     * pointer, because thirty call sites read it and none of them care; this
+     * token is what the table owns, and the last descriptor to drop it is the
+     * one that calls gp_close.
+     *
+     * A refcount rather than a shared_ptr<gp_file> because gp_file is opaque
+     * by design (see host.h) and only the backend may destroy one. */
+    std::shared_ptr<int> share;
+
     bool     used = false;
 };
 
@@ -103,8 +124,18 @@ struct GuestFd {
 
 struct Thread {
     Machine *m   = nullptr;
+    /* GUARDED BY Machine::lock, and it has to be: the Jit is a local inside
+     * the function running this thread, so the pointer is only valid between
+     * that frame publishing it and clearing it — and ExitGroup dereferences it
+     * from ANOTHER thread to halt this one. The fault handler reads it without
+     * the lock, which is unsafe in general and the least of the problems at
+     * the point where it runs. */
     Dynarmic::A32::Jit *jit = nullptr;
     uint32_t tid = 0;
+
+    /* Index into the shared ExclusiveMonitor. Scarce — the monitor is sized
+     * once — so it is handed back by RetireThread when the thread ends. */
+    size_t processor_id = 0;
 
     /* The ARM thread-pointer registers, read through CP15. PER THREAD, which
      * is the whole reason CP15 is constructed per thread too: dynarmic compiles
@@ -165,7 +196,14 @@ struct Machine {
      * without needing every name unbound by hand. Guarded by `lock`. */
     std::map<std::string, std::weak_ptr<UnixSocket>> bound;
 
+    /* The LIVE threads, not every thread ever made. It used to be the latter,
+     * with the processor id taken from threads.size() — so a title that cycles
+     * worker threads hit the ExclusiveMonitor's ceiling after thirty-two
+     * CREATIONS, however few were running, and clone() started failing with
+     * EAGAIN while the log blamed a limit that was not reached. */
     std::vector<std::unique_ptr<Thread>> threads;
+    /* One byte per monitor slot, sized at startup. Guarded by `lock`. */
+    std::vector<uint8_t> proc_used;
     std::atomic<uint32_t> next_tid{ 1000 };
 
     /* exit_group, or a fatal fault: every thread stops. Atomic because it is
@@ -189,6 +227,10 @@ struct Machine {
     std::string HostPath(const std::string &guest);
 
     void ExitGroup(int st);                  /* stop every thread */
+    /* A finished thread gives back its monitor slot and leaves the live set.
+     * Called by the thread itself, as the last thing it does — nothing may
+     * touch the Thread afterwards, because this destroys it. */
+    void RetireThread(Thread *t);
 };
 
 /* The ARM kuser helper page at 0xffff0000. See kuser.cpp — it is not optional,

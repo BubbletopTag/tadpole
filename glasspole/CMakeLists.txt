@@ -66,7 +66,7 @@ if(GP_CLANG AND GP_OBJCOPY)
     # multi-target by construction, so this needs no cross-binutils install.
     set(GP_ARMFLAGS --target=armv7-unknown-linux-gnueabi
                     -march=armv7-a -mfpu=vfp -mfloat-abi=softfp -fuse-ld=lld)
-    foreach(gp_test hello thread)
+    foreach(gp_test hello thread threads-many)
     add_custom_command(
         OUTPUT  ${CMAKE_CURRENT_BINARY_DIR}/${gp_test}.bin
         COMMAND ${GP_CLANG} ${GP_ARMFLAGS} -nostdlib -static

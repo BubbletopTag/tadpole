@@ -264,6 +264,10 @@ struct gp_file {
     SRWLOCK lock;    /* orders pread's save/restore against read/write/seek */
     int     append;
     int     pipe;    /* a FIFO stand-in — see the named-pipe table below */
+    /* 1 + the g_fifo index when this descriptor is one of possibly several
+     * onto a pipe WE serve; 0 when it is not. One-based so calloc's zero
+     * already means "not a served FIFO" and no other site has to say so. */
+    int     serves;
 };
 
 /* ---- FIFOs as named pipes -------------------------------------------------
@@ -290,65 +294,155 @@ struct gp_file {
  *     PIPE_NOWAIT is old and deprecated in favour of overlapped I/O, and it
  *     is also EXACTLY the semantics O_NONBLOCK promises, in one flag. */
 #define GP_MAX_FIFOS 12
-static struct { char path[512]; char pipe[80]; } g_fifo[GP_MAX_FIFOS];
+static struct {
+    char   path[512];
+    char   pipe[80];
+    /* The server end, when WE are the reader — one per PATH, however many
+     * descriptors the guest holds onto it. See fifo_open for why that is the
+     * whole fix. */
+    HANDLE server;
+    int    refs;
+} g_fifo[GP_MAX_FIFOS];
 static int g_fifo_n;
+/* Guest threads open and close event nodes concurrently, and the table is now
+ * mutable state rather than a lookup built once. SRWLOCK_INIT makes a static
+ * one valid with no initialisation call. */
+static SRWLOCK g_fifo_lock = SRWLOCK_INIT;
 
-static const char *fifo_lookup(const char *path)
+static int fifo_lookup(const char *path)
 {
     int i;
     for (i = 0; i < g_fifo_n; i++)
         if (strcmp(g_fifo[i].path, path) == 0)
-            return g_fifo[i].pipe;
-    return NULL;
+            return i;
+    return -1;
 }
 
 int gp_mkfifo(const char *path, uint32_t mode)
 {
     const char *base = strrchr(path, '/');
+    int r = 0;
     (void)mode;
     base = base ? base + 1 : path;
-    if (fifo_lookup(path))
-        return GP_EEXIST;               /* callers treat this as "fine" */
-    if (g_fifo_n >= GP_MAX_FIFOS)
-        return GP_ENOMEM;
-    snprintf(g_fifo[g_fifo_n].path, sizeof(g_fifo[g_fifo_n].path), "%s", path);
-    snprintf(g_fifo[g_fifo_n].pipe, sizeof(g_fifo[g_fifo_n].pipe),
-             "\\\\.\\pipe\\tadpole-%s", base);
-    g_fifo_n++;
-    return 0;
+    AcquireSRWLockExclusive(&g_fifo_lock);
+    if (fifo_lookup(path) >= 0)
+        r = GP_EEXIST;                  /* callers treat this as "fine" */
+    else if (g_fifo_n >= GP_MAX_FIFOS)
+        r = GP_ENOMEM;
+    else {
+        snprintf(g_fifo[g_fifo_n].path, sizeof(g_fifo[g_fifo_n].path), "%s", path);
+        snprintf(g_fifo[g_fifo_n].pipe, sizeof(g_fifo[g_fifo_n].pipe),
+                 "\\\\.\\pipe\\tadpole-%s", base);
+        g_fifo[g_fifo_n].server = NULL;
+        g_fifo[g_fifo_n].refs   = 0;
+        g_fifo_n++;
+    }
+    ReleaseSRWLockExclusive(&g_fifo_lock);
+    return r;
 }
 
-static int fifo_open(const char *pipename, int flags, gp_file **out)
+/* Open one end of a FIFO stand-in.
+ *
+ * THE DIRECTION DECIDES THE ROLE, and getting that wrong is why touch did not
+ * work on Windows at all.
+ *
+ * The old rule was "try to connect as a client; if there is nobody there, become
+ * the server", with only O_WRONLY forced to stay a client. But the shim opens
+ * every event node **O_RDWR|O_NONBLOCK** — tadpole_shim.c:705, "O_RDWR so the
+ * open doesn't block waiting for a writer", which on Linux is free and correct.
+ * Under the old rule the FIRST such open created the server, and the SECOND one
+ * found that server listening and connected to it. The guest was then talking to
+ * itself; the single pipe instance was spent; and the viewer's writer got
+ * ERROR_PIPE_BUSY for ever, retried once a frame by ev_open_missing(), with no
+ * event ever crossing. On Linux a second reader on one FIFO is ordinary and
+ * harmless, which is why nothing above host.h guards against it.
+ *
+ * So a reader is now ALWAYS the server, and never probes for one first. Several
+ * guest descriptors onto one path share the single server handle and a
+ * refcount, which is also the closest thing to Linux's behaviour available
+ * here: there, two readers split one stream; here they read one stream through
+ * one handle, and whichever asks first gets the bytes. That is a real
+ * difference in a case the shim does not depend on, and it is written down
+ * rather than papered over.
+ *
+ * A writer stays a client and still gets ENXIO when nobody is reading, which
+ * the shim's audio path depends on. */
+static int fifo_open(int idx, int flags, gp_file **out)
 {
+    const char *pipename = g_fifo[idx].pipe;
     HANDLE h;
     gp_file *f;
-    DWORD access = (flags & 3) == GP_O_WRONLY ? GENERIC_WRITE
-                 : (flags & 3) == GP_O_RDONLY ? GENERIC_READ
-                 : GENERIC_READ | GENERIC_WRITE;
+    int served = 0;
 
-    h = CreateFileA(pipename, access, 0, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) {
-        DWORD e = GetLastError();
-        if (e == ERROR_PIPE_BUSY)
-            return GP_EBUSY;
-        if ((flags & 3) == GP_O_WRONLY)
+    if ((flags & 3) == GP_O_WRONLY) {
+        h = CreateFileA(pipename, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE) {
+            DWORD e = GetLastError();
+            if (e == ERROR_PIPE_BUSY)
+                return GP_EBUSY;
             return GP_ENXIO;            /* no reader: Linux's exact answer */
-        /* First reader creates the pipe and serves it. */
-        h = CreateNamedPipeA(pipename,
-                             PIPE_ACCESS_DUPLEX,
-                             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
-                             1, 64 << 10, 64 << 10, 0, NULL);
-        if (h == INVALID_HANDLE_VALUE)
-            return err();
-        ConnectNamedPipe(h, NULL);      /* NOWAIT: arms, never blocks */
+        }
+    } else {
+        AcquireSRWLockExclusive(&g_fifo_lock);
+        if (!g_fifo[idx].server) {
+            h = CreateNamedPipeA(pipename,
+                                 PIPE_ACCESS_DUPLEX,
+                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
+                                 1, 64 << 10, 64 << 10, 0, NULL);
+            if (h == INVALID_HANDLE_VALUE) {
+                /* The name is already served by somebody else — the audio
+                 * FIFO, whose reader is the viewer. Joining as a client is
+                 * right there, and cannot be the self-connection above,
+                 * because our own server would have been found in the table. */
+                ReleaseSRWLockExclusive(&g_fifo_lock);
+                h = CreateFileA(pipename, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+                                OPEN_EXISTING, 0, NULL);
+                if (h == INVALID_HANDLE_VALUE)
+                    return err();
+                goto wrap;
+            }
+            ConnectNamedPipe(h, NULL);  /* NOWAIT: arms, never blocks */
+            g_fifo[idx].server = h;
+        }
+        g_fifo[idx].refs++;
+        h = g_fifo[idx].server;
+        ReleaseSRWLockExclusive(&g_fifo_lock);
+        served = idx + 1;
     }
+
+wrap:
     f = calloc(1, sizeof *f);
-    if (!f) { CloseHandle(h); return GP_ENOMEM; }
-    f->h = h;
-    f->pipe = 1;
+    if (!f) {
+        if (served) {
+            AcquireSRWLockExclusive(&g_fifo_lock);
+            if (--g_fifo[idx].refs == 0) { CloseHandle(h); g_fifo[idx].server = NULL; }
+            ReleaseSRWLockExclusive(&g_fifo_lock);
+        } else {
+            CloseHandle(h);
+        }
+        return GP_ENOMEM;
+    }
+    f->h      = h;
+    f->pipe   = 1;
+    f->serves = served;
     InitializeSRWLock(&f->lock);
     *out = f;
     return 0;
+}
+
+/* A client that has gone leaves our server holding a broken pipe, and Win32
+ * will not accept another until it is disconnected and re-armed.
+ *
+ * Without this, closing the viewer ended the event stream permanently: the
+ * guest's next read returned end of file, its evdev loop concluded the device
+ * was gone, and reopening the viewer changed nothing. It is also what makes
+ * the guest's O_RDWR meaningful — a FIFO held open for reading and writing
+ * never sees end of file on Linux, and now does not here either. */
+static void fifo_rearm(gp_file *f)
+{
+    if (!f->serves) return;
+    DisconnectNamedPipe(f->h);
+    ConnectNamedPipe(f->h, NULL);
 }
 
 /* REAL shared views, on Windows 7 API. The stopgap that lived here — a
@@ -425,23 +519,43 @@ int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
 
 int gp_poll_readable(gp_file **fs, int n, int timeout_ms, unsigned char *ready)
 {
-    /* Everything a gp_file can hold on Windows is a regular file, and a
-     * regular file is always readable — which host.h blesses as the correct
-     * answer. The FIFOs this call exists for do not exist here; when the
-     * one-process queue replaces them, it will not arrive through this
-     * interface. */
+    /* A regular file is always readable, which host.h blesses as correct. A
+     * PIPE is not, and saying it is turns the guest's event loop into a spin:
+     * poll answers "ready" at once, the read comes back EAGAIN, and round it
+     * goes at the speed of the JIT. Since the FIFO stand-ins now really exist
+     * here, they get a real answer — PeekNamedPipe reports how many bytes are
+     * waiting without consuming any, on every Windows since NT.
+     *
+     * Polled rather than waited on, because a NOWAIT pipe has no waitable
+     * object and the alternative is overlapped I/O, which would restructure
+     * every handle in this file for one caller. The sleep between looks is
+     * what the guest's own poll timeout was going to cost anyway. */
+    const unsigned slice_ms = 5;
+    unsigned waited = 0;
     int i, cnt = 0;
-    for (i = 0; i < n; i++) {
-        ready[i] = (fs[i] != NULL);
-        if (ready[i]) cnt++;
+
+    for (;;) {
+        cnt = 0;
+        for (i = 0; i < n; i++) {
+            DWORD avail = 0;
+            if (!fs[i]) { ready[i] = 0; continue; }
+            if (fs[i]->pipe)
+                ready[i] = PeekNamedPipe(fs[i]->h, NULL, 0, NULL, &avail, NULL)
+                         ? (avail > 0) : 1;   /* unpeekable: let the read decide */
+            else
+                ready[i] = 1;
+            if (ready[i]) cnt++;
+        }
+        if (cnt) return cnt;
+        if (timeout_ms == 0) return 0;
+        if (timeout_ms > 0 && waited >= (unsigned)timeout_ms) return 0;
+        /* "Forever" still returns after a bounded nap: every caller of this
+         * re-loops by construction, and one that cannot make progress should
+         * be visible rather than parked. */
+        if (timeout_ms < 0 && waited >= 100) return 0;
+        gp_sleep_ns((uint64_t)slice_ms * 1000000ull);
+        waited += slice_ms;
     }
-    /* Nothing to watch: honour the timeout rather than spin. "Forever" gets
-     * a bounded nap instead — poll callers re-loop by construction, and a
-     * guest waiting forever on zero files is already dead. */
-    if (cnt == 0 && timeout_ms != 0)
-        gp_sleep_ns((timeout_ms < 0 ? 100u
-                                    : (unsigned)timeout_ms) * 1000000ull);
-    return cnt;
 }
 
 int gp_open(const char *path, int flags, uint32_t mode, gp_file **out)
@@ -457,9 +571,12 @@ int gp_open(const char *path, int flags, uint32_t mode, gp_file **out)
 
     /* A path gp_mkfifo registered is a pipe wearing a filename. */
     {
-        const char *pn = fifo_lookup(path);
-        if (pn)
-            return fifo_open(pn, flags, out);
+        int fi;
+        AcquireSRWLockShared(&g_fifo_lock);
+        fi = fifo_lookup(path);
+        ReleaseSRWLockShared(&g_fifo_lock);
+        if (fi >= 0)
+            return fifo_open(fi, flags, out);
     }
 
     if ((e = widen(path, w, GP_WPATH)) < 0) return e;
@@ -504,9 +621,23 @@ int gp_open(const char *path, int flags, uint32_t mode, gp_file **out)
 
 int gp_close(gp_file *f)
 {
-    int r;
+    int r = 0;
     if (!f) return GP_EBADF;
-    r = CloseHandle(f->h) ? 0 : err();
+    if (f->serves) {
+        /* The LAST descriptor onto a served FIFO closes it. Closing on the
+         * first would tear the pipe down under the guest's other reader and
+         * hand the viewer a name with no server behind it. */
+        int idx = f->serves - 1;
+        AcquireSRWLockExclusive(&g_fifo_lock);
+        if (--g_fifo[idx].refs <= 0) {
+            r = CloseHandle(g_fifo[idx].server) ? 0 : err();
+            g_fifo[idx].server = NULL;
+            g_fifo[idx].refs   = 0;
+        }
+        ReleaseSRWLockExclusive(&g_fifo_lock);
+    } else {
+        r = CloseHandle(f->h) ? 0 : err();
+    }
     free(f);
     return r;
 }
@@ -520,7 +651,9 @@ static int64_t pipe_err(DWORD e, int reading)
     if (e == ERROR_NO_DATA || e == ERROR_PIPE_LISTENING)
         return reading ? GP_EAGAIN : GP_EAGAIN;
     if (e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED)
-        return reading ? 0 : GP_EIO;   /* reader: EOF; writer: gone */
+        return reading ? 0 : GP_EPIPE; /* reader: EOF; writer: the exact errno
+                                        * Linux gives, which the shim's audio
+                                        * retry already knows how to read */
     return err_from(e);
 }
 
@@ -534,7 +667,14 @@ int64_t gp_read(gp_file *f, void *buf, size_t len)
     ReleaseSRWLockExclusive(&f->lock);
     if (!ok) {
         DWORD e = GetLastError();
-        return f->pipe ? pipe_err(e, 1) : err_from(e);
+        if (!f->pipe) return err_from(e);
+        /* Our own server, and the writer has left: re-arm for the next one and
+         * say "nothing yet" rather than "the device is gone". */
+        if (f->serves && (e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED)) {
+            fifo_rearm(f);
+            return GP_EAGAIN;
+        }
+        return pipe_err(e, 1);
     }
     /* A NOWAIT pipe "succeeds" with 0 bytes when empty; that is EAGAIN, not
      * EOF — EOF is the peer actually leaving, reported above. */
@@ -557,7 +697,12 @@ int64_t gp_write(gp_file *f, const void *buf, size_t len)
     ReleaseSRWLockExclusive(&f->lock);
     if (!ok) {
         DWORD e = GetLastError();
-        return f->pipe ? pipe_err(e, 0) : err_from(e);
+        if (!f->pipe) return err_from(e);
+        if (f->serves && (e == ERROR_BROKEN_PIPE || e == ERROR_PIPE_NOT_CONNECTED)) {
+            fifo_rearm(f);
+            return GP_EAGAIN;
+        }
+        return pipe_err(e, 0);
     }
     /* NOWAIT again: a full pipe "writes" 0 bytes. EAGAIN, so the shim's
      * bounded retry paces the writer exactly as it does on Linux. */
@@ -642,6 +787,13 @@ static int fill_from_handle(HANDLE h, struct gp_statbuf *st)
     st->ino      = ((uint64_t)bi.nFileIndexHigh << 32) | bi.nFileIndexLow;
     st->mode     = synth_mode(bi.dwFileAttributes);
     st->is_dir   = (bi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
+    /* NTFS keeps a link count and it is right for files. For directories it
+     * counts hard links only, so it is 1 rather than "2 + subdirectories" —
+     * a truthful answer to a different question than the guest is asking.
+     * 1 is what a walker reads as "this filesystem's link counts cannot be
+     * used", which is the honest signal and makes it recurse instead of
+     * trusting arithmetic that does not hold here. */
+    st->nlink    = st->is_dir ? 1u : bi.nNumberOfLinks;
     if (st->is_dir) st->size = 0;
     return 0;
 }
@@ -667,9 +819,10 @@ int gp_fstat(gp_file *f, struct gp_statbuf *st)
         /* Pipes have no file information; say S_IFIFO and be done, which is
          * also everything fstat on a Linux FIFO usefully says. */
         memset(st, 0, sizeof *st);
-        st->mode = 0010000u | 0644u;
-        st->dev  = 0;
-        st->ino  = (uint64_t)(uintptr_t)f;
+        st->mode  = 0010000u | 0644u;
+        st->dev   = 0;
+        st->ino   = (uint64_t)(uintptr_t)f;
+        st->nlink = 1;
         return 0;
     }
     return fill_from_handle(f->h, st);
