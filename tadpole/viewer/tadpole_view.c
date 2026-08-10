@@ -1650,18 +1650,36 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 	(void)silent;
 	if (outfd) *outfd = -1;
 
-	/* TOOLS RUN AS PYTHON HERE. The library scanner and the game installer
-	 * exist in both spellings — tools/scan-games.py is what the shell
-	 * wrapper runs anyway, and tools/install-game.py is a port of the shell
-	 * one added for this — so Windows runs the .py directly and needs no
-	 * bash. Anything not in this table is genuinely shell (firmware,
-	 * profiles, the online update) and says so rather than half-working.
-	 * The Linux path is untouched: it still spawns the scripts. */
+	/* TOOLS RUN AS PYTHON HERE. Every tool the viewer spawns exists in both
+	 * spellings now: the .sh ones are Linux's entry points and the .py ones
+	 * are what Windows runs, with no bash anywhere. The Linux path is
+	 * untouched — it still spawns the scripts.
+	 *
+	 * FIRMWARE WAS THE HOLE, and it was the whole product on Windows. The
+	 * setup wizard could download system files and then had nothing to
+	 * install them with, so the honest refusal below left a user who had
+	 * done everything right staring at a first-run screen. install-firmware,
+	 * online-update, make-profile and erase-firmware are the four that
+	 * closes. A profile matters as much as the firmware: without one the
+	 * system boots to Create Profile and stops, so "installed" and
+	 * "playable" are different states and both need a tool here.
+	 *
+	 * The refusal stays for anything genuinely unported, because a tool that
+	 * half-works is worse than one that says it cannot. */
 	if (!as_guest) {
+		static const struct { const char *sh, *py; } port[] = {
+			{ "tools/install-game.sh",     "tools/install-game.py"     },
+			{ "tools/scan-games.sh",       "tools/scan-games.py"       },
+			{ "tools/install-firmware.sh", "tools/install-firmware.py" },
+			{ "tools/online-update.sh",    "tools/online-update.py"    },
+			{ "tools/make-profile.sh",     "tools/make-profile.py"     },
+			{ "tools/erase-firmware.sh",   "tools/erase-firmware.py"   },
+		};
 		const char *py = NULL;
-		if (!strcmp(script, "tools/install-game.sh")) py = "tools/install-game.py";
-		else if (!strcmp(script, "tools/scan-games.sh")) py = "tools/scan-games.py";
-		else if (strstr(script, ".py"))                 py = script;
+		unsigned k;
+		for (k = 0; k < sizeof(port) / sizeof(port[0]); k++)
+			if (!strcmp(script, port[k].sh)) { py = port[k].py; break; }
+		if (!py && strstr(script, ".py"))               py = script;
 		if (!py) {
 			fprintf(stderr, "tadpole-view: cannot run %s — that tool is a "
 			        "shell script and Windows has no shell for it\n", script);

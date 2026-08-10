@@ -205,9 +205,87 @@ for d in shimlibs shimlibs-z shimlibs-gl; do
 done
 
 for t in install-game.py scan-games.py check-update.py fetch-firmware.py \
+         install-firmware.py online-update.py make-profile.py \
+         erase-firmware.py \
          pkgtool.py fix-perms.py lf3.py scan-games.sh packagelists; do
     cp -r "$PROJ/tools/$t" "$STAGE/tools/" 2>/dev/null || true
 done
+
+# ---- the Python the firmware tools need -----------------------------------
+# IT SHIPS, and that is a deliberate reversal. Telling a Windows user to go
+# install Python and then pip two packages is the same wall as "find a device
+# and run LFConnect": the setup wizard could already DOWNLOAD the system files
+# and then had nothing to install them with, which is the worst possible place
+# to stop. So the interpreter comes in the box.
+#
+# 3.8.10 SPECIFICALLY, and the version is the interesting part: it is the last
+# CPython that runs on Windows 7, which is the floor Glasspole targets. Newer
+# embeddables refuse to start there with a missing-API error that names a DLL
+# and not the real cause.
+#
+# Two wheels on top of it, and only two, because ubi_reader 0.8.9 is the last
+# release before it grew a cryptography/zstandard tail it does not need for
+# this. lzallright ships abi3, so one binary covers every CPython from 3.8 up
+# — nothing here is pinned to the interpreter's exact minor version.
+#
+# It lands in build/deps/python because tadpole-view already probes exactly
+# that path ahead of PATH, so no viewer code had to learn about this.
+PY_VER="${PY_VER:-3.8.10}"
+PYDIR="$OUT/winpython"
+if [ ! -f "$PYDIR/python.exe" ]; then
+    echo "==> fetching Python $PY_VER for Windows, with ubi_reader"
+    rm -rf "$PYDIR"; mkdir -p "$PYDIR/Lib/site-packages"
+    curl -fsSL -o "$OUT/python-embed.zip" \
+        "https://www.python.org/ftp/python/$PY_VER/python-$PY_VER-embed-amd64.zip"
+    unzip -qo "$OUT/python-embed.zip" -d "$PYDIR"
+    rm -f "$OUT/python-embed.zip"
+
+    # The embeddable build ships a ._pth that pins sys.path to the stdlib zip
+    # and the executable's own directory — deliberately, so it cannot pick up
+    # a system install. That also excludes site-packages, so the wheels below
+    # would be invisible without this line. Written rather than appended: the
+    # file is regenerated whole so a re-run cannot double the entry.
+    printf 'python%s.zip\n.\nLib\\site-packages\n' \
+        "$(echo "$PY_VER" | cut -d. -f1,2 | tr -d .)" \
+        > "$PYDIR/python$(echo "$PY_VER" | cut -d. -f1,2 | tr -d .)._pth"
+
+    # A WHEEL IS A ZIP, so this needs no pip on the host and no Windows to
+    # run on — which matters, because the host here is Linux and pip cannot
+    # install a win_amd64 wheel into a Linux tree by any normal route.
+    # --platform/--python-version only downloads; unzip does the rest.
+    WH="$OUT/wheels"; rm -rf "$WH"; mkdir -p "$WH"
+    PIPPY=""
+    for p in python3 python; do command -v $p >/dev/null && { PIPPY=$p; break; }; done
+    if [ -n "$PIPPY" ]; then
+        # Arch and friends ship no pip in the system Python; a throwaway venv
+        # has one via ensurepip and costs a second.
+        $PIPPY -m venv "$OUT/pipenv" >/dev/null 2>&1 || true
+        [ -x "$OUT/pipenv/bin/python" ] && PIPPY="$OUT/pipenv/bin/python"
+        $PIPPY -m pip download -q --only-binary=:all: \
+            --platform win_amd64 --python-version 38 -d "$WH" \
+            "ubi_reader==0.8.9" "lzallright" || {
+                echo "could not download the Python wheels — the firmware" >&2
+                echo "installer will not work on Windows without them." >&2; }
+    fi
+    for w in "$WH"/*.whl; do
+        [ -f "$w" ] || continue
+        unzip -qo "$w" -d "$PYDIR/Lib/site-packages"
+    done
+    rm -rf "$WH"
+fi
+if [ -f "$PYDIR/python.exe" ]; then
+    mkdir -p "$STAGE/build/deps"
+    cp -r "$PYDIR" "$STAGE/build/deps/python"
+    # __pycache__ from a host run would be x86-64 Linux bytecode under a
+    # Windows tree: dead weight that Python ignores, so drop it.
+    find "$STAGE/build/deps/python" -name __pycache__ -type d \
+         -exec rm -rf {} + 2>/dev/null || true
+    echo "    bundled Python $PY_VER ($(du -sh "$STAGE/build/deps/python" | cut -f1))"
+    [ -d "$STAGE/build/deps/python/Lib/site-packages/ubireader" ] || {
+        echo "WARNING: ubi_reader is missing from the bundle — firmware" >&2
+        echo "         install will fail on Windows." >&2; }
+fi
+
 echo "$VERSION" > "$STAGE/.tadpole-version"
 
 echo "staged: $STAGE"
