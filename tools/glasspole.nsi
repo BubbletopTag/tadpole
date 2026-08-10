@@ -58,11 +58,16 @@ Section "Install"
 
   WriteUninstaller "$INSTDIR\Uninstall.exe"
 
-  CreateShortCut "$DESKTOP\${APP}.lnk" "$INSTDIR\tadpole.exe" "" "$INSTDIR\tadpole.exe" 0
+  ; NAMED FOR THE PRODUCT, PICTURED FOR THE BACKEND. What someone installed is
+  ; the Tadpole emulator, so that is what the icon says; the Glasspole frog is
+  ; what it looks like, which is the same signal the window and its chrome
+  ; give. The icon comes from tadpole.exe's own resource, so shortcut,
+  ; task bar and Add/Remove Programs all show one artwork.
+  CreateShortCut "$DESKTOP\Tadpole Emulator.lnk" "$INSTDIR\tadpole.exe" "" "$INSTDIR\tadpole.exe" 0
   CreateDirectory "$SMPROGRAMS\${APP}"
-  CreateShortCut "$SMPROGRAMS\${APP}\${APP}.lnk" "$INSTDIR\tadpole.exe" "" "$INSTDIR\tadpole.exe" 0
+  CreateShortCut "$SMPROGRAMS\${APP}\Tadpole Emulator.lnk" "$INSTDIR\tadpole.exe" "" "$INSTDIR\tadpole.exe" 0
   ; The system menu, for people who want the LeapPad rather than the front end.
-  CreateShortCut "$SMPROGRAMS\${APP}\${APP} (system menu).lnk" \
+  CreateShortCut "$SMPROGRAMS\${APP}\Tadpole Emulator (system menu).lnk" \
                  "$INSTDIR\tadpole.exe" "--boot" "$INSTDIR\tadpole.exe" 0
   CreateShortCut "$SMPROGRAMS\${APP}\Uninstall ${APP}.lnk" "$INSTDIR\Uninstall.exe"
 
@@ -83,7 +88,8 @@ Section "Uninstall"
   ; THE PROGRAM ONLY. Firmware, games and saves live in %LOCALAPPDATA%\Tadpole
   ; and are the user's — some of it took an hour to download, and none of it
   ; is ours to delete because they removed the player.
-  Delete "$DESKTOP\${APP}.lnk"
+  Delete "$DESKTOP\Tadpole Emulator.lnk"
+  Delete "$DESKTOP\${APP}.lnk"        ; a shortcut left by a build before the rename
   RMDir /r "$SMPROGRAMS\${APP}"
   RMDir /r "$INSTDIR"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP}"
