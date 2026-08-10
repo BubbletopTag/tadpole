@@ -1503,6 +1503,120 @@ static void guest_log_close(void)
  * LD_LIBRARY_PATH, and glasspole's sysroot fallthrough opens them natively
  * against the current drive. */
 static HANDLE g_guest_h;
+static HANDLE g_tool_h;
+
+/* Run one of the project's Python tools and stream its output to the progress
+ * panel.
+ *
+ * OUTPUT GOES THROUGH A FILE, NOT A PIPE, and that is the point. The panel is
+ * drained by tool_drain() from the UI thread with plain read() calls that
+ * expect a non-blocking descriptor; an anonymous pipe on Windows has no such
+ * mode, so a read between the tool's lines would freeze the window. A file
+ * has exactly the semantics wanted for free: reads return what has been
+ * written so far and 0 at the end, over and over, until the writer finishes.
+ * Same trick as the guest's log, for the same reason.
+ *
+ * Which Python: TADPOLE_PYTHON if set, then the py launcher, then python3 and
+ * python. First one that starts wins; if none do, the caller's "could not
+ * start" message is the truth. */
+/* Where Python actually is, in the order worth trying. PATH is the LEAST
+ * reliable of these on Windows: python.org's per-user installer does not add
+ * itself by default, so "python" resolving is the exception rather than the
+ * rule, and a tool that only tries PATH tells most users they have no Python
+ * while it sits in their profile. */
+static const char *find_python(char *buf, size_t n)
+{
+	const char *e = getenv("TADPOLE_PYTHON");
+	char probe[900];
+	WIN32_FIND_DATAA fd;
+	HANDLE h;
+
+	if (e && *e && access(e, F_OK) == 0) {
+		snprintf(buf, n, "\"%s\"", e);
+		return buf;
+	}
+	/* Project-local, the Windows spelling of tools/fetch-deps.sh's
+	 * build/deps/python — a Python that came with Tadpole beats one that
+	 * happens to be installed. */
+	snprintf(probe, sizeof(probe), "%s/build/deps/python/python.exe", g_projdir);
+	if (access(probe, F_OK) == 0) {
+		snprintf(buf, n, "\"%s\"", probe);
+		return buf;
+	}
+	e = getenv("LOCALAPPDATA");
+	if (e && *e) {
+		snprintf(probe, sizeof(probe), "%s\\Programs\\Python\\Python3*", e);
+		h = FindFirstFileA(probe, &fd);
+		if (h != INVALID_HANDLE_VALUE) {
+			do {
+				snprintf(probe, sizeof(probe),
+				         "%s\\Programs\\Python\\%s\\python.exe", e, fd.cFileName);
+				if (access(probe, F_OK) == 0) {
+					FindClose(h);
+					snprintf(buf, n, "\"%s\"", probe);
+					return buf;
+				}
+			} while (FindNextFileA(h, &fd));
+			FindClose(h);
+		}
+	}
+	return NULL;              /* the PATH candidates are tried after this */
+}
+
+static pid_t spawn_python(const char *rel, char *const argv[], int *outfd)
+{
+	static const char *cand[] = { NULL, "py -3", "python3", "python" };
+	char found[1024];
+	char cmd[4096], logp[700];
+	SECURITY_ATTRIBUTES sa;
+	STARTUPINFOA si;
+	PROCESS_INFORMATION pi;
+	HANDLE lh;
+	unsigned c;
+	int i, n, ok = 0;
+
+	cand[0] = find_python(found, sizeof(found));
+
+	memset(&sa, 0, sizeof(sa));
+	sa.nLength = sizeof(sa);
+	sa.bInheritHandle = TRUE;
+	snprintf(logp, sizeof(logp), "%s/tool.log", g_dir);
+	lh = CreateFileA(logp, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+	                 &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (lh == INVALID_HANDLE_VALUE)
+		return -1;
+
+	for (c = 0; c < sizeof(cand) / sizeof(cand[0]) && !ok; c++) {
+		if (!cand[c] || !cand[c][0])
+			continue;
+		n = snprintf(cmd, sizeof(cmd), "%s \"%s/%s\"", cand[c], g_projdir, rel);
+		for (i = 1; argv[i] && n < (int)sizeof(cmd) - 4; i++)
+			n += snprintf(cmd + n, sizeof(cmd) - n, " \"%s\"", argv[i]);
+		memset(&si, 0, sizeof(si));
+		si.cb = sizeof(si);
+		si.dwFlags    = STARTF_USESTDHANDLES;
+		si.hStdOutput = lh;
+		si.hStdError  = lh;
+		memset(&pi, 0, sizeof(pi));
+		if (CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+		                   NULL, g_projdir, &si, &pi))
+			ok = 1;
+	}
+	CloseHandle(lh);
+	if (!ok) {
+		fprintf(stderr, "tadpole-view: no Python found for %s — install "
+		        "Python 3 from python.org, or set TADPOLE_PYTHON\n", rel);
+		ui_status("this needs Python 3 installed");
+		return -1;
+	}
+	CloseHandle(pi.hThread);
+	if (g_tool_h)
+		CloseHandle(g_tool_h);
+	g_tool_h = pi.hProcess;
+	if (outfd)
+		*outfd = open(logp, O_RDONLY);
+	return (pid_t)pi.dwProcessId;
+}
 
 /* C:\x/y -> /x/y: colon-free AND separator-consistent, because this is the
  * only place host spelling becomes guest spelling. A drive letter would split
@@ -1534,11 +1648,28 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 	(void)silent;
 	if (outfd) *outfd = -1;
 
-	/* Only the guest-launching script translates; the rest are genuinely
-	 * shell and python and say so. */
-	if (strcmp(script, "tadpole.sh") != 0 || !as_guest) {
-		fprintf(stderr, "tadpole-view: cannot run %s — scripts need the "
-		        "full build; guests launch natively\n", script);
+	/* TOOLS RUN AS PYTHON HERE. The library scanner and the game installer
+	 * exist in both spellings — tools/scan-games.py is what the shell
+	 * wrapper runs anyway, and tools/install-game.py is a port of the shell
+	 * one added for this — so Windows runs the .py directly and needs no
+	 * bash. Anything not in this table is genuinely shell (firmware,
+	 * profiles, the online update) and says so rather than half-working.
+	 * The Linux path is untouched: it still spawns the scripts. */
+	if (!as_guest) {
+		const char *py = NULL;
+		if (!strcmp(script, "tools/install-game.sh")) py = "tools/install-game.py";
+		else if (!strcmp(script, "tools/scan-games.sh")) py = "tools/scan-games.py";
+		else if (strstr(script, ".py"))                 py = script;
+		if (!py) {
+			fprintf(stderr, "tadpole-view: cannot run %s — that tool is a "
+			        "shell script and Windows has no shell for it\n", script);
+			return -1;
+		}
+		return spawn_python(py, argv, outfd);
+	}
+	if (strcmp(script, "tadpole.sh") != 0) {
+		fprintf(stderr, "tadpole-view: cannot run %s — guests launch "
+		        "natively on Windows\n", script);
 		return -1;
 	}
 	/* argstart is where the GUEST's own argv begins, and it is tracked
@@ -1672,12 +1803,22 @@ static void guest_stop(void)
 	g_guest_h = NULL;
 }
 
-/* Tools (updates, installs) never start on Windows, so there is nothing to
- * reap; "still running" keeps tool_poll inert. */
+/* Reap a finished Python tool, so the progress panel closes and reports.
+ * Without this the panel would sit at "starting..." for ever, which is how a
+ * working installer still looks broken. */
 static int tool_reap(pid_t pid, int *exited_ok)
 {
-	(void)pid; (void)exited_ok;
-	return 0;
+	DWORD code = 1;
+	(void)pid;
+	if (!g_tool_h)
+		return 0;
+	if (WaitForSingleObject(g_tool_h, 0) == WAIT_TIMEOUT)
+		return 0;
+	GetExitCodeProcess(g_tool_h, &code);
+	CloseHandle(g_tool_h);
+	g_tool_h = NULL;
+	*exited_ok = (code == 0);
+	return 1;
 }
 
 #else  /* POSIX guest supervision */
