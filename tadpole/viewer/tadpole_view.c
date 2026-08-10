@@ -1728,24 +1728,57 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 	    " -E TSLIB_CONFFILE=/nonexistent-ts.conf"
 	    " -E TADPOLE_SYSROOT=%s/runtime/sysroot",
 	    g_projdir, R, R, R, R, dir, R);
-	if (ui_cfg()->gl)
+	if (ui_cfg()->gl || ui_cfg()->gl_hle)
 		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL=1");
-	/* HLE REPLAY IS HELD BACK ON WINDOWS, and only HLE. Measured on the
-	 * OptiPlex against AppManager, with the viewer attached and everything
-	 * else identical: TADPOLE_GL=1 alone boots to the Sign In screen and
-	 * stays up, adding TADPOLE_GL_HLE=1 dies every time with
+	/* HLE REPLAY GOES TO THE GUEST ON WINDOWS AGAIN — THE BLOCKER IS GONE.
+	 *
+	 * It was held back because AppManager died before its first frame with
 	 *     [0x5] CreateHandle: No framebuffer allocation available
 	 *     <ASSERT> Unsupported destination PixelFormat used 0
-	 * before the first frame. The GL boundary itself is fine — Flash titles
-	 * render and the replayer initialises on this driver — so this is a
-	 * specific fault in the HLE path here, not a reason to disable GL. A
-	 * booting system menu beats a fast crash; re-enable the moment the
-	 * cause is found. */
-	else if (ui_cfg()->gl_hle)
-		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL=1");
+	 * while TADPOLE_GL=1 alone stayed up.
+	 *
+	 * RE-MEASURED, and it no longer happens. AppManager launched with
+	 * TADPOLE_GL=1 TADPOLE_GL_HLE=1 against a viewer holding the ring boots
+	 * to "UI entered" with three successful CreateHandle calls at
+	 * 480x272 (1920). Confirmed as not-my-doing by rebuilding glasspole from
+	 * this same commit with the host_win32.c view fix reverted: THAT boots
+	 * too. Something between the original measurement and here repaired it —
+	 * the TADPOLE_DIR spelling fix and the syscall/errno/chdir work are all
+	 * candidates — so this note deliberately does not claim a cause.
+	 *
+	 * WHAT WITHHOLDING IT COST, which is the reason this matters more than a
+	 * crash: it did not turn rendering off, it silently selected the SOFTWARE
+	 * RASTERISER. tadpole.sh's own note describes that path as drawing simple
+	 * screens correctly and "visibly mangling busy ones". So every 3D title on
+	 * Windows was being judged on the fallback, and "content too large for its
+	 * frame, a banner drawn flipped, objects missing" is what that fallback
+	 * looks like — a Windows-only rendering bug with no Windows-only rendering
+	 * code behind it.
+	 *
+	 * If it regresses, the honest move is to re-measure and say so here, not
+	 * to withhold silently: a user cannot tell the fallback from the real
+	 * thing except by the picture being wrong. */
 	if (ui_cfg()->gl_hle)
-		fprintf(stderr, "tadpole-view: HLE replay not passed to the guest on "
-		        "Windows (AppManager cannot allocate a framebuffer with it)\n");
+		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL_HLE=1");
+	/* THE DIAGNOSIS VARIABLES, which guest_env() sets on POSIX and this path
+	 * did not set at all. Windows spells its guest environment by hand, one
+	 * -E at a time, so a variable not named here simply never reaches the
+	 * shim — and TADPOLE_GL_DEBUG was never named here. Debug level 2 in the
+	 * viewer therefore turned on the GL trace on Linux and did NOTHING on
+	 * Windows, which is precisely the platform where the 3D output is wrong
+	 * and the trace is the thing you want.
+	 *
+	 * It looked like it was working, which is why it survived: tad_gl_warn()
+	 * and tad_gl_report() write to gl-warnings.log whatever the level is, so
+	 * a Windows run still produced a GL error tally. What it could not
+	 * produce was the per-call trace naming the enum that raised them. */
+	if (ui_cfg()->debug_level >= 2)
+		n += snprintf(cmd + n, sizeof(cmd) - n,
+		              " -E TADPOLE_DEBUG=1 -E TADPOLE_GL_DEBUG=1");
+	if (ui_cfg()->gl_dumpframe)
+		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL_DUMPFRAME=1");
+	if (ui_cfg()->gl_dumptex)
+		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL_DUMPTEX=1");
 	n += snprintf(cmd + n, sizeof(cmd) - n, " %s", prog);
 	if (argstart)
 		for (i = argstart; argv[i] && n < (int)sizeof(cmd) - 2; i++)

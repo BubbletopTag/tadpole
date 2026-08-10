@@ -240,8 +240,46 @@ cp -r "$PROJ/runtime/setup-sysroot.sh" "$STAGE/runtime/" 2>/dev/null || true
 # — the difference between an emulator and a window. What does NOT ship is
 # runtime/libs, which is LeapFrog's own libraries: those arrive with the
 # firmware the wizard fetches.
+# -L DEREFERENCES, and it is the whole point of this loop on Windows.
+#
+# Three of these files are symlinks in git (mode 120000):
+#   libGLESv1_CM.so.1   -> libGLESv1_CM.so     the SONAME every title links
+#   libEGL.so.1         -> libEGL.so
+#   libopengles_lite.so -> libGLESv1_CM.so     the name NATIVE 3D titles link
+#
+# Windows git defaults to core.symlinks=false, so a checkout writes them as
+# TEXT FILES containing the target's name — 15 bytes, not an ELF. A plain
+# `cp -r` then faithfully copies either a symlink (Linux build host) or a
+# 15-byte stub (Windows build host that never ran `make gl`), and the shipped
+# tree has no working libopengles_lite.so either way. The loader resolves
+# DT_NEEDED by filename, finds the stub, cannot load it, and falls through to
+# runtime/libs and the STOCK VR5 driver — which is the exact "native 3D titles
+# were never using our OpenGL at all" bug, re-created on Windows by a
+# different mechanism. It does not fail loudly; it renders wrong.
+#
+# -L copies what the link POINTS AT, so the staged tree holds three real
+# copies of the library under the three names the loader looks for, on every
+# build host, whether or not `make gl` ran and whatever core.symlinks says.
 for d in shimlibs shimlibs-z shimlibs-gl; do
-    [ -d "$PROJ/runtime/$d" ] && cp -r "$PROJ/runtime/$d" "$STAGE/runtime/"
+    [ -d "$PROJ/runtime/$d" ] && cp -rL "$PROJ/runtime/$d" "$STAGE/runtime/"
+done
+
+# -L HAS NOTHING TO FOLLOW WHEN THE CHECKOUT ITSELF LOST THE SYMLINK.
+# Building from a Windows clone (core.symlinks=false, and no `make gl` to
+# re-create the aliases via MSYS's copying ln) leaves a text stub on disk, not
+# a link, so the copy above faithfully staged the stub. Repair the staged tree
+# directly: the stub's entire content is the name of the file it should have
+# been, and no real shared library is under 256 bytes.
+for d in shimlibs shimlibs-z shimlibs-gl; do
+    for f in "$STAGE/runtime/$d"/*; do
+        [ -f "$f" ] || continue
+        [ "$(wc -c < "$f")" -lt 256 ] || continue
+        t="$(tr -d '\r\n' < "$f")"
+        case "$t" in ""|*/*) continue ;; esac
+        [ -f "$(dirname "$f")/$t" ] || continue
+        cp -f "$(dirname "$f")/$t" "$f"
+        echo "    materialised $d/$(basename "$f") -> $t"
+    done
 done
 
 # cart2tar.py and fatread.py go together — the converter is the front end and

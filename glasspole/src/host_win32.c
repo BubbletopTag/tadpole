@@ -183,6 +183,53 @@ static DWORD prot_to_win(int prot)
     }
 }
 
+/* GIVE BACK EVERY VIEW WHOLLY INSIDE [addr, addr+len).
+ *
+ * Nothing did this, and that was a one-way door. A view was recorded on the
+ * way in and released only by gp_release() — i.e. at teardown — so a guest
+ * that mapped and unmapped shared memory during a run leaked BOTH resources
+ * that gp_map_shared() needs:
+ *
+ *   g_view_n      never fell, so after GP_MAX_VIEWS mappings in the life of
+ *                 the process every further one returned GP_ENOMEM;
+ *   g_chunk_is_view[]  stayed 1 on those chunks forever, so re-mapping the
+ *                 SAME address — which is what a guest doing mmap/munmap/mmap
+ *                 does — hit "already carries a view" and returned GP_EINVAL.
+ *
+ * The guest sees a failed mmap and reports it in its own words. For a title
+ * that is "CreateHandle: No framebuffer allocation available", which is a
+ * completely honest message about a completely invisible cause.
+ *
+ * Whole views only. A view is one section mapping and UnmapViewOfFile takes
+ * its base or nothing; a partial munmap therefore keeps the old go-dark
+ * behaviour below, which is still what the guest observably asked for.
+ *
+ * The chunks go back to being plain reserved address space, exactly as
+ * gp_reserve left them, so the next gp_map_shared can take them again. */
+static void views_release_within(void *addr, size_t len)
+{
+    uint8_t *lo = addr, *hi = lo + len;
+    int i;
+
+    for (i = 0; i < g_view_n; ) {
+        uint8_t *vlo = g_view[i].at;
+        uint8_t *vhi = vlo + g_view[i].chunks * (size_t)GP_CHUNK;
+        size_t first, k;
+
+        if (vlo < lo || vhi > hi) { i++; continue; }
+
+        UnmapViewOfFile(vlo);
+        CloseHandle(g_view[i].hmap);
+        first = (size_t)chunk_of(vlo);
+        for (k = 0; k < g_view[i].chunks; k++) {
+            g_chunk_is_view[first + k] = 0;
+            VirtualAlloc(vlo + k * (size_t)GP_CHUNK, GP_CHUNK,
+                         MEM_RESERVE, PAGE_NOACCESS);
+        }
+        g_view[i] = g_view[--g_view_n];   /* order is not meaningful here */
+    }
+}
+
 /* Apply one operation across [addr, addr+len) without ever spanning two
  * allocations — chunk by chunk inside the chunked reservation, one call
  * outside it. op: 0 commit, 1 protect, 2 decommit. */
@@ -237,7 +284,15 @@ static int mem_walk(void *addr, size_t len, int prot, int op)
 
 int gp_commit(void *addr, size_t len, int prot)   { return mem_walk(addr, len, prot, 0); }
 int gp_protect(void *addr, size_t len, int prot)  { return mem_walk(addr, len, prot, 1); }
-int gp_decommit(void *addr, size_t len)           { return mem_walk(addr, len, 0, 2); }
+int gp_decommit(void *addr, size_t len)
+{
+    /* This is a guest munmap(). Hand back any whole view it covers BEFORE the
+     * walk, so the address space and the slot are both reusable; whatever is
+     * left is ordinary committed memory and decommits as it always did. */
+    if (g_res_base && chunk_of(addr) >= 0)
+        views_release_within(addr, len);
+    return mem_walk(addr, len, 0, 2);
+}
 
 int gp_release(void *base, size_t size)
 {
@@ -474,7 +529,6 @@ int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
 
     (void)prot;   /* census maps are RW; the view is RW; mprotect may narrow */
 
-    if (g_view_n >= GP_MAX_VIEWS) return GP_ENOMEM;
     if (chunk_of(at) < 0 || ((uintptr_t)at % GP_CHUNK) != 0
         || (off % GP_CHUNK) != 0)
         return GP_EINVAL;
@@ -482,12 +536,29 @@ int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
     first = (size_t)chunk_of(at);
     n     = (len + GP_CHUNK - 1) / GP_CHUNK;
     len   = n * (size_t)GP_CHUNK;
+
+    /* MAP_FIXED REPLACES, it does not refuse. This used to fail with EINVAL
+     * whenever the target already carried a view, which made re-mapping the
+     * same address impossible even after the guest had properly unmapped it —
+     * because nothing cleared g_chunk_is_view[] until teardown. Linux lets a
+     * fixed mapping drop whatever was there, so do that: give back any view
+     * wholly inside the target range first. */
+    views_release_within(at, len);
     for (i = 0; i < n; i++)
         if (g_chunk_is_view[first + i]) {
-            gp_log("map_shared: %p already carries a view — unmap first\n",
-                   (void *)((uint8_t *)at + i * GP_CHUNK));
+            /* Still set means a view only PARTIALLY overlaps this request,
+             * which cannot be resolved by unmapping a whole section. */
+            gp_log("map_shared: %p is part of a larger view — unmap that "
+                   "first\n", (void *)((uint8_t *)at + i * GP_CHUNK));
             return GP_EINVAL;
         }
+    if (g_view_n >= GP_MAX_VIEWS) {
+        /* Silent before, and it presents as an out-of-memory failure inside
+         * the guest with no hint that the limit is ours. */
+        gp_log("map_shared: all %d view slots are in use — cannot map %p\n",
+               GP_MAX_VIEWS, at);
+        return GP_ENOMEM;
+    }
 
     end = off + len;
     hmap = CreateFileMappingW(f->h, NULL, PAGE_READWRITE,
