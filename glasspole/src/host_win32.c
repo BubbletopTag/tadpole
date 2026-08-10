@@ -1,10 +1,10 @@
-/* Glasspole — the Win32 backend of host.h.
+﻿/* Glasspole â€” the Win32 backend of host.h.
  *
  * The other half of the bet host.h makes: everything above it is untouched, and
  * every Linux-ism ends here. GetLastError() becomes a negative Linux errno in
  * exactly one function; UTF-8 paths widen to UTF-16 and go to the W entry
  * points, never the A ones; and nothing below calls anything newer than
- * Windows 7 SP1 — which concretely means no WaitOnAddress (Win8) and no
+ * Windows 7 SP1 â€” which concretely means no WaitOnAddress (Win8) and no
  * VirtualAlloc2 (Win10 1803), each avoided the way host.h's comments already
  * prescribe.
  *
@@ -12,7 +12,7 @@
  * offset honours the offset but MOVES the handle's file pointer afterwards
  * (verified on this machine, and MSDN agrees: "the system updates the
  * OVERLAPPED offset and the file pointer"). So gp_pread takes the offset from
- * OVERLAPPED — one seek fewer than seek/read/seek-back — but still saves and
+ * OVERLAPPED â€” one seek fewer than seek/read/seek-back â€” but still saves and
  * restores the pointer under the file's lock, or a mapping refill would move
  * the position the guest believes in.
  */
@@ -85,13 +85,13 @@ static int widen(const char *u8, WCHAR *w, int cap)
 /* ---- address space ------------------------------------------------------- */
 
 /* THE RESERVATION IS CHUNKED, and that is what makes real shared mappings
- * possible on Windows 7. A single 4 GiB MEM_RESERVE cannot be broken up —
+ * possible on Windows 7. A single 4 GiB MEM_RESERVE cannot be broken up â€”
  * MEM_RELEASE frees all of it or none, and MapViewOfFileEx cannot place a
  * view inside it. Pre-1803 Windows has no placeholders. So the guest's space
  * is reserved as one 64 KB VirtualAlloc per chunk: same address span, same
  * protection against the host allocator, but any chunk can individually be
  * released and a file view mapped over it. That is how gp_map_shared gets
- * genuine aliasing — Pet Pad maps its framebuffer at two guest addresses and
+ * genuine aliasing â€” Pet Pad maps its framebuffer at two guest addresses and
  * renders through one while reading the other, which no private copy can
  * reproduce.
  *
@@ -99,7 +99,7 @@ static int widen(const char *u8, WCHAR *w, int cap)
  * milliseconds, once), and commit/protect/decommit must walk chunk by chunk
  * because none of the Virtual* calls may span separate allocations.
  *
- * ONE live chunked reservation is supported, because exactly one exists — the
+ * ONE live chunked reservation is supported, because exactly one exists â€” the
  * guest space. A second gp_reserve while one is live falls back to a plain
  * unsplittable reservation and says so.
  *
@@ -136,7 +136,7 @@ void *gp_reserve(void *at, size_t size)
     uint8_t *b;
     size_t n, i;
 
-    if (g_res_base)     /* the one chunked reservation is taken — see above */
+    if (g_res_base)     /* the one chunked reservation is taken â€” see above */
         return VirtualAlloc(at, size, MEM_RESERVE, PAGE_NOACCESS);
 
     probe = VirtualAlloc(at, size, MEM_RESERVE, PAGE_NOACCESS);
@@ -171,7 +171,7 @@ static DWORD prot_to_win(int prot)
 {
     /* PAGE_* protections are an enumeration, not a bitmask, and there is no
      * write-without-read: W rounds up to RW, WX to RWX. The guest cannot tell
-     * — ARM Linux rounds the same way. */
+     * â€” ARM Linux rounds the same way. */
     switch (prot & (GP_PROT_READ | GP_PROT_WRITE | GP_PROT_EXEC)) {
     case 0:                                        return PAGE_NOACCESS;
     case GP_PROT_READ:                             return PAGE_READONLY;
@@ -186,15 +186,15 @@ static DWORD prot_to_win(int prot)
 /* GIVE BACK EVERY VIEW WHOLLY INSIDE [addr, addr+len).
  *
  * Nothing did this, and that was a one-way door. A view was recorded on the
- * way in and released only by gp_release() — i.e. at teardown — so a guest
+ * way in and released only by gp_release() â€” i.e. at teardown â€” so a guest
  * that mapped and unmapped shared memory during a run leaked BOTH resources
  * that gp_map_shared() needs:
  *
  *   g_view_n      never fell, so after GP_MAX_VIEWS mappings in the life of
  *                 the process every further one returned GP_ENOMEM;
  *   g_chunk_is_view[]  stayed 1 on those chunks forever, so re-mapping the
- *                 SAME address — which is what a guest doing mmap/munmap/mmap
- *                 does — hit "already carries a view" and returned GP_EINVAL.
+ *                 SAME address â€” which is what a guest doing mmap/munmap/mmap
+ *                 does â€” hit "already carries a view" and returned GP_EINVAL.
  *
  * The guest sees a failed mmap and reports it in its own words. For a title
  * that is "CreateHandle: No framebuffer allocation available", which is a
@@ -231,7 +231,7 @@ static void views_release_within(void *addr, size_t len)
 }
 
 /* Apply one operation across [addr, addr+len) without ever spanning two
- * allocations — chunk by chunk inside the chunked reservation, one call
+ * allocations â€” chunk by chunk inside the chunked reservation, one call
  * outside it. op: 0 commit, 1 protect, 2 decommit. */
 static int mem_walk(void *addr, size_t len, int prot, int op)
 {
@@ -318,7 +318,7 @@ struct gp_file {
     HANDLE  h;
     SRWLOCK lock;    /* orders pread's save/restore against read/write/seek */
     int     append;
-    int     pipe;    /* a FIFO stand-in — see the named-pipe table below */
+    int     pipe;    /* a FIFO stand-in â€” see the named-pipe table below */
     /* 1 + the g_fifo index when this descriptor is one of possibly several
      * onto a pipe WE serve; 0 when it is not. One-based so calloc's zero
      * already means "not a served FIFO" and no other site has to say so. */
@@ -331,21 +331,21 @@ struct gp_file {
  * CreateFileMapping EXTENDS the file to the section's maximum size, and
  * gp_map_shared has to round that up to the 64 KB allocation granularity. So a
  * guest that ftruncate()s a file to 200 bytes and then maps it measures 65536
- * afterwards — a number no POSIX program could have produced, handed to a
+ * afterwards â€” a number no POSIX program could have produced, handed to a
  * guest that has every right to trust it.
  *
  * That is not hypothetical, and it is not cosmetic. The GL shim decides
  * whether its copy of struct layer_state is still in step with the shim's by
  * comparing state.bin's length against its own sizeof, which is 200. On
  * Windows it read 65536, concluded the layout had drifted, and fell back to
- * "use the full panel" — so every Leapster title's 320x240 window was rendered
+ * "use the full panel" â€” so every Leapster title's 320x240 window was rendered
  * at 480x272: scaled up and cropped, on Windows and only on Windows, with no
  * platform-specific rendering code anywhere in the picture.
  *
  * KEYED BY THE FILE, NOT THE DESCRIPTOR. The shim creates, truncates and maps
  * state.bin on one fd; the GL library opens it separately and measures it on
  * another. A note stored on the gp_file that did the mapping would be
- * invisible from the fd that asks the question — which is the whole point.
+ * invisible from the fd that asks the question â€” which is the whole point.
  * Windows' volume + file index is the same identity st_dev/st_ino carries. */
 #define GP_MAX_GROWN 16
 static struct {
@@ -380,9 +380,9 @@ static int64_t grown_get(HANDLE h)
     return r;
 }
 
-/* Record the pre-extension size, once. A second mapping of the same file must
- * not overwrite it with the already-grown length. */
-static void grown_note(HANDLE h, int64_t logical)
+/* only_if_absent: a second mapping of the same file must NOT overwrite the
+ * remembered size with the already-grown length. A guest ftruncate must. */
+static void grown_set(HANDLE h, int64_t logical, int only_if_absent)
 {
     DWORD vol, hi, lo;
     int i;
@@ -390,7 +390,10 @@ static void grown_note(HANDLE h, int64_t logical)
     AcquireSRWLockExclusive(&g_grown_lock);
     for (i = 0; i < g_grown_n; i++)
         if (g_grown[i].vol == vol && g_grown[i].idx_hi == hi
-            && g_grown[i].idx_lo == lo) goto out;
+            && g_grown[i].idx_lo == lo) {
+            if (!only_if_absent) g_grown[i].logical = logical;
+            goto out;
+        }
     if (g_grown_n < GP_MAX_GROWN) {
         g_grown[g_grown_n].vol    = vol;
         g_grown[g_grown_n].idx_hi = hi;
@@ -398,8 +401,8 @@ static void grown_note(HANDLE h, int64_t logical)
         g_grown[g_grown_n].logical = logical;
         g_grown_n++;
     } else {
-        gp_log("map_shared: no room to remember the guest-visible size of a "
-               "%lld-byte file; it will measure as grown\n", (long long)logical);
+        gp_log("no room to remember the guest-visible size of a %lld-byte "
+               "file; it will measure as grown\n", (long long)logical);
     }
 out:
     ReleaseSRWLockExclusive(&g_grown_lock);
@@ -425,7 +428,7 @@ static void grown_clear(HANDLE h)
  *
  * Win32 HAS pipes with FIFO semantics; they are just not filesystem objects
  * an open() can reach. So the mapping lives HERE: gp_mkfifo records the path
- * in a table and gp_open consults it — a registered path opens
+ * in a table and gp_open consults it â€” a registered path opens
  * \\.\pipe\tadpole-<basename> instead of a file, and everything above host.h
  * keeps thinking it is a file, which is the contract.
  *
@@ -437,7 +440,7 @@ static void grown_clear(HANDLE h)
  * Ordering and non-blocking, both of which Linux gives for free:
  *   - the two ends start in either order, so whichever opens FOR READING
  *     first becomes the pipe server and the writer connects as a client;
- *   - a writer with no reader must get ENXIO, not a block — the shim's audio
+ *   - a writer with no reader must get ENXIO, not a block â€” the shim's audio
  *     path opens O_WRONLY|O_NONBLOCK and depends on failing fast, retrying
  *     each period, and discarding on pace;
  *   - reads and writes never block (PIPE_NOWAIT): an empty pipe reads as
@@ -448,7 +451,7 @@ static void grown_clear(HANDLE h)
 static struct {
     char   path[512];
     char   pipe[80];
-    /* The server end, when WE are the reader — one per PATH, however many
+    /* The server end, when WE are the reader â€” one per PATH, however many
      * descriptors the guest holds onto it. See fifo_open for why that is the
      * whole fix. */
     HANDLE server;
@@ -499,7 +502,7 @@ int gp_mkfifo(const char *path, uint32_t mode)
  *
  * The old rule was "try to connect as a client; if there is nobody there, become
  * the server", with only O_WRONLY forced to stay a client. But the shim opens
- * every event node **O_RDWR|O_NONBLOCK** — tadpole_shim.c:705, "O_RDWR so the
+ * every event node **O_RDWR|O_NONBLOCK** â€” tadpole_shim.c:705, "O_RDWR so the
  * open doesn't block waiting for a writer", which on Linux is free and correct.
  * Under the old rule the FIRST such open created the server, and the SECOND one
  * found that server listening and connected to it. The guest was then talking to
@@ -541,7 +544,7 @@ static int fifo_open(int idx, int flags, gp_file **out)
                                  PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
                                  1, 64 << 10, 64 << 10, 0, NULL);
             if (h == INVALID_HANDLE_VALUE) {
-                /* The name is already served by somebody else — the audio
+                /* The name is already served by somebody else â€” the audio
                  * FIFO, whose reader is the viewer. Joining as a client is
                  * right there, and cannot be the self-connection above,
                  * because our own server would have been found in the table. */
@@ -587,7 +590,7 @@ wrap:
  * Without this, closing the viewer ended the event stream permanently: the
  * guest's next read returned end of file, its evdev loop concluded the device
  * was gone, and reopening the viewer changed nothing. It is also what makes
- * the guest's O_RDWR meaningful — a FIFO held open for reading and writing
+ * the guest's O_RDWR meaningful â€” a FIFO held open for reading and writing
  * never sees end of file on Linux, and now does not here either. */
 static void fifo_rearm(gp_file *f)
 {
@@ -596,8 +599,8 @@ static void fifo_rearm(gp_file *f)
     ConnectNamedPipe(f->h, NULL);
 }
 
-/* REAL shared views, on Windows 7 API. The stopgap that lived here — a
- * private copy with a write-back at exit — could not survive contact with
+/* REAL shared views, on Windows 7 API. The stopgap that lived here â€” a
+ * private copy with a write-back at exit â€” could not survive contact with
  * Pet Pad, which maps its framebuffer at TWO guest addresses and renders
  * through one while reading the other. Private copies cannot alias; the
  * write-back flushed the copy nothing drew into, and the screenshot was
@@ -606,7 +609,7 @@ static void fifo_rearm(gp_file *f)
  * The chunked reservation (see gp_reserve) is what makes the real thing
  * possible without VirtualAlloc2: release exactly the covering chunks and
  * MapViewOfFileEx into the hole. Views of one local file alias through the
- * file's single section, whichever handles they came from — so the guest's
+ * file's single section, whichever handles they came from â€” so the guest's
  * double mapping behaves exactly as MAP_SHARED does on Linux, other
  * processes reading the file see live pages, and there is nothing to flush.
  *
@@ -635,7 +638,7 @@ int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
 
     /* MAP_FIXED REPLACES, it does not refuse. This used to fail with EINVAL
      * whenever the target already carried a view, which made re-mapping the
-     * same address impossible even after the guest had properly unmapped it —
+     * same address impossible even after the guest had properly unmapped it â€”
      * because nothing cleared g_chunk_is_view[] until teardown. Linux lets a
      * fixed mapping drop whatever was there, so do that: give back any view
      * wholly inside the target range first. */
@@ -644,14 +647,14 @@ int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
         if (g_chunk_is_view[first + i]) {
             /* Still set means a view only PARTIALLY overlaps this request,
              * which cannot be resolved by unmapping a whole section. */
-            gp_log("map_shared: %p is part of a larger view — unmap that "
+            gp_log("map_shared: %p is part of a larger view â€” unmap that "
                    "first\n", (void *)((uint8_t *)at + i * GP_CHUNK));
             return GP_EINVAL;
         }
     if (g_view_n >= GP_MAX_VIEWS) {
         /* Silent before, and it presents as an out-of-memory failure inside
          * the guest with no hint that the limit is ours. */
-        gp_log("map_shared: all %d view slots are in use — cannot map %p\n",
+        gp_log("map_shared: all %d view slots are in use â€” cannot map %p\n",
                GP_MAX_VIEWS, at);
         return GP_ENOMEM;
     }
@@ -659,14 +662,14 @@ int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
     end = off + len;
     /* REMEMBER HOW BIG THE GUEST LEFT IT, because the next call grows it.
      * `len` was rounded up to the allocation granularity above, and
-     * CreateFileMapping extends the file to the section's maximum size — so
+     * CreateFileMapping extends the file to the section's maximum size â€” so
      * a 200-byte state.bin becomes 65536 the moment it is mapped. Linux does
      * no such thing, and a guest that measures its own file gets an answer it
-     * cannot make sense of. See grown_note(). */
+     * cannot make sense of. See grown_set(). */
     {
         LARGE_INTEGER cur;
         if (GetFileSizeEx(f->h, &cur) && (uint64_t)cur.QuadPart < end)
-            grown_note(f->h, cur.QuadPart);
+            grown_set(f->h, cur.QuadPart, 1);
     }
     hmap = CreateFileMappingW(f->h, NULL, PAGE_READWRITE,
                               (DWORD)(end >> 32), (DWORD)end, NULL);
@@ -678,7 +681,7 @@ int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
                         (DWORD)(off >> 32), (DWORD)off, len, at);
     if (!v) {
         int e = err();
-        gp_log("map_shared: lost %p to a racing allocation — the accepted "
+        gp_log("map_shared: lost %p to a racing allocation â€” the accepted "
                "window, but it fired; re-reserving\n", at);
         for (i = 0; i < n; i++)
             VirtualAlloc((uint8_t *)at + i * (size_t)GP_CHUNK, GP_CHUNK,
@@ -701,7 +704,7 @@ int gp_poll_readable(gp_file **fs, int n, int timeout_ms, unsigned char *ready)
      * PIPE is not, and saying it is turns the guest's event loop into a spin:
      * poll answers "ready" at once, the read comes back EAGAIN, and round it
      * goes at the speed of the JIT. Since the FIFO stand-ins now really exist
-     * here, they get a real answer — PeekNamedPipe reports how many bytes are
+     * here, they get a real answer â€” PeekNamedPipe reports how many bytes are
      * waiting without consuming any, on every Windows since NT.
      *
      * Polled rather than waited on, because a NOWAIT pipe has no waitable
@@ -821,8 +824,8 @@ int gp_close(gp_file *f)
 }
 
 /* GetLastError -> the FIFO-shaped errno a pipe end expects. NOWAIT pipes
- * speak in these three: empty (or not-yet-connected) is EAGAIN — the same
- * answer O_NONBLOCK gives — and a departed peer is EOF on read, EPIPE-ish on
+ * speak in these three: empty (or not-yet-connected) is EAGAIN â€” the same
+ * answer O_NONBLOCK gives â€” and a departed peer is EOF on read, EPIPE-ish on
  * write, for which EIO is the closest number the table carries. */
 static int64_t pipe_err(DWORD e, int reading)
 {
@@ -855,7 +858,7 @@ int64_t gp_read(gp_file *f, void *buf, size_t len)
         return pipe_err(e, 1);
     }
     /* A NOWAIT pipe "succeeds" with 0 bytes when empty; that is EAGAIN, not
-     * EOF — EOF is the peer actually leaving, reported above. */
+     * EOF â€” EOF is the peer actually leaving, reported above. */
     if (f->pipe && n == 0 && len > 0)
         return GP_EAGAIN;
     return n;      /* file EOF is TRUE with n == 0, exactly read()'s 0 */
@@ -926,7 +929,7 @@ int64_t gp_seek(gp_file *f, int64_t off, int whence)
     if (f->pipe) return GP_ESPIPE;
     /* SEEK_END means the end the GUEST knows about. Where a mapping grew the
      * file for granularity, seeking to the real end would report a size the
-     * guest never chose — which is exactly how the GL shim concluded its
+     * guest never chose â€” which is exactly how the GL shim concluded its
      * struct layout was wrong. Resolve it against the remembered size instead;
      * lseek(0, SEEK_END) is how a POSIX program asks "how big is this?". */
     if (whence == GP_SEEK_END) {
@@ -959,7 +962,7 @@ static uint32_t synth_mode(DWORD attr)
          | ((attr & FILE_ATTRIBUTE_READONLY) ? 0555u : 0755u);
 }
 
-/* (dev, ino) are load-bearing — see host.h. On Windows file identity lives on
+/* (dev, ino) are load-bearing â€” see host.h. On Windows file identity lives on
  * HANDLES, not paths: GetFileAttributesExW cannot produce the volume serial or
  * file index, so even the path-based stat opens a handle. Zero desired access
  * makes it an attribute-only open that needs no read permission, and
@@ -975,7 +978,7 @@ static int fill_from_handle(HANDLE h, struct gp_statbuf *st)
     st->mode     = synth_mode(bi.dwFileAttributes);
     st->is_dir   = (bi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 1 : 0;
     /* NTFS keeps a link count and it is right for files. For directories it
-     * counts hard links only, so it is 1 rather than "2 + subdirectories" —
+     * counts hard links only, so it is 1 rather than "2 + subdirectories" â€”
      * a truthful answer to a different question than the guest is asking.
      * 1 is what a walker reads as "this filesystem's link counts cannot be
      * used", which is the honest signal and makes it recurse instead of
@@ -1028,15 +1031,40 @@ int gp_truncate(gp_file *f, uint64_t size)
 {
     /* SetFileInformationByHandle(FileEndOfFileInfo) is Vista+, inside the
      * floor, and unlike the SetFilePointer/SetEndOfFile dance it does not
-     * touch the file position — ftruncate does not either. */
+     * touch the file position â€” ftruncate does not either. */
     FILE_END_OF_FILE_INFO info;
+    LARGE_INTEGER cur;
     int r;
+
     info.EndOfFile.QuadPart = (LONGLONG)size;
-    r = SetFileInformationByHandle(f->h, FileEndOfFileInfo,
-                                   &info, sizeof info) ? 0 : err();
-    /* The guest has just stated the size itself, so there is nothing left to
-     * correct for — whatever a mapping did earlier, THIS is now the truth. */
-    if (r == 0) grown_clear(f->h);
+    if (SetFileInformationByHandle(f->h, FileEndOfFileInfo, &info, sizeof info)) {
+        /* The guest has stated the size and the filesystem agreed, so there is
+         * nothing left to correct for â€” THIS is now the truth. */
+        grown_clear(f->h);
+        return 0;
+    }
+    r = err();
+
+    /* WINDOWS WILL NOT RESIZE A FILE ANOTHER PROCESS HAS MAPPED. Linux will,
+     * and the guest is a Linux program, so a refusal here is a divergence and
+     * not a fact about the file.
+     *
+     * It is also the ordinary case, not a corner: the viewer maps state.bin as
+     * soon as it finds a valid header, and a state.bin left behind by an
+     * EARLIER run is already 65536 bytes because that run's mapping grew it.
+     * The viewer maps the stale file, the guest starts, its ftruncate to 200
+     * is refused, and the length stays 65536 â€” so the GL shim reads a size the
+     * guest never chose and falls back to the full panel. Fresh run dirs were
+     * fine, which is exactly why this survived a first round of testing here.
+     *
+     * The file already holds at least what the guest asked for, so every byte
+     * the guest can address is present and the ONLY thing wrong is the number.
+     * Remember the number it asked for and report that. Shrinking is
+     * observably a no-op to a mapped reader on Linux too. */
+    if (GetFileSizeEx(f->h, &cur) && (uint64_t)cur.QuadPart >= size) {
+        grown_set(f->h, (int64_t)size, 0);
+        return 0;
+    }
     return r;
 }
 
@@ -1136,7 +1164,7 @@ int gp_diropen(const char *path, gp_dir **out)
     if (!d) return GP_ENOMEM;
     d->find = FindFirstFileW(w, &d->fd);
     if (d->find == INVALID_HANDLE_VALUE) { e = err(); free(d); return e; }
-    d->pending = 1;      /* "." — FindFirstFileW yields it, like readdir */
+    d->pending = 1;      /* "." â€” FindFirstFileW yields it, like readdir */
     *out = d;
     return 0;
 }
@@ -1216,11 +1244,11 @@ uint32_t gp_thread_id(void) { return (uint32_t)GetCurrentThreadId(); }
  * The sixty lines host.h promised. An address hashes to a bucket holding an
  * SRWLOCK and a CONDITION_VARIABLE; gp_wait_on re-checks the word under the
  * bucket lock, which is the same lock gp_wake takes, so the compare and the
- * sleep are atomic against the wake — the futex guarantee.
+ * sleep are atomic against the wake â€” the futex guarantee.
  *
  * gp_wake wakes the WHOLE bucket even for count == 1. Addresses share
  * buckets, and a single wake could land on a waiter for a different address,
- * which would swallow the wake and leave the intended waiter asleep — a lost
+ * which would swallow the wake and leave the intended waiter asleep â€” a lost
  * wakeup, the one bug this interface exists to prevent. Waking everyone is
  * merely a thundering herd within one bucket: each waiter returns 0, its
  * caller re-checks its word, and the ones woken by accident go back to sleep.
@@ -1276,7 +1304,7 @@ int gp_wake(volatile uint32_t *addr, int count)
 }
 
 /* ---- time ----------------------------------------------------------------
- * The hot one — no lock and no allocation below this line. The one-time
+ * The hot one â€” no lock and no allocation below this line. The one-time
  * resolutions race benignly: every thread computes and stores identical
  * values. */
 
@@ -1290,7 +1318,7 @@ uint64_t gp_wall_ns(void)
     if (!g_time_ready) {
         /* GetSystemTimePreciseAsFileTime is Windows 8+, better than the
          * ~15.6 ms tick of the plain call, and the guest calls gettimeofday
-         * 381,096 times a run — resolve it if it exists, live without it on
+         * 381,096 times a run â€” resolve it if it exists, live without it on
          * Windows 7. GetProcAddress, not a link-time import, is what keeps
          * the floor at 7. */
         g_precise = (precise_time_fn)(void (*)(void))GetProcAddress(
@@ -1317,7 +1345,7 @@ uint64_t gp_mono_ns(void)
 
 void gp_sleep_ns(uint64_t ns)
 {
-    /* Sleep rounds to the scheduler tick, ~15.6 ms by default — uselessly
+    /* Sleep rounds to the scheduler tick, ~15.6 ms by default â€” uselessly
      * coarse for a guest pacing frames with nanosleep. timeBeginPeriod(1)
      * pulls it to ~1 ms, process-lifetime, undone by the OS at exit; every
      * emulator ships this call. Benign race, same as above. */
@@ -1331,7 +1359,7 @@ void gp_sleep_ns(uint64_t ns)
 /* ---- guest faults --------------------------------------------------------
  * The Windows shape of host_posix.c's SIGSEGV handler. A vectored handler
  * sees the exception before any frame-based (__try) handling, on the faulting
- * thread's own stack — which is intact, because a GUEST stack overrun is an
+ * thread's own stack â€” which is intact, because a GUEST stack overrun is an
  * ordinary access violation inside the 4 GiB reservation, not a host stack
  * fault, so no alternate stack is needed where POSIX required one. A host
  * EXCEPTION_STACK_OVERFLOW is not ours to explain and is passed on. */
@@ -1344,7 +1372,7 @@ static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *xp)
         return EXCEPTION_CONTINUE_SEARCH;
     /* MAY NOT COME BACK: the policy layer longjmps out of here to run the
      * guest's own SIGSEGV handler (see host.h). That is measured on POSIX and
-     * NOT on Windows — a longjmp out of a vectored handler unwinds through
+     * NOT on Windows â€” a longjmp out of a vectored handler unwinds through
      * frames the kernel put on the stack, and the reliable Windows spelling of
      * the same idea is to edit xp->ContextRecord and return
      * EXCEPTION_CONTINUE_EXECUTION. Until someone can test that, a Windows
@@ -1352,7 +1380,7 @@ static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *xp)
     if (g_fault_fn)
         g_fault_fn((void *)(uintptr_t)xp->ExceptionRecord->ExceptionInformation[1]);
     /* TerminateProcess, not exit(): atexit handlers and stdio flushing after
-     * a memory fault can fault again and hide what was just printed — the
+     * a memory fault can fault again and hide what was just printed â€” the
      * same reasoning as the POSIX backend's _exit(). */
     TerminateProcess(GetCurrentProcess(), 73);
     return EXCEPTION_CONTINUE_SEARCH;   /* unreachable */
@@ -1363,8 +1391,8 @@ static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *xp)
 void gp_fault_rearm(void) { }
 
 /* Windows has no SIGQUIT. The nearest thing is a console control handler on
- * CTRL_BREAK_EVENT, which is a different enough contract — it runs on a thread
- * the system injects, and only for a process attached to a console — that
+ * CTRL_BREAK_EVENT, which is a different enough contract â€” it runs on a thread
+ * the system injects, and only for a process attached to a console â€” that
  * guessing at it here would be worse than saying no. Refused, so the caller
  * reports that hang sampling is unavailable rather than silently never
  * working. */
@@ -1399,7 +1427,7 @@ int64_t gp_console_write(int fd, const void *buf, size_t len)
     if (len > 0x7fffffffu) len = 0x7fffffffu;
     /* WriteFile serves both a console and a redirection. The console decodes
      * bytes in its output codepage, so non-ASCII guest output can mojibake on
-     * screen while staying byte-exact through a pipe — the pipe is what the
+     * screen while staying byte-exact through a pipe â€” the pipe is what the
      * qemu-arm diffing harness reads, and byte-exact there is what matters. */
     if (!WriteFile(h, buf, (DWORD)len, &n, NULL)) return err();
     return n;
@@ -1410,7 +1438,7 @@ void gp_log(const char *fmt, ...)
     /* msvcrt's unbuffered stderr writes CHARACTER AT A TIME, which turns a
      * --trace run into an I/O benchmark: ~23 traced syscalls/second, i.e. the
      * tracer costing three orders of magnitude more than the thing it traces.
-     * Line-buffer it once. The POSIX backend needs none of this — glibc's
+     * Line-buffer it once. The POSIX backend needs none of this â€” glibc's
      * unbuffered stderr still writes whole calls. */
     static int buffered;
     va_list ap;
