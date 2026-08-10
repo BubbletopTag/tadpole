@@ -407,6 +407,13 @@ def main(argv):
     ap.add_argument("--a-label", default="Tadpole (qemu-arm)")
     ap.add_argument("--b-label", default="Glasspole")
     ap.add_argument("-o", "--out", default=None)
+    # A page body with no document around it, for hosts that supply their own
+    # <head>. Publishing the standalone file to one of those nests a whole
+    # second <html> inside the first, which browsers "fix" by discarding the
+    # inner <head> — taking the stylesheet with it, so the report arrives as
+    # unstyled text and nothing says why.
+    ap.add_argument("--fragment", action="store_true",
+                    help="emit the body only, no doctype/html/head/body")
     args = ap.parse_args(argv[1:])
 
     A_rows = {r["pkg"]: r for r in read_tsv(os.path.join(args.a, "results.tsv"))}
@@ -452,10 +459,13 @@ def main(argv):
 
     out = []
     W = out.append
-    W('<!doctype html><html lang="en"><head><meta charset="utf-8">')
-    W('<meta name="viewport" content="width=device-width,initial-scale=1">')
-    W("<title>Glasspole vs Tadpole — title compatibility</title>")
-    W("<style>%s</style></head><body><div class='wrap'>" % CSS)
+    if not args.fragment:
+        W('<!doctype html><html lang="en"><head><meta charset="utf-8">')
+        W('<meta name="viewport" content="width=device-width,initial-scale=1">')
+        W("<title>Glasspole vs Tadpole — title compatibility</title>")
+        W("</head><body>")
+    W("<style>%s</style>" % CSS)
+    W("<div class='wrap'>")
 
     W("<header class='mast'><div>")
     W("<h1>Glasspole vs Tadpole</h1>")
@@ -615,7 +625,9 @@ def main(argv):
     W("<p>a: %s &middot; b: %s</p>"
       % (html.escape(args.a), html.escape(args.b)))
     W("</footer>")
-    W("</div><script>%s</script></body></html>" % JS)
+    W("</div><script>%s</script>" % JS)
+    if not args.fragment:
+        W("</body></html>")
 
     dest = args.out or os.path.join(args.b, "index.html")
     with open(dest, "w") as fh:
