@@ -1,0 +1,22 @@
+/* The Windows resource block for tadpole.exe and tadpole-view.exe.
+ *
+ * ICON ID 1, AND THE NUMBER MATTERS. Explorer, the taskbar and Alt-Tab all
+ * show the icon with the LOWEST numeric ID, not the first one declared.
+ *
+ * THE DESKTOP SHORTCUT INHERITS THIS, which is the whole point. The installer
+ * creates it as
+ *
+ *   CreateShortCut "$DESKTOP\...lnk" "$INSTDIR\tadpole.exe" "" "$INSTDIR\tadpole.exe" 0
+ *
+ * — icon index 0 of tadpole.exe itself — so there is no separate .ico to
+ * install, nothing to go stale, and a shortcut the user makes by hand gets the
+ * same artwork as the one the installer made.
+ *
+ * IT IS THE GLASSPOLE LOGO ON A FILE CALLED tadpole.exe, and that is
+ * deliberate: on Windows the product IS Glasspole, the viewer already rebrands
+ * itself at runtime, and the executable names are internal plumbing nobody
+ * chose to look at. Matching the window would be worse than matching the name.
+ *
+ * The icon lives at the repository root and is shared with glasspole.exe.
+ * Regenerate from glasspole.png with tools/make-icon.py. */
+1 ICON "../../glasspole.ico"

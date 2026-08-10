@@ -167,15 +167,33 @@ ninja -C "$OUT/glasspole" glasspole
 # Compiled directly: the viewer's CMakeLists exists for MSYS2, where
 # pkg-config answers; here the SDL paths are known and a toolchain file for
 # three source files would be ceremony.
-echo "==> tadpole-view.exe"
 V="$PROJ/tadpole/viewer"
+
+# ---- the icon --------------------------------------------------------------
+# Both of these get the Glasspole logo, and tadpole.exe is the one that
+# matters: the installer points the desktop and Start-menu shortcuts at
+# "$INSTDIR\tadpole.exe" with icon index 0, so embedding it here is what makes
+# the shortcut show the logo — no separate .ico to install and nothing to go
+# stale. A shortcut the user makes by hand gets the same artwork.
+#
+# glasspole.ico is committed; regenerate it from glasspole.png with
+# tools/make-icon.py when the logo changes. Building it here would put an
+# image library between a Windows build and a working one.
+echo "==> icon"
+"$TRIPLE-windres" "$V/tadpole_win.rc" -O coff -o "$OUT/tadpole_icon.o" || {
+    echo "windres failed — the executables will have no icon" >&2
+    rm -f "$OUT/tadpole_icon.o"; }
+ICON_OBJ=""
+[ -f "$OUT/tadpole_icon.o" ] && ICON_OBJ="$OUT/tadpole_icon.o"
+
+echo "==> tadpole-view.exe"
 "$TRIPLE-gcc" -O2 -std=gnu17 -DTADPOLE_VERSION="\"$VERSION\"" \
     -o "$OUT/tadpole-view.exe" \
-    "$V/tadpole_view.c" "$V/tadpole_ui.c" "$V/tadpole_hle.c" \
+    "$V/tadpole_view.c" "$V/tadpole_ui.c" "$V/tadpole_hle.c" $ICON_OBJ \
     $SDL_CFLAGS $Z_CFLAGS $SDL_LIBS -lopengl32 $Z_LIBS -lshlwapi -static -mconsole
 
 echo "==> tadpole.exe (launcher)"
-"$TRIPLE-gcc" -O2 -o "$OUT/tadpole.exe" "$V/tadpole_launcher.c" \
+"$TRIPLE-gcc" -O2 -o "$OUT/tadpole.exe" "$V/tadpole_launcher.c" $ICON_OBJ \
     -static -municode -mwindows
 
 fi   # end of the cross-compiled branch

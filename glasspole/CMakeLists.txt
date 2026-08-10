@@ -40,8 +40,18 @@ else()
     set(GP_HOST src/host_posix.c)
 endif()
 
+# The icon, on Windows only. windres does not exist in a Linux build and a .rc
+# means nothing to ELF, so the resource joins the source list rather than being
+# compiled unconditionally. CMAKE_RC_COMPILER comes from the cross toolchain
+# file tools/build-windows.sh writes.
+set(GP_RC)
+if(WIN32)
+    enable_language(RC)
+    set(GP_RC src/glasspole.rc)
+endif()
+
 add_executable(glasspole src/cpu.cpp src/syscall.cpp src/signal.cpp src/cp15.cpp
-                         src/kuser.cpp src/elf.c ${GP_HOST})
+                         src/kuser.cpp src/elf.c ${GP_HOST} ${GP_RC})
 target_include_directories(glasspole PRIVATE src)
 target_link_libraries(glasspole PRIVATE dynarmic)
 if(WIN32)

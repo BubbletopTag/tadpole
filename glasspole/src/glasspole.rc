@@ -1,0 +1,16 @@
+/* Glasspole — the Windows resource block.
+ *
+ * ICON ID 1, AND THE NUMBER MATTERS. Explorer, the taskbar and the Alt-Tab
+ * switcher all show an executable's icon with the LOWEST numeric ID, not the
+ * first one declared. Anything else here would have to stay above this.
+ *
+ * The path is relative to this file, and the icon lives at the repository root
+ * because tadpole.exe and tadpole-view.exe embed the same one — one logo, one
+ * file, three executables. Regenerate it from glasspole.png with
+ * tools/make-icon.py; it is committed so that a Windows build needs no image
+ * library.
+ *
+ * Compiled only on Windows: CMakeLists.txt adds this to the target inside
+ * if(WIN32), because windres does not exist in a Linux build and a .rc means
+ * nothing to ELF. */
+1 ICON "../../glasspole.ico"
