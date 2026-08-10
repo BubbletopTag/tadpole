@@ -325,6 +325,102 @@ struct gp_file {
     int     serves;
 };
 
+/* ---- files a mapping grew, and how big the guest left them ----------------
+ *
+ * mmap does not change a file's length on Linux. On Windows it does:
+ * CreateFileMapping EXTENDS the file to the section's maximum size, and
+ * gp_map_shared has to round that up to the 64 KB allocation granularity. So a
+ * guest that ftruncate()s a file to 200 bytes and then maps it measures 65536
+ * afterwards — a number no POSIX program could have produced, handed to a
+ * guest that has every right to trust it.
+ *
+ * That is not hypothetical, and it is not cosmetic. The GL shim decides
+ * whether its copy of struct layer_state is still in step with the shim's by
+ * comparing state.bin's length against its own sizeof, which is 200. On
+ * Windows it read 65536, concluded the layout had drifted, and fell back to
+ * "use the full panel" — so every Leapster title's 320x240 window was rendered
+ * at 480x272: scaled up and cropped, on Windows and only on Windows, with no
+ * platform-specific rendering code anywhere in the picture.
+ *
+ * KEYED BY THE FILE, NOT THE DESCRIPTOR. The shim creates, truncates and maps
+ * state.bin on one fd; the GL library opens it separately and measures it on
+ * another. A note stored on the gp_file that did the mapping would be
+ * invisible from the fd that asks the question — which is the whole point.
+ * Windows' volume + file index is the same identity st_dev/st_ino carries. */
+#define GP_MAX_GROWN 16
+static struct {
+    DWORD   vol, idx_hi, idx_lo;
+    int64_t logical;
+} g_grown[GP_MAX_GROWN];
+static int     g_grown_n;
+static SRWLOCK g_grown_lock = SRWLOCK_INIT;
+
+static int file_id(HANDLE h, DWORD *vol, DWORD *hi, DWORD *lo)
+{
+    BY_HANDLE_FILE_INFORMATION bi;
+    if (!GetFileInformationByHandle(h, &bi)) return 0;
+    *vol = bi.dwVolumeSerialNumber;
+    *hi  = bi.nFileIndexHigh;
+    *lo  = bi.nFileIndexLow;
+    return 1;
+}
+
+/* The size to report for this handle, or -1 to report the real one. */
+static int64_t grown_get(HANDLE h)
+{
+    DWORD vol, hi, lo;
+    int64_t r = -1;
+    int i;
+    if (!file_id(h, &vol, &hi, &lo)) return -1;
+    AcquireSRWLockShared(&g_grown_lock);
+    for (i = 0; i < g_grown_n; i++)
+        if (g_grown[i].vol == vol && g_grown[i].idx_hi == hi
+            && g_grown[i].idx_lo == lo) { r = g_grown[i].logical; break; }
+    ReleaseSRWLockShared(&g_grown_lock);
+    return r;
+}
+
+/* Record the pre-extension size, once. A second mapping of the same file must
+ * not overwrite it with the already-grown length. */
+static void grown_note(HANDLE h, int64_t logical)
+{
+    DWORD vol, hi, lo;
+    int i;
+    if (!file_id(h, &vol, &hi, &lo)) return;
+    AcquireSRWLockExclusive(&g_grown_lock);
+    for (i = 0; i < g_grown_n; i++)
+        if (g_grown[i].vol == vol && g_grown[i].idx_hi == hi
+            && g_grown[i].idx_lo == lo) goto out;
+    if (g_grown_n < GP_MAX_GROWN) {
+        g_grown[g_grown_n].vol    = vol;
+        g_grown[g_grown_n].idx_hi = hi;
+        g_grown[g_grown_n].idx_lo = lo;
+        g_grown[g_grown_n].logical = logical;
+        g_grown_n++;
+    } else {
+        gp_log("map_shared: no room to remember the guest-visible size of a "
+               "%lld-byte file; it will measure as grown\n", (long long)logical);
+    }
+out:
+    ReleaseSRWLockExclusive(&g_grown_lock);
+}
+
+/* The guest has restated the size itself, so there is nothing left to correct. */
+static void grown_clear(HANDLE h)
+{
+    DWORD vol, hi, lo;
+    int i;
+    if (!file_id(h, &vol, &hi, &lo)) return;
+    AcquireSRWLockExclusive(&g_grown_lock);
+    for (i = 0; i < g_grown_n; i++)
+        if (g_grown[i].vol == vol && g_grown[i].idx_hi == hi
+            && g_grown[i].idx_lo == lo) {
+            g_grown[i] = g_grown[--g_grown_n];
+            break;
+        }
+    ReleaseSRWLockExclusive(&g_grown_lock);
+}
+
 /* ---- FIFOs as named pipes -------------------------------------------------
  *
  * Win32 HAS pipes with FIFO semantics; they are just not filesystem objects
@@ -561,6 +657,17 @@ int gp_map_shared(void *at, size_t len, gp_file *f, uint64_t off, int prot)
     }
 
     end = off + len;
+    /* REMEMBER HOW BIG THE GUEST LEFT IT, because the next call grows it.
+     * `len` was rounded up to the allocation granularity above, and
+     * CreateFileMapping extends the file to the section's maximum size — so
+     * a 200-byte state.bin becomes 65536 the moment it is mapped. Linux does
+     * no such thing, and a guest that measures its own file gets an answer it
+     * cannot make sense of. See grown_note(). */
+    {
+        LARGE_INTEGER cur;
+        if (GetFileSizeEx(f->h, &cur) && (uint64_t)cur.QuadPart < end)
+            grown_note(f->h, cur.QuadPart);
+    }
     hmap = CreateFileMappingW(f->h, NULL, PAGE_READWRITE,
                               (DWORD)(end >> 32), (DWORD)end, NULL);
     if (!hmap) return err();
@@ -817,6 +924,15 @@ int64_t gp_seek(gp_file *f, int64_t off, int whence)
                  : whence == GP_SEEK_END ? FILE_END : FILE_BEGIN;
     BOOL ok;
     if (f->pipe) return GP_ESPIPE;
+    /* SEEK_END means the end the GUEST knows about. Where a mapping grew the
+     * file for granularity, seeking to the real end would report a size the
+     * guest never chose — which is exactly how the GL shim concluded its
+     * struct layout was wrong. Resolve it against the remembered size instead;
+     * lseek(0, SEEK_END) is how a POSIX program asks "how big is this?". */
+    if (whence == GP_SEEK_END) {
+        int64_t l = grown_get(f->h);
+        if (l >= 0) { method = FILE_BEGIN; off += l; }
+    }
     want.QuadPart = off;
     AcquireSRWLockExclusive(&f->lock);
     ok = SetFilePointerEx(f->h, want, &got, method);
@@ -896,7 +1012,16 @@ int gp_fstat(gp_file *f, struct gp_statbuf *st)
         st->nlink = 1;
         return 0;
     }
-    return fill_from_handle(f->h, st);
+    {
+        int r = fill_from_handle(f->h, st);
+        /* Same correction as gp_seek: fstat is the other way a guest asks how
+         * big its file is, and it must not learn about our granularity. */
+        if (r == 0) {
+            int64_t l = grown_get(f->h);
+            if (l >= 0) st->size = (uint64_t)l;
+        }
+        return r;
+    }
 }
 
 int gp_truncate(gp_file *f, uint64_t size)
@@ -905,9 +1030,14 @@ int gp_truncate(gp_file *f, uint64_t size)
      * floor, and unlike the SetFilePointer/SetEndOfFile dance it does not
      * touch the file position — ftruncate does not either. */
     FILE_END_OF_FILE_INFO info;
+    int r;
     info.EndOfFile.QuadPart = (LONGLONG)size;
-    return SetFileInformationByHandle(f->h, FileEndOfFileInfo,
-                                      &info, sizeof info) ? 0 : err();
+    r = SetFileInformationByHandle(f->h, FileEndOfFileInfo,
+                                   &info, sizeof info) ? 0 : err();
+    /* The guest has just stated the size itself, so there is nothing left to
+     * correct for — whatever a mapping did earlier, THIS is now the truth. */
+    if (r == 0) grown_clear(f->h);
+    return r;
 }
 
 int gp_sync(gp_file *f)
