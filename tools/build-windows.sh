@@ -82,7 +82,37 @@ if [ ! -d "$SDL" ]; then
     curl -fsSL "$SDL_URL" | tar xz -C "$OUT/sdl2"
 fi
 SDL_CFLAGS="-I$SDL/include -I$SDL/include/SDL2 -Dmain=SDL_main"
-SDL_LIBS="-L$SDL/lib -lmingw32 -lSDL2main -lSDL2 -mwindows"
+# ASK SDL, rather than writing the list out. A static SDL2 needs a dozen
+# Windows import libraries — ole32, oleaut32, setupapi, dinput8 and the rest —
+# and the failure when one is missing is a page of undefined COM symbols like
+# CoCreateInstance, which names SDL nowhere. sdl2-config ships in the archive
+# and knows the exact set for the version being used.
+if [ -x "$SDL/bin/sdl2-config" ]; then
+    SDL_LIBS="$("$SDL/bin/sdl2-config" --prefix="$SDL" --static-libs)"
+else
+    SDL_LIBS="-L$SDL/lib -lmingw32 -mwindows -lSDL2main -lSDL2 -lm -lkernel32 \
+-luser32 -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lversion -luuid \
+-ladvapi32 -lsetupapi -lshell32 -ldinput8"
+fi
+
+# ---- zlib -----------------------------------------------------------------
+# The viewer decodes PNG with nothing but zlib, and there is no distribution
+# mingw zlib worth relying on either — so it is fetched and cross-built here,
+# for the same reason and in the same way as SDL2 above. It is about two
+# hundred kilobytes of C and takes a couple of seconds.
+ZLIB_VER="${ZLIB_VER:-1.3.1}"
+ZLIB="$OUT/zlib/zlib-$ZLIB_VER"
+if [ ! -f "$ZLIB/libz.a" ]; then
+    echo "==> fetching and building zlib $ZLIB_VER for $TRIPLE"
+    mkdir -p "$OUT/zlib"
+    curl -fsSL "https://github.com/madler/zlib/releases/download/v$ZLIB_VER/zlib-$ZLIB_VER.tar.gz" \
+        | tar xz -C "$OUT/zlib"
+    # win32/Makefile.gcc is zlib's own cross-compilation path; PREFIX is the
+    # tool prefix, not an install location.
+    make -C "$ZLIB" -f win32/Makefile.gcc PREFIX="$TRIPLE-" libz.a >/dev/null
+fi
+Z_CFLAGS="-I$ZLIB"
+Z_LIBS="-L$ZLIB -lz"
 
 # ---- glasspole ------------------------------------------------------------
 # The emulator. Needs dynarmic, which is a CMake project, so it gets a
@@ -100,8 +130,36 @@ set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
 set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 EOF
+# BOOST, AND WHY IT NEEDS A DIRECTORY OF ITS OWN.
+#
+# dynarmic does find_package(Boost 1.57 REQUIRED). There is no mingw Boost in
+# most distributions, and the host's headers would do — Boost's use here is
+# variant and type_index, both header-only and both perfectly portable, and
+# Boost picks its platform config from the COMPILER's macros, so mingw gets the
+# Windows one.
+#
+# The problem is not the headers, it is the directory they live in. Found at
+# /usr/include, CMake adds /usr/include to the include path, and from that
+# moment mingw's own <wchar.h> is shadowed by glibc's. The failure surfaces
+# inside mingw's <cwchar> as "fwide has not been declared", which points
+# nowhere near Boost.
+#
+# So the same headers are offered from a directory that contains NOTHING else.
+BOOSTDIR="$OUT/boostinc"
+if [ ! -e "$BOOSTDIR/boost" ]; then
+    if [ -d /usr/include/boost ]; then
+        mkdir -p "$BOOSTDIR"
+        ln -sfn /usr/include/boost "$BOOSTDIR/boost"
+    else
+        echo "no Boost headers found — install boost (headers are enough)" >&2
+        exit 1
+    fi
+fi
+
 cmake -S "$PROJ/glasspole" -B "$OUT/glasspole" -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE="$OUT/mingw.cmake" \
+      -DBoost_INCLUDE_DIR="$BOOSTDIR" \
+      -DBoost_NO_SYSTEM_PATHS=ON \
       -DCMAKE_BUILD_TYPE=Release >/dev/null
 ninja -C "$OUT/glasspole" glasspole
 
@@ -114,7 +172,7 @@ V="$PROJ/tadpole/viewer"
 "$TRIPLE-gcc" -O2 -std=gnu17 -DTADPOLE_VERSION="\"$VERSION\"" \
     -o "$OUT/tadpole-view.exe" \
     "$V/tadpole_view.c" "$V/tadpole_ui.c" "$V/tadpole_hle.c" \
-    $SDL_CFLAGS $SDL_LIBS -lopengl32 -lz -lshlwapi -static -mconsole
+    $SDL_CFLAGS $Z_CFLAGS $SDL_LIBS -lopengl32 $Z_LIBS -lshlwapi -static -mconsole
 
 echo "==> tadpole.exe (launcher)"
 "$TRIPLE-gcc" -O2 -o "$OUT/tadpole.exe" "$V/tadpole_launcher.c" \
