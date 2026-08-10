@@ -1191,7 +1191,7 @@ struct mitem {
 };
 
 enum {
-	IT_RUN_UI = 1, IT_SWF, IT_PKG, IT_FW, IT_STOP, IT_QUIT,
+	IT_RUN_UI = 1, IT_SWF, IT_PKG, IT_CART, IT_FW, IT_STOP, IT_QUIT,
 	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE, IT_UPDATE,
 	IT_GAMES, IT_DEBUG, IT_SYSTEM
 };
@@ -1208,6 +1208,11 @@ static const struct mitem FILE_ITEMS[] = {
 	 * their own game collection. */
 	{ "Game Library...",        IT_GAMES,  0, 0, 0 },
 	{ "Install .tar directly...", IT_PKG,  0, 0, 0 },
+	/* A cartridge people dumped THEMSELVES, with dd on the device, is a raw
+	 * FAT image and not a package — so it sat in a folder next to the .tar
+	 * files being uninstallable, which is a poor reward for making a proper
+	 * backup. This turns one into the other. */
+	{ "Convert Cartridge Dump...", IT_CART, 0, 0, 0 },
 	{ "",                       0,         0, 0, 0 },
 	{ "Setup System Firmware...", IT_FW,   0, 0, 0 },
 	{ "Erase System Firmware",  IT_ERASE,  0, 1, 1 },
@@ -1617,6 +1622,19 @@ static void activate(int id)
 		if (access(start, R_OK) != 0)
 			path_join(start, sizeof(start), g_proj, "");
 		fb_open("Install Package", start, ".tar", UI_ACT_INSTALL_PKG);
+		break;
+	case IT_CART:
+		/* Same starting folder as Install, because a dump pulled off a device
+		 * over FTP lands wherever the user keeps their games — and the
+		 * converted .tar is written into the games folder, so the next thing
+		 * they do is find it already in the Game Library. */
+		if (g_cfg.games_dir[0])
+			snprintf(start, sizeof(start), "%s", g_cfg.games_dir);
+		else
+			path_join(start, sizeof(start), g_proj, "games");
+		if (access(start, R_OK) != 0)
+			path_join(start, sizeof(start), g_proj, "");
+		fb_open("Cartridge dump (.bin)", start, ".bin", UI_ACT_CONVERT_CART);
 		break;
 	case IT_FW:
 		path_join(start, sizeof(start), g_proj, "");

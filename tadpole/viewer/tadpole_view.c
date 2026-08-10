@@ -3135,6 +3135,27 @@ int main(int argc, char **argv)
 		case UI_ACT_INSTALL_PKG:
 			tool_run("install", "tools/install-game.sh", actpath);
 			break;
+		case UI_ACT_CONVERT_CART: {
+			/* THE .tar GOES TO THE GAMES FOLDER, not beside the .bin. The
+			 * point of converting is to install it, and the Game Library
+			 * reads that folder — so the result appears where the user is
+			 * already looking rather than next to a 128 MB image they now
+			 * have to go and find. */
+			char *av[6];
+			char gd[600];
+			const char *dir = ui_cfg()->games_dir;
+			int n = 0;
+			av[n++] = (char *)"tools/cart2tar.py";
+			if (dir && *dir) {
+				snprintf(gd, sizeof(gd), "%s", dir);
+				av[n++] = (char *)"-o";
+				av[n++] = gd;
+			}
+			av[n++] = (char *)actpath;
+			av[n]   = NULL;
+			tool_runv("converting cartridge", "tools/cart2tar.py", av);
+			break;
+		}
 		case UI_ACT_SCAN_GAMES:
 			tool_run("reading games", "tools/scan-games.sh", actpath);
 			break;

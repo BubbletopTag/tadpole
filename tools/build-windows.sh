@@ -204,9 +204,12 @@ for d in shimlibs shimlibs-z shimlibs-gl; do
     [ -d "$PROJ/runtime/$d" ] && cp -r "$PROJ/runtime/$d" "$STAGE/runtime/"
 done
 
+# cart2tar.py and fatread.py go together — the converter is the front end and
+# the FAT reader is all of the work. Both are pure stdlib on purpose, so the
+# bundled 3.7 runs them with nothing added.
 for t in install-game.py scan-games.py check-update.py fetch-firmware.py \
          install-firmware.py online-update.py make-profile.py \
-         erase-firmware.py \
+         erase-firmware.py cart2tar.py fatread.py \
          pkgtool.py fix-perms.py lf3.py scan-games.sh packagelists; do
     cp -r "$PROJ/tools/$t" "$STAGE/tools/" 2>/dev/null || true
 done

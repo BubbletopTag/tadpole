@@ -325,6 +325,39 @@ bundles a shared library package alongside the game. The scanner copes with the
 same variety in icons — RGB and RGBA PNG, and the Flash-era titles whose
 manifest names a `.swf` and ships the artwork beside it as `PopUpIcon.png`.
 
+### Raw cartridge dumps (`.bin`)
+
+The other way people back a cartridge up is on the device itself, which needs
+no PC software at all:
+
+```sh
+dd if=/dev/mtdblock6 of=/LF/Bulk/cart.bin     # on the device, over telnet
+```
+
+then pull the file off by FTP. That is a complete, faithful backup — and it is
+a raw FAT filesystem image, not a package, so Tadpole could not install one.
+
+**File → Convert Cartridge Dump...** turns it into a `.tar` and writes it into
+your games folder, where the Game Library picks it up like any other backup.
+
+```sh
+./tools/cart2tar.py cart.bin            # or several, and -o to choose where
+./tools/fatread.py cart.bin             # just list what is on it
+```
+
+The FAT reading is hand-written (`tools/fatread.py`, no dependencies) because
+every off-the-shelf way to do it is missing on one platform or the other:
+`mount -o loop` needs root and does not exist on Windows, and `mtools` is not
+installed by default on any of the three Linux distributions above. Long
+filenames are read properly — LeapFrog's own files are not 8.3, and a reader
+that ignores VFAT produces a package of mangled stubs that installs and then
+fails to load.
+
+Nothing is rearranged on the way through. A cartridge holds the title *and* a
+`lib/` package of shared libraries, both with their own `meta.inf`, and the
+installer already knows what to do with an archive containing several — so the
+faithful copy is also the one that installs correctly.
+
 ---
 
 ## Running

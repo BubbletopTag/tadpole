@@ -74,6 +74,7 @@ enum ui_action {
 	UI_ACT_RUN_SWF,          /* path filled in */
 	UI_ACT_RUN_APP,          /* path = PackageID of an installed app */
 	UI_ACT_INSTALL_PKG,      /* path filled in */
+	UI_ACT_CONVERT_CART,     /* path = a raw cartridge dump to turn into .tar */
 	UI_ACT_SETUP_FIRMWARE,   /* path filled in */
 	UI_ACT_ERASE_FW,         /* wipe the installed system files */
 	UI_ACT_BUILD_SYSROOT,    /* regenerate runtime/sysroot from the rootfs */
