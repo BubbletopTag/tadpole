@@ -26,6 +26,25 @@ ShowInstDetails show
 ShowUninstDetails show
 BrandingText "${APP} ${VERSION}"
 
+; SAY WHAT THIS IS BEFORE A SINGLE FILE IS WRITTEN. Someone who downloaded
+; "the LeapPad emulator" is entitled to know, before installing, that the
+; Windows build runs on an emulator core written from scratch here rather
+; than on the qemu-user everything else uses — and that the different look is
+; deliberate, not a different program. Cancel is a real answer, so this is
+; MB_OKCANCEL and not a notice they can only agree with.
+Function .onInit
+  MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION \
+"This is a port of the Tadpole LeapPad 2 emulator.$\n$\n\
+It runs on a highly experimental, custom-built replacement for qemu-user, \
+codenamed Glasspole.$\n$\n\
+Because of that, the Windows port uses different branding and colours from \
+the Linux version, so you can tell at a glance which backend you are running.$\n$\n\
+Continue with the installation?" \
+    IDOK continue
+  Abort
+continue:
+FunctionEnd
+
 Page directory
 Page instfiles
 UninstPage uninstConfirm
