@@ -196,6 +196,25 @@ echo "==> tadpole.exe (launcher)"
 "$TRIPLE-gcc" -O2 -o "$OUT/tadpole.exe" "$V/tadpole_launcher.c" $ICON_OBJ \
     -static -municode -mwindows
 
+# ---- hle-probe.exe ---------------------------------------------------------
+# THE ONE DIAGNOSTIC THAT CANNOT BE RUN FROM HERE. Everything else about a
+# Windows problem can be reasoned out of the binaries on this machine; what
+# the user's GPU driver actually offers cannot. hle_probe.c says it plainly:
+# on Windows the operating system's fallback renderer is GDI OpenGL 1.1 with
+# no FBOs at all, and GLES 1.x has no shaders, so HLE needs a real
+# compatibility profile from a real driver. If SDL lands on the GDI fallback
+# the replay renders wrong rather than failing, which is the hardest kind of
+# wrong to diagnose from a photograph.
+#
+# It is a few seconds of build time and it ships, so the answer is always one
+# command away on the machine that has the problem. -mconsole because the
+# probe's output IS its product.
+echo "==> hle-probe.exe"
+"$TRIPLE-gcc" -O2 -std=gnu17 -o "$OUT/hle-probe.exe" "$V/hle_probe.c" \
+    $SDL_CFLAGS $SDL_LIBS -lopengl32 -static -mconsole || {
+        echo "  (hle-probe did not build — not fatal)" >&2
+        rm -f "$OUT/hle-probe.exe"; }
+
 fi   # end of the cross-compiled branch
 
 # ---- staging --------------------------------------------------------------
@@ -204,6 +223,9 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE/tadpole/viewer/build" "$STAGE/glasspole/build" "$STAGE/tools" \
          "$STAGE/runtime"
 cp "$OUT/tadpole.exe"                    "$STAGE/tadpole.exe"
+# Ships beside the binaries so a rendering complaint can be answered with a
+# measurement instead of a round trip. See the note where it is built.
+[ -f "$OUT/hle-probe.exe" ] && cp "$OUT/hle-probe.exe" "$STAGE/"
 cp "$OUT/tadpole-view.exe"               "$STAGE/tadpole/viewer/build/"
 cp "$OUT/glasspole/glasspole.exe"        "$STAGE/glasspole/build/"
 [ -n "$SDL" ] && cp "$SDL/bin/SDL2.dll" "$STAGE/tadpole/viewer/build/" 2>/dev/null || true

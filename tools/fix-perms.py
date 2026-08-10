@@ -52,7 +52,19 @@ def main(argv):
                 scanned += 1
                 # O_NONBLOCK as well, belt and braces: a device node that slips
                 # through must not be able to block either.
-                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+                #
+                # AND IT DOES NOT EXIST ON WINDOWS. os.O_NONBLOCK is POSIX-only,
+                # so naming it unconditionally raised
+                #
+                #   AttributeError: module 'os' has no attribute 'O_NONBLOCK'
+                #
+                # on the first file, which killed this whole step. The firmware
+                # installer runs it as a subprocess and carried on regardless,
+                # so the install "succeeded" with the message scrolled past.
+                # Nothing on Windows can block on opening a regular file the way
+                # a FIFO does on Linux — there are no FIFOs in an NTFS tree —
+                # so having no flag to add there is correct, not a compromise.
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
                 try:
                     head = os.read(fd, 4)
                 finally:
