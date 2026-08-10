@@ -413,20 +413,36 @@ std::string Machine::HostPath(const std::string &guest) {
      * shortly after. Identical syscalls to qemu, identical files, and a
      * different answer to a question about a path that was not there. */
     if (guest.empty()) return std::string();
+
     /* Relative paths resolve against the guest's cwd, not against the sysroot
      * root. Getting this wrong is invisible until a title chdirs.
      *
-     * Against cwd_host — the ALREADY-RESOLVED host directory — and not
-     * `sysroot + cwd`. chdir() is the one path the shim translates for itself
-     * (qemu-user does not translate chdir, so the shim has to), which means
-     * the cwd the guest reports is usually a host path already. Prefixing the
-     * sysroot to it doubles it, and there is no existence fallback down here
-     * to hide that: Clam Prix chdir'd into its package, opened Data/main.waf,
-     * got ENOENT, and asserted on the NULL waf_archive. */
+     * JOINING IS ALL THAT HAPPENS HERE. The result goes back through exactly
+     * the same sysroot rule as any absolute path below, and it has to, because
+     * THE CWD IS NOT ALWAYS A GUEST PATH: the shim prepends the sysroot to
+     * every chdir itself (qemu-user does not translate chdir at all), so what
+     * arrives is often an absolute HOST path. This branch used to prepend the
+     * sysroot unconditionally and with no fallback, which produced
+     *
+     *   open Data/misc.waf -> /tmp/sr/tmp/sr/LF/Bulk/ProgramFiles/<pkg>/Data/misc.waf = -2
+     *
+     * — the sysroot twice — for EVERY relative open a title makes after
+     * entering its own package, which is nearly all of them. Measured on Clam
+     * Prix: all six Data/*.waf opens failed, waf_open asserted on a null
+     * archive, and the title exited 127 with a screen it had never drawn.
+     *
+     * RECURSING RATHER THAN TRACKING A SECOND CWD. The first fix for this kept
+     * the resolved host directory alongside the guest one and used it here.
+     * That works only when SYS_chdir was the thing that set it, and it needs
+     * two strings to stay in step forever. Handing the joined path back to the
+     * sysroot-first/literal-second rule needs no extra state and is right for
+     * either kind of cwd, because "does the sysroot have it" is the question
+     * that distinguishes them. It also covers open, stat, access, mkdir,
+     * unlink, rename and opendir in one place instead of at each call. */
     if (guest[0] != '/') {
-        std::string base = cwd_host.empty() ? sysroot : cwd_host;
+        std::string base = cwd;
         if (base.empty() || base.back() != '/') base += '/';
-        return base + guest;
+        return HostPath(base + guest);
     }
 
     /* qemu-user's -L semantics, and they matter more than they look. The

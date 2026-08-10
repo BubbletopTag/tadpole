@@ -74,6 +74,9 @@ struct UnixSocket {
     std::deque<std::shared_ptr<UnixSocket>> backlog;   /* server: pending peers */
     std::weak_ptr<UnixSocket>               peer;      /* client/server: the far end */
     std::deque<std::string>                 rx;        /* bytes waiting to be read */
+    /* A connection that is accepted and whose traffic goes nowhere. The syslog
+     * socket is the only one — see the /dev/log case in connect(). */
+    bool sink = false;
 };
 
 /* The guest's descriptor table. Guest fd numbers are OURS — the lowest free
@@ -225,15 +228,16 @@ struct Machine {
      * nothing while reporting only that a config failed to load. */
     std::string cwd = "/";
 
-    /* ...and the SAME directory as a HOST path, which is not `sysroot + cwd`.
-     * The shim's chdir() wrapper resolves the sysroot itself and hands the
-     * kernel a host path, so `cwd` is routinely already host-absolute; adding
-     * the sysroot to it a second time produced
+    /* ONE cwd, and it may hold a HOST path. The shim's chdir() wrapper
+     * resolves the sysroot itself and hands the kernel a host path (qemu-user
+     * does not translate chdir at all), so this string is routinely already
+     * host-absolute. HostPath used to prepend the sysroot to it regardless,
+     * producing
      *   /tmp/sr/tmp/sr/LF/Bulk/ProgramFiles/<pkg>/Data/main.waf
-     * and every relative open after a chdir returned ENOENT. Resolving
-     * relative paths through this instead is also what the kernel does for
-     * qemu, which never translates a relative path at all. */
-    std::string cwd_host;
+     * and every relative open after a chdir returned ENOENT. It now feeds the
+     * joined path back through the sysroot-first/literal-second rule, which
+     * answers correctly for either kind of cwd without a second string here
+     * that would have to be kept in step forever. */
 
     uint32_t mmap_next = 0;
     uint32_t brk_cur   = 0;
