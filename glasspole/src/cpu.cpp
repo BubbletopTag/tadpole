@@ -324,11 +324,19 @@ std::string Machine::HostPath(const std::string &guest) {
      * different answer to a question about a path that was not there. */
     if (guest.empty()) return std::string();
     /* Relative paths resolve against the guest's cwd, not against the sysroot
-     * root. Getting this wrong is invisible until a title chdirs. */
+     * root. Getting this wrong is invisible until a title chdirs.
+     *
+     * Against cwd_host — the ALREADY-RESOLVED host directory — and not
+     * `sysroot + cwd`. chdir() is the one path the shim translates for itself
+     * (qemu-user does not translate chdir, so the shim has to), which means
+     * the cwd the guest reports is usually a host path already. Prefixing the
+     * sysroot to it doubles it, and there is no existence fallback down here
+     * to hide that: Clam Prix chdir'd into its package, opened Data/main.waf,
+     * got ENOENT, and asserted on the NULL waf_archive. */
     if (guest[0] != '/') {
-        std::string base = cwd;
+        std::string base = cwd_host.empty() ? sysroot : cwd_host;
         if (base.empty() || base.back() != '/') base += '/';
-        return sysroot + base + guest;
+        return base + guest;
     }
 
     /* qemu-user's -L semantics, and they matter more than they look. The

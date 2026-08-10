@@ -1414,19 +1414,30 @@ void gp_syscall(Thread &t) {
 
     case SYS_chdir: {
         /* Guest-relative chdir is resolved through the CURRENT cwd before it
-         * replaces it, so `chdir("Data")` from a package directory works. */
+         * replaces it, so `chdir("Data")` from a package directory works.
+         *
+         * BOTH forms of the directory are kept. `cwd` is what getcwd hands
+         * back and what a further relative chdir builds on; `cwd_host` is the
+         * host directory that relative open/stat resolve against. They are not
+         * the same string and one cannot be derived from the other, because
+         * the argument arriving here has usually been through the shim's own
+         * chdir() wrapper and is already sysroot-prefixed — see Machine. */
         std::string want = m.Str(a0);
         if (m.trace) tpath = want;
-        std::string target = want;
+        std::string target = want, host;
         if (!target.empty() && target[0] != '/') {
             target = m.cwd;
             if (target.empty() || target.back() != '/') target += '/';
             target += want;
+            host = m.HostPath(want);       /* resolves through cwd_host */
+        } else {
+            host = m.HostPath(target);
         }
         gp_statbuf st;
-        if (gp_stat(m.HostPath(target).c_str(), &st) < 0) { ret = GP_ENOENT; break; }
+        if (gp_stat(host.c_str(), &st) < 0) { ret = GP_ENOENT; break; }
         if (!st.is_dir) { ret = GP_ENOTDIR; break; }
-        m.cwd = target;
+        m.cwd      = target;
+        m.cwd_host = host;
         ret = 0;
         break;
     }

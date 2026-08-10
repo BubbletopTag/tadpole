@@ -184,6 +184,16 @@ struct Machine {
      * nothing while reporting only that a config failed to load. */
     std::string cwd = "/";
 
+    /* ...and the SAME directory as a HOST path, which is not `sysroot + cwd`.
+     * The shim's chdir() wrapper resolves the sysroot itself and hands the
+     * kernel a host path, so `cwd` is routinely already host-absolute; adding
+     * the sysroot to it a second time produced
+     *   /tmp/sr/tmp/sr/LF/Bulk/ProgramFiles/<pkg>/Data/main.waf
+     * and every relative open after a chdir returned ENOENT. Resolving
+     * relative paths through this instead is also what the kernel does for
+     * qemu, which never translates a relative path at all. */
+    std::string cwd_host;
+
     uint32_t mmap_next = 0;
     uint32_t brk_cur   = 0;
     std::vector<GuestFd> fds;
