@@ -539,6 +539,20 @@ static void prereq_check(struct prereq *p)
 			snprintf(cand, sizeof(cand), "%s/build/deps/python/bin/python3", g_proj);
 			if (access(cand, X_OK) == 0) p->fwtools = 1;
 		}
+		/* AND THE WINDOWS SPELLING OF THE SAME THING, which is not bin/python3
+		 * — the embeddable distribution puts python.exe at the top of its own
+		 * directory, with no bin. Without this the installer ships a Python,
+		 * ubi_reader and lzallright, and the wizard's first page still says
+		 * "No firmware extractor. Run ./tools/fetch-deps.sh": wrong about the
+		 * dependency, and pointing at a shell script Windows cannot run
+		 * either. Same failure as the qemu-arm check below, same fix.
+		 *
+		 * F_OK, not X_OK: executability is not a thing access() can report on
+		 * Windows, and "it is there" is the whole question. */
+		if (!p->fwtools) {
+			snprintf(cand, sizeof(cand), "%s/build/deps/python/python.exe", g_proj);
+			if (access(cand, F_OK) == 0) p->fwtools = 1;
+		}
 	}
 	/* GLASSPOLE COUNTS AS AN EMULATOR. Without this the wizard is correct but
 	 * useless on Windows: qemu-arm's user mode cannot exist there, so the
