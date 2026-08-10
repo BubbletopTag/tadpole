@@ -56,7 +56,16 @@ def _repo_from_git():
 
 
 REPO = os.environ.get("TADPOLE_REPO") or _repo_from_git() or "bubbletoptag/tadpole"
-ASSET = "Tadpole-x86_64.AppImage"
+
+# ONE RELEASE, TWO ASSETS, AND EACH PLATFORM ASKS FOR ITS OWN. Handing a
+# Windows user an AppImage is worse than offering no update at all: the
+# download succeeds and the file cannot run. So the asset follows the platform
+# doing the asking. TADPOLE_ASSET overrides, for testing and for anyone
+# checking the other platform's release from this one.
+ASSET_LINUX = "Tadpole-x86_64.AppImage"
+ASSET_WINDOWS = "Glasspole-Setup.exe"
+ASSET = os.environ.get("TADPOLE_ASSET") or (
+    ASSET_WINDOWS if sys.platform == "win32" else ASSET_LINUX)
 API = "https://api.github.com/repos/%s/releases?per_page=30" % REPO
 UA = "Tadpole-update-check"
 TIMEOUT = 8

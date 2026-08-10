@@ -28,6 +28,8 @@
 #else
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>       /* map_file: MapViewOfFile of the guest's arena */
+#include <shellapi.h>      /* ShellExecuteA: hand over to the update installer */
+#include <limits.h>        /* INT_PTR's companions */
 #include <io.h>            /* _open_osfhandle: pipe HANDLEs as CRT fds */
 
 /* The FIFO stand-ins, viewer end. glasspole's gp_mkfifo maps a FIFO path to
@@ -1753,14 +1755,25 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 		if (lh == INVALID_HANDLE_VALUE)
 			lh = CreateFileA("NUL", GENERIC_WRITE, 0, &sa, OPEN_EXISTING, 0, NULL);
 
+		/* WITH DEBUG ON, THE GUEST GETS A CONSOLE OF ITS OWN. AppManager is
+		 * four hundred lines of boot chatter and the single most useful
+		 * artefact when a title misbehaves; watching it arrive live is worth
+		 * a window, and it is what "debug level 1" means everywhere else in
+		 * this program. Quiet by default: a console per launch would be
+		 * noise for someone who only wants to play. The log file is written
+		 * either way, so nothing is lost by choosing the quiet one. */
+		int console = ui_cfg()->debug_level >= 1;
 		memset(&si, 0, sizeof(si));
 		si.cb = sizeof(si);
-		si.dwFlags    = STARTF_USESTDHANDLES;
-		si.hStdInput  = NULL;
-		si.hStdOutput = lh;
-		si.hStdError  = lh;
+		if (!console) {
+			si.dwFlags    = STARTF_USESTDHANDLES;
+			si.hStdInput  = NULL;
+			si.hStdOutput = lh;
+			si.hStdError  = lh;
+		}
 		memset(&pi, 0, sizeof(pi));
-		if (!CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+		if (!CreateProcessA(NULL, cmd, NULL, NULL, !console,
+		                    console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
 		                    NULL, g_projdir, &si, &pi)) {
 			if (lh != INVALID_HANDLE_VALUE) CloseHandle(lh);
 			fprintf(stderr, "tadpole-view: glasspole would not start "
@@ -2148,6 +2161,23 @@ static void tool_poll(void)
 		snprintf(dest, sizeof(dest), "%s", g_update_dest);
 		g_update_dest[0] = 0;
 
+#ifdef _WIN32
+		/* Hand over to the installer and get out of its way. It has to
+		 * replace files this process is holding open, so the running program
+		 * closing itself IS the last step of the update rather than an
+		 * inconvenience to work around. */
+		ui_progress_line("starting the installer");
+		ui_progress_done(1);
+		guest_stop();
+		guest_log_close();
+		if ((INT_PTR)ShellExecuteA(NULL, "open", dest, NULL, NULL, SW_SHOWNORMAL) > 32) {
+			SDL_Quit();
+			exit(0);
+		}
+		ui_progress_line("downloaded, but the installer would not start —");
+		ui_progress_line(dest);
+		return;
+#endif
 		if (img && img[0] && !strcmp(dest + strlen(dest) - 4, ".new")) {
 			char target[1100];
 			snprintf(target, sizeof(target), "%s", img);
@@ -3124,11 +3154,22 @@ int main(int argc, char **argv)
 			const char *img = getenv("APPIMAGE");
 			char dest[1100];
 			char *av[3];
+#ifdef _WIN32
+			/* A Windows release is an INSTALLER, not an image to swap under
+			 * ourselves: it goes to the user's own data directory and is run
+			 * when the download finishes (see tool_poll), which is the
+			 * convention every Windows updater follows and the only one that
+			 * can replace files this process is holding open. */
+			(void)img;
+			snprintf(dest, sizeof(dest), "%s/Glasspole-Setup.exe",
+			         g_dir[0] ? g_dir : ".");
+#else
 			if (img && img[0])
 				snprintf(dest, sizeof(dest), "%s.new", img);
 			else
 				snprintf(dest, sizeof(dest), "%s/Tadpole-x86_64.AppImage",
 				         g_projdir[0] ? g_projdir : ".");
+#endif
 			av[0] = (char *)"--download";
 			av[1] = dest;
 			av[2] = NULL;
