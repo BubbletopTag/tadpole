@@ -43,10 +43,36 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-command -v "$TRIPLE-gcc" >/dev/null || {
-    echo "no $TRIPLE-gcc — install mingw-w64" >&2; exit 1; }
+# NATIVE OR CROSS, decided by where it is running. Under MSYS2 the compiler
+# IS the target compiler and the two CMake trees are already there, so the
+# script builds in place instead of cross-compiling — which is what makes it
+# possible to test the installer on the machine that will run it, without
+# waiting for a Linux release to be cut.
+NATIVE=0
+case "$(uname -s)" in MSYS*|MINGW*) NATIVE=1 ;; esac
+
+if [ "$NATIVE" = 0 ]; then
+    command -v "$TRIPLE-gcc" >/dev/null || {
+        echo "no $TRIPLE-gcc — install mingw-w64" >&2; exit 1; }
+fi
 
 mkdir -p "$OUT"
+
+if [ "$NATIVE" = 1 ]; then
+    echo "==> native MSYS2 build"
+    cmake -S "$PROJ/glasspole" -B "$PROJ/glasspole/build" -G Ninja >/dev/null
+    ninja -C "$PROJ/glasspole/build" glasspole
+    cmake -S "$PROJ/tadpole/viewer" -B "$PROJ/tadpole/viewer/build" -G Ninja \
+          -DTADPOLE_VERSION="$VERSION" >/dev/null
+    ninja -C "$PROJ/tadpole/viewer/build"
+    mkdir -p "$OUT/glasspole"
+    cp "$PROJ/glasspole/build/glasspole.exe"        "$OUT/glasspole/"
+    cp "$PROJ/tadpole/viewer/build/tadpole-view.exe" "$OUT/"
+    cp "$PROJ/tadpole/viewer/build/tadpole.exe"      "$OUT/"
+    SDL=""            # everything is linked statically by the CMake build
+fi
+
+if [ "$NATIVE" = 0 ]; then
 
 # ---- SDL2 -----------------------------------------------------------------
 SDL="$OUT/sdl2/SDL2-$SDL_VER/$TRIPLE"
@@ -94,6 +120,8 @@ echo "==> tadpole.exe (launcher)"
 "$TRIPLE-gcc" -O2 -o "$OUT/tadpole.exe" "$V/tadpole_launcher.c" \
     -static -municode -mwindows
 
+fi   # end of the cross-compiled branch
+
 # ---- staging --------------------------------------------------------------
 STAGE="$OUT/stage"
 rm -rf "$STAGE"
@@ -102,14 +130,24 @@ mkdir -p "$STAGE/tadpole/viewer/build" "$STAGE/glasspole/build" "$STAGE/tools" \
 cp "$OUT/tadpole.exe"                    "$STAGE/tadpole.exe"
 cp "$OUT/tadpole-view.exe"               "$STAGE/tadpole/viewer/build/"
 cp "$OUT/glasspole/glasspole.exe"        "$STAGE/glasspole/build/"
-cp "$SDL/bin/SDL2.dll"                   "$STAGE/tadpole/viewer/build/" 2>/dev/null || true
+[ -n "$SDL" ] && cp "$SDL/bin/SDL2.dll" "$STAGE/tadpole/viewer/build/" 2>/dev/null || true
 # tadpole.sh is how every part of this finds the project root, so it ships
 # even though nothing runs it on Windows.
 cp "$PROJ/tadpole.sh" "$PROJ/glasspole.png" "$PROJ/tadpole.png" \
    "$PROJ/README.md" "$STAGE/"
 cp -r "$PROJ/runtime/setup-sysroot.sh" "$STAGE/runtime/" 2>/dev/null || true
+
+# THE ARM SHIM SHIPS. It is guest code, identical on every host, it is in git
+# already, and without it a title loads no framebuffer, no input and no audio
+# — the difference between an emulator and a window. What does NOT ship is
+# runtime/libs, which is LeapFrog's own libraries: those arrive with the
+# firmware the wizard fetches.
+for d in shimlibs shimlibs-z shimlibs-gl; do
+    [ -d "$PROJ/runtime/$d" ] && cp -r "$PROJ/runtime/$d" "$STAGE/runtime/"
+done
+
 for t in install-game.py scan-games.py check-update.py fetch-firmware.py \
-         pkgtool.py fix-perms.py lf3.py packagelists; do
+         pkgtool.py fix-perms.py lf3.py scan-games.sh packagelists; do
     cp -r "$PROJ/tools/$t" "$STAGE/tools/" 2>/dev/null || true
 done
 echo "$VERSION" > "$STAGE/.tadpole-version"
