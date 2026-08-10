@@ -1141,6 +1141,13 @@ static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *xp)
 {
     if (xp->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION)
         return EXCEPTION_CONTINUE_SEARCH;
+    /* MAY NOT COME BACK: the policy layer longjmps out of here to run the
+     * guest's own SIGSEGV handler (see host.h). That is measured on POSIX and
+     * NOT on Windows — a longjmp out of a vectored handler unwinds through
+     * frames the kernel put on the stack, and the reliable Windows spelling of
+     * the same idea is to edit xp->ContextRecord and return
+     * EXCEPTION_CONTINUE_EXECUTION. Until someone can test that, a Windows
+     * guest keeps today's behaviour for faults it cannot hand on. */
     if (g_fault_fn)
         g_fault_fn((void *)(uintptr_t)xp->ExceptionRecord->ExceptionInformation[1]);
     /* TerminateProcess, not exit(): atexit handlers and stdio flushing after
@@ -1148,6 +1155,22 @@ static LONG CALLBACK fault_veh(EXCEPTION_POINTERS *xp)
      * same reasoning as the POSIX backend's _exit(). */
     TerminateProcess(GetCurrentProcess(), 73);
     return EXCEPTION_CONTINUE_SEARCH;   /* unreachable */
+}
+
+/* Nothing to do: a vectored handler does not run with the fault masked, so
+ * there is no mask to put back. See host.h. */
+void gp_fault_rearm(void) { }
+
+/* Windows has no SIGQUIT. The nearest thing is a console control handler on
+ * CTRL_BREAK_EVENT, which is a different enough contract — it runs on a thread
+ * the system injects, and only for a process attached to a console — that
+ * guessing at it here would be worse than saying no. Refused, so the caller
+ * reports that hang sampling is unavailable rather than silently never
+ * working. */
+int gp_install_quit_handler(gp_quit_fn fn)
+{
+    (void)fn;
+    return GP_ENOSYS;
 }
 
 int gp_install_fault_handler(gp_fault_fn fn)

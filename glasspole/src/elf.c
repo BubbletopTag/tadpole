@@ -77,6 +77,7 @@ int gp_elf_load(gp_guest *g, const char *path, uint32_t bias, gp_image *out) {
     out->phnum = eh.phnum;
 
     uint32_t brk = 0;
+    uint32_t load_lo = 0xffffffffu;
     int have_phdr_addr = 0;
 
     for (uint32_t i = 0; i < eh.phnum; i++) {
@@ -128,6 +129,9 @@ int gp_elf_load(gp_guest *g, const char *path, uint32_t bias, gp_image *out) {
         if (r < 0) { gp_close(f); return r; }
 
         if (va + ph.memsz > brk) brk = va + ph.memsz;
+        /* Where the image STARTS, which the loader knew and then threw away.
+         * A crash report cannot name a library from an address without it. */
+        if (lo < load_lo) load_lo = lo;
 
         /* AT_PHDR when there is no PT_PHDR: the program headers live inside
          * whichever PT_LOAD covers e_phoff. */
@@ -136,7 +140,8 @@ int gp_elf_load(gp_guest *g, const char *path, uint32_t bias, gp_image *out) {
             out->phdr = va + (eh.phoff - ph.offset);
     }
 
-    out->brk = page_up(brk);
+    out->brk     = page_up(brk);
+    out->load_lo = load_lo == 0xffffffffu ? 0 : load_lo;
     gp_close(f);
 
     gp_log("elf: %s — entry %08x, %u phdrs at %08x, brk %08x%s%s\n",
@@ -165,6 +170,7 @@ int gp_elf_load_program(gp_guest *g, const char *path, const char *sysroot,
     if (r < 0) return r;
 
     out->interp_base = interp_bias;
+    out->interp_end  = interp.brk;
     out->entry       = interp.entry;   /* the interpreter runs first */
     return 0;
 }

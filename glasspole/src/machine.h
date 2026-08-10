@@ -120,6 +120,29 @@ struct GuestFd {
     bool     used = false;
 };
 
+/* ---- signals ------------------------------------------------------------ */
+
+/* One disposition, in the KERNEL's shape rather than libc's.
+ *
+ * rt_sigaction's struct is handler, flags, restorer, then a 64-bit mask, with
+ * sigsetsize passed as a separate argument. libc's struct sigaction puts a
+ * sigset_t between the handler and the flags and its size is a build-time
+ * choice of the C library — so a layout copied from the host would put
+ * sa_flags in the wrong place and SA_SIGINFO would never arrive. The shim's
+ * tadpole_crash.c hit exactly that and documents it; both sides now name the
+ * same struct.
+ *
+ * `handler` is a guest address, or 0 for SIG_DFL and 1 for SIG_IGN. */
+struct SigAction {
+    uint32_t handler  = 0;
+    uint32_t flags    = 0;
+    uint32_t restorer = 0;
+    uint64_t mask     = 0;
+};
+
+/* 1..31 are the classic signals and nothing here uses the realtime range. */
+constexpr int GP_NSIG = 32;
+
 /* ---- one guest thread --------------------------------------------------- */
 
 struct Thread {
@@ -157,6 +180,24 @@ struct Thread {
     uint64_t ticks_left = 0;
     uint64_t syscalls   = 0;
 
+    /* THE MASK IS PER THREAD AND THE HANDLERS ARE NOT. sigprocmask is defined
+     * to affect only the calling thread, while CLONE_SIGHAND makes the
+     * disposition table one per process — so they sit on opposite sides of the
+     * split, and putting the mask in Machine would let one thread blocking a
+     * signal during a critical section silently block it everywhere.
+     *
+     * `sigpend` is written by OTHER threads (tkill aimed here, and a
+     * process-directed kill), which is why it is atomic while `sigmask` — only
+     * ever touched by this thread — is not. */
+    uint64_t              sigmask = 0;
+    std::atomic<uint64_t> sigpend{ 0 };
+
+    /* Which round of "describe yourself" this thread has already answered.
+     * A host SIGQUIT cannot touch the thread list from its handler, so it only
+     * bumps Machine::quit_gen and each thread notices for itself — see
+     * gp_install_quit_handler in host.h. */
+    uint32_t quit_seen = 0;
+
     bool exited = false;
 
     void Halt();              /* stop just this thread */
@@ -184,6 +225,16 @@ struct Machine {
      * nothing while reporting only that a config failed to load. */
     std::string cwd = "/";
 
+    /* ...and the SAME directory as a HOST path, which is not `sysroot + cwd`.
+     * The shim's chdir() wrapper resolves the sysroot itself and hands the
+     * kernel a host path, so `cwd` is routinely already host-absolute; adding
+     * the sysroot to it a second time produced
+     *   /tmp/sr/tmp/sr/LF/Bulk/ProgramFiles/<pkg>/Data/main.waf
+     * and every relative open after a chdir returned ENOENT. Resolving
+     * relative paths through this instead is also what the kernel does for
+     * qemu, which never translates a relative path at all. */
+    std::string cwd_host;
+
     uint32_t mmap_next = 0;
     uint32_t brk_cur   = 0;
     std::vector<GuestFd> fds;
@@ -206,9 +257,39 @@ struct Machine {
     std::vector<uint8_t> proc_used;
     std::atomic<uint32_t> next_tid{ 1000 };
 
+    /* SHARED, because every clone() in the census carried CLONE_SIGHAND: what
+     * a signal does is a property of the PROCESS, not of the thread that
+     * happens to receive it. Guarded by `lock`, except on the fault path —
+     * see take_action() in signal.cpp for why that one cannot take it. */
+    std::array<SigAction, GP_NSIG> sigactions{};
+
+    /* WHAT IS MAPPED WHERE, and it exists for exactly one reader.
+     *
+     * The shim's crash handler resolves a guest pc by reading
+     * /proc/self/maps and reporting "libFoo.so+0x1234" — the form that makes
+     * two crashes from the 79 titles sharing one engine comparable. Under
+     * glasspole there was no such file, so HostPath fell through to the HOST's
+     * /proc/self/maps and every guest address was matched against the
+     * emulator's own mappings: every line of every backtrace came out as
+     * "anon+<the address again>", which is a backtrace with the answer
+     * removed. Guarded by `lock`. */
+    struct GuestMap {
+        uint32_t    base = 0, end = 0;
+        int         prot = 0;
+        std::string path;
+    };
+    std::vector<GuestMap> maps;
+    void AddMap(uint32_t base, uint32_t len, int prot, const std::string &path);
+    void WriteProcMaps();                    /* caller holds `lock` */
+
     /* exit_group, or a fatal fault: every thread stops. Atomic because it is
      * read by each thread's run loop without taking the lock. */
     std::atomic<bool> exiting{ false };
+
+    /* How many times somebody outside has asked the guest to describe itself.
+     * Bumped from a host signal handler, which is why it is an atomic counter
+     * and not a list of things to do. */
+    std::atomic<uint32_t> quit_gen{ 0 };
     int  status = 0;
 
     bool trace = false;
@@ -247,5 +328,32 @@ int gp_spawn_thread(Thread &parent, uint32_t flags, uint32_t child_stack,
 
 /* Called from dynarmic's CallSVC. */
 void gp_syscall(Thread &t);
+
+/* ---- signals, all of it in signal.cpp ----------------------------------- */
+
+/* The kernel's sigreturn trampolines, which live in the vectors page beside
+ * the kuser helpers. Called by gp_install_kuser_page while the page is still
+ * writable. */
+void gp_signal_write_trampolines(Machine &m);
+
+int32_t gp_sigaction (Thread &t, int sig, uint32_t act, uint32_t oldact, uint32_t setsize);
+int32_t gp_sigprocmask(Thread &t, int how, uint32_t set, uint32_t oldset, uint32_t setsize);
+
+/* kill(37), tkill(238) and tgkill(268). Marks the signal pending on the target
+ * thread; gp_signal_deliver is what runs it. */
+int32_t gp_signal_send(Thread &t, uint32_t nr, uint32_t a0, uint32_t a1, uint32_t a2);
+
+/* Run the highest-priority deliverable pending signal on THIS thread, if any.
+ * Returns true if it did anything. Must be called with Machine::lock NOT held.
+ *
+ * It is called from two places and needs both: gp_syscall, once the return
+ * value is in r0, and the run loop, for a signal another thread aimed here. */
+bool gp_signal_deliver(Thread &t);
+
+/* A guest SIGSEGV from a host fault. Returns false if the guest has no handler
+ * installed, in which case the caller reports the fault and dies as before. */
+bool gp_signal_fault(Thread &t, uint32_t fault_addr);
+
+void gp_sigreturn(Thread &t, bool rt);
 
 #endif /* GLASSPOLE_MACHINE_H */

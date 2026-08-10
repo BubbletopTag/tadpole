@@ -313,11 +313,41 @@ static gp_fault_fn g_fault_fn;
 
 static void segv_handler(int sig, siginfo_t *si, void *uc) {
     (void)sig; (void)uc;
+    /* MAY NOT COME BACK. See gp_install_fault_handler in host.h: the policy
+     * layer hands a guest with its own SIGSEGV handler to that handler, and
+     * gets there by longjmping out of this frame. */
     if (g_fault_fn) g_fault_fn(si->si_addr);
     /* Not return, and not exit(): we are on a signal stack after a memory
      * fault, and anything that runs atexit handlers or flushes stdio may
      * fault again and hide the message we just printed. */
     _exit(73);
+}
+
+static gp_quit_fn g_quit_fn;
+
+static void quit_handler(int sig) {
+    (void)sig;
+    if (g_quit_fn) g_quit_fn();
+}
+
+int gp_install_quit_handler(gp_quit_fn fn) {
+    struct sigaction sa;
+    g_quit_fn = fn;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = quit_handler;
+    /* SA_RESTART, because this must not turn a sampled guest's in-flight read
+     * into an EINTR it was never written to expect. */
+    sa.sa_flags = SA_RESTART;
+    sigemptyset(&sa.sa_mask);
+    return sigaction(SIGQUIT, &sa, NULL) == 0 ? 0 : err();
+}
+
+void gp_fault_rearm(void) {
+    sigset_t s;
+    sigemptyset(&s);
+    sigaddset(&s, SIGSEGV);
+    sigaddset(&s, SIGBUS);
+    pthread_sigmask(SIG_UNBLOCK, &s, NULL);
 }
 
 int gp_install_fault_handler(gp_fault_fn fn) {
