@@ -48,6 +48,7 @@ extern "C" {
  * that presents as the guest handling the wrong error. */
 #define GP_EPERM    -1
 #define GP_ENOENT   -2
+#define GP_ESRCH    -3   /* kill/tkill naming a thread that is not there */
 #define GP_EINTR    -4
 #define GP_EIO      -5
 #define GP_ENXIO    -6   /* O_WRONLY|O_NONBLOCK on a FIFO with no reader */
@@ -321,11 +322,48 @@ int   gp_poll_readable(gp_file **fs, int n, int timeout_ms, unsigned char *ready
  * POLICY — what to print, and about which guest thread — lives above.
  *
  * `fn` is called on the faulting thread with the faulting host address, in a
- * context where very little is safe: print, and do not try to recover. The
+ * context where very little is safe: print, and do not allocate or lock. The
  * backend terminates the process once it returns, so `fn` need not.
+ *
+ * IT IS ALLOWED NOT TO RETURN, and the policy layer uses that. A guest that
+ * installed its own SIGSEGV handler is entitled to run it — that is where
+ * Tadpole's crash report comes from — and there is no way to resume a JIT
+ * block mid-instruction, so cpu.cpp longjmps out to its run loop instead and
+ * re-enters the guest at the handler. The backend must therefore treat "fn
+ * returned" as the only path to termination, and must not do any cleanup that
+ * a non-returning fn would skip.
  */
 typedef void (*gp_fault_fn)(void *fault_addr);
 int   gp_install_fault_handler(gp_fault_fn fn);
+
+/* Called by the policy layer after it has taken control away from a faulting
+ * thread as described above.
+ *
+ * POSIX blocks the signal for the duration of its handler and a longjmp out
+ * does not put that back, so without this the thread runs on with SIGSEGV
+ * blocked and the NEXT guest fault kills the process outright with nothing
+ * said about it. Win32's vectored handlers have no such mask, so its backend
+ * has nothing to do here. */
+void  gp_fault_rearm(void);
+
+/* ---- asking a running guest to describe itself --------------------------
+ *
+ * A white screen raises nothing, so there is no fault to catch and the crash
+ * path above never runs. The shim's answer to that is a SIGQUIT handler that
+ * prints the same pc/lr/stack report and RETURNS, so the guest carries on and
+ * can be sampled twice — which is the difference between "stuck on one
+ * instruction" and "looping over a range". tadpole_crash.c documents it as the
+ * way to diagnose a hang.
+ *
+ * It only works if a quit from OUTSIDE the emulator becomes a signal INSIDE
+ * the guest, which is what this is for. `fn` is called on whichever host
+ * thread takes the signal and must do nothing but set a flag: the guest-side
+ * delivery happens later, on each guest thread's own run loop.
+ *
+ * Returns <0 where the host has no such notion, which is not a failure worth
+ * refusing to start over. */
+typedef void (*gp_quit_fn)(void);
+int   gp_install_quit_handler(gp_quit_fn fn);
 
 /* ---- odds and ends ------------------------------------------------------ */
 int   gp_random(void *buf, size_t len);          /* /dev/urandom */

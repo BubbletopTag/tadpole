@@ -69,6 +69,13 @@ int gp_install_kuser_page(Machine &m) {
     std::memcpy(m.Ptr(0xffff0fc0), kuser_cmpxchg, sizeof kuser_cmpxchg);
     std::memcpy(m.Ptr(0xffff0fe0), kuser_get_tls, sizeof kuser_get_tls);
 
+    /* THE SIGNAL RETURN TRAMPOLINES SHARE THIS PAGE, at 0xffff0500, because
+     * that is where the kernel puts them — it is the same vectors page and
+     * the same reasoning: a handler returns to an absolute address nobody
+     * declared. See signal.cpp. Written here rather than there because this is
+     * the one moment the page is still writable. */
+    gp_signal_write_trampolines(m);
+
     /* Helper version 5, which is what a 2.6.32-era kernel published and what
      * the guest's libgcc was built against. */
     const uint32_t version = 5;

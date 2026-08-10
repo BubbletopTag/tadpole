@@ -40,7 +40,8 @@ else()
     set(GP_HOST src/host_posix.c)
 endif()
 
-add_executable(glasspole src/cpu.cpp src/syscall.cpp src/cp15.cpp src/kuser.cpp src/elf.c ${GP_HOST})
+add_executable(glasspole src/cpu.cpp src/syscall.cpp src/signal.cpp src/cp15.cpp
+                         src/kuser.cpp src/elf.c ${GP_HOST})
 target_include_directories(glasspole PRIVATE src)
 target_link_libraries(glasspole PRIVATE dynarmic)
 if(WIN32)
@@ -66,7 +67,7 @@ if(GP_CLANG AND GP_OBJCOPY)
     # multi-target by construction, so this needs no cross-binutils install.
     set(GP_ARMFLAGS --target=armv7-unknown-linux-gnueabi
                     -march=armv7-a -mfpu=vfp -mfloat-abi=softfp -fuse-ld=lld)
-    foreach(gp_test hello thread threads-many)
+    foreach(gp_test hello thread threads-many abort segv)
     add_custom_command(
         OUTPUT  ${CMAKE_CURRENT_BINARY_DIR}/${gp_test}.bin
         COMMAND ${GP_CLANG} ${GP_ARMFLAGS} -nostdlib -static
