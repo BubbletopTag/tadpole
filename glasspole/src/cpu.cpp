@@ -323,12 +323,28 @@ std::string Machine::HostPath(const std::string &guest) {
      * shortly after. Identical syscalls to qemu, identical files, and a
      * different answer to a question about a path that was not there. */
     if (guest.empty()) return std::string();
+
     /* Relative paths resolve against the guest's cwd, not against the sysroot
-     * root. Getting this wrong is invisible until a title chdirs. */
+     * root. Getting this wrong is invisible until a title chdirs.
+     *
+     * JOINING IS ALL THAT HAPPENS HERE. The result goes through exactly the
+     * same sysroot rule as any absolute path below, and it has to, because THE
+     * CWD IS NOT ALWAYS A GUEST PATH: tadpole's shim prepends the sysroot to
+     * every chdir itself (qemu-user does not translate chdir at all), so what
+     * arrives is an absolute HOST path. This branch used to prepend the sysroot
+     * to it unconditionally and with no fallback, which produced
+     *
+     *   open Data/misc.waf -> /tmp/sr/tmp/sr/LF/Bulk/ProgramFiles/<pkg>/Data/misc.waf = -2
+     *
+     * — the sysroot twice — for EVERY relative open a title makes after
+     * entering its own package, which is nearly all of them. Measured on Clam
+     * Prix: all six Data/*.waf opens failed, waf_open asserted on a null
+     * archive, and the title exited 127 with a screen that had never been
+     * drawn. qemu opens the same files without complaint. */
     if (guest[0] != '/') {
         std::string base = cwd;
         if (base.empty() || base.back() != '/') base += '/';
-        return sysroot + base + guest;
+        return HostPath(base + guest);
     }
 
     /* qemu-user's -L semantics, and they matter more than they look. The

@@ -216,6 +216,42 @@ void fill_stat64(const gp_statbuf &st, guest_stat64 *g) {
     g->st_atime_  = g->st_ctime_ = g->st_mtime_;
 }
 
+/* ---- paths -------------------------------------------------------------- */
+
+/* Canonicalise an absolute path the way the kernel does before getcwd hands it
+ * back: no empty components, no "." and no ".." left in it, and no trailing
+ * slash unless the whole path is "/".
+ *
+ * IT IS THE STRING THE GUEST SEES, and the guest does arithmetic on it. Storing
+ * chdir's argument verbatim meant getcwd answered
+ *
+ *     /tmp/sr/LF/Bulk/ProgramFiles/LST3-0x00180025-000000/     (trailing slash)
+ *     /LF/Bulk/Data/probe/dir/..                               (after chdir(".."))
+ *
+ * where qemu — where the real kernel — answers the same path canonical and
+ * without the slash. A title that concatenates or compares that string gets a
+ * different answer under the two emulators for no other reason.
+ *
+ * LEXICAL, not by resolving each component. That is the same decision lstat64
+ * already makes here: runtime/sysroot is a symlink farm and this layer's whole
+ * story is that those links are invisible, so "x/.." is x's parent and not the
+ * parent of whatever x points at. */
+std::string canon_path(const std::string &p) {
+    std::vector<std::string> parts;
+    size_t i = 0;
+    while (i < p.size()) {
+        size_t j = p.find('/', i);
+        if (j == std::string::npos) j = p.size();
+        std::string c = p.substr(i, j - i);
+        if (c == "..") { if (!parts.empty()) parts.pop_back(); }
+        else if (!c.empty() && c != ".") parts.push_back(std::move(c));
+        i = j + 1;
+    }
+    std::string out;
+    for (auto &c : parts) { out += '/'; out += c; }
+    return out.empty() ? "/" : out;
+}
+
 /* ---- descriptors -------------------------------------------------------- */
 
 /* Put a copy of `src` at the lowest free descriptor >= `from`, which is what
@@ -287,6 +323,7 @@ int32_t sock_recv(Machine &m, std::unique_lock<std::mutex> &guard,
 
 int32_t sock_send(Machine &m, const std::shared_ptr<UnixSocket> &sk,
                   uint32_t buf, uint32_t len) {
+    if (sk->sink) return (int32_t)len;          /* the syslog socket, see connect */
     auto peer = sk->peer.lock();
     if (!peer) return GP_EPIPE;
     std::string payload((const char *)m.Ptr(buf), len);
@@ -639,6 +676,38 @@ void gp_syscall(Thread &t) {
 
         auto it = m.bound.find(name);
         std::shared_ptr<UnixSocket> server = it == m.bound.end() ? nullptr : it->second.lock();
+
+        /* THE SYSLOG SOCKET IS ACCEPTED AND THROWN AWAY, and the reason is an
+         * errno two calls later rather than anything about logging.
+         *
+         * syslogd runs on the device (etc/init.d/syslog starts it), so on real
+         * hardware this connect succeeds. Under qemu-arm it also succeeds —
+         * qemu hands the sun_path to the host, and a systemd host has a
+         * world-writable /dev/log — so the guest's messages quietly go to the
+         * host's journal. Here AF_UNIX is ours and nothing is bound, so it
+         * failed, and THAT is what produced the divergence the compatibility
+         * sweep saw:
+         *
+         *   qemu       ts_config: No such file or directory
+         *   glasspole  ts_config: Permission denied
+         *
+         * uClibc's syslog falls back to LOG_CONS when it cannot reach the
+         * logger, which means open("/dev/console") — a root-owned device on
+         * the host that BOTH emulators refuse identically with EACCES
+         * (measured; this is not a path bug). tslib's ts_config returns -1
+         * without touching errno, so the caller's perror("ts_config") printed
+         * whatever the last failing syscall left behind: ENOENT under qemu,
+         * where the console was never opened, and EACCES here, where it was
+         * opened and refused 48 times in one run.
+         *
+         * Succeeding is what the device does and what qemu does. Dropping the
+         * bytes is the only part that differs, and nothing reads them back. */
+        if (!server && name == "/dev/log") {
+            g->sock->sink = true;
+            ret = 0;
+            break;
+        }
+
         if (!server || !server->listening) {
             /* The documented benign case: DaemonControl with no VideoDaemon
              * behind it. ECONNREFUSED is what the guest is used to seeing. */
@@ -1141,16 +1210,32 @@ void gp_syscall(Thread &t) {
     }
 
     case SYS_access: {
-        /* The mode argument is still not checked — the guest is one uid
-         * against a host filesystem whose permissions we do not model, and a
-         * W_OK that guesses is worse than one that is not asked. What DID need
-         * fixing is the error: every failure was flattened to ENOENT, so a
-         * path whose parent is a file, or one the host refuses, was reported
-         * as simply absent and the guest went looking for the wrong cause. */
+        /* The error was fixed first: every failure was flattened to ENOENT, so
+         * a path whose parent is a file, or one the host refuses, was reported
+         * as simply absent and the guest went looking for the wrong cause.
+         *
+         * THE MODE IS CHECKED NOW, and it has to be — access(W_OK) exists
+         * precisely so a program can find out whether writing will work, and
+         * answering "yes" to every question makes the call useless. Measured
+         * against qemu on a 0444 file: W_OK is EACCES there and was 0 here, as
+         * was X_OK on a plain data file.
+         *
+         * The test is "does ANY permission class grant it", not "does OUR uid
+         * get it". We do not model uids — st_uid and st_gid are invented
+         * constants a few lines up — so a class-by-class answer would be
+         * fiction. This one is the truthful half: a bit that is set nowhere
+         * cannot be granted to anyone, which is exactly the case the guest is
+         * asking about on a read-only file, and a bit that is set somewhere is
+         * left alone rather than guessed at. */
         gp_statbuf st;
         if (m.trace) tpath = m.Str(a0);
         int r0 = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st);
-        ret = r0 < 0 ? r0 : 0;
+        if (r0 < 0) { ret = r0; break; }
+        constexpr uint32_t R_ANY = 0444, W_ANY = 0222, X_ANY = 0111;
+        const uint32_t want = a1;
+        ret = (((want & 4) && !(st.mode & R_ANY)) ||
+               ((want & 2) && !(st.mode & W_ANY)) ||
+               ((want & 1) && !(st.mode & X_ANY))) ? GP_EACCES : 0;
         break;
     }
 
@@ -1406,7 +1491,12 @@ void gp_syscall(Thread &t) {
 
     case SYS_getcwd: {
         const size_t n = m.cwd.size() + 1;
-        if (a1 < n) { ret = GP_EINVAL; break; }
+        /* ERANGE, NOT EINVAL. It is what the kernel answers for a buffer too
+         * small to hold the path, and callers act on the difference: the libc
+         * getcwd(NULL, 0) form doubles its buffer and tries again on ERANGE,
+         * and gives up on anything else. Measured against qemu with a 1-byte
+         * buffer — errno 34 there, 22 here. */
+        if (a1 < n) { ret = GP_ERANGE; break; }
         std::memcpy(m.Ptr(a0), m.cwd.c_str(), n);
         ret = (int32_t)n;
         break;
@@ -1424,9 +1514,15 @@ void gp_syscall(Thread &t) {
             target += want;
         }
         gp_statbuf st;
-        if (gp_stat(m.HostPath(target).c_str(), &st) < 0) { ret = GP_ENOENT; break; }
+        /* THE REAL ERRNO, not ENOENT for everything. A path whose parent is a
+         * file is ENOTDIR and one that is too long is ENAMETOOLONG; flattening
+         * both to "not there" is how a guest ends up looking for the wrong
+         * cause. Measured: chdir() with a 5000-byte path gives 36 under qemu
+         * and used to give 2 here. */
+        int r0 = gp_stat(m.HostPath(target).c_str(), &st);
+        if (r0 < 0) { ret = r0; break; }
         if (!st.is_dir) { ret = GP_ENOTDIR; break; }
-        m.cwd = target;
+        m.cwd = canon_path(target);
         ret = 0;
         break;
     }

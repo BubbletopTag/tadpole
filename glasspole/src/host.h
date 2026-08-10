@@ -68,6 +68,7 @@ extern "C" {
 #define GP_ENOSPC   -28
 #define GP_ESPIPE   -29
 #define GP_EROFS    -30
+#define GP_ERANGE   -34  /* getcwd into a buffer too small: NOT EINVAL */
 #define GP_ENOSYS   -38
 #define GP_ENOTEMPTY -39
 #define GP_EPIPE    -32

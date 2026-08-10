@@ -74,6 +74,9 @@ struct UnixSocket {
     std::deque<std::shared_ptr<UnixSocket>> backlog;   /* server: pending peers */
     std::weak_ptr<UnixSocket>               peer;      /* client/server: the far end */
     std::deque<std::string>                 rx;        /* bytes waiting to be read */
+    /* A connection that is accepted and whose traffic goes nowhere. The syslog
+     * socket is the only one — see the /dev/log case in connect(). */
+    bool sink = false;
 };
 
 /* The guest's descriptor table. Guest fd numbers are OURS — the lowest free
