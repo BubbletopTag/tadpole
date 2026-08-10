@@ -218,6 +218,18 @@ int   gp_sync(gp_file *f);
  * something does, the symptom will be silence rather than an error. */
 int   gp_mkfifo(const char *utf8_path, uint32_t mode);
 
+/* chmod(2). The mode is Linux permission bits.
+ *
+ * ONLY THE WRITE BIT CROSSES. Windows has no owner/group/other and no execute
+ * bit; all it has is a read-only attribute, so the Win32 backend keys on
+ * `mode & 0222` and ignores the rest. That is a lossy mapping and it is
+ * deliberately not hidden behind a success-for-everything stub: the ERRORS are
+ * what the guest actually reads. Toy Story 3's AppManager chmods
+ * /tmp/bam-wrapper to 0555, a file that is not there on either system, and the
+ * only thing it needs back is ENOENT — which it got from qemu and did not get
+ * from a -ENOSYS that made a missing file look like a missing kernel. */
+int   gp_chmod (const char *utf8_path, uint32_t mode);
+
 int   gp_mkdir (const char *utf8_path, uint32_t mode);
 int   gp_rmdir (const char *utf8_path);
 int   gp_unlink(const char *utf8_path);

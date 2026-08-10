@@ -165,9 +165,35 @@ struct Spawn {
     gp_thread *host = nullptr;
 };
 
+/* THE WATCHDOG REPORTS; IT DOES NOT SENTENCE. It used to call ExitGroup(72) on
+ * a thread that ran three slices without a syscall, on the reasoning that a
+ * guest which stops talking to the kernel is stuck on a lock it will never get.
+ *
+ * That reasoning has a counter-example and it cost a whole title. PAW Patrol:
+ * Ready For Action spends its load doing UTF-8 work inside libustring's
+ * Glib::ustring::ustring(const ustring&, size_type, size_type) — a substring
+ * walk over a 3 KB string, called from the app's own parsing — and it does it
+ * entirely out of already-allocated memory, so it issues no syscall for 1.0
+ * BILLION instructions. The limit was three slices, 600M; the title needed
+ * five. The dump named the loop exactly and the loop was fine. The emulator
+ * was killing a guest that was merely busy, and no threshold set by guesswork
+ * can tell those apart — the next title to want six slices would be lost the
+ * same way.
+ *
+ * Measured, with nothing else changed: killing it gave lit 0% colours 1, and
+ * letting it run gave lit 99% colours 7316 — the same screen qemu draws, which
+ * never had a watchdog to survive.
+ *
+ * So the instrument stays and the verdict goes. Every reason the dump existed
+ * is preserved: a genuine deadlock still prints its pc, sp, lr and registers,
+ * once, and the run then hangs the way it truly is hanging instead of being
+ * dressed up as a clean exit. The line that follows a recovery says how long
+ * the quiet stretch actually was, which is the fact that separates the two
+ * cases and the one nobody could see while the first case was fatal. */
 void RunLoop(Thread &t, Dynarmic::A32::Jit &jit) {
     uint64_t last_syscalls = 0;
-    int      quiet_slices  = 0;
+    uint64_t quiet_slices  = 0;
+    bool     reported      = false;
 
     while (!t.exited && !t.m->exiting.load(std::memory_order_relaxed)) {
         t.ticks_left = BUDGET;
@@ -175,21 +201,29 @@ void RunLoop(Thread &t, Dynarmic::A32::Jit &jit) {
         if (t.exited || t.m->exiting.load(std::memory_order_relaxed)) break;
 
         if (t.syscalls == last_syscalls) {
-            if (++quiet_slices >= 3) {
+            /* Once per quiet stretch. Repeating it every three slices would
+             * bury the guest's own output under the emulator's, which is the
+             * other way to lose a diagnosis. */
+            if (++quiet_slices >= 3 && !reported) {
+                reported = true;
                 const auto &r = jit.Regs();
-                gp_log("WATCHDOG tid %u: %llu instructions, no syscall. Spinning.\n",
+                gp_log("WATCHDOG tid %u: %llu instructions, no syscall. Either a lock "
+                       "that never comes free or a long compute; still running.\n",
                        t.tid, (unsigned long long)(BUDGET * quiet_slices));
                 gp_log("  pc=%08x  sp=%08x  lr=%08x  cpsr=%08x\n",
                        r[15], r[13], r[14], jit.Cpsr());
                 for (int q = 0; q < 13; q += 4)
                     gp_log("  r%-2d %08x  r%-2d %08x  r%-2d %08x  r%-2d %08x\n",
                            q, r[q], q + 1, r[q + 1], q + 2, r[q + 2], q + 3, r[q + 3]);
-                t.m->ExitGroup(72);
-                break;
             }
         } else {
+            if (reported)
+                gp_log("WATCHDOG tid %u: released after %llu instructions — it was "
+                       "computing, not stuck.\n",
+                       t.tid, (unsigned long long)(BUDGET * quiet_slices));
             last_syscalls = t.syscalls;
             quiet_slices  = 0;
+            reported      = false;
         }
     }
 }

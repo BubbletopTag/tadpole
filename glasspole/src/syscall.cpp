@@ -73,6 +73,8 @@ enum : uint32_t {
     SYS_socket = 281, SYS_bind = 282, SYS_connect = 283, SYS_listen = 284,
     SYS_accept = 285, SYS_send = 289, SYS_recv = 291, SYS_shutdown = 293,
     SYS_setsockopt = 294, SYS_getsockopt = 295, SYS_sendto = 290, SYS_recvfrom = 292,
+    /* Both named themselves in the same sweep, from the default case. */
+    SYS_chmod = 15, SYS_timer_create = 257,
 };
 
 /* Guest open() flags, which are the same values on ARM Linux as our GP_O_*
@@ -339,6 +341,8 @@ const char *name_of(uint32_t nr) {
         case SYS_setitimer: return "setitimer";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
+        case SYS_chmod: return "chmod";
+        case SYS_timer_create: return "timer_create";
         default: return "?";
     }
 }
@@ -453,6 +457,38 @@ void gp_syscall(Thread &t) {
          * it belongs: on whoever brings signal delivery. */
         ret = GP_ENOSYS;
         break;
+
+    case SYS_timer_create: {
+        /* A POSIX timer that is created and never armed, because that is
+         * exactly what the guest asks for. Brio's CKernelMPI::CreateTimer calls
+         * timer_create at start-up and treats any failure as fatal — the
+         * -ENOSYS from the default case is what stopped PAW Patrol: The Great
+         * Robot Rescue dead, with <ASSERT> POSIX function fails with error #38
+         * from System/Kernel/Kernel.cpp:911.
+         *
+         * WHAT THE TITLE ACTUALLY DOES, measured under qemu -strace: five
+         * timer_create calls and NOT ONE timer_settime, timer_gettime or
+         * timer_delete in a full run to a drawn screen. So there is nothing
+         * here to schedule. Handing back a distinct id and remembering nothing
+         * is not a shortcut around a timer implementation; it is the whole of
+         * the behaviour the guest exercises.
+         *
+         * The ids are distinct and never reused so that the day something does
+         * arm one, timer_settime lands in the default case and NAMES ITSELF
+         * rather than being quietly accepted against a timer that would never
+         * fire. Signals cannot be delivered at all yet (see SYS_kill), so an
+         * armed timer would be a promise this emulator could not keep.
+         *
+         * Arguments are (clockid, struct sigevent *, timer_t *). The sigevent
+         * is not read: every field in it describes a notification, and there is
+         * no notification. */
+        if (!a2) { ret = GP_EFAULT; break; }
+        static std::atomic<uint32_t> next_timer_id{ 1 };
+        uint32_t id = next_timer_id.fetch_add(1, std::memory_order_relaxed);
+        std::memcpy(m.Ptr(a2), &id, sizeof id);
+        ret = 0;
+        break;
+    }
 
     case SYS_ARM_set_tls:
         /* The kernel's ARM TLS helper. dynarmic keeps TPIDRURO for us, and
@@ -1367,6 +1403,25 @@ void gp_syscall(Thread &t) {
     }
     case SYS_mkdir:  ret = gp_mkdir (m.HostPath(m.Str(a0)).c_str(), a1); break;
     case SYS_rmdir:  ret = gp_rmdir (m.HostPath(m.Str(a0)).c_str()); break;
+    case SYS_chmod: {
+        /* AppManager chmods /tmp/bam-wrapper to 0555 while setting up power and
+         * USB, and the file is not there under either emulator — qemu answers
+         * ENOENT and carries on. So the whole of this call's product is an
+         * errno, and the default case was answering the wrong one.
+         *
+         * AND IT DOES NOT MAKE EITHER CALLER WORK, which is the point of
+         * writing it down. Toy Story 3 and LeapSchool: Reading were the two
+         * titles that reached it, and both are blank UNDER QEMU TOO for an
+         * unrelated reason: App.so fails to load and AppManager restarts
+         * itself, identically on both sides. What the missing case cost was a
+         * diagnosis — "unimplemented syscall 15" was the loudest line in those
+         * logs and it was pointing at nothing. Implementing it takes the false
+         * lead away and leaves the real failure visible. */
+        std::string p = m.Str(a0);
+        if (m.trace) tpath = p;
+        ret = gp_chmod(m.HostPath(p).c_str(), a1 & 07777);
+        break;
+    }
 
     case SYS_ioctl:
         /* Every ioctl in the census was TCGETS, libc asking whether a

@@ -844,6 +844,23 @@ int gp_sync(gp_file *f)
     return FlushFileBuffers(f->h) ? 0 : err();
 }
 
+int gp_chmod(const char *path, uint32_t mode)
+{
+    WCHAR w[GP_WPATH];
+    DWORD attr;
+    int e;
+    if ((e = widen(path, w, GP_WPATH)) < 0) return e;
+    /* Ask the attributes first rather than calling SetFileAttributesW blind:
+     * it is what turns "no such file" into ENOENT instead of whatever the set
+     * would have complained about, and ENOENT is the answer the one measured
+     * caller is waiting for. */
+    attr = GetFileAttributesW(w);
+    if (attr == INVALID_FILE_ATTRIBUTES) return err();
+    if (mode & 0222) attr &= ~(DWORD)FILE_ATTRIBUTE_READONLY;
+    else             attr |=  (DWORD)FILE_ATTRIBUTE_READONLY;
+    return SetFileAttributesW(w, attr) ? 0 : err();
+}
+
 int gp_mkdir(const char *path, uint32_t mode)
 {
     WCHAR w[GP_WPATH];
