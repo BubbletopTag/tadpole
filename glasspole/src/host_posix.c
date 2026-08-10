@@ -174,6 +174,8 @@ int gp_sync(gp_file *f) {
 
 int gp_mkfifo(const char *p, uint32_t m) { return mkfifo(p, (mode_t)m) == 0 ? 0 : err(); }
 
+int gp_chmod (const char *p, uint32_t m) { return chmod(p, (mode_t)(m & 07777)) == 0 ? 0 : err(); }
+
 int gp_mkdir (const char *p, uint32_t m) { return mkdir(p, (mode_t)m) == 0 ? 0 : err(); }
 int gp_rmdir (const char *p)             { return rmdir(p)            == 0 ? 0 : err(); }
 int gp_unlink(const char *p)             { return unlink(p)           == 0 ? 0 : err(); }
