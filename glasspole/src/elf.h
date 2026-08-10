@@ -35,8 +35,10 @@ typedef struct gp_image {
     uint32_t exec_entry;   /* the executable's own entry, for AT_ENTRY */
     uint32_t phdr;         /* guest address of the program headers, for AT_PHDR */
     uint32_t phent, phnum;
+    uint32_t load_lo;      /* start of the lowest PT_LOAD */
     uint32_t brk;          /* end of the highest PT_LOAD, where the heap starts */
     uint32_t interp_base;  /* 0 when the binary is static */
+    uint32_t interp_end;   /* one past the interpreter's highest PT_LOAD */
     char     interp[128];  /* the PT_INTERP string, empty when static */
 } gp_image;
 

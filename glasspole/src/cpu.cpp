@@ -23,6 +23,7 @@
 #include "machine.h"
 
 #include <atomic>
+#include <csetjmp>
 #include <cstdio>
 #include <cstdlib>
 
@@ -118,8 +119,36 @@ public:
 thread_local Thread *g_current = nullptr;
 Machine *g_machine = nullptr;
 
-/* Called from a signal handler. Almost nothing is safe here, so this prints
- * through gp_log and stops — no attempt to recover, no attempt to unwind.
+/* WHERE A FAULTING THREAD GOES INSTEAD OF DYING.
+ *
+ * A guest that installed its own SIGSEGV handler is entitled to run it, and
+ * under Tadpole that handler is the thing that writes crash.log — the only
+ * symbolised backtrace this project has. But the fault lands in the middle of
+ * a JIT block, and there is no way to resume x86 that was compiled from an ARM
+ * instruction which cannot complete.
+ *
+ * So the faulting thread leaves. It sets the guest up on its handler, longjmps
+ * back to RunThread, and RunThread builds a FRESH Jit and re-enters the guest
+ * at the handler — fresh because dynarmic's Run() asserts it is not already
+ * executing, and the abandoned one still believes it is.
+ *
+ * This is not free of cost. Everything between here and RunThread is skipped
+ * without unwinding, dynarmic's included, and the old Jit's code buffer is
+ * dropped rather than reused. That is the right trade for a process whose next
+ * act is to report why it died. */
+thread_local std::jmp_buf g_fault_jmp;
+thread_local bool         g_fault_armed = false;
+thread_local bool         g_fault_taken = false;
+/* BOUNDED, because each hand-off abandons a Jit and builds another. A guest
+ * handler installed without SA_RESETHAND that faults inside itself would
+ * otherwise recurse until the address space ran out, and the last thing a
+ * crash report should do is replace the crash. Four is more than any real
+ * report needs and small enough to notice. */
+thread_local int          g_fault_handoffs = 0;
+constexpr int             MAX_FAULT_HANDOFFS = 4;
+
+/* Called from a signal handler. Almost nothing is safe here: no locks, no
+ * allocation, print and go.
  *
  * The pc reported is the start of the JIT block being executed, not the exact
  * instruction: dynarmic only writes the guest pc back at block boundaries. It
@@ -137,6 +166,9 @@ void on_guest_fault(void *addr) {
     }
 
     const uint32_t guest = static_cast<uint32_t>(p - base);
+    /* SAID FIRST, and unconditionally. The guest's handler may write a far
+     * better report than this one, or may itself fault trying; either way the
+     * line the compatibility sweep triages on is already in the log. */
     gp_log("GUEST FAULT: %08x was never mapped\n", guest);
     if (g_current) {
         gp_log("  thread %u, %llu syscalls in\n", g_current->tid,
@@ -146,6 +178,23 @@ void on_guest_fault(void *addr) {
                    g_current->jit->Regs()[15], g_current->jit->Regs()[13],
                    g_current->jit->Regs()[14]);
     }
+
+    if (g_current && g_fault_armed && g_fault_handoffs < MAX_FAULT_HANDOFFS &&
+        gp_signal_fault(*g_current, guest)) {
+        gp_log("  handing it to the guest's own SIGSEGV handler\n");
+        g_fault_armed = false;
+        g_fault_taken = true;
+        g_fault_handoffs++;
+        std::longjmp(g_fault_jmp, 1);
+    }
+}
+
+/* A quit from outside, counted rather than acted on. Everything a host signal
+ * handler is allowed to do is here: one relaxed increment. The guest-side
+ * delivery happens on each guest thread, where locks and guest memory are
+ * safe again — see gp_signal_deliver. */
+void on_quit_request() {
+    if (g_machine) g_machine->quit_gen.fetch_add(1, std::memory_order_relaxed);
 }
 
 int commit_thunk(void *ctx, uint32_t addr, uint32_t len, int prot) {
@@ -173,6 +222,18 @@ void RunLoop(Thread &t, Dynarmic::A32::Jit &jit) {
         t.ticks_left = BUDGET;
         jit.Run();
         if (t.exited || t.m->exiting.load(std::memory_order_relaxed)) break;
+
+        /* A signal ANOTHER thread aimed here, or a quit asked from outside the
+         * emulator. Either halted this Jit to be noticed now rather than at
+         * some unbounded time in the future, so this is where it gets run —
+         * and it counts as progress, or the watchdog below would read a thread
+         * that was interrupted three times as a spin. */
+        if ((t.sigpend.load(std::memory_order_relaxed) ||
+             t.m->quit_gen.load(std::memory_order_relaxed) != t.quit_seen) &&
+            gp_signal_deliver(t)) {
+            quiet_slices = 0;
+            continue;
+        }
 
         if (t.syscalls == last_syscalls) {
             if (++quiet_slices >= 3) {
@@ -221,20 +282,49 @@ void RunThread(Thread &t, const std::array<uint32_t, 16> &regs,
     /* Per thread, and pointed at THIS thread's tls fields. */
     conf.coprocessors[15] = gp_make_cp15(t);
 
-    Dynarmic::A32::Jit jit{ conf };
+    /* THE STATE THE NEXT Jit STARTS FROM, kept out here because a fault can
+     * end this one. Not written between the setjmp and the longjmp, which is
+     * what makes reading them afterwards defined. */
+    std::array<uint32_t, 16> r = regs;
+    std::array<uint32_t, 64> e = ext;
+    uint32_t c = cpsr, f = fpscr;
 
-    jit.Regs()    = regs;
-    jit.ExtRegs() = ext;
-    jit.SetCpsr(cpsr);
-    jit.SetFpscr(fpscr);
+    for (;;) {
+        Dynarmic::A32::Jit jit{ conf };
 
-    /* PUBLISHED AND WITHDRAWN UNDER THE LOCK. `jit` lives on this stack frame
-     * and ExitGroup halts threads by reaching through this pointer from
-     * another one; without the lock on both sides, a thread finishing while
-     * exit_group runs is a dereference of a frame that has already gone. */
-    { std::lock_guard<std::mutex> g(t.m->lock); t.jit = &jit; }
-    RunLoop(t, jit);
-    { std::lock_guard<std::mutex> g(t.m->lock); t.jit = nullptr; }
+        jit.Regs()    = r;
+        jit.ExtRegs() = e;
+        jit.SetCpsr(c);
+        jit.SetFpscr(f);
+
+        /* PUBLISHED AND WITHDRAWN UNDER THE LOCK. `jit` lives on this stack
+         * frame and ExitGroup halts threads by reaching through this pointer
+         * from another one; without the lock on both sides, a thread finishing
+         * while exit_group runs is a dereference of a frame that has already
+         * gone. */
+        { std::lock_guard<std::mutex> g(t.m->lock); t.jit = &jit; }
+
+        g_fault_taken = false;
+        if (setjmp(g_fault_jmp) == 0) {
+            g_fault_armed = true;
+            RunLoop(t, jit);
+        }
+        g_fault_armed = false;
+
+        { std::lock_guard<std::mutex> g(t.m->lock); t.jit = nullptr; }
+        if (!g_fault_taken) break;
+
+        /* Back from a fault, with the guest already pointed at its own SIGSEGV
+         * handler. POSIX left that signal blocked when it called the handler
+         * we jumped out of, so put it back before running guest code that may
+         * well fault again. */
+        gp_fault_rearm();
+        r = jit.Regs();
+        e = jit.ExtRegs();
+        c = jit.Cpsr();
+        f = jit.Fpscr();
+        gp_log("tid %u: resuming in the guest's fault handler at %08x\n", t.tid, r[15]);
+    }
 }
 
 void thread_entry(void *arg) {
@@ -344,6 +434,67 @@ std::string Machine::HostPath(const std::string &guest) {
     struct gp_statbuf st;
     if (gp_stat(in_root.c_str(), &st) == 0) return in_root;
     return guest;
+}
+
+/* ---- /proc/self/maps ----------------------------------------------------
+ *
+ * Synthesized rather than served from a descriptor, and written out on every
+ * change rather than on demand. Both choices are about WHERE THE READER IS:
+ * the reader is a crash handler inside the guest, it opens the path with the
+ * ordinary open() it already uses, and the least surprising thing we can do is
+ * make the file be there. Rewriting it costs a few hundred bytes per
+ * file-backed mmap — the census counted 295 in a whole run — and buys a file
+ * that is never stale.
+ *
+ * The format is the kernel's, as far as the one parser that reads it cares:
+ * the range, the permissions, and the path LAST on the line. */
+void Machine::AddMap(uint32_t base, uint32_t len, int prot, const std::string &path) {
+    if (path.empty() || !len) return;
+    GuestMap g;
+    g.base = base;
+    g.end  = base + len;
+    g.prot = prot;
+    g.path = path;
+    auto at = maps.begin();
+    while (at != maps.end() && at->base < g.base) ++at;
+    maps.insert(at, std::move(g));
+}
+
+void Machine::WriteProcMaps() {
+    if (maps.empty() || sysroot.empty()) return;
+
+    std::string text;
+    text.reserve(maps.size() * 80);
+    char line[512];
+    for (const auto &g : maps) {
+        std::snprintf(line, sizeof line, "%08x-%08x %c%c%cp 00000000 00:00 0          %s\n",
+                      g.base, g.end,
+                      (g.prot & GP_PROT_READ)  ? 'r' : '-',
+                      (g.prot & GP_PROT_WRITE) ? 'w' : '-',
+                      (g.prot & GP_PROT_EXEC)  ? 'x' : '-',
+                      g.path.c_str());
+        text += line;
+    }
+
+    /* Into the sysroot, because that is where HostPath looks first and it is
+     * the only writable place the guest and the host agree on. A read-only
+     * sysroot simply gets no file, and the crash report degrades to the
+     * addresses alone rather than failing.
+     *
+     * IT IS ONE FILE FOR THE WHOLE SYSROOT, which is the honest limitation
+     * here: two guests sharing a sysroot overwrite each other's, and a crash
+     * report could then name the wrong library. tools/worker-sysroot.sh
+     * already gives every concurrent runner its own copy for exactly this
+     * class of reason, so the case that would break is one that is already
+     * documented as unsupported. */
+    gp_mkdir((sysroot + "/proc").c_str(), 0755);
+    gp_mkdir((sysroot + "/proc/self").c_str(), 0755);
+    gp_file *f = nullptr;
+    if (gp_open((sysroot + "/proc/self/maps").c_str(),
+                GP_O_WRONLY | GP_O_CREAT | GP_O_TRUNC, 0644, &f) < 0)
+        return;
+    gp_write(f, text.data(), text.size());
+    gp_close(f);
 }
 
 void Machine::RetireThread(Thread *t) {
@@ -506,6 +657,13 @@ int main(int argc, char **argv) {
     if (gp_install_fault_handler(on_guest_fault) < 0)
         gp_log("warning: no fault handler — a stray guest access will look like "
                "the emulator crashing\n");
+    /* `kill -QUIT <pid>` becomes a guest SIGQUIT, which is how a HANG is
+     * diagnosed: the shim answers one with a stack dump and carries on. On a
+     * host with no such signal this is refused, and saying so is the point —
+     * the tool silently never working is how it was lost the first time. */
+    if (gp_install_quit_handler(on_quit_request) < 0)
+        gp_log("note: SIGQUIT is not available here, so a hung guest cannot be "
+               "asked for a stack dump\n");
 
     gp_guest g{ m.base, commit_thunk, &m };
     /* An ABSOLUTE path is a GUEST path and goes through the sysroot, which is
@@ -516,6 +674,17 @@ int main(int argc, char **argv) {
     int r = gp_elf_load_program(&g, prog.c_str(), sysroot, INTERP_BASE, &m.image);
     if (r < 0) { gp_log("could not load %s (%d)\n", prog.c_str(), r); return 1; }
     m.brk_cur = m.image.brk;
+
+    /* The two images the LOADER placed. Everything after this is the guest's
+     * own ld-uClibc calling mmap2, and syscall.cpp records those as they
+     * happen. Without these two the executable's own frames — which is most of
+     * a Brio backtrace — have no name. */
+    m.AddMap(m.image.load_lo, m.image.brk - m.image.load_lo,
+             GP_PROT_READ | GP_PROT_EXEC, argv[i]);
+    if (m.image.interp_base)
+        m.AddMap(m.image.interp_base, m.image.interp_end - m.image.interp_base,
+                 GP_PROT_READ | GP_PROT_EXEC, m.image.interp);
+    m.WriteProcMaps();
 
     /* argv as the guest sees it: the path inside the sysroot, not the host's. */
     std::vector<const char *> gargv;

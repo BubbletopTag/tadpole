@@ -65,7 +65,11 @@ enum : uint32_t {
     SYS_sched_setparam = 154, SYS_sched_getparam = 155,
     SYS_sched_setscheduler = 156, SYS_sched_getscheduler = 157,
     SYS_sched_get_priority_max = 159, SYS_sched_get_priority_min = 160,
-    SYS_kill = 37, SYS_poll = 168, SYS_sysinfo = 116,
+    /* Signals. tkill and tgkill are how uClibc's raise() reaches a thread, so
+     * they are how abort() reaches the process — see signal.cpp. */
+    SYS_kill = 37, SYS_tkill = 238, SYS_tgkill = 268,
+    SYS_sigreturn = 119, SYS_rt_sigreturn = 173,
+    SYS_poll = 168, SYS_sysinfo = 116,
     SYS_fdatasync = 148, SYS_fsync = 118, SYS_newselect = 142, SYS_statfs = 99,
     SYS_madvise = 220,
     /* AF_UNIX sockets, implemented in-process. ARM has direct socket calls
@@ -328,6 +332,11 @@ const char *name_of(uint32_t nr) {
         case SYS_sched_getscheduler: return "sched_getscheduler";
         case SYS_sched_setscheduler: return "sched_setscheduler";
         case SYS_socket: return "socket";           case SYS_kill: return "kill";
+        case SYS_tkill: return "tkill";             case SYS_tgkill: return "tgkill";
+        case SYS_rt_sigaction: return "rt_sigaction";
+        case SYS_rt_sigprocmask: return "rt_sigprocmask";
+        case SYS_rt_sigreturn: return "rt_sigreturn";
+        case SYS_sigreturn: return "sigreturn";
         case SYS_bind: return "bind";               case SYS_connect: return "connect";
         case SYS_listen: return "listen";           case SYS_accept: return "accept";
         case SYS_send: return "send";               case SYS_recv: return "recv";
@@ -434,23 +443,38 @@ void gp_syscall(Thread &t) {
         break;
 
     case SYS_set_robust_list:
-    case SYS_rt_sigaction:
-    case SYS_rt_sigprocmask:
     case SYS_ARM_cacheflush:
-        /* Accepted and ignored. dynarmic manages its own code cache, and the
-         * signal calls matter only once something can deliver one. */
+        /* Accepted and ignored. dynarmic manages its own code cache. */
         ret = 0;
         break;
 
+    /* ---- signals ---- */
+    /* All of these are in signal.cpp; the cases here only unpack arguments.
+     * Delivery happens at the BOTTOM of this function, after r0 is written. */
+    case SYS_rt_sigaction:   ret = gp_sigaction (t, (int)a0, a1, a2, a3); break;
+    case SYS_rt_sigprocmask: ret = gp_sigprocmask(t, (int)a0, a1, a2, a3); break;
+
+    case SYS_kill:
+    case SYS_tkill:
+    case SYS_tgkill:
+        ret = gp_signal_send(t, nr, a0, a1, a2);
+        break;
+
+    case SYS_sigreturn:
+    case SYS_rt_sigreturn:
+        /* RETURNS NOTHING, and must not. r0 comes back from the saved frame —
+         * it is the value the interrupted syscall had already produced — so
+         * falling through to `r[0] = ret` below would overwrite the one
+         * register sigreturn exists to restore. */
+        gp_sigreturn(t, nr == SYS_rt_sigreturn);
+        return;
+
     case SYS_setitimer:
-        /* Refused without the per-call log spam of the default case. The
-         * timer's whole product is a SIGALRM and nothing can deliver one;
-         * the one known caller — libsiimpl's ualarm(), which uClibc spells
-         * with setitimer — tolerates the refusal and the title runs. An
-         * accepted-and-ignored 0 here is UNTESTED against that caller (a
-         * first attempt at it drowned in a broken test harness before it
-         * measured anything), so honesty keeps the burden of proof where
-         * it belongs: on whoever brings signal delivery. */
+        /* Still refused. Signals now arrive, but nothing here keeps a timer to
+         * raise SIGALRM FROM — that wants a clock source and a thread to run
+         * it on, and the one known caller (libsiimpl's ualarm, which uClibc
+         * spells with setitimer) tolerates the refusal and the title runs.
+         * Accepting it and never firing would be the worse lie of the two. */
         ret = GP_ENOSYS;
         break;
 
@@ -491,13 +515,6 @@ void gp_syscall(Thread &t) {
     case SYS_sched_getparam:
         if (a1) { uint32_t z = 0; std::memcpy(m.Ptr(a1), &z, 4); }
         ret = 0;
-        break;
-
-    case SYS_kill:
-        /* Nothing here can deliver a signal yet. Reporting success for a
-         * signal that will never arrive is worse than refusing. */
-        gp_log("kill(%u, %u) — signals are not implemented\n", a0, a1);
-        ret = GP_EPERM;
         break;
 
     case SYS_poll: {
@@ -940,6 +957,12 @@ void gp_syscall(Thread &t) {
             if (!g || !g->file) { ret = GP_EBADF; break; }
             std::memset(m.Ptr(at), 0, len);
             gp_pread(g->file, m.Ptr(at), a1, (uint64_t)pgoff * GP_PAGE);
+            /* RECORDED, so that a crash report can name this library. Only
+             * file-backed mappings: an anonymous one has nothing to be called
+             * and the kernel leaves its path field empty too. See
+             * Machine::WriteProcMaps. */
+            m.AddMap(at, len, prot, g->path);
+            m.WriteProcMaps();
         } else {
             std::memset(m.Ptr(at), 0, len);
         }
@@ -1549,4 +1572,19 @@ void gp_syscall(Thread &t) {
     }
 
     r[0] = (uint32_t)ret;
+
+    /* AND ONLY NOW IS A SIGNAL DELIVERED.
+     *
+     * The frame a handler runs on top of is the one sigreturn resumes, so it
+     * has to contain the answer this call produced. Delivering inside the case
+     * above would save r0 as whatever the guest passed in — and raise() would
+     * appear to have returned its own signal number.
+     *
+     * The lock is dropped first because delivery takes it again to read the
+     * disposition table, and half the cases above have already let go of it. */
+    if (t.sigpend.load(std::memory_order_relaxed) ||
+        m.quit_gen.load(std::memory_order_relaxed) != t.quit_seen) {
+        if (guard.owns_lock()) guard.unlock();
+        gp_signal_deliver(t);
+    }
 }
