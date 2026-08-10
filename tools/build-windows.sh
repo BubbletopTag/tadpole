@@ -227,7 +227,7 @@ done
 # bundled 3.7 runs them with nothing added.
 for t in install-game.py scan-games.py check-update.py fetch-firmware.py \
          install-firmware.py online-update.py make-profile.py \
-         erase-firmware.py cart2tar.py fatread.py \
+         erase-firmware.py cart2tar.py fatread.py netssl.py \
          pkgtool.py fix-perms.py lf3.py scan-games.sh packagelists; do
     cp -r "$PROJ/tools/$t" "$STAGE/tools/" 2>/dev/null || true
 done
@@ -329,6 +329,36 @@ if [ ! -f "$PYDIR/python.exe" ]; then
     rm -rf "$WH"
     # The bridge from what ubi_reader imports to what is actually installed.
     cp "$HERE/win-lzallright.py" "$PYDIR/Lib/site-packages/lzallright.py"
+
+    # VCRUNTIME140.dll NEXT TO THE EXTENSION, not only beside python.exe.
+    #
+    # Python loads a .pyd with LoadLibraryExW(..., LOAD_WITH_ALTERED_SEARCH_PATH),
+    # and that flag REPLACES the executable's directory with the .pyd's own
+    # directory in the search order. Every stdlib extension sits in the
+    # interpreter's root, next to vcruntime140.dll, so they all resolve it and
+    # nothing looks wrong — but lzo.cp37-win_amd64.pyd is installed into
+    # Lib\site-packages, where there is no vcruntime, so it alone failed with
+    #
+    #   ubi_reader is not available to this Python (DLL load failed)
+    #
+    # after bz2 had already read all 78 packages from the same interpreter.
+    # Copying the DLL beside it is the whole fix.
+    cp "$PYDIR/vcruntime140.dll" "$PYDIR/Lib/site-packages/" 2>/dev/null || true
+
+    # THE CA BUNDLE, because Windows 7 cannot verify LeapFrog's certificate.
+    # Their chain is rooted at DigiCert Global Root G2 (2013) and Windows
+    # ships roots via Windows Update, so a fresh 7 does not have it: the
+    # download failed verification and reported "cannot reach the server"
+    # while the same host browsed fine over http:// in IE. Taken from the
+    # build host's Mozilla bundle; see tools/netssl.py for how it is used.
+    for ca in /etc/ssl/certs/ca-certificates.crt \
+              /etc/pki/tls/certs/ca-bundle.crt \
+              /etc/ssl/cert.pem; do
+        [ -r "$ca" ] && { cp "$ca" "$PYDIR/cacert.pem"; break; }
+    done
+    [ -f "$PYDIR/cacert.pem" ] || {
+        echo "WARNING: no CA bundle found on this host — HTTPS downloads will" >&2
+        echo "         fail on a Windows that lacks the DigiCert G2 root." >&2; }
 fi
 if [ -f "$PYDIR/python.exe" ]; then
     mkdir -p "$STAGE/build/deps"

@@ -30,6 +30,11 @@ import xml.etree.ElementTree as ET
 
 BASE = "https://digitalcontent.leapfrog.com/packages"
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+# EVERY REQUEST GOES THROUGH THIS. LeapFrog's chain is rooted at DigiCert
+# Global Root G2, which an un-updated Windows 7 does not have — see netssl.py.
+import netssl  # noqa: E402  — a sibling tool, not a package
 XML = os.path.join(HERE, "packagelists", "EnglishLeapPad2.xml")
 BUNDLED = os.path.join(HERE, "packagelists", "lp2-bundled.txt")
 EXTS = ("lf2", "lf3", "lfp")
@@ -130,7 +135,7 @@ def head(url, timeout=20):
     """-> size in bytes, or None if it is not there."""
     req = urllib.request.Request(url, method="HEAD")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with netssl.urlopen(req, timeout=timeout) as r:
             return int(r.headers.get("content-length", 0))
     except urllib.error.HTTPError:
         return None
@@ -203,7 +208,7 @@ def main():
             continue
         print(f"  [{n}/{len(plan)}] {desc or pid}  {size/1048576:.1f} MB", flush=True)
         try:
-            with urllib.request.urlopen(url, timeout=120) as r, \
+            with netssl.urlopen(url, timeout=120) as r, \
                  open(dest + ".part", "wb") as f:
                 while True:
                     chunk = r.read(1 << 16)
