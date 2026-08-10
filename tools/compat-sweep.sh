@@ -50,11 +50,29 @@ OUT="${COMPAT_OUT:-$PROJ/build/compat/$(date +%Y%m%d-%H%M%S)}"
 [ -n "$OUT" ] || { echo "nothing to resume" >&2; exit 1; }
 mkdir -p "$OUT/shots" || exit 1
 TSV="$OUT/results.tsv"
-[ -f "$TSV" ] || printf 'pkg\tname\tkind\tverdict\tearly_lit\tearly_col\tlate_lit\tlate_col\talive\tsignal\tsite\tnote\n' > "$TSV"
+[ -f "$TSV" ] || printf 'pkg\tname\tkind\tverdict\tearly_lit\tearly_col\tlate_lit\tlate_col\talive\tsignal\tsite\tnote\temu\tended\temufault\n' > "$TSV"
+
+# WHICH EMULATOR IS UNDER TEST. Default qemu-arm, exactly as before; set
+# COMPAT_EMU to a glasspole binary to sweep that instead. tadpole.sh already
+# chooses through TADPOLE_QEMU, so the whole front end comes along unchanged
+# and the two runs differ in one variable — which is the only way the numbers
+# they produce are comparable.
+EMU="${COMPAT_EMU:-}"
+if [ -n "$EMU" ]; then
+    [ -x "$EMU" ] || { echo "no emulator at $EMU" >&2; exit 1; }
+else
+    EMU="$(PROJ="$PROJ"; . "$HERE/lib-deps.sh"; tad_qemu || true)"
+    [ -n "$EMU" ] || { echo "no emulator found" >&2; exit 1; }
+fi
+# The reaper matches on the process NAME, so it has to be this binary's name
+# and not a hardcoded qemu-arm — sweeping glasspole with a reaper that only
+# knows about qemu leaves every guest running, and 110 abandoned emulators
+# take the machine down long before the sweep ends.
+EMU_PROC="$(basename "$EMU")"
 
 reap() {
     local p d
-    for p in $(pgrep -x qemu-arm 2>/dev/null); do
+    for p in $(pgrep -x "$EMU_PROC" 2>/dev/null); do
         d=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null |
             grep '^TADPOLE_DIR=' | cut -d= -f2)
         # EXACT match, not a prefix. A prefix would make every worker reap
@@ -68,6 +86,54 @@ trap 'reap; exit 130' INT TERM
 stat_of() {                                   # $1 = TADPOLE_DIR -> "lit col"
     "$HERE/fbshot.py" -d "$1" --stat 2>/dev/null |
         sed -n 's/lit \([0-9]*\)% colours \([0-9]*\)/\1 \2/p'
+}
+
+# WHAT THE EMULATOR ITSELF SAID WENT WRONG.  $1 = run.log -> one line, or ""
+#
+# THE SHIM'S crash.log DOES NOT APPEAR UNDER GLASSPOLE, and assuming it did
+# would have quietly wrecked the comparison. That file is written by a SIGSEGV
+# handler inside the guest; glasspole's on_guest_fault logs the fault and
+# returns rather than delivering a guest signal, so the handler never runs. A
+# sweep that only looks for crash.log therefore scores every glasspole crash
+# as "blank" — the emulator would have come out looking less crashy than qemu
+# while actually being worse, which is the exact wrong answer.
+#
+# So read what glasspole prints instead. Each of these is a distinct failure
+# with a distinct fix, and keeping them apart is most of the value of the run:
+#
+#   GUEST FAULT           unmapped memory — the segfault equivalent
+#   HOST FAULT            outside the guest entirely: an emulator bug
+#   could not translate   an ARM instruction dynarmic does not implement
+#   exception N at pc     the CPU refused the instruction
+#   WATCHDOG              200M instructions with no syscall: spinning
+#   clone without CLONE_THREAD    fork(), which glasspole does not do
+#   could not load        never got as far as running
+#   abort()               the guest called abort and nothing caught it
+#   unimplemented syscall a syscall glasspole does not have
+#
+# BY PRIORITY, NOT BY POSITION IN THE FILE. Searching for "first line that
+# matches anything" reports whichever failure happened EARLIEST, and the
+# earliest is routinely the least interesting: a title that logs an
+# unimplemented syscall at startup and then dies on unmapped memory thirty
+# seconds later gets filed under the syscall, and the fault that actually
+# killed it never appears in the counts.
+emu_fault() {
+    local f pat
+    for pat in \
+        'HOST FAULT at [^ ]+' \
+        'GUEST FAULT: [0-9a-f]+' \
+        'could not translate [0-9]+ instruction\(s\) at [0-9a-f]+' \
+        'exception [0-9]+ at pc=[0-9a-f]+' \
+        'could not load .*' \
+        'clone without CLONE_THREAD' \
+        'guest exited with status 127' \
+        'unimplemented syscall [0-9]+' \
+        'WATCHDOG tid [0-9]+'
+    do
+        f=$(grep -a -m1 -oE "$pat" "$1" 2>/dev/null | head -1)
+        [ -n "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+    return 0
 }
 
 # COMPAT_EXACT=1 matches the whole PackageID instead of any substring of it.
@@ -107,9 +173,11 @@ for d in "$PF"/*/; do
     cd="$OUT/shots/$pkg"; mkdir -p "$cd"
     reap; rm -rf "$TDIR"; mkdir -p "$TDIR"
 
-    TADPOLE_DIR="$TDIR" TADPOLE_CRASHDIR="$cd" TADPOLE_SYSROOT="$SYSROOT" setsid \
+    TADPOLE_QEMU="$EMU" TADPOLE_DIR="$TDIR" TADPOLE_CRASHDIR="$cd" \
+    TADPOLE_SYSROOT="$SYSROOT" setsid \
         "$PROJ/tadpole.sh" --app "$pkg" --no-viewer \
         > "$cd/run.log" 2>&1 < /dev/null &
+    guest_pid=$!
 
     sleep "$EARLY"
     read -r el ec <<<"$(stat_of "$TDIR")"
@@ -142,6 +210,11 @@ for d in "$PF"/*/; do
     reap; rm -rf "$TDIR"
 
     sig=""; site=""; alive=""; note=""
+    fault="$(emu_fault "$cd/run.log")"
+    # Did the guest still exist at the deadline? A title that is spinning and a
+    # title that is gone both draw nothing, and only this tells them apart.
+    if kill -0 "$guest_pid" 2>/dev/null; then ended=running; else ended=exited; fi
+
     if [ -s "$cd/crash.log" ]; then
         verdict=crash
         sig=$(sed -n 's/^  signal   *\([A-Z]*\).*/\1/p' "$cd/crash.log" | head -1)
@@ -152,16 +225,27 @@ for d in "$PF"/*/; do
         note=$(grep -a -m1 -A1 "terminate called" "$cd/run.log" |
                tr '\n' ' ' | sed 's/  */ /g' | cut -c1-160)
     elif [ "${lc:-0}" -ge 64 ] && [ "${ll:-0}" -ge 3 ]; then
+        # DREW A REAL SCREEN, and that stays "ok" even if the emulator
+        # grumbled. A WATCHDOG line from one spinning worker thread while the
+        # title renders happily is a lead worth keeping, not a failure — the
+        # fault is recorded in its own column either way.
         verdict=ok
     elif [ "${ec:-0}" -ge 64 ] && [ "${el:-0}" -ge 3 ]; then
         verdict=partial; note="drew early, blank later"
+    elif [ -n "$fault" ]; then
+        # Nothing on screen AND the emulator said why. That is a crash, however
+        # it was reported — this is the branch that keeps glasspole's failures
+        # from being scored as the milder "blank".
+        verdict=crash; site="$fault"
+        [ -n "$note" ] || note="reported by the emulator, not by a guest signal"
     else
         verdict=blank
     fi
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$pkg" "$name" "$kind" "$verdict" "${el:-0}" "${ec:-0}" \
-        "${ll:-0}" "${lc:-0}" "$alive" "$sig" "$site" "$note" >> "$TSV"
+        "${ll:-0}" "${lc:-0}" "$alive" "$sig" "$site" "$note" \
+        "$EMU_PROC" "$ended" "$fault" >> "$TSV"
     printf '%-28s %-8s %-8s lit %3s%% / %-5s colours  %s\n' \
         "${name:0:28}" "$kind" "$verdict" "${ll:-0}" "${lc:-0}" "$sig"
 done

@@ -24,6 +24,27 @@
 #     deadline turns load into false "blank" verdicts — four workers already
 #     put Clam Prix at 3445 colours where it reaches 8637 alone.
 #
+# DO NOT PUBLISH A BASELINE MEASURED THIS WAY. Re-sampling fixes false BLANKS;
+# it does nothing about false CRASHES, and at 24 workers those dominate:
+#
+#     24 workers, qemu-arm    49 of 110 crash in libEvent.so+0x4a80..0x4a88
+#     sequential, qemu-arm     0 of 110 crash there at all
+#
+# Three adjacent addresses in one library, half the catalogue, and not one
+# occurrence when the same 110 titles are run one at a time on the same build
+# the same night. Whatever the race is — the guest's event library, or qemu's
+# threading under load — the swarm manufactures it, and a run that reports 35
+# titles working when 75 do is not a slower answer, it is a wrong one.
+#
+# It went further than being wrong: measured this way Glasspole scored 174% of
+# qemu, because the contention hurt the reference and not the thing under test.
+# A comparison is only as good as its baseline, and this one silently was not.
+#
+# So: the swarm is for triage — finding which titles to look at, quickly. Any
+# number that leaves this machine comes from a sequential run. Two sequential
+# sweeps started together cost one sweep's wall time and put only two guests
+# on the box, which is well inside where the artefact appears.
+#
 # NOT CLAUDE AGENTS. The parallelism that matters here is qemu processes, not
 # assistants: an agent per title would add minutes of model latency and cost to
 # something a background job does instantly. Agents earn their keep on judgement
@@ -77,7 +98,13 @@ total=${#list[@]}
 [ "$total" -gt 0 ] || { echo "no titles matched" >&2; exit 1; }
 [ "$N" -gt "$total" ] && N=$total
 
+# WHICH EMULATOR, said out loud. Two sweeps of the same 110 titles are only
+# comparable if the one thing that differs between them is this, so it is
+# printed here and recorded per row in results.tsv rather than left implicit
+# in whichever binary tad_qemu happened to pick.
+EMU_SHOW="${COMPAT_EMU:-$(PROJ="$PROJ"; . "$HERE/lib-deps.sh"; tad_qemu || echo "?")}"
 echo "swarm: $total titles across $N workers  (${cpus} threads, ${memgb} GB free)"
+echo "  emulator: $EMU_SHOW"
 echo "  -> $OUT"
 
 cleanup() {
@@ -102,6 +129,7 @@ for i in $(seq 1 "$N"); do
         done
         [ ${#mine[@]} -gt 0 ] || exit 0
         COMPAT_SYSROOT="$sr" COMPAT_OUT="$OUT/w$i" COMPAT_EXACT=1 \
+        COMPAT_EMU="${COMPAT_EMU:-}" \
             "$HERE/compat-sweep.sh" "${mine[@]}" > "$OUT/w$i.log" 2>&1
         "$HERE/worker-sysroot.sh" --rm "$sr" 2>/dev/null
     ) &
