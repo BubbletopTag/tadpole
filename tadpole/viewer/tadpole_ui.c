@@ -1577,10 +1577,25 @@ int ui_update_pending(void) { return !strcmp(g_up_status, "behind"); }
 
 void ui_update_finish(void)
 {
-	/* "dev" opens the same dialog: an unreleased build still wants to see what
-	 * has shipped since, and the heading already reads "You have an unreleased
-	 * build" rather than claiming you are behind. */
-	if (!strcmp(g_up_status, "behind") || !strcmp(g_up_status, "dev")) {
+	/* AN UNRELEASED BUILD IS NOT BEHIND, AND MUST NOT BE NAGGED.
+	 *
+	 * "dev" used to open this dialog too, on the reasoning that someone running
+	 * a working copy still wants to see what has shipped since. In practice it
+	 * is backwards: a working copy is almost always NEWER than the newest
+	 * release — it is the code the next release will be cut from — so the
+	 * program spent every launch offering to "update" a developer to something
+	 * older than what they had just compiled, with a Download button that would
+	 * have replaced their build with a published one.
+	 *
+	 * It is still a distinct state and still reported as one: check-update.py
+	 * prints `status dev`, Help -> About says "dev (unreleased)", and asking
+	 * for the check by hand gets the answer below. What it no longer does is
+	 * interrupt.
+	 *
+	 * Only a genuine `behind` raises the prompt now — and since tools/
+	 * release.sh will not publish an asset whose binary does not carry the
+	 * release version, `dev` in a released build is no longer reachable. */
+	if (!strcmp(g_up_status, "behind")) {
 		g_modal = M_UPDATE;
 		return;
 	}
@@ -1588,6 +1603,13 @@ void ui_update_finish(void)
 	 * the one that runs by itself at startup owes them silence. */
 	if (g_up_silent)
 		return;
+	/* Asked for, and running a working copy: say so plainly rather than
+	 * falling through to "Could not check", which would blame the network for
+	 * an answer that arrived perfectly well. */
+	if (!strcmp(g_up_status, "dev")) {
+		msg("Unreleased build", "This build is not a release.");
+		return;
+	}
 	/* SAY IT, rather than leaving the version to speak for itself. This used
 	 * to put g_up_cur in the body, so a successful check answered with a bare
 	 * "08082026-0001" under a title — which reads as a fact about the build,
@@ -2003,8 +2025,18 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		/* WHICH BUILD THIS IS. Without it, "check for updates said I am up to
 		 * date" and "which one am I actually running" had no answer anywhere
 		 * in the program — and it is the first thing anyone reporting a bug
-		 * is asked for. Baked in at build time; "dev" in a working copy. */
-		text(r, lx + 62, ly + 38, TADPOLE_VERSION, C_ACCENT);
+		 * is asked for. Baked in at build time; "dev" in a working copy.
+		 *
+		 * AND A BARE "dev" IS NOT AN ANSWER. It reads as a version — people
+		 * reported it as one, as "my copy says DEV" — when what it means is
+		 * that this binary was built without being told which release it is.
+		 * Releases cannot say it any more (tools/release.sh verifies the
+		 * stamp is in the binary before it will publish), so anyone seeing
+		 * this is running a working copy and is better served by being told
+		 * so in words. 16 characters at 6px fits the 210px dialog. */
+		text(r, lx + 62, ly + 38,
+		     strcmp(TADPOLE_VERSION, "dev") ? TADPOLE_VERSION
+		                                    : "dev (unreleased)", C_ACCENT);
 		text(r, lx, ly + 60, "qemu-user + guest shim +", C_TEXT_DIM);
 		text(r, lx, ly + 70, "software GLES1 rasteriser", C_TEXT_DIM);
 		text(r, lx, ly + 84, "A childhood preserved.", C_ACCENT);

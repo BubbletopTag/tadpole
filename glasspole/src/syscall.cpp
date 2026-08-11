@@ -12,6 +12,7 @@
  * misbehaving.
  */
 #include "machine.h"
+#include "path.h"
 
 #include <dynarmic/interface/A32/a32.h>
 
@@ -1586,10 +1587,19 @@ void gp_syscall(Thread &t) {
         std::string want = m.Str(a0);
         if (m.trace) tpath = want;
         std::string target = want;
-        if (!target.empty() && target[0] != '/') {
+        /* gp_path_kind, not `target[0] != '/'`, for the reason spelled out in
+         * path.h: on Windows a path that names its own volume is absolute and
+         * a test that only knows the leading slash calls it relative. Nothing
+         * the viewer sends can produce one today — TADPOLE_SYSROOT is
+         * deliberately spelled drive-relative precisely because it ends up
+         * here — but a user who points it at a native path should not have
+         * every chdir silently glued onto the guest's cwd. */
+        int kind = gp_path_kind(target.c_str());
+        if (kind == GP_PATH_RELATIVE) {
             target = m.cwd;
             if (target.empty() || target.back() != '/') target += '/';
             target += want;
+            kind = gp_path_kind(target.c_str());
         }
         gp_statbuf st;
         /* THE REAL ERRNO, not ENOENT for everything. A path whose parent is a
@@ -1604,7 +1614,10 @@ void gp_syscall(Thread &t) {
         int r0 = gp_stat(m.HostPath(target).c_str(), &st);
         if (r0 < 0) { ret = r0; break; }
         if (!st.is_dir) { ret = GP_ENOTDIR; break; }
-        m.cwd = canon_path(target);
+        /* canon_path splits on '/' and re-joins with a leading one, so it
+         * would turn "C:/x" into "/C:/x". A path that names its own volume is
+         * kept verbatim and left for Win32 to canonicalise, which it does. */
+        m.cwd = kind == GP_PATH_HOST ? target : canon_path(target);
         ret = 0;
         break;
     }

@@ -33,15 +33,64 @@ SDL_URL="https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VER/SD
 TRIPLE=x86_64-w64-mingw32
 VERSION="dev"
 WANT_INSTALLER=0
+ALLOW_DEV=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --installer) WANT_INSTALLER=1 ;;
-        --version)   shift; VERSION="${1:-dev}" ;;
+        # `--version` WITH NOTHING AFTER IT IS A MISTAKE, NOT A REQUEST FOR
+        # "dev". It used to silently mean the latter, which is the worst
+        # possible reading: a release script whose variable came out empty
+        # would build a complete, correctly-named Glasspole-Setup.exe that
+        # reported itself as an unreleased build, and nothing anywhere would
+        # say so.
+        --version)   shift
+                     [ -n "${1:-}" ] || {
+                         echo "--version needs an argument, e.g. 09082026-0003" >&2
+                         exit 2; }
+                     VERSION="$1" ;;
+        # For deliberately building the installer out of a working copy — see
+        # the refusal further down.
+        --allow-dev) ALLOW_DEV=1 ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
     shift
 done
+
+# AN UNVERSIONED INSTALLER IS INDISTINGUISHABLE FROM A RELEASE ONE. The staged
+# binaries are the same, the filename is the same, and Glasspole-Setup.exe is
+# the exact name tools/check-update.py downloads and the viewer then EXECUTES.
+# Someone who builds one by hand and uploads it has shipped a build that tells
+# every user it is unreleased, and the update checker can never mark it current.
+# Refuse by default; --allow-dev for when that really is what you want.
+if [ "$WANT_INSTALLER" = 1 ] && [ "$VERSION" = dev ] && [ "$ALLOW_DEV" = 0 ]; then
+    echo "refusing to build Glasspole-Setup.exe with no version." >&2
+    echo "  Pass --version DDMMYYYY-NNNN (tools/release.sh does), or" >&2
+    echo "  --allow-dev if you really want an installer that reports 'dev'." >&2
+    exit 2
+fi
+
+# WHAT THE VIEWER MUST CARRY WHEN IT IS BUILT. Used by both branches below.
+# The check is `strings | grep -x`, the same one tools/build-appimage.sh and
+# the release script use, because a version that is passed and a version that
+# is IN THE BINARY are different claims — and the second is the only one that
+# reaches a user.
+#
+# NO `grep -q` HERE, AND THAT IS NOT A STYLE CHOICE. This script runs under
+# `set -o pipefail`. `grep -q` exits the instant it matches, `strings` is still
+# pouring several megabytes into the pipe, so it dies of SIGPIPE with status
+# 141 — and pipefail hands the PIPELINE that 141. The check then fails hardest
+# in exactly the case where it should pass, which would have made every release
+# refuse itself. Letting grep read to the end costs a few milliseconds on a
+# 3 MB binary and removes the trap entirely.
+check_stamp() {
+    [ "$VERSION" = dev ] && return 0
+    strings "$1" 2>/dev/null | grep -Fx -- "$VERSION" >/dev/null || {
+        echo "error: $(basename "$1") does not carry $VERSION after building." >&2
+        echo "  Refusing to ship a binary that would misreport its version." >&2
+        exit 1; }
+    echo "    $(basename "$1") reports $VERSION"
+}
 
 # NATIVE OR CROSS, decided by where it is running. Under MSYS2 the compiler
 # IS the target compiler and the two CMake trees are already there, so the
@@ -62,9 +111,16 @@ if [ "$NATIVE" = 1 ]; then
     echo "==> native MSYS2 build"
     cmake -S "$PROJ/glasspole" -B "$PROJ/glasspole/build" -G Ninja >/dev/null
     ninja -C "$PROJ/glasspole/build" glasspole
+    # -DTADPOLE_VERSION WAS ACCEPTED AND IGNORED HERE UNTIL THE VIEWER'S
+    # CMakeLists LEARNED TO READ IT. CMake does not fail on an unused -D; it
+    # printed "Manually-specified variables were not used by this project"
+    # among the configure output and built a viewer that fell back to "dev".
+    # Every native MSYS2 build was unversioned. Now it is consumed — and
+    # checked below, because being told is not the same as carrying it.
     cmake -S "$PROJ/tadpole/viewer" -B "$PROJ/tadpole/viewer/build" -G Ninja \
           -DTADPOLE_VERSION="$VERSION" >/dev/null
     ninja -C "$PROJ/tadpole/viewer/build"
+    check_stamp "$PROJ/tadpole/viewer/build/tadpole-view.exe"
     mkdir -p "$OUT/glasspole"
     cp "$PROJ/glasspole/build/glasspole.exe"        "$OUT/glasspole/"
     cp "$PROJ/tadpole/viewer/build/tadpole-view.exe" "$OUT/"
@@ -160,8 +216,13 @@ cmake -S "$PROJ/glasspole" -B "$OUT/glasspole" -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE="$OUT/mingw.cmake" \
       -DBoost_INCLUDE_DIR="$BOOSTDIR" \
       -DBoost_NO_SYSTEM_PATHS=ON \
+      -DTADPOLE_VERSION="$VERSION" \
       -DCMAKE_BUILD_TYPE=Release >/dev/null
 ninja -C "$OUT/glasspole" glasspole
+# glasspole.exe used to carry no version at all — see glasspole/CMakeLists.txt.
+# It is the executable a user is most likely to run by hand, and it was the
+# least able to say what it was.
+check_stamp "$OUT/glasspole/glasspole.exe"
 
 # ---- viewer and launcher --------------------------------------------------
 # Compiled directly: the viewer's CMakeLists exists for MSYS2, where
@@ -187,14 +248,20 @@ ICON_OBJ=""
 [ -f "$OUT/tadpole_icon.o" ] && ICON_OBJ="$OUT/tadpole_icon.o"
 
 echo "==> tadpole-view.exe"
+# Compiled from source every time — there are no object files to go stale, so
+# this branch never had the "make skipped the relink" hazard the Makefile grew
+# .tadpole-version to close. check_stamp confirms that rather than assuming it.
 "$TRIPLE-gcc" -O2 -std=gnu17 -DTADPOLE_VERSION="\"$VERSION\"" \
     -o "$OUT/tadpole-view.exe" \
     "$V/tadpole_view.c" "$V/tadpole_ui.c" "$V/tadpole_hle.c" $ICON_OBJ \
     $SDL_CFLAGS $Z_CFLAGS $SDL_LIBS -lopengl32 $Z_LIBS -lshlwapi -static -mconsole
+check_stamp "$OUT/tadpole-view.exe"
 
 echo "==> tadpole.exe (launcher)"
-"$TRIPLE-gcc" -O2 -o "$OUT/tadpole.exe" "$V/tadpole_launcher.c" $ICON_OBJ \
+"$TRIPLE-gcc" -O2 -DTADPOLE_VERSION="\"$VERSION\"" \
+    -o "$OUT/tadpole.exe" "$V/tadpole_launcher.c" $ICON_OBJ \
     -static -municode -mwindows
+check_stamp "$OUT/tadpole.exe"
 
 # ---- hle-probe.exe ---------------------------------------------------------
 # THE ONE DIAGNOSTIC THAT CANNOT BE RUN FROM HERE. Everything else about a
@@ -448,7 +515,26 @@ if [ -f "$PYDIR/python.exe" ]; then
     esac
 fi
 
+# THE VERSION OF THE INSTALLED TREE, and it is read now rather than written and
+# forgotten. tools/check-update.py falls back to this file when nothing passed
+# it --current, which is every case except the viewer asking on its own behalf:
+# only tadpole-view.exe has the version compiled in, so without this the tool
+# run by hand out of an installed tree answered `status dev` and offered
+# thirteen releases as new.
 echo "$VERSION" > "$STAGE/.tadpole-version"
+
+# CHECK THE TREE THAT IS ABOUT TO BE PACKAGED, not the one that was built, and
+# check EVERY executable in it rather than the one that happens to draw the
+# About box. Everything above verified binaries in $OUT; what NSIS picks up is
+# $STAGE, and between the two there is a pile of cp — one stale copy is all it
+# takes for the installer to disagree with the build that produced it. Two of
+# these three had no version to check at all until now, which is precisely how
+# a Windows user ended up running something that called itself "dev".
+check_stamp "$STAGE/tadpole.exe"
+check_stamp "$STAGE/tadpole/viewer/build/tadpole-view.exe"
+check_stamp "$STAGE/glasspole/build/glasspole.exe"
+[ "$(cat "$STAGE/.tadpole-version")" = "$VERSION" ] || {
+    echo "error: the staged .tadpole-version does not say $VERSION" >&2; exit 1; }
 
 echo "staged: $STAGE"
 [ "$WANT_INSTALLER" = 1 ] || { echo "done (no installer asked for)"; exit 0; }
@@ -459,4 +545,11 @@ command -v makensis >/dev/null || {
 echo "==> Glasspole-Setup.exe"
 makensis -NOCD -DVERSION="$VERSION" -DSTAGE="$STAGE" -DOUTFILE="$OUT/Glasspole-Setup.exe" \
          "$HERE/glasspole.nsi" >/dev/null
+
+# AND THE INSTALLER ITSELF CARRIES IT. The payload is solid-LZMA compressed, so
+# this can only see the NSIS header — BrandingText and the DisplayVersion that
+# goes into Add/Remove Programs — which is exactly the part -DVERSION controls
+# and therefore exactly what this can usefully confirm. The binaries inside were
+# checked before staging, where they were still readable.
+check_stamp "$OUT/Glasspole-Setup.exe"
 echo "built: $OUT/Glasspole-Setup.exe"

@@ -18,6 +18,23 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
+/* WHICH BUILD THIS IS — CARRIED, NOT PRINTED.
+ *
+ * tadpole.exe is a GUI-subsystem program with no console to print to, so there
+ * is nothing useful for it to *say*; what matters is that the string is IN it.
+ * The release scripts verify an artifact by reading the version back out of
+ * the finished binary with `strings`, and until now this was one of two
+ * executables in the installer that contained no version to find — so it could
+ * not be checked, only assumed, which is the state that let a "dev" build ship.
+ *
+ * `volatile` and the exported name keep the linker from discarding a constant
+ * that no code path reads. That is the entire point of it: it is written for
+ * the build to inspect, not for the program to use. */
+#ifndef TADPOLE_VERSION
+#define TADPOLE_VERSION "dev"
+#endif
+volatile const char tadpole_build_version[] = TADPOLE_VERSION;
+
 static void fail(const WCHAR *what)
 {
     MessageBoxW(NULL, what, L"Tadpole", MB_OK | MB_ICONERROR);

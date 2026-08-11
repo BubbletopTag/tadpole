@@ -1620,18 +1620,47 @@ static pid_t spawn_python(const char *rel, char *const argv[], int *outfd)
 	return (pid_t)pi.dwProcessId;
 }
 
-/* C:\x/y -> /x/y: colon-free AND separator-consistent, because this is the
- * only place host spelling becomes guest spelling. A drive letter would split
- * a colon-separated LD_LIBRARY_PATH, and a backslash is not a separator to
- * uClibc OR to glasspole's HostPath — a TADPOLE_DIR of "\Users\...\run" is
- * not absolute to it, so the shim's framebuffer files go somewhere the guest
- * never looks and the title dies inside its display module with
- * "No framebuffer allocation available". %LOCALAPPDATA% hands us exactly
- * that spelling, so this conversion is not defensive: it is the common case. */
-static void drel(const char *in, char *out, size_t n)
+/* C:\x/y -> /x/y (drop_drive) or C:/x/y (keep it), because this is the only
+ * place host spelling becomes guest spelling.
+ *
+ * The separator conversion is never optional: a backslash is not a separator
+ * to uClibc OR to glasspole's HostPath, so a TADPOLE_DIR of "C:\Users\...\run"
+ * would reach the guest as a single opaque name, the shim's framebuffer files
+ * would go somewhere the guest never looks, and the title would die inside its
+ * display module with "No framebuffer allocation available". %LOCALAPPDATA%
+ * hands us exactly that spelling, so this is not defensive: it is the common
+ * case.
+ *
+ * THE DRIVE LETTER IS A DIFFERENT QUESTION, AND GETTING IT WRONG COST AN
+ * INSTALL. Dropping it was the rule for everything, because a colon splits a
+ * colon-separated LD_LIBRARY_PATH and the resulting driveless path resolves
+ * against the guest process's current drive — which the viewer sets to the
+ * install tree, so the install's own paths come out right by construction.
+ *
+ * TADPOLE_DIR is the one path that is NOT in the install tree. It lives under
+ * %LOCALAPPDATA%, i.e. on the user profile's drive. On the C: install that
+ * everyone including the installer's default uses, the two drives are the same
+ * one and the missing letter is refilled correctly by accident. Install to E:
+ * and the guest is told the runtime directory is at /Users/<name>/AppData/...
+ * — which it dutifully resolves on E:, where there is no such directory. Every
+ * fb0.bin, state.bin and event node then fails to open, and the log reads:
+ *
+ *     [0x5] CreateHandle: No framebuffer allocation available
+ *     <ASSERT>: [0x0] Unsupported destination PixelFormat used 0
+ *
+ * — a framebuffer complaint with no framebuffer code behind it.
+ *
+ * So: keep the drive for the single-value variables that may name another
+ * volume, drop it only where a colon genuinely cannot survive. LD_LIBRARY_PATH
+ * is that one place, and every entry in it is inside the install tree anyway.
+ * glasspole anchors what is left on the drive its own .exe was loaded from
+ * rather than on the current directory — see the note above widen() in
+ * host_win32.c — so the driveless spelling no longer depends on how the
+ * process was started either. */
+static void drel(const char *in, char *out, size_t n, int drop_drive)
 {
 	size_t i;
-	if (in[0] && in[1] == ':')
+	if (drop_drive && in[0] && in[1] == ':')
 		in += 2;
 	for (i = 0; i + 1 < n && in[i]; i++)
 		out[i] = in[i] == '\\' ? '/' : in[i];
@@ -1718,16 +1747,35 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 		return -1;
 	}
 
-	drel(g_projdir, R, sizeof(R));
-	drel(g_dir, dir, sizeof(dir));
+	/* R: the install tree, drive filed off. Everything derived from it stays
+	 * that way — LD_LIBRARY_PATH because a colon there is a separator, and
+	 * TADPOLE_SYSROOT because the shim prepends it to guest paths and then
+	 * chdir()s into the result, which glasspole canonicalises as a guest path.
+	 * All of those live on the install's own drive, so the drive glasspole
+	 * anchors them on is the right one.
+	 *
+	 * dir: TADPOLE_DIR, WITH ITS DRIVE, because it is the one path in the run
+	 * that is not in the install tree — %LOCALAPPDATA% is on the user profile's
+	 * volume, which is only the install's volume by coincidence. See drel().
+	 *
+	 * --sysroot is given absolutely rather than as "runtime/sysroot". It was
+	 * relative, which quietly made the sysroot lookup depend on the child's
+	 * current directory being the one we pass below; when that assumption
+	 * fails nothing says so — every guest path falls through to the literal
+	 * branch and the rootfs appears to be empty.
+	 *
+	 * Quoted, all of them: "C:\Program Files\..." and any user whose name has
+	 * a space in it would otherwise end the argument early. */
+	drel(g_projdir, R, sizeof(R), 1);
+	drel(g_dir, dir, sizeof(dir), 0);
 	n = snprintf(cmd, sizeof(cmd),
-	    "\"%s/glasspole/build/glasspole.exe\" --sysroot runtime/sysroot"
+	    "\"%s/glasspole/build/glasspole.exe\" --sysroot \"%s/runtime/sysroot\""
 	    " -E \"LD_LIBRARY_PATH=%s/runtime/shimlibs-gl:%s/runtime/shimlibs-z:"
 	    "%s/runtime/shimlibs:%s/runtime/libs\""
-	    " -E TADPOLE_DIR=%s"
+	    " -E \"TADPOLE_DIR=%s\""
 	    " -E TSLIB_CONFFILE=/nonexistent-ts.conf"
-	    " -E TADPOLE_SYSROOT=%s/runtime/sysroot",
-	    g_projdir, R, R, R, R, dir, R);
+	    " -E \"TADPOLE_SYSROOT=%s/runtime/sysroot\"",
+	    g_projdir, g_projdir, R, R, R, R, dir, R);
 	if (ui_cfg()->gl || ui_cfg()->gl_hle)
 		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL=1");
 	/* HLE REPLAY GOES TO THE GUEST ON WINDOWS AGAIN — THE BLOCKER IS GONE.
@@ -2216,12 +2264,29 @@ static void tool_poll(void)
 		/* Hand over to the installer and get out of its way. It has to
 		 * replace files this process is holding open, so the running program
 		 * closing itself IS the last step of the update rather than an
-		 * inconvenience to work around. */
-		ui_progress_line("starting the installer");
+		 * inconvenience to work around.
+		 *
+		 * "/S" — SILENTLY, AND THAT IS THE POINT OF THE WHOLE EXERCISE.
+		 *
+		 * Updating here used to mean: the window disappears, an installer
+		 * appears, agree to the introduction, confirm the directory, press
+		 * Install, then find Tadpole and open it again. Six steps and a
+		 * closed program. On Linux the same button renames the new AppImage
+		 * over the running one and execv()s it — the window blinks and comes
+		 * back on the new version, and nothing is asked. That gap is what
+		 * "Windows users cannot update as easily" means.
+		 *
+		 * A silent NSIS install skips every page, keeps the directory the
+		 * previous install recorded in the registry, and the installer's
+		 * .onInstSuccess starts tadpole.exe again when it is done. The user
+		 * presses Download and the program comes back updated, which is what
+		 * the Linux side has always done. Running it by hand from Explorer is
+		 * unaffected and still asks everything it used to. */
+		ui_progress_line("installing the update");
 		ui_progress_done(1);
 		guest_stop();
 		guest_log_close();
-		if ((INT_PTR)ShellExecuteA(NULL, "open", dest, NULL, NULL, SW_SHOWNORMAL) > 32) {
+		if ((INT_PTR)ShellExecuteA(NULL, "open", dest, "/S", NULL, SW_SHOWNORMAL) > 32) {
 			SDL_Quit();
 			exit(0);
 		}
@@ -2324,6 +2389,26 @@ int main(int argc, char **argv)
 	const char *shot_state = NULL, *shot_out = NULL;
 	int boot_now = 0, power_announced = 0;
 	const char *env;
+
+	/* --version, ANSWERED BEFORE ANYTHING ELSE HAPPENS.
+	 *
+	 * "Which build am I running?" is the first question on every bug report and
+	 * the only place it could be answered was Help -> About, which needs a
+	 * window, a GPU and a working install to reach. It is also the only way to
+	 * check a Windows build without a Windows desktop in front of you, which is
+	 * how the "released binaries report dev" complaint went unmeasured for as
+	 * long as it did: the string is in the executable, but nothing would say it
+	 * out loud.
+	 *
+	 * Deliberately the very first thing in main — before find_project_dir(),
+	 * before settings are read and long before SDL — so it answers on a machine
+	 * where the rest of the program cannot start at all. */
+	for (i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--version")) {
+			printf("%s\n", TADPOLE_VERSION);
+			return 0;
+		}
+	}
 
 	find_project_dir(argv[0]);
 	/* Saved settings are the defaults; command-line flags still win, so the

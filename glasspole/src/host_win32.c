@@ -18,6 +18,7 @@
  */
 #define WIN32_LEAN_AND_MEAN
 #include "host.h"
+#include "path.h"
 
 #include <windows.h>
 #include <timeapi.h>   /* timeBeginPeriod; LEAN_AND_MEAN strips it from windows.h */
@@ -73,10 +74,57 @@ static int err(void) { return err_from(GetLastError()); }
  * UTF-8 in, UTF-16 out, W entry points only. MB_ERR_INVALID_CHARS on purpose:
  * a byte sequence that is not UTF-8 names no file this backend can reach, and
  * ENOENT is the honest answer rather than whatever the ANSI codepage would
- * have guessed. */
+ * have guessed.
+ *
+ * AND ONE THING LINUX NEVER HAS TO DO: decide which disk a rooted path is on.
+ * "\Users\bob" — and "/Users/bob", which Win32 folds to the same thing — names
+ * no volume, so it resolves against the process's CURRENT drive, an accident
+ * of how the program was started. Tadpole hands the guest rooted paths by
+ * design (a drive letter cannot survive a colon-separated LD_LIBRARY_PATH), so
+ * every one of them was riding on that accident. It held only because the
+ * viewer starts glasspole with its current directory inside the install tree.
+ *
+ * Anchor them on the drive glasspole.exe was LOADED from instead. That is the
+ * install tree by construction — the viewer builds the command as
+ * <projdir>/glasspole/build/glasspole.exe — and unlike the current directory
+ * it cannot be changed by a shortcut, a cmd session on another drive, or a
+ * SetCurrentDirectory anywhere. On a single-drive machine this is a no-op,
+ * which is why nobody found it until someone installed to E:.
+ *
+ * It is only half the story: a path that already names its volume is left
+ * alone (gp_path_anchor refuses it), and TADPOLE_DIR now arrives naming its
+ * volume for exactly that reason. See path.h. */
 #define GP_WPATH 4096
+
+static char g_anchor;        /* drive letter, or 0 for "do not anchor" */
+static LONG g_anchor_known;
+
+static char anchor_drive(void)
+{
+    WCHAR self[MAX_PATH];
+    DWORD n;
+
+    if (g_anchor_known) return g_anchor;
+    /* Truncation is fine and does not need handling: two characters is the
+     * whole answer, and GetModuleFileNameW fills the buffer from the front
+     * even when the name does not fit. A path with no drive letter at all —
+     * a UNC install, say — leaves the anchor at 0, and every rooted path then
+     * behaves exactly as it did before this existed. */
+    n = GetModuleFileNameW(NULL, self, MAX_PATH);
+    g_anchor = (n >= 2 && self[1] == L':') ? (char)self[0] : 0;
+    /* Two threads racing here compute the same byte from the same immutable
+     * source, so the race is real and harmless. The flag is written last. */
+    InterlockedExchange(&g_anchor_known, 1);
+    return g_anchor;
+}
+
 static int widen(const char *u8, WCHAR *w, int cap)
 {
+    char anchored[GP_WPATH];
+    char drive = anchor_drive();
+
+    if (drive && gp_path_anchor(u8, drive, anchored, sizeof anchored))
+        u8 = anchored;
     if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, u8, -1, w, cap))
         return GP_ENOENT;
     return 0;
@@ -199,6 +247,14 @@ static DWORD prot_to_win(int prot)
  * The guest sees a failed mmap and reports it in its own words. For a title
  * that is "CreateHandle: No framebuffer allocation available", which is a
  * completely honest message about a completely invisible cause.
+ *
+ * THAT MESSAGE HAS MORE THAN ONE CAUSE, and reading it as this one cost time
+ * later. It says only "the display module could not get its framebuffer": view
+ * exhaustion here is one way, and the framebuffer file simply not opening —
+ * because TADPOLE_DIR resolved onto the wrong drive — is another, with an
+ * identical symptom and nothing in between to tell them apart. See path.h. The
+ * way to separate them is that this one needs a mmap to have been attempted at
+ * all, so the /dev/fb0 open in the guest log has to have succeeded first.
  *
  * Whole views only. A view is one section mapping and UnmapViewOfFile takes
  * its base or nothing; a partial munmap therefore keeps the old go-dark

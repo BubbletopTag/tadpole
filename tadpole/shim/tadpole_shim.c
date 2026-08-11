@@ -325,6 +325,27 @@ static void log_open(void)
 	g_logfd = fd;
 }
 
+/* SAY IT WHATEVER THE DEBUG LEVEL IS.
+ *
+ * dbg() is for the running commentary and is off unless somebody asked for it.
+ * This is for the handful of failures that make the emulator useless and are
+ * INVISIBLE from every other vantage point — the arena not being creatable
+ * being the one that prompted it. A user does not turn debugging on before the
+ * thing goes wrong, and the whole cost of the bug below was that nothing,
+ * anywhere, named the cause.
+ *
+ * Deliberately not routed through log_open()'s per-pid file: this has to
+ * arrive on the guest's stderr, which is what the viewer pumps into
+ * tadpole.log and what a user pastes into a report. */
+static void note(const char *msg)
+{
+	size_t n = strlen(msg);
+	if (g_logfd >= 0)
+		write(g_logfd, msg, n);
+	else
+		write(2, msg, n);
+}
+
 static void dbg(const char *msg)
 {
 	size_t n;
@@ -480,11 +501,48 @@ static void init(void)
 	 * i.e. lines 544 and 816 of fb0) but pans a DIFFERENT fb device for
 	 * each layer (fb0 PAN 544, fb1 PAN 816). Backing each device with its
 	 * own file therefore loses every layer but the first. */
+
+	/* AN ARENA THAT CANNOT BE CREATED HAS TO SAY SO, AND USED NOT TO.
+	 *
+	 * Both opens below were written as `if (fd >= 0)` with no else, so a
+	 * TADPOLE_DIR the guest cannot write left the shim silent and carrying on.
+	 * What the user then sees is Brio discovering the consequence several
+	 * layers away and describing it in its own vocabulary:
+	 *
+	 *     [0x5] InitModule: Screen = 0 x 0, pitch = 0
+	 *     [0x5] InitModule: Mapped 00000000 to 0x50d30000, size 00000000
+	 *     [0x5] CreateHandle: No framebuffer allocation available
+	 *     <ASSERT>: Unsupported destination PixelFormat used 0
+	 *               (line 175 in LightningBase/Src/BlitBuffer.cpp)
+	 *
+	 * — four messages about pixel formats and display handles for a bug that
+	 * is one failed open of one file, whose NAME appears nowhere. And the
+	 * assert does not kill AppManager: it parks it, for ever, so the same
+	 * fault reads as "it crashed" to whoever finds the log and as "it is stuck
+	 * on a black screen" to whoever is only looking at the window. Both
+	 * reports were made, separately, about this one line.
+	 *
+	 * It was worse than merely unhelpful. That guest message already had a
+	 * documented cause on Windows — mmap view exhaustion, since fixed — so the
+	 * evidence pointed confidently at an unrelated and already-repaired bug.
+	 *
+	 * Say the path. Always, not under TADPOLE_DEBUG: the emulator is useless
+	 * from here on, nobody turns logging up before the thing fails, and one
+	 * line naming the directory is the difference between reading this and
+	 * guessing. */
 	snprintf(path, sizeof(path), "%s/fb0.bin", g_dir);
 	fd = real_open(path, O_RDWR | O_CREAT, 0666);
 	if (fd >= 0) {
 		ftruncate(fd, (long)(g_w * g_h * (g_bpp / 8) * NBUF));
 		real_close(fd);
+	} else {
+		char m[420];
+		snprintf(m, sizeof(m),
+		         "[tadpole] FATAL: cannot create the framebuffer arena %s — "
+		         "the display will have no memory to allocate from, and Brio "
+		         "will report that as \"No framebuffer allocation available\". "
+		         "Is TADPOLE_DIR reachable and writable by the guest?\n", path);
+		note(m);
 	}
 
 	/* shared state, mmapped so the viewer sees updates live */
@@ -497,7 +555,15 @@ static void init(void)
 		if (g_state == (void *)-1)
 			g_state = 0;
 	}
-	if (g_state) {
+	if (!g_state) {
+		char m[420];
+		snprintf(m, sizeof(m),
+		         "[tadpole] FATAL: cannot map the shared state %s — the viewer "
+		         "has nothing to read, so the window stays black however well "
+		         "the guest runs. Is TADPOLE_DIR reachable and writable by the "
+		         "guest?\n", path);
+		note(m);
+	} else {
 		memset(g_state, 0, sizeof(*g_state));
 		g_state->magic   = TADPOLE_MAGIC;
 		g_state->version = TADPOLE_VERSION;

@@ -52,6 +52,52 @@ OUT="${TADPOLE_APPIMAGE_OUT:-$PROJ/build/Tadpole-x86_64.AppImage}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# ---- 0. the version, and why this script has to care ----------------------
+#
+# THIS SCRIPT PACKAGES A VIEWER; IT USED NOT TO BUILD ONE. That distinction
+# shipped a wrong version to everybody.
+#
+# tools/release.sh has always called this as
+#
+#     TADPOLE_VERSION="$VERSION" ./tools/build-appimage.sh
+#
+# which reads exactly like it stamps the release. It did not: the next line
+# down only ASSERTED that a viewer exists and then copied it, so the image was
+# built around whatever binary the developer happened to have compiled last —
+# in practice `make viewer` with the Makefile's default of "dev". The variable
+# was accepted and discarded.
+#
+# It is not a hypothetical. tadpole-10082026-0007, the current release, ships a
+# tadpole-view carrying the literal string "dev" and no version at all, so its
+# About box says "dev" and its update check reports `status dev` — which the
+# viewer shows as "you have an unreleased build", at every launch, listing all
+# thirteen releases as newer, with no way ever to say "up to date".
+#
+# So: if a version is asked for, build the viewer with it and CHECK THE STAMP
+# TOOK before packaging anything. The check is not ceremony — the Makefile
+# grew .tadpole-version precisely because `make` cannot see a -D change from
+# timestamps, and 08082026-0002 went out calling itself 0001 that way. Trust
+# the mechanism, verify the result.
+#
+# With no TADPOLE_VERSION set nothing changes: a developer build still packages
+# whatever is there and still reports "dev", which is true.
+if [ -n "${TADPOLE_VERSION:-}" ] && [ "$TADPOLE_VERSION" != dev ]; then
+    echo "==> stamping the viewer as $TADPOLE_VERSION"
+    make -C "$PROJ/tadpole" viewer TADPOLE_VERSION="$TADPOLE_VERSION" \
+        || die "could not build the viewer — nothing has been packaged"
+    # `grep -Fx ... >/dev/null`, not `grep -qx`: -q exits on the first match
+    # and `strings` then dies of SIGPIPE. Harmless here (this script sets no
+    # pipefail) but the identical check in tools/release.sh runs under one,
+    # where it turns a passing check into a failing release. Same spelling in
+    # both places so neither can drift into the trap.
+    strings "$PROJ/tadpole/viewer/tadpole-view" 2>/dev/null |
+        grep -Fx -- "$TADPOLE_VERSION" >/dev/null \
+        || die "the viewer does not carry $TADPOLE_VERSION after building.
+  Refusing to package an image that would misreport its own version — that is
+  the bug that made a release tell every user it was an unreleased build."
+    echo "    viewer reports $TADPOLE_VERSION"
+fi
+
 # ---- 1. everything must be built first ----------------------------------
 [ -x "$PROJ/tadpole/viewer/tadpole-view" ] || die "not built — run: cd tadpole && make"
 for d in shimlibs shimlibs-gl shimlibs-z; do

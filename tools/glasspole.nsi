@@ -12,8 +12,16 @@
 ; would ask for elevation to do something one user asked for.
 
 !define APP "Glasspole"
+
+; NO DEFAULT VERSION. This used to quietly define "dev" when nothing passed
+; -DVERSION, which meant a missing or empty variable in the release script
+; produced a perfectly ordinary-looking Glasspole-Setup.exe whose branding and
+; whose Add/Remove Programs entry both said "dev" — and there is no later step
+; that could have caught it. The only caller is tools/build-windows.sh and it
+; always passes one, so anything else is a build bug and should stop here
+; rather than ship.
 !ifndef VERSION
-  !define VERSION "dev"
+  !error "VERSION was not defined — build this through tools/build-windows.sh"
 !endif
 
 Name "${APP}"
@@ -32,7 +40,15 @@ BrandingText "${APP} ${VERSION}"
 ; than on the qemu-user everything else uses — and that the different look is
 ; deliberate, not a different program. Cancel is a real answer, so this is
 ; MB_OKCANCEL and not a notice they can only agree with.
+;
+; NOT ON AN UPDATE, THOUGH. Tadpole runs this installer with /S when it is
+; updating itself, and someone who is already running the program has both
+; seen this notice and answered it. Asking again — and then asking for an
+; install directory, and then for a click on Install — is the whole of why
+; updating on Windows felt like a chore next to Linux, where the AppImage
+; swaps itself and reopens with no questions at all.
 Function .onInit
+  IfSilent done
   MessageBox MB_OKCANCEL|MB_ICONEXCLAMATION \
 "This is a port of the Tadpole LeapPad 2 emulator.$\n$\n\
 It runs on a highly experimental, custom-built replacement for qemu-user, \
@@ -40,9 +56,31 @@ codenamed Glasspole.$\n$\n\
 Because of that, the Windows port uses different branding and colours from \
 the Linux version, so you can tell at a glance which backend you are running.$\n$\n\
 Continue with the installation?" \
-    IDOK continue
+    IDOK done
   Abort
-continue:
+done:
+FunctionEnd
+
+; AND PUT THE PROGRAM BACK WHEN AN UPDATE FINISHES.
+;
+; This is the last piece of the asymmetry the update path had. On Linux the
+; viewer renames the new AppImage over the running one and execv()s it, so the
+; user watches the window blink and come back on the new version. On Windows it
+; downloaded an installer, launched it, exited — and stopped there, leaving
+; someone who had asked for an update looking at a closed program and an
+; installer wizard, with the last step ("open it again") left to them.
+;
+; Only on the silent path: someone who ran the installer by hand from Explorer
+; did not ask for the program to start, and an installer that launches things
+; unbidden is its own kind of rude. $INSTDIR is right in both cases because
+; InstallDirRegKey reads back the directory the previous install recorded.
+; Labels rather than `IfSilent 0 +2`: a relative jump that is one instruction
+; out fails in the direction that launches the program when nobody asked, and
+; no compiler will tell you.
+Function .onInstSuccess
+  IfSilent 0 no_relaunch
+    Exec '"$INSTDIR\tadpole.exe"'
+no_relaunch:
 FunctionEnd
 
 Page directory
