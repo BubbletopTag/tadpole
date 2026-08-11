@@ -486,6 +486,7 @@ tadpole/viewer/         the application: window, UI, audio, host-GPU replay
 tools/                  install and diagnostic scripts
 tools/test-build.sh     build from scratch in a clean container, 3 distributions
 tools/compat-sweep.sh   launch every installed title and record what it did
+tools/bug-report.py     collect a report you can drag into a chat window
 rootfs/                 firmware you installed          (not distributed)
 runtime/sysroot/        the guest's filesystem view
 docs/HANDOVER.md        engineering notes — how it works and why
@@ -517,3 +518,29 @@ cap is adjustable in Options → Audio Settings.
 **Everything is slow** — check the status bar says `HLE nn fps`. If it says
 `idle` or has fallen back, you are on the software renderer, which is about 5x
 slower.
+
+### Reporting something that is broken
+
+**Help → Report a Problem**. Type what went wrong, press Save Report, and a
+folder opens containing two files:
+
+```
+report.txt      what you typed, your version, OS, GPU, settings, last 100 log lines
+screen.png      the frame that was on screen when you opened the dialog
+```
+
+Drag both into Discord, or attach them to a GitHub issue. Nothing is uploaded
+anywhere — it writes the two files and stops, so the report goes wherever you
+choose to send it and nowhere else. Home directory paths and your account name
+are rewritten out before either file is written.
+
+The screenshot is taken of the guest's picture with the menus and the dialog
+excluded, so a rendering bug — a glitched font, a misplaced layer, wrong
+colours — arrives as a picture rather than a description of one. It is the half
+of a report that a log cannot carry.
+
+From a terminal, when the viewer will not start at all:
+
+```sh
+./tools/bug-report.py --desc "what happened"    # same report, no screenshot
+```

@@ -84,6 +84,7 @@ enum ui_action {
 	UI_ACT_INSTALL_GAMES,    /* path = file listing the archives to install */
 	UI_ACT_CHECK_UPDATE,     /* ask GitHub whether a newer release exists */
 	UI_ACT_DO_UPDATE,        /* download it; path = where to write */
+	UI_ACT_BUG_REPORT,       /* collect a report; text via ui_bug_get */
 	UI_ACT_STOP,
 	UI_ACT_QUIT,
 	UI_ACT_RELAYOUT          /* rotate/scale changed; viewer must resize */
@@ -162,6 +163,27 @@ void  ui_profile_get(char *name, size_t namesz, int *grade,
 
 /* Told by the viewer so the bar can show it and File can offer Stop. */
 void  ui_set_running(int running);
+
+/* ---- bug report --------------------------------------------------------
+ *
+ * Help -> Report a Problem collects what the user typed, the log tail, the
+ * machine, and A PICTURE OF THE SCREEN into a folder they can drag into a
+ * chat window. The picture is the reason this lives partly in the viewer:
+ * the UI cannot screenshot itself, because by the time the dialog is up it
+ * is covering the very thing being reported.
+ *
+ * So the capture is a one-frame handshake. Opening the dialog raises
+ * ui_shot_pending(); the viewer's render loop honours it AFTER drawing the
+ * guest and BEFORE drawing the chrome, which is the only moment in the frame
+ * where the window holds the guest's picture and nothing else; then it calls
+ * ui_shot_taken(). Miss that window and the report shows a screenshot of the
+ * dialog asking for the screenshot.
+ */
+void  ui_bug_get(char *text, size_t textsz);
+int   ui_shot_pending(void);
+void  ui_shot_taken(int ok);
+/* Where the report landed, for the dialog that says so. */
+void  ui_bug_done(const char *folder);
 
 /* Idle backdrop, drawn when no guest is running. */
 void  ui_draw_idle(SDL_Renderer *ren, int lw, int lh);

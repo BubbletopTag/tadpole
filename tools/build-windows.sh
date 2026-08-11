@@ -352,10 +352,17 @@ done
 # cart2tar.py and fatread.py go together — the converter is the front end and
 # the FAT reader is all of the work. Both are pure stdlib on purpose, so the
 # bundled 3.7 runs them with nothing added.
+#
+# THIS LIST IS AN ALLOWLIST, AND FORGETTING IT SHIPS A DEAD MENU ITEM. The
+# AppImage copies tools/ wholesale, so a new tool works on Linux the moment it
+# exists and the Windows half is the one that has to be told. bug-report.py is
+# reachable from Help -> Report a Problem, which is to say from the hands of
+# exactly the people least able to work around it not being there.
 for t in install-game.py scan-games.py check-update.py fetch-firmware.py \
          install-firmware.py online-update.py make-profile.py \
          erase-firmware.py cart2tar.py fatread.py netssl.py \
-         pkgtool.py fix-perms.py lf3.py scan-games.sh packagelists; do
+         pkgtool.py fix-perms.py lf3.py bug-report.py \
+         scan-games.sh packagelists; do
     cp -r "$PROJ/tools/$t" "$STAGE/tools/" 2>/dev/null || true
 done
 

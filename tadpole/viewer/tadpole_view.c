@@ -1418,7 +1418,10 @@ static void guest_setenv(const struct ui_settings *c)
 static int   g_glog_fd = -1;
 static FILE *g_glog_file;
 
-static void guest_log_path(char *out, size_t n)
+/* The per-user state directory, created if it is not there. Split out of
+ * guest_log_path() because the bug report's screenshot needs the same
+ * directory and the same mkdir-every-level care to land in it. */
+static void state_dir_path(char *out, size_t n)
 {
 	/* XDG override, then the platform's app-data directory, then ~/.local.
 	 * LOCALAPPDATA is just an environment variable — set on every Windows,
@@ -1442,10 +1445,103 @@ static void guest_log_path(char *out, size_t n)
 		*p = '/';
 	}
 	tp_mkdir(out);
-	{
-		size_t l = strlen(out);
-		snprintf(out + l, n - l, "/tadpole.log");
+}
+
+static void guest_log_path(char *out, size_t n)
+{
+	size_t l;
+	state_dir_path(out, n);
+	l = strlen(out);
+	snprintf(out + l, n - l, "/tadpole.log");
+}
+
+/* Where the bug report's screenshot waits between being taken and being copied
+ * into the report folder. One fixed name, overwritten every time: this is a
+ * handoff between two halves of the same program, not something to keep. */
+static void report_shot_path(char *out, size_t n)
+{
+	size_t l;
+	state_dir_path(out, n);
+	l = strlen(out);
+	snprintf(out + l, n - l, "/report-pending.png");
+}
+
+/* Where the typed description is handed to the tool.
+ *
+ * A FILE RATHER THAN AN ARGUMENT, and Windows is the reason. spawn_python()
+ * builds a command line by wrapping each argument in double quotes, so a
+ * description containing a quote character — "it says "no disc" and stops" —
+ * would arrive as two broken arguments and take the rest of the flags with it.
+ * A file has no quoting rules to get wrong. */
+static void report_desc_path(char *out, size_t n)
+{
+	size_t l;
+	state_dir_path(out, n);
+	l = strlen(out);
+	snprintf(out + l, n - l, "/report-desc.txt");
+}
+
+/* Show the finished report to the user in their file manager.
+ *
+ * Best effort, and deliberately unchecked: a machine with no file manager is
+ * not a failure anyone needs telling about, because the dialog has already
+ * named the folder and the report is already written. */
+static void open_folder(const char *path)
+{
+#ifdef _WIN32
+	ShellExecuteA(NULL, "open", path, NULL, NULL, SW_SHOWNORMAL);
+#else
+	/* DOUBLE FORK, so the file manager is reparented to init. tool_reap()
+	 * waits on one specific pid; a second child it has never heard of would
+	 * sit in the process table as a zombie until the viewer exits. */
+	pid_t p = fork();
+	if (p == 0) {
+		if (fork() == 0) {
+			execlp("xdg-open", "xdg-open", path, (char *)NULL);
+			_exit(127);
+		}
+		_exit(0);
 	}
+	if (p > 0) {
+		int st;
+		waitpid(p, &st, 0);      /* the middle child, which exits at once */
+	}
+#endif
+}
+
+/* Did the last capture land? The UI keeps its own copy to word the dialog
+ * with; this one decides whether the tool is told about a screenshot at all. */
+static int g_shot_ok;
+
+/* Take the picture the report is about.
+ *
+ * Reads the window back exactly as it stands, which is why WHERE this is
+ * called from is the whole design: after the guest's layers and before
+ * ui_draw(), the one moment in the frame holding the guest's picture and
+ * nothing else. Called after ui_draw() it would capture the dialog that asked
+ * for it, and called before the guest is composited it would capture the frame
+ * before the one the user is complaining about.
+ *
+ * With no guest running this still fires and catches the idle screen. That is
+ * not a wasted file: "it will not start" reports are worth a picture of what
+ * the user is looking at instead. */
+static int capture_report_shot(SDL_Renderer *ren)
+{
+	char path[700];
+	unsigned char *rgb;
+	int ow = 0, oh = 0, ok = 0;
+
+	SDL_GetRendererOutputSize(ren, &ow, &oh);
+	if (ow <= 0 || oh <= 0) return 0;
+	if (!(rgb = malloc((size_t)ow * oh * 3)))
+		return 0;
+	if (SDL_RenderReadPixels(ren, NULL, SDL_PIXELFORMAT_RGB24,
+	                         rgb, ow * 3) == 0) {
+		report_shot_path(path, sizeof(path));
+		ok = write_png(path, ow, oh, rgb);
+	}
+	free(rgb);
+	return ok;
 }
 
 static void guest_log_open(void)
@@ -2130,6 +2226,11 @@ static int  g_tool_len;
  * g_tool_update marks which kind of run is in flight. */
 static int  g_tool_update;
 static char g_update_dest[1100];
+/* The bug report is the same shape as the update check: output to be read
+ * rather than shown, and far too quick to justify a progress panel flashing
+ * up and closing again. */
+static int  g_tool_bug;
+static char g_bug_folder[1100];
 
 static void tool_run2(const char *what, const char *script,
                       const char *a1, const char *a2)
@@ -2158,13 +2259,14 @@ static void tool_run(const char *what, const char *script, const char *arg)
 	tool_run2(what, script, arg, NULL);
 }
 
-/* Up to six arguments, for the tools that take flags rather than a path. */
+/* Up to ten arguments, for the tools that take flags rather than a path.
+ * (Six until the bug report, which passes four flag/value pairs.) */
 static void tool_runv(const char *what, const char *script, char *const av[])
 {
-	char *argv[8];
+	char *argv[12];
 	int n = 0;
 	argv[n++] = (char *)script;
-	while (av[n - 1] && n < 7) { argv[n] = av[n - 1]; n++; }
+	while (av[n - 1] && n < 11) { argv[n] = av[n - 1]; n++; }
 	argv[n] = NULL;
 	if (g_tool > 0) { ui_status("busy: %s", g_tool_what); return; }
 	snprintf(g_tool_what, sizeof(g_tool_what), "%s", what);
@@ -2174,10 +2276,11 @@ static void tool_runv(const char *what, const char *script, char *const av[])
 	/* No progress panel for the update check: it is a background errand, and
 	 * covering the window with a box every launch to say "still nothing new"
 	 * is exactly the behaviour that makes people turn updaters off. */
-	if (g_tool > 0 && !g_tool_update) {
+	if (g_tool > 0 && !g_tool_update && !g_tool_bug) {
 		ui_progress_begin(what); ui_progress_line("starting...");
 	} else if (g_tool <= 0) {
 		g_tool_update = 0;
+		g_tool_bug = 0;
 		ui_status("%s could not start", what);
 	}
 }
@@ -2201,6 +2304,13 @@ static void tool_drain(void)
 					long a2 = 0, b2 = 0;
 					if (sscanf(g_tool_buf + 11, "%ld %ld", &a2, &b2) == 2 && b2 > 0)
 						ui_progress_pct((int)((a2 * 100) / b2));
+				} else if (g_tool_bug) {
+					/* One line of it matters — where the folder went. The
+					 * rest is written for someone running the tool in a
+					 * terminal, and the dialog says it better. */
+					if (!strncmp(g_tool_buf, "@@REPORT ", 9))
+						snprintf(g_bug_folder, sizeof(g_bug_folder), "%s",
+						         g_tool_buf + 9);
 				} else if (g_tool_update) {
 					ui_update_line(g_tool_buf);
 				} else if (!strncmp(g_tool_buf, "pct ", 4)) {
@@ -2225,11 +2335,31 @@ static void tool_poll(void)
 	tool_drain();                      /* anything written just before exit */
 	if (g_tool_len) {
 		g_tool_buf[g_tool_len] = 0;
-		if (g_tool_update) ui_update_line(g_tool_buf);
-		else               ui_progress_line(g_tool_buf);
+		if (g_tool_bug) {
+			if (!strncmp(g_tool_buf, "@@REPORT ", 9))
+				snprintf(g_bug_folder, sizeof(g_bug_folder), "%s",
+				         g_tool_buf + 9);
+		}
+		else if (g_tool_update) ui_update_line(g_tool_buf);
+		else                    ui_progress_line(g_tool_buf);
 	}
 	g_tool_len = 0;
 	if (g_tool_fd >= 0) { close(g_tool_fd); g_tool_fd = -1; }
+
+	/* THE REPORT OWNS ITS OWN ENDING, for the same reason the update check
+	 * does: it never opened a progress panel, so it must not close one. */
+	if (g_tool_bug) {
+		g_tool_bug = 0;
+		g_tool = 0;
+		if (ok && g_bug_folder[0]) {
+			ui_bug_done(g_bug_folder);
+			open_folder(g_bug_folder);
+		} else {
+			/* The typed text is still in the box — see ui_bug_done(). */
+			ui_status("the report could not be saved");
+		}
+		return;
+	}
 
 	/* THE UPDATE CHECK OWNS ITS OWN ENDING. It never opened a progress panel
 	 * — a check that flashes a dialog at every launch is worse than no check —
@@ -2979,6 +3109,14 @@ int main(int argc, char **argv)
 			} else {
 				ui_draw_idle(ren, lw, lh + UI_BAR_H);
 			}
+			/* THE BUG REPORT'S SCREENSHOT GOES HERE — between the guest and
+			 * the chrome. See capture_report_shot(); this line is the reason
+			 * the capture lives in the viewer rather than in the UI, which
+			 * cannot photograph the screen without its own dialog in the way. */
+			if (ui_shot_pending()) {
+				g_shot_ok = capture_report_shot(ren);
+				ui_shot_taken(g_shot_ok);
+			}
 			ui_draw(ren, lw, lh + UI_BAR_H);
 		}
 		SDL_RenderPresent(ren);
@@ -3333,6 +3471,41 @@ int main(int argc, char **argv)
 			snprintf(g_update_dest, sizeof(g_update_dest), "%s", dest);
 			g_tool_update = 0;
 			tool_runv("Downloading update", "tools/check-update.py", av);
+			break;
+		}
+		case UI_ACT_BUG_REPORT: {
+			static char descp[700], shotp[700];
+			char text[1024];
+			char *av[9];
+			int n = 0;
+			FILE *df;
+
+			ui_bug_get(text, sizeof(text));
+			report_desc_path(descp, sizeof(descp));
+			report_shot_path(shotp, sizeof(shotp));
+
+			if ((df = fopen(descp, "w"))) {
+				fputs(text, df);
+				fclose(df);
+			} else {
+				/* Without the description the report is a log dump, which is
+				 * the half nobody can act on. Say so rather than writing one. */
+				ui_status("cannot write to the state folder");
+				break;
+			}
+
+			av[n++] = (char *)"--desc-file"; av[n++] = descp;
+			av[n++] = (char *)"--version";   av[n++] = (char *)TADPOLE_VERSION;
+			av[n++] = (char *)"--brand";     av[n++] = (char *)ui_brand_name();
+			/* Only when the capture actually landed: the tool tests the file
+			 * anyway, but passing a path that was never written asks it to
+			 * decide something this side already knows. */
+			if (g_shot_ok) { av[n++] = (char *)"--shot"; av[n++] = shotp; }
+			av[n] = NULL;
+
+			g_bug_folder[0] = 0;
+			g_tool_bug = 1;
+			tool_runv("Saving report", "tools/bug-report.py", av);
 			break;
 		}
 		case UI_ACT_ONLINE_UPDATE:

@@ -208,7 +208,7 @@ static int  g_hot_item  = -1;
 
 /* modal */
 enum modal_kind { M_NONE = 0, M_ABOUT, M_UPDATE, M_GFX, M_AUDIO, M_PAD, M_DEBUG, M_SYSTEM,
-                  M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES, M_APPS };
+                  M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES, M_APPS, M_BUG };
 static enum modal_kind g_modal;
 
 /* ---- update check state -------------------------------------------------
@@ -229,9 +229,19 @@ static int  g_up_nnote;
 static int  g_up_scroll;
 static int  g_up_count;
 static int  g_up_silent;
-static char  g_msg_title[64], g_msg_body[512];
+static char  g_msg_title[64], g_msg_body[512], g_msg_body2[128];
 /* Non-zero when M_MSG is a yes/no rather than an acknowledgement. */
 static int   g_confirm;
+
+/* ---- bug report ---------------------------------------------------------
+ * What the user typed, whether the box has the keyboard, and the one-frame
+ * request for a screenshot the viewer has to honour before it draws us. See
+ * the note in tadpole_ui.h for why the capture cannot happen in here. */
+#define BUG_MAX 800
+static char g_bug_text[BUG_MAX];
+static int  g_bug_focus;
+static int  g_bug_shot;          /* 1 = capture wanted, viewer clears it */
+static int  g_bug_shot_ok;       /* did the capture actually happen */
 static int   g_sys_ready = -1;   /* -1 = not yet checked */
 
 /* file browser */
@@ -1193,7 +1203,7 @@ struct mitem {
 enum {
 	IT_RUN_UI = 1, IT_SWF, IT_PKG, IT_CART, IT_FW, IT_STOP, IT_QUIT,
 	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE, IT_UPDATE,
-	IT_GAMES, IT_DEBUG, IT_SYSTEM
+	IT_GAMES, IT_DEBUG, IT_SYSTEM, IT_BUG
 };
 
 static const struct mitem FILE_ITEMS[] = {
@@ -1230,6 +1240,10 @@ static const struct mitem OPT_ITEMS[] = {
 static const struct mitem HELP_ITEMS[] = {
 	{ "Setup Wizard...",        IT_WIZARD, 0, 0, 0 },
 	{ "Check for Updates...",   IT_UPDATE, 0, 0, 0 },
+	/* Enabled always, INCLUDING when nothing is running and when the system
+	 * files are missing. "It will not start" is a bug report too, and it is
+	 * the one from someone who has no other way to tell us anything. */
+	{ "Report a Problem...",    IT_BUG,    0, 0, 0 },
 	{ "About Tadpole",          IT_ABOUT,  0, 0, 0 },
 };
 
@@ -1516,7 +1530,49 @@ static void msg(const char *title, const char *body)
 {
 	snprintf(g_msg_title, sizeof(g_msg_title), "%s", title);
 	snprintf(g_msg_body, sizeof(g_msg_body), "%s", body);
+	g_msg_body2[0] = 0;
 	g_modal = M_MSG;
+}
+
+/* Same, with a second line. text() does not wrap, so anything that needs to
+ * say two things has to say them as two strings. */
+static void msg2(const char *title, const char *body, const char *body2)
+{
+	msg(title, body);
+	snprintf(g_msg_body2, sizeof(g_msg_body2), "%s", body2);
+}
+
+/* ---- bug report --------------------------------------------------------- */
+
+void ui_bug_get(char *out, size_t n)
+{
+	if (out && n) snprintf(out, n, "%s", g_bug_text);
+}
+
+int  ui_shot_pending(void) { return g_bug_shot; }
+
+void ui_shot_taken(int ok)
+{
+	g_bug_shot = 0;
+	g_bug_shot_ok = ok;
+}
+
+void ui_bug_done(const char *folder)
+{
+	/* THE FOLDER NAME, NOT THE PATH. A report saved to a home directory two
+	 * levels deep produces a string wider than this dialog, and text() does
+	 * not wrap — so the useful half would be the half that ran off the edge.
+	 * The viewer opens the folder anyway; what this has to answer is "did it
+	 * work, and what am I looking for", which the name does. */
+	const char *base = folder, *p;
+	for (p = folder; *p; p++)
+		if (*p == '/' || *p == '\\') base = p + 1;
+	msg2("Report saved", base, "Drag both files into Discord.");
+	/* CLEARED ONLY ON SUCCESS. Every failure path leaves the text where it
+	 * is, because the alternative is telling someone their report could not
+	 * be written and eating what they wrote about it in the same breath. */
+	g_bug_text[0] = 0;
+	ui_status("report saved");
 }
 
 
@@ -1668,6 +1724,18 @@ static void activate(int id)
 	case IT_DEBUG: g_modal = M_DEBUG; break;
 	case IT_SYSTEM: g_modal = M_SYSTEM; break;
 	case IT_ABOUT: g_modal = M_ABOUT; break;
+	case IT_BUG:
+		/* ASK FOR THE PICTURE NOW, not when Save is pressed. The frame worth
+		 * capturing is the one that made the user reach for this menu, and
+		 * between opening the dialog and typing a sentence about it the guest
+		 * has carried on running — a title mid-animation would be a different
+		 * frame by then, and a title that crashed would be no frame at all.
+		 * The viewer takes it on the next frame, under the dialog. */
+		g_bug_shot = 1;
+		g_bug_shot_ok = 0;
+		g_bug_focus = 1;
+		g_modal = M_BUG;
+		break;
 	case IT_UPDATE: g_action = UI_ACT_CHECK_UPDATE; break;
 	case IT_GAMES: games_open(); break;
 	case IT_WIZARD: g_wiz_page = 0; g_modal = M_WIZARD; break;
@@ -1730,6 +1798,9 @@ static struct dlg cur_dlg(int lw, int lh)
 	case M_WIZARD: return dlg_fit(lw, lh, 348, 210);
 	case M_PROGRESS: return dlg_fit(lw, lh, 350, 150);
 	case M_MSG:   return dlg_fit(lw, lh, 250, 92);
+	/* Wide enough that a sentence does not wrap every four words, and tall
+	 * enough to show what is being sent without a scrollbar. */
+	case M_BUG:   return dlg_fit(lw, lh, 320, 204);
 	/* The library wants every pixel it can have: it is a list of eighty-odd
 	 * names next to a picture. */
 	case M_GAMES: return dlg_fit(lw, lh, 460, 260);
@@ -1788,6 +1859,64 @@ static SDL_Rect up_btn(const struct dlg *d, int which)
 	b.y = d->y + d->h - b.h - 8;
 	b.x = which == 0 ? d->x + d->w - 2 * b.w - 16 : d->x + d->w - b.w - 8;
 	return b;
+}
+
+/* Buttons for the report dialog: 0 = Save Report, 1 = Cancel. */
+static SDL_Rect bug_btn(const struct dlg *d, int which)
+{
+	SDL_Rect b;
+	b.w = 80; b.h = 14;
+	b.y = d->y + d->h - b.h - 8;
+	b.x = which == 0 ? d->x + d->w - 2 * b.w - 16 : d->x + d->w - b.w - 8;
+	return b;
+}
+
+/* The typing area. The 50 at the bottom is the two lines saying what the
+ * report will contain plus the button row: at 46 the buttons' top bevel ran
+ * a pixel under the second line and read as an underline through it. */
+static SDL_Rect bug_box(const struct dlg *d)
+{
+	SDL_Rect f;
+	f.x = d->x + 10;
+	f.y = d->y + 46;
+	f.w = d->w - 20;
+	f.h = d->h - 46 - 50;
+	return f;
+}
+
+/* Break the typed text into display lines: at the newlines the user typed, at
+ * spaces where one fits, and mid-word only when a single word is longer than
+ * the box. Returns the number of lines produced.
+ *
+ * WRAPPED AT DRAW TIME, NOT STORED WRAPPED. The box re-flows when the window
+ * is resized, and — the part that matters — the buffer handed to the report is
+ * exactly what the user typed, with no line breaks this function invented. */
+#define BUG_COLS 80
+#define BUG_ROWS 24
+static int bug_wrap(const char *s, int cols, char out[BUG_ROWS][BUG_COLS + 1])
+{
+	int n = 0;
+	if (cols > BUG_COLS) cols = BUG_COLS;
+	if (cols < 1) cols = 1;
+	while (*s && n < BUG_ROWS) {
+		int len = 0, brk;
+		while (s[len] && s[len] != '\n' && len < cols) len++;
+		if (s[len] && s[len] != '\n') {
+			/* A full line with more to come: step back to the last space, if
+			 * this line has one. If it has none the word is longer than the
+			 * box and there is nothing to do but break it. */
+			brk = len;
+			while (brk > 0 && s[brk] != ' ') brk--;
+			if (brk > 0) len = brk;
+		}
+		memcpy(out[n], s, (size_t)len);
+		out[n][len] = 0;
+		n++;
+		s += len;
+		while (*s == ' ') s++;
+		if (*s == '\n') s++;
+	}
+	return n;
 }
 
 static SDL_Rect wiz_btn(const struct dlg *d, int which)   /* 0 back 1 next 2 cancel */
@@ -1892,6 +2021,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_MSG:   title = g_msg_title; break;
 	case M_UPDATE: title = "Update available"; break;
 	case M_APPS:  title = "Launch App"; break;
+	case M_BUG:   title = "Report a Problem"; break;
 	default: break;
 	}
 
@@ -2234,8 +2364,55 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			     g_prog_ok ? C_ACCENT : C_TEXT);
 		break;
 	}
+	case M_BUG: {
+		SDL_Rect f = bug_box(&d);
+		char lines[BUG_ROWS][BUG_COLS + 1];
+		int cols = (f.w - 8) / GLYPH_ADV;
+		int vis  = (f.h - 6) / 9;
+		int n    = bug_wrap(g_bug_text, cols, lines);
+		int first = n > vis ? n - vis : 0;
+		int i2;
+
+		text(r, d.x + 10, d.y + 22, "Which game, and what did you see?", C_TEXT);
+		text(r, d.x + 10, d.y + 33, "The more specific, the better.", C_TEXT_DIM);
+
+		fill(r, f.x, f.y, f.w, f.h, C_VOID);
+		bevel(r, f.x, f.y, f.w, f.h, g_bug_focus ? 1 : 0);
+		for (i2 = first; i2 < n; i2++)
+			text(r, f.x + 4, f.y + 4 + (i2 - first) * 9, lines[i2], C_TEXT);
+		if (!g_bug_text[0] && !g_bug_focus)
+			text(r, f.x + 4, f.y + 4, "click and type", C_TEXT_DIM);
+		if (g_bug_focus && (SDL_GetTicks() / 450) % 2 == 0)
+			fill(r, f.x + 4 + (n ? text_w(lines[n - 1]) : 0),
+			     f.y + 3 + (n ? n - 1 - first : 0) * 9, 1, 8, C_ACCENT);
+
+		/* WHAT IS IN THE ENVELOPE, SAID BEFORE IT IS SEALED. This collects a
+		 * picture of someone's screen and a hundred lines of their log; they
+		 * are entitled to read that sentence before they press the button,
+		 * not after they have posted the result in a public channel. */
+		text(r, d.x + 10, d.y + d.h - 44,
+		     g_bug_shot_ok ? "Saves a screenshot, the last 100 log"
+		                   : "Saves the last 100 log lines, your",
+		     C_TEXT_DIM);
+		text(r, d.x + 10, d.y + d.h - 34,
+		     g_bug_shot_ok ? "lines, and your system details."
+		                   : "system details. No screen to capture.",
+		     C_TEXT_DIM);
+
+		for (i2 = 0; i2 < 2; i2++) {
+			SDL_Rect b = bug_btn(&d, i2);
+			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+			bevel(r, b.x, b.y, b.w, b.h, 1);
+			text_c(r, b.x, b.w, b.y + 3, i2 == 0 ? "Save Report" : "Cancel",
+			       hot ? C_ACCENT : C_TEXT);
+		}
+		break;
+	}
 	case M_MSG:
 		text(r, d.x + 10, d.y + 24, g_msg_body, C_TEXT);
+		if (g_msg_body2[0])
+			text(r, d.x + 10, d.y + 36, g_msg_body2, C_TEXT_DIM);
 		if (g_confirm) {
 			SDL_Rect b = { d.x + d.w - 96, d.y + d.h - 18, 44, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
@@ -2707,8 +2884,8 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	default: break;
 	}
 
-	if (g_modal == M_WIZARD || g_modal == M_UPDATE)
-		return;      /* both carry their own buttons; a generic Close would
+	if (g_modal == M_WIZARD || g_modal == M_UPDATE || g_modal == M_BUG)
+		return;      /* all carry their own buttons; a generic Close would
 		              * land on top of them, which it did */
 	cb = close_rect(&d);
 	{
@@ -2804,6 +2981,18 @@ void ui_debug_state(const char *spec)
 	else if (!strcmp(name, "debug"))   g_modal = M_DEBUG;
 	else if (!strcmp(name, "system"))  g_modal = M_SYSTEM;
 	else if (!strcmp(name, "about"))   g_modal = M_ABOUT;
+	/* Typed-in text and a claimed screenshot, because the empty box is the
+	 * one state of this dialog that shows neither the wrapping nor the
+	 * sentence saying what is about to be collected. */
+	else if (!strcmp(name, "bug")) {
+		snprintf(g_bug_text, sizeof(g_bug_text), "%s",
+		         "Ben 10 Ultimate Alien has a glitched font on the title "
+		         "screen - the letters are all boxes. Other games look fine.");
+		g_bug_focus = 1;
+		g_bug_shot_ok = 1;
+		g_modal = M_BUG;
+	}
+	else if (!strcmp(name, "bugempty")) { g_bug_focus = 0; g_modal = M_BUG; }
 	/* `apps@x,y` renders the launcher with the pointer at x,y, so a row can be
 	 * shown highlighted without anyone touching a mouse. */
 	else if (!strcmp(name, "apps"))    { ap_reload(); g_modal = M_APPS; }
@@ -2868,6 +3057,28 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			g_modal = M_NONE;
 			return 1;
 		}
+	}
+
+	if (g_modal == M_BUG) {
+		SDL_Rect f = bug_box(&d);
+		SDL_Rect b0 = bug_btn(&d, 0), b1 = bug_btn(&d, 1);
+		if (inside(mx, my, f.x, f.y, f.w, f.h)) { g_bug_focus = 1; return 1; }
+		if (inside(mx, my, b0.x, b0.y, b0.w, b0.h)) {
+			g_bug_focus = 0;
+			g_action = UI_ACT_BUG_REPORT;
+			g_modal = M_NONE;
+			return 1;
+		}
+		if (inside(mx, my, b1.x, b1.y, b1.w, b1.h)) {
+			/* THE TEXT SURVIVES A CANCEL. Someone who typed three sentences,
+			 * closed this to go and check which level it was, and came back
+			 * to an empty box would not type them again. */
+			g_bug_focus = 0;
+			g_modal = M_NONE;
+			return 1;
+		}
+		g_bug_focus = 0;
+		return 1;
 	}
 
 	if (g_modal == M_UPDATE) {
@@ -3254,9 +3465,19 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 		return g_modal != M_NONE;
 
 	case SDL_TEXTINPUT:
-		/* THE ONLY PLACE IN TADPOLE THAT TAKES TYPING. Everything else is
-		 * pointer-driven, so text input is enabled all the time and simply
-		 * ignored unless the name field has focus — no mode to get stuck in. */
+		/* ONE OF THE TWO PLACES IN TADPOLE THAT TAKE TYPING — this and the
+		 * profile name. Everything else is pointer-driven, so text input is
+		 * enabled all the time and simply ignored unless one of them has
+		 * focus; there is no mode to get stuck in. */
+		if (g_modal == M_BUG && g_bug_focus) {
+			size_t n = strlen(g_bug_text);
+			const char *t = e->text.text;
+			for (; *t && n < sizeof(g_bug_text) - 1; t++)
+				if ((unsigned char)*t >= 0x20 && (unsigned char)*t < 0x7F)
+					g_bug_text[n++] = *t;
+			g_bug_text[n] = 0;
+			return 1;
+		}
 		if (g_modal == M_WIZARD && g_wiz_page == WIZ_PROFILE && g_prof_focus) {
 			size_t n = strlen(g_prof_name);
 			const char *t = e->text.text;
@@ -3270,6 +3491,31 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 		return g_modal != M_NONE;
 
 	case SDL_KEYDOWN:
+		if (g_modal == M_BUG && g_bug_focus) {
+			size_t n = strlen(g_bug_text);
+			switch (e->key.keysym.sym) {
+			case SDLK_BACKSPACE:
+				if (n) g_bug_text[n - 1] = 0;
+				return 1;
+			/* RETURN INSERTS A NEWLINE, it does not submit. This is a
+			 * description box, not a search field: "it crashes when I do X"
+			 * followed by steps is the shape these arrive in, and a Return
+			 * that fired off the report at the end of the first line would
+			 * send half of every one of them. */
+			case SDLK_RETURN:
+			case SDLK_KP_ENTER:
+				if (n < sizeof(g_bug_text) - 1) {
+					g_bug_text[n] = '\n';
+					g_bug_text[n + 1] = 0;
+				}
+				return 1;
+			case SDLK_ESCAPE:
+				g_bug_focus = 0;
+				return 1;
+			default:
+				break;
+			}
+		}
 		if (g_modal == M_WIZARD && g_wiz_page == WIZ_PROFILE && g_prof_focus) {
 			size_t n = strlen(g_prof_name);
 			if (e->key.keysym.sym == SDLK_BACKSPACE) {
