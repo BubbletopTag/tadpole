@@ -131,6 +131,18 @@ DIRTY="$(git status --porcelain --untracked-files=no)"
     echo "$DIRTY" | sed 's/^/    /' >&2
 }
 
+# ---- the tests that need no build -------------------------------------------
+# There is no CI here, so a test that is not run on the way to a release is a
+# test that is not run. These are the host-side rules that Linux cannot
+# otherwise exercise — the Windows path and symlink handling — and they cost
+# under a second between them. A release is the last moment they are free.
+echo "==> host-side tests"
+if [ -f "$HERE/tests/link_resolve_test.py" ]; then
+    python3 "$HERE/tests/link_resolve_test.py" \
+        || die "the rootfs symlink rules are wrong — refusing to ship an
+  installer that would fail partway through building a sysroot"
+fi
+
 # ---- build both ------------------------------------------------------------
 # NOTHING IS TAGGED OR PUSHED UNTIL BOTH ASSETS EXIST AND BOTH CARRY $VERSION.
 # A release is two files; producing one of them and discovering the other

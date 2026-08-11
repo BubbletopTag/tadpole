@@ -109,11 +109,118 @@ def members_of(path):
 
 # ---- filesystem helpers -----------------------------------------------------
 
-def link_or_copy(src, dst):
+# A kernel gives up after ~40 links; so do we, and for the same reason. The
+# rootfs contains at least one two-hop chain (pidof -> pidof.sysvinit ->
+# /sbin/killall5), so following exactly one link is not enough.
+GUEST_LINK_HOPS = 40
+
+
+def _guest_join(rootfs, base, target):
+    """Resolve one link target as a kernel rooted at `rootfs` would.
+
+    Two rules, and both of them are the whole point:
+
+      * an absolute target is absolute IN THE GUEST. "/sbin/killall5" is the
+        rootfs's /sbin/killall5, not the host's — on Windows the host has no
+        /sbin at all, and on Linux it has one belonging to somebody else.
+      * ".." at the root is the root. Real kernels clamp it there, which is why
+        "linuxrc -> ../bin/busybox" is a perfectly good link on the device and
+        a path outside the directory tree here.
+    """
+    if target.startswith("/"):
+        joined = os.path.join(rootfs, target.lstrip("/"))
+    else:
+        joined = os.path.join(base, target)
+    parts = []
+    for seg in os.path.relpath(joined, rootfs).replace("\\", "/").split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts:                    # at the root, ".." is the root
+                parts.pop()
+            continue
+        parts.append(seg)
+    return os.path.join(rootfs, *parts) if parts else rootfs
+
+
+def guest_resolve(rootfs, path):
+    """Where the guest would end up following the links at `path`.
+
+    Returns a host path INSIDE `rootfs`, or None if the guest would not find
+    anything either. None is a normal answer, not a failure: the firmware
+    genuinely ships links to files it does not contain — the LucyAssets videos
+    are missing on the device too — and the right thing to do with those is
+    what the device does, which is nothing.
+
+    Because every step is re-anchored on `rootfs`, the answer can never be a
+    file outside it, whatever the link says.
+    """
+    rootfs = os.path.abspath(rootfs)
+    cur = os.path.abspath(path)
+    for _ in range(GUEST_LINK_HOPS):
+        if not os.path.islink(cur):
+            return cur if os.path.exists(cur) else None
+        cur = _guest_join(rootfs, os.path.dirname(cur), os.readlink(cur))
+    return None                          # a loop
+
+
+def copy_tree_as_guest(rootfs, src, dst, _chain=()):
+    """Copy `src` to `dst`, following the rootfs's links the way the guest does.
+
+    shutil.copytree cannot do this, and both of its settings are wrong here:
+
+      symlinks=True   makes symlinks, which Windows refuses without Developer
+                      Mode or elevation — the reason this function copies.
+      symlinks=False  dereferences against the HOST. A dangling link then
+                      raises (this is the crash: "shutil.Error ...
+                      bin/pidof.sysvinit"), and a link that is NOT dangling on
+                      the host is worse than one that is, because
+                      "/etc" would copy the host's /etc into the guest image.
+
+    So the walk is done here, one entry at a time, with every link resolved by
+    guest_resolve and therefore always re-anchored inside the rootfs. Returns
+    the number of entries skipped because the guest could not reach them
+    either.
+
+    _chain carries the directories currently being copied, so a directory link
+    pointing back up its own path is skipped rather than followed forever.
+    """
+    os.makedirs(dst, exist_ok=True)
+    skipped = 0
+    here = _chain + (os.path.abspath(src),)
+    for name in sorted(os.listdir(src)):
+        s = os.path.join(src, name)
+        d = os.path.join(dst, name)
+        if os.path.islink(s):
+            real = guest_resolve(rootfs, s)
+            if real is None:             # dangling for the guest too
+                skipped += 1
+                continue
+            if os.path.isdir(real):
+                if os.path.abspath(real) in here:
+                    skipped += 1         # a link back up our own path
+                    continue
+                skipped += copy_tree_as_guest(rootfs, real, d, here)
+            else:
+                shutil.copy2(real, d)
+        elif os.path.isdir(s):
+            skipped += copy_tree_as_guest(rootfs, s, d, here)
+        else:
+            shutil.copy2(s, d)
+    return skipped
+
+
+def link_or_copy(src, dst, rootfs=None):
     """A symlink on Linux, a real copy on Windows.
 
     Windows can make symlinks only with Developer Mode or elevation, and a
     failure here would leave a sysroot that looks built and is not.
+
+    `rootfs` is the root the guest's own absolute links are relative to, and
+    is required whenever `src` is a directory inside a firmware image —
+    without it there is no way to know that "/sbin/killall5" means the
+    rootfs's. It is not needed for the files copied out of runtime/, which
+    are ours and contain no links.
     """
     if not os.path.exists(src):
         return False
@@ -128,7 +235,11 @@ def link_or_copy(src, dst):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if WINDOWS:
         if os.path.isdir(src):
-            shutil.copytree(src, dst, symlinks=False)
+            # NOT shutil.copytree. It dereferences against the host, which
+            # aborts the whole install on the first link the host cannot
+            # follow — "/sbin/killall5" is the rootfs's, and the host has no
+            # /sbin. See copy_tree_as_guest.
+            copy_tree_as_guest(rootfs or src, src, dst)
         else:
             shutil.copy2(src, dst)
     else:
@@ -361,14 +472,15 @@ def build_sysroot(rootfs):
 
     for d in ("bin", "boot", "etc", "Firmware", "lib", "linuxrc", "mnt",
               "sbin", "erootfs.md5"):
-        link_or_copy(os.path.join(rootfs, d), os.path.join(sysroot, d))
+        link_or_copy(os.path.join(rootfs, d), os.path.join(sysroot, d), rootfs)
 
     lf = os.path.join(sysroot, "LF")
     if os.path.islink(lf):
         os.remove(lf)
     os.makedirs(os.path.join(lf, "Bulk"), exist_ok=True)
     os.makedirs(os.path.join(lf, "Cart"), exist_ok=True)
-    link_or_copy(os.path.join(rootfs, "LF", "Base"), os.path.join(lf, "Base"))
+    link_or_copy(os.path.join(rootfs, "LF", "Base"), os.path.join(lf, "Base"),
+                 rootfs)
 
     for d in ("dev/input", "sys", "proc", "tmp", "flags"):
         os.makedirs(os.path.join(sysroot, d), exist_ok=True)
@@ -382,14 +494,14 @@ def build_sysroot(rootfs):
     if os.path.isdir(src_usr):
         for b in sorted(os.listdir(src_usr)):
             if b != "lib":
-                link_or_copy(os.path.join(src_usr, b), os.path.join(usr, b))
+                link_or_copy(os.path.join(src_usr, b), os.path.join(usr, b), rootfs)
     usrlib = os.path.join(usr, "lib")
     os.makedirs(usrlib, exist_ok=True)
     for src in (os.path.join(rootfs, "usr", "lib"), os.path.join(rootfs, "lib")):
         if not os.path.isdir(src):
             continue
         for f in sorted(os.listdir(src)):
-            link_or_copy(os.path.join(src, f), os.path.join(usrlib, f))
+            link_or_copy(os.path.join(src, f), os.path.join(usrlib, f), rootfs)
 
     shim = os.path.join(PROJ, "runtime", "shimlibs", "libdl.so.0")
     if os.path.exists(shim):
@@ -409,7 +521,7 @@ def build_sysroot(rootfs):
     if os.path.isdir(src_etc):
         for b in sorted(os.listdir(src_etc)):
             if b != "asound.conf":
-                link_or_copy(os.path.join(src_etc, b), os.path.join(etc, b))
+                link_or_copy(os.path.join(src_etc, b), os.path.join(etc, b), rootfs)
     write_text(os.path.join(etc, "asound.conf"), ASOUND)
 
     # /var/sounds — rcS makes these per-platform on the device.
@@ -421,17 +533,17 @@ def build_sysroot(rootfs):
     if os.path.isdir(src_var):
         for b in sorted(os.listdir(src_var)):
             if b != "sounds":
-                link_or_copy(os.path.join(src_var, b), os.path.join(var, b))
+                link_or_copy(os.path.join(src_var, b), os.path.join(var, b), rootfs)
     sounds = os.path.join(var, "sounds")
     os.makedirs(sounds, exist_ok=True)
     src_sounds = os.path.join(rootfs, "var", "sounds")
     if os.path.isdir(src_sounds):
         for f in sorted(os.listdir(src_sounds)):
-            link_or_copy(os.path.join(src_sounds, f), os.path.join(sounds, f))
+            link_or_copy(os.path.join(src_sounds, f), os.path.join(sounds, f), rootfs)
     vid = os.path.join(rootfs, "LF", "Base", "LpadAssets", "Video")
     for v in ("StartupVideo.ogg", "ShutdownVideo.ogg", "TransitionVideo.ogg",
               "powerdown.wav"):
-        link_or_copy(os.path.join(vid, v), os.path.join(sounds, v))
+        link_or_copy(os.path.join(vid, v), os.path.join(sounds, v), rootfs)
 
     for rel, text in SYSFS.items():
         write_text(os.path.join(sysroot, rel), text)
