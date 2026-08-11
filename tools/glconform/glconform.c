@@ -109,6 +109,9 @@ extern void glFogfv(GLenum pname, const GLfloat *params);
 extern void glTexEnvi(GLenum target, GLenum pname, GLint param);
 extern void glGetTexEnviv(GLenum target, GLenum pname, GLint *params);
 
+/* blending */
+extern void glBlendFunc(GLenum sfactor, GLenum dfactor);
+
 /* point/line/polygon/stencil/clipplane (23 of 108) */
 extern void glPointSize(GLfloat size);
 extern void glLineWidth(GLfloat width);
@@ -144,6 +147,10 @@ extern void glGetClipPlanef(GLenum plane, GLfloat *eqn);
 #define GL_TEXTURE_ENV                  0x2300
 #define GL_TEXTURE_ENV_MODE             0x2200
 #define GL_DECAL                        0x2101
+#define GL_BLEND_DST                    0x0BE0
+#define GL_BLEND_SRC                    0x0BE1
+#define GL_SRC_ALPHA                    0x0302
+#define GL_ONE_MINUS_SRC_ALPHA          0x0303
 #define GL_TEXTURE_WRAP_S               0x2802
 #define GL_TEXTURE_MIN_FILTER           0x2801
 #define GL_CLAMP_TO_EDGE                0x812F
@@ -314,6 +321,50 @@ static void t_texenv(void)
 	       " got 0x%04x\"\n", got == GL_DECAL ? "OK" : "FAIL",
 	       (unsigned)drain(), (unsigned)got);
 	if (got == GL_DECAL) g_ok++; else g_fail++;
+}
+
+/* THE PAIR THAT DREW BEN 10'S MENU TEXT IN BLACK.
+ *
+ * Same save/restore shape as t_texenv above, and the same cost when the getter
+ * does not answer — except that this one is invisible until a host GPU is
+ * doing the blending. Traced out of Ben 10: Ultimate Alien, one frame of its
+ * menu:
+ *
+ *     glGetTexEnvxv(GL_TEXTURE_ENV_MODE)   // saved, and we DO answer this
+ *     glGetIntegerv(GL_BLEND_DST, &dst)    // saved
+ *     glGetIntegerv(GL_BLEND_SRC, &src)    // saved
+ *     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+ *     ... draw the text ...
+ *     glTexEnvx(GL_TEXTURE_ENV_MODE, GL_MODULATE)
+ *     glEnable(GL_BLEND)
+ *     glBlendFunc(src, dst)                // restore what it read back
+ *
+ * Unhandled, both queries wrote 0, so the restore was glBlendFunc(GL_ZERO,
+ * GL_ZERO) — 1227 of them against 444 correct ones in a single run — and every
+ * blended draw afterwards multiplied to black. The software rasteriser ignores
+ * the factors and hardcodes src-alpha-over, so it showed nothing; the HLE path
+ * forwards them to the host glBlendFunc, so it showed everything. A rendering
+ * bug that only exists on the fast path is exactly the kind this binary is for.
+ *
+ * The initial values are worth a second line on hardware: GLES 1.1 §4.1.7 says
+ * GL_ONE / GL_ZERO, and that is what our shim now starts from, but only the
+ * device can confirm the VR5 agrees. */
+static void t_blendfunc(void)
+{
+	GLint src = -1, dst = -1;
+	drain();
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glGetIntegerv(GL_BLEND_SRC, &src);
+	glGetIntegerv(GL_BLEND_DST, &dst);
+	printf("RESULT blend.func_roundtrip %s err=0x%04x detail=\"want 0x0302,0x0303"
+	       " got 0x%04x,0x%04x\"\n",
+	       (src == (GLint)GL_SRC_ALPHA && dst == (GLint)GL_ONE_MINUS_SRC_ALPHA)
+	           ? "OK" : "FAIL",
+	       (unsigned)drain(), (unsigned)src, (unsigned)dst);
+	if (src == (GLint)GL_SRC_ALPHA && dst == (GLint)GL_ONE_MINUS_SRC_ALPHA)
+		g_ok++;
+	else
+		g_fail++;
 }
 
 static void t_texparam(void)
@@ -710,6 +761,7 @@ static int glconform_main(void)
 
 	t_texenv();
 	t_texparam();
+	t_blendfunc();
 
 	t_state_setters();
 	t_clipplane();

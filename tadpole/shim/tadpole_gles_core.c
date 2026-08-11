@@ -121,6 +121,10 @@ static void warn2(const char *msg, int a, int b) { tad_gl_warn(msg, a, b); }
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
 #define GL_TEXTURE_2D           0x0DE1
 #define GL_BLEND                0x0BE2
+#define GL_BLEND_DST            0x0BE0
+#define GL_BLEND_SRC            0x0BE1
+#define GL_ZERO_                0x0000
+#define GL_ONE_                 0x0001
 #define GL_ALPHA                0x1906
 #define GL_RGB                  0x1907
 #define GL_RGBA                 0x1908
@@ -328,6 +332,11 @@ int g_swaps, g_clears;
 static GLenum g_active_tex;              /* 0-based unit index */
 static int    g_tex2d_unit[MAX_TEXUNITS];
 static int    g_blend_on;
+/* The blend FACTORS, which a title reads back with glGetIntegerv and restores.
+ * GL_ONE / GL_ZERO is the GLES 1.1 initial pair. See glBlendFunc for what
+ * answering these badly did to Ben 10's menu. */
+static GLenum g_blend_src = GL_ONE_;
+static GLenum g_blend_dst = GL_ZERO_;
 
 /* ---- DEPTH BUFFER --------------------------------------------------------
  *
@@ -1701,6 +1710,18 @@ static void hle_sync_state(void)
 		if (g_texs[i].name && g_texs[i].argb)
 			hle_teximage2d(g_texs[i].name, g_texs[i].w, g_texs[i].h,
 			               g_texs[i].argb);
+	/* THE BLEND FACTORS TOO, for the same reason the textures are here: a title
+	 * that set them BEFORE the viewer attached forwarded them to nobody, and the
+	 * host would then blend with its own defaults (GL_ONE / GL_ZERO) while the
+	 * guest believed it had asked for something else. Attach order alone decided
+	 * whether a frame came out right, which is the kind of difference that reads
+	 * as "it only glitches sometimes".
+	 *
+	 * Only these two, deliberately: the rest of the render state (GL_BLEND
+	 * itself, depth, texenv) has the same hole and wants the same treatment, but
+	 * each needs its own measurement rather than an assumption, so they are not
+	 * swept in here on spec. */
+	hle_blendfunc(g_blend_src, g_blend_dst);
 	tr2("HLE resynced buffers/textures", MAX_BUFS, MAX_TEXS);
 }
 
@@ -3158,7 +3179,34 @@ void glDepthRangef(GLfloat n, GLfloat f) { (void)n; (void)f; }
 /* Defined with the rest of the family further down; declared here because this
  * is where the other texture state setters live. */
 void glTexParameterx(GLenum t, GLenum p, GLfixed v);
+/* THE FACTORS ARE REMEMBERED BECAUSE A TITLE READS THEM BACK.
+ *
+ * This used to trace and forward, storing nothing, so glGetIntegerv had no
+ * state to answer GL_BLEND_SRC / GL_BLEND_DST from and took the default branch
+ * — writing 0 and raising GL_INVALID_ENUM. Zero is GL_ZERO, a perfectly legal
+ * factor, so a renderer that saves and restores blending got no error it would
+ * act on and quietly restored glBlendFunc(GL_ZERO, GL_ZERO): every blended
+ * fragment afterwards multiplied to black.
+ *
+ * Ben 10: Ultimate Alien draws its menu that way, and one traced run of it made
+ * the shape unarguable — 1227 glBlendFunc(0,0) against 444 correct
+ * glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA), the bad one restored
+ * immediately after each bracketed draw. Same class of bug as the glIsEnabled note above and
+ * the compressed-format pair below: answering a state query badly is worse than
+ * not answering it, because the caller acts on the answer.
+ *
+ * ONLY THE HLE PATH SHOWED IT. The software rasteriser ignores the factors
+ * entirely and hardcodes src-alpha-over (see the g_blend_on branch in the
+ * triangle loop), so it drew the text correctly while the host-GPU replay —
+ * which forwards these two enums straight to the real glBlendFunc — drew it
+ * black. That is why this reproduced only with the viewer up, and it is the
+ * reason tools/glconform now carries blend.func_roundtrip.
+ *
+ * The initial pair is GL_ONE / GL_ZERO, per GLES 1.1 §4.1.7 — the state a title
+ * that never calls glBlendFunc is entitled to read back. The two live further
+ * up, beside g_blend_on, because hle_sync_state() replays them on attach. */
 void glBlendFunc(GLenum sf, GLenum df) { tr2("glBlendFunc src/dst", (int)sf, (int)df);
+  g_blend_src = sf; g_blend_dst = df;
   if (hle_ready()) hle_blendfunc(sf, df); }
 
 /* TEXEL CONVERSION — one path for glTexImage2D and glTexSubImage2D.
@@ -4269,6 +4317,10 @@ static int get_integers(GLenum p, GLint *v)
 	case GL_ARRAY_BUFFER_BINDING:         *v = (GLint)g_bound_array; break;
 	case GL_ELEMENT_ARRAY_BUFFER_BINDING: *v = (GLint)g_bound_elem; break;
 	case GL_MAX_MODELVIEW_STACK_DEPTH:    *v = MV_STACK_DEPTH; break;
+	/* See glBlendFunc: unanswered, these two restored GL_ZERO/GL_ZERO and
+	 * turned Ben 10's menu text black under the host-GPU replay. */
+	case GL_BLEND_SRC:                    *v = (GLint)g_blend_src; break;
+	case GL_BLEND_DST:                    *v = (GLint)g_blend_dst; break;
 	/* SKINNING CAPABILITIES. Unanswered, these fell to the default below and
 	 * reported ZERO — telling a title that no palette matrices and no bones per
 	 * vertex exist. A model that asks before setting up skinning is then
@@ -4613,6 +4665,14 @@ void tad_gl_context_reset(void)
 	g_vtx.buf = g_col.buf = g_tex.buf = g_nrm.buf = 0;
 	g_cur_color = 0xFFFFFFFFu;
 	g_tex_gen_fail = 0;
+	/* Back to the GLES 1.1 initial pair. These are answers to a state query, so
+	 * carrying them across a title boundary is the same cross-title leak as the
+	 * texture mirrors below: the next title gets a fresh context on the device
+	 * and would read GL_ONE / GL_ZERO from it, and one that saves and restores
+	 * blending before ever setting it would otherwise restore the PREVIOUS
+	 * game's factors. */
+	g_blend_src = GL_ONE_;
+	g_blend_dst = GL_ZERO_;
 	/* TexEnv is per-unit, not per-object, so clearing the texture table does
 	 * not touch it — the next title would inherit the previous one's combiner
 	 * and env colour. Texture sampler state needs nothing here: tex_slot()
