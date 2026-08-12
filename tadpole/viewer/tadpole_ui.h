@@ -150,6 +150,10 @@ int  ui_update_pending(void);
 
 /* One-line status shown at the right of the bar. */
 void  ui_status(const char *fmt, ...);
+/* A modal the user has to dismiss, raised from code rather than from a menu.
+ * -> 0 if something else was already on screen and it was NOT shown, so the
+ * caller can try again on a later frame instead of losing the message. */
+int   ui_alert(const char *title, const char *body);
 
 /* Re-test whether the system files exist. Call after anything that could
  * have installed or removed them. */

@@ -82,20 +82,36 @@ export TADPOLE_GL
 # every "how does this title look" judgement made from a plain launch was
 # judging the fallback. Same trap as TADPOLE_GL above, same fix.
 #
-# TADPOLE_GL_HLE=0 forces the software rasteriser, which is still how you tell
-# whether a rendering fault is in the shared GL core or only in the replay. The
-# shim tests for the variable's PRESENCE, so "off" has to mean unset, not 0.
-if [ -z "${TADPOLE_GL_HLE:-}" ] && [ -r "$UICFG" ]; then
-    TADPOLE_GL_HLE="$(awk '$1=="gl_hle"{print $2}' "$UICFG" | tail -1)"
+# AND NOW IT IS THE ONLY PATH. The software rasteriser is deprecated: it is
+# years behind the GL core it shares, several times slower, and it cannot
+# express state the titles rely on — it samples one texture unit and ignores the
+# blend factors. Two real bugs this month were invisible in software for exactly
+# that reason. So the config checkbox no longer turns it off (the front end
+# shows it ticked and greyed), and a guest that asks for replay and cannot get
+# it now STOPS rather than quietly rendering the rest of the session wrongly.
+#
+# TADPOLE_GL_SOFTWARE=1 is the way back, and it has to be asked for by name:
+#
+#     TADPOLE_GL_SOFTWARE=1 ./tadpole.sh --app X
+#
+# It is still the right tool for one job — telling whether a rendering fault is
+# in the shared GL core or only in the replay — which is why it is kept at all.
+if [ -n "${TADPOLE_GL_SOFTWARE:-}" ] && [ "${TADPOLE_GL_SOFTWARE}" != 0 ]; then
+    export TADPOLE_GL_SOFTWARE
+    unset TADPOLE_GL_HLE
+else
+    unset TADPOLE_GL_SOFTWARE
+    TADPOLE_GL_HLE=1; export TADPOLE_GL_HLE
 fi
-: "${TADPOLE_GL_HLE:=1}"
-if [ "$TADPOLE_GL_HLE" = 0 ]; then unset TADPOLE_GL_HLE; else export TADPOLE_GL_HLE; fi
 
 LIBS="$HERE/runtime/shimlibs-z:$HERE/runtime/shimlibs:$HERE/runtime/libs"
 [ "$TADPOLE_GL" != 0 ] && LIBS="$HERE/runtime/shimlibs-gl:$LIBS"
 VIEWER="$HERE/tadpole/viewer/tadpole-view"
 export TADPOLE_DIR="${TADPOLE_DIR:-/tmp/tadpole}"
 
+# The command line as typed, kept before the parser shifts it away, so an error
+# message can hand back something that can actually be pasted.
+ORIG_ARGS=("$@")
 use_viewer=1; debug=0; mode=front; scale=2; rotate=0; prog=""; appname=""; declare -a progargs=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -122,6 +138,30 @@ while [ $# -gt 0 ]; do
     esac
     shift || true
 done
+
+# NO VIEWER MEANS NO HOST GPU, AND THEREFORE NO RENDERING WORTH TRUSTING.
+#
+# The replayer lives in the viewer, so `--no-viewer` cannot do host-GPU replay
+# by construction. It used to fall back to the software rasteriser silently,
+# which is how every compat verdict in this repository came to be recorded on a
+# path that cannot multitexture and ignores the blend factors — the reason two
+# rendering bugs this month were invisible to the sweep that was supposed to
+# find them.
+#
+# So say it here, once, in the launcher, rather than letting the guest abort a
+# few seconds later with less context. Modes that never render are exempt:
+# --list and --shell draw nothing.
+if [ "$use_viewer" = 0 ] && [ "$mode" != list ] && [ "$mode" != shell ] \
+   && { [ -z "${TADPOLE_GL_SOFTWARE:-}" ] || [ "${TADPOLE_GL_SOFTWARE}" = 0 ]; }; then
+    echo "tadpole: --no-viewer has no host GPU to replay to, and the software" >&2
+    echo "  rasteriser is deprecated — it cannot express multitexturing or the" >&2
+    echo "  blend factors, so what it draws is not what the device draws." >&2
+    echo "" >&2
+    echo "  To render for real, drop --no-viewer." >&2
+    echo "  To use the software rasteriser deliberately, ask for it:" >&2
+    echo "      TADPOLE_GL_SOFTWARE=1 $0 ${ORIG_ARGS[*]}" >&2
+    exit 1
+fi
 
 # THE FRONT END MUST START WITHOUT SYSTEM FILES. That is the whole point of the
 # setup wizard: a first-time user has no firmware yet, and dying here with a

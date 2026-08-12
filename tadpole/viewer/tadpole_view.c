@@ -1372,7 +1372,18 @@ static void guest_setenv(const struct ui_settings *c)
 	int lv = c->debug_level;
 
 	if (c->gl)           setenv("TADPOLE_GL", "1", 1);          else unsetenv("TADPOLE_GL");
-	if (c->gl_hle)       setenv("TADPOLE_GL_HLE", "1", 1);      else unsetenv("TADPOLE_GL_HLE");
+	/* TADPOLE_GL_SOFTWARE COMES FROM THE USER'S SHELL, not from the settings —
+	 * it is the deliberate way to the deprecated software rasteriser, and on
+	 * Windows setting it before launching the viewer is the ONLY way to reach
+	 * it, since the checkbox that used to is now locked on. The guest inherits
+	 * our environment, so it arrives on its own; the point of naming it here is
+	 * that TADPOLE_GL_HLE must not be sent alongside it. The shim prefers
+	 * software when both are present, but "both are present" is a contradiction
+	 * to have to reason about at the far end. */
+	if (getenv("TADPOLE_GL_SOFTWARE") || !c->gl_hle)
+		unsetenv("TADPOLE_GL_HLE");
+	else
+		setenv("TADPOLE_GL_HLE", "1", 1);
 	if (c->gl_dumpframe) setenv("TADPOLE_GL_DUMPFRAME", "1", 1);else unsetenv("TADPOLE_GL_DUMPFRAME");
 	if (c->gl_dumptex)   setenv("TADPOLE_GL_DUMPTEX", "1", 1);  else unsetenv("TADPOLE_GL_DUMPTEX");
 	if (c->touch_debug)  setenv("TADPOLE_TOUCH_DEBUG", "1", 1); else unsetenv("TADPOLE_TOUCH_DEBUG");
@@ -2533,6 +2544,7 @@ int main(int argc, char **argv)
 	unsigned long fps_frames = 0, fps_packets = 0;    /* counters at that sample */
 	int fps_primed = 0;               /* fps_at/fps_frames hold a real reading */
 	int fps_shown = 0;                /* the status line is ours to clear */
+	int gpu_lost_told = 0;            /* the replay-died dialog, once a session */
 	char path[512];
 	int scale = 2, w, h, i, running = 1, touching = 0;
 	int rotate = 0;   /* degrees CW; portrait apps need 90 */
@@ -3375,6 +3387,24 @@ int main(int argc, char **argv)
 				} else if (hle_guest_fell_back()) {
 					ui_status("HLE FELL BACK - software");
 					fps_shown = 1;
+					/* A line on the status bar was how this was reported for
+					 * months, and it is the one place nobody looks while a
+					 * game is on screen. The software rasteriser cannot
+					 * express what the titles ask for, so every frame after
+					 * this point is wrong rather than slow — that deserves
+					 * something the user has to dismiss.
+					 *
+					 * Once per session, and only when nothing else is up:
+					 * ui_alert() declines while a menu or dialog is open, so
+					 * retry on later ticks until it lands. */
+					if (!gpu_lost_told) {
+						char body[160];
+						snprintf(body, sizeof(body),
+						         "GPU render engine CRASHED. "
+						         "Please restart %s.", ui_brand_name());
+						if (ui_alert("Graphics", body))
+							gpu_lost_told = 1;
+					}
 				} else if (pk > fps_packets) {
 					ui_status("HLE 0 fps");
 					fps_shown = 1;

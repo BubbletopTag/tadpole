@@ -1279,6 +1279,14 @@ static void cfg_load(void)
 		}
 	}
 	fclose(f);
+	/* WHATEVER THE FILE SAID. Every install that ever unticked host GPU replay
+	 * has `gl_hle 0` written down, and honouring it now would hand those users
+	 * the deprecated software rasteriser for ever — silently, since the row
+	 * that used to explain it is greyed. The setting is kept in the struct and
+	 * still written back, so nothing else has to change and a future release
+	 * could give the choice back; it is simply not read as an off switch.
+	 * TADPOLE_GL_SOFTWARE=1 is the deliberate way to the old path. */
+	g_cfg.gl_hle = 1;
 }
 
 /* ---- menu model ---------------------------------------------------------- */
@@ -1620,6 +1628,21 @@ static void msg(const char *title, const char *body)
 	g_modal = M_MSG;
 }
 
+/* The same dialog, for the render loop rather than a menu item. It has to be
+ * possible to raise one of these from outside this file: the host-GPU replay
+ * dying is noticed by the frame pump, not by anything the user clicked.
+ *
+ * Deliberately does NOT steal an open menu or a modal already on screen —
+ * whatever the user is doing wins, and the caller is expected to try again. */
+int ui_alert(const char *title, const char *body)
+{
+	if (g_modal != M_NONE) return 0;
+	g_confirm = 0;
+	g_open_menu = -1;
+	msg(title, body);
+	return 1;
+}
+
 
 /* ---- update check ------------------------------------------------------- */
 
@@ -1830,7 +1853,9 @@ static struct dlg cur_dlg(int lw, int lh)
 	case M_FILES: return dlg_fit(lw, lh, 300, 172);
 	case M_WIZARD: return dlg_fit(lw, lh, 348, 210);
 	case M_PROGRESS: return dlg_fit(lw, lh, 350, 150);
-	case M_MSG:   return dlg_fit(lw, lh, 250, 92);
+	/* Tall enough for a wrapped body plus the erase confirmation's two extra
+	 * lines beneath it — see the M_MSG draw. */
+	case M_MSG:   return dlg_fit(lw, lh, 250, 116);
 	/* The library wants every pixel it can have: it is a list of eighty-odd
 	 * names next to a picture. */
 	case M_GAMES: return dlg_fit(lw, lh, 460, 260);
@@ -1864,6 +1889,21 @@ static void row_check(SDL_Renderer *r, const struct dlg *d, int i,
 	if (hot) fill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI);
 	text(r, d->x + 10, y, on ? GL_CHECK_1 : GL_CHECK_0, on ? C_ACCENT : C_TEXT_DIM);
 	text(r, d->x + 22, y, label, C_TEXT);
+}
+
+/* A setting that is no longer a choice: ticked, dimmed, and inert. Shown rather
+ * than removed because it has been in this dialog for a long time and its
+ * absence would read as "the feature went away" — the opposite of what
+ * happened. `note` says why it cannot be changed. */
+static void row_check_locked(SDL_Renderer *r, const struct dlg *d, int i,
+                             const char *label, const char *note)
+{
+	int y = row_y(d, i);
+	text(r, d->x + 10, y, GL_CHECK_1, C_TEXT_DIM);
+	text(r, d->x + 22, y, label, C_TEXT_DIM);
+	if (note)
+		text(r, d->x + 22 + (int)strlen(label) * GLYPH_ADV + GLYPH_ADV, y,
+		     note, C_TEXT_DIM);
 }
 
 static void row_value(SDL_Renderer *r, const struct dlg *d, int i,
@@ -2147,8 +2187,14 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		char buf[32];
 		row_check(r, &d, 0, "Enable OpenGL", g_cfg.gl,
 		          row_hit(&d, 0, g_mx, g_my));
-		row_check(r, &d, 1, "Host GPU replay (HLE)", g_cfg.gl_hle,
-		          row_hit(&d, 1, g_mx, g_my));
+		/* NOT A CHOICE ANY MORE. The software rasteriser is deprecated: it
+		 * samples one texture unit and ignores the blend factors, so it draws
+		 * busy titles wrongly rather than slowly, and two rendering bugs this
+		 * month were invisible on it. Turning replay off from here would be
+		 * choosing that quietly, which is the thing being removed. It stays
+		 * visible, ticked and greyed; TADPOLE_GL_SOFTWARE=1 is the way to the
+		 * old path for anyone deliberately comparing the two. */
+		row_check_locked(r, &d, 1, "Host GPU replay (HLE)", "- always on");
 		/* Only meaningful on the host-GPU path: the software rasteriser has
 		 * no samples to average. Shown greyed rather than hidden, so the
 		 * setting does not appear and disappear as HLE is toggled. */
@@ -2335,18 +2381,46 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			     g_prog_ok ? C_ACCENT : C_TEXT);
 		break;
 	}
-	case M_MSG:
-		text(r, d.x + 10, d.y + 24, g_msg_body, C_TEXT);
+	case M_MSG: {
+		/* WRAPPED, because the body is not always ours to keep short. Two of
+		 * the four callers pass a fixed sentence, but "Could not check" passes
+		 * netssl's reason — which is a full explanation of a certificate
+		 * failure and the single most useful line the update check produces.
+		 * Drawn unwrapped it ran off the panel and took the half naming the
+		 * cause with it, the same way the progress panel used to truncate. */
+		int ly = d.y + 24, cols = (d.w - 20) / GLYPH_ADV, nl = 0;
+		const char *p = g_msg_body;
+		while (*p && nl < 4) {
+			int take = (int)strlen(p), brk;
+			if (take > cols) {
+				take = cols;
+				for (brk = take; brk > cols / 4; brk--)
+					if (p[brk] == ' ') { take = brk; break; }
+			}
+			{
+				char line[128];
+				int n = take < (int)sizeof(line) - 1 ? take : (int)sizeof(line) - 1;
+				memcpy(line, p, (size_t)n);
+				line[n] = 0;
+				text(r, d.x + 10, ly, line, C_TEXT);
+			}
+			ly += 10; nl++;
+			p += take;
+			while (*p == ' ') p++;
+		}
 		if (g_confirm) {
 			SDL_Rect b = { d.x + d.w - 96, d.y + d.h - 18, 44, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
 			bevel(r, b.x, b.y, b.w, b.h, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Erase", hot ? C_ACCENT : C_TEXT);
-			text(r, d.x + 10, d.y + 40, "Games and firmware downloads", C_TEXT_DIM);
-			text(r, d.x + 10, d.y + 50, "are not touched.", C_TEXT_DIM);
+			/* Below the body, wherever it ended, rather than at a fixed offset
+			 * that a two-line body would collide with. */
+			text(r, d.x + 10, ly + 6, "Games and firmware downloads", C_TEXT_DIM);
+			text(r, d.x + 10, ly + 16, "are not touched.", C_TEXT_DIM);
 		}
 		break;
+	}
 	case M_WIZARD: {
 		struct prereq pq;
 		int bx = d.x + 62, by = d.y + 20, i2;
@@ -3036,6 +3110,16 @@ void ui_debug_state(const char *spec)
 		ui_progress_line("install-didj: no LF/Base here \xE2\x80\x94 install "
 		                 "the system firmware first\xE2\x80\xA6");
 	}
+	/* The dialog the frame pump raises when host-GPU replay dies. Worth a
+	 * capture state of its own: it is the one modal no sequence of clicks can
+	 * produce, so without this nobody ever looks at it. */
+	else if (!strcmp(name, "alert")) {
+		char body[160];
+		snprintf(body, sizeof(body),
+		         "GPU render engine CRASHED. Please restart %s.",
+		         ui_brand_name());
+		ui_alert("Graphics", body);
+	}
 	else if (!strncmp(name, "wiz", 3)) {
 		g_modal = M_WIZARD;
 		g_wiz_page = (name[3] >= '0' && name[3] <= '9') ? name[3] - '0' : 0;
@@ -3315,9 +3399,10 @@ static int dialog_click(int lw, int lh, int mx, int my)
 				ui_status("GL %s on reboot", g_cfg.gl ? "on" : "off");
 		}
 		else if (row_hit(&d, 1, mx, my)) {
-			g_cfg.gl_hle = !g_cfg.gl_hle;
-			if (g_running)
-				ui_status("HLE %s on reboot", g_cfg.gl_hle ? "on" : "off");
+			/* Locked on — see the note where this row is drawn. Say why once
+			 * rather than letting a click look like a dead spot in the UI. */
+			ui_status("Host GPU replay is always on "
+			          "(TADPOLE_GL_SOFTWARE=1 for the old path)");
 		}
 		else if (row_hit(&d, 2, mx, my) && g_cfg.gl_hle) {
 			static const int s[] = { 0, 2, 4, 8 };

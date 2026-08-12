@@ -31,6 +31,8 @@
 # Leapster title reads sideways.
 
 set -u
+
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(dirname "$HERE")"
 # Which INSTALL to drive. The project tree has the code but only the stock
@@ -142,7 +144,14 @@ echo "==> booting (log: $LOG)"
 # explicitly.
 if [ "${TADPOLE_NO_VIEWER:-0}" = 1 ]; then
     echo "    (headless: software rasteriser, no hle: diagnostics)"
-    "$ROOT/tadpole.sh" --no-viewer --boot >> "$LOG" 2>&1 &
+    # ASKED FOR BY NAME. Host-GPU replay is the only supported path now and
+    # tadpole.sh refuses --no-viewer without this, precisely so that nobody
+    # reaches the software rasteriser by accident. This branch reaches it on
+    # purpose — that is what it is for — so it says so. Set HERE and not at the
+    # top of the file: the default branch above runs WITH the viewer, and
+    # exporting this globally would force software on the very runs this
+    # script exists to collect hle: diagnostics from.
+    TADPOLE_GL_SOFTWARE=1 "$ROOT/tadpole.sh" --no-viewer --boot >> "$LOG" 2>&1 &
 else
     "$ROOT/tadpole.sh" --boot >> "$LOG" 2>&1 &
 fi

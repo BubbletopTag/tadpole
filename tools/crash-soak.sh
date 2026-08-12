@@ -23,6 +23,8 @@
 # --viewer when chasing something that needs the real display path.
 
 set -u
+
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(dirname "$HERE")"
 export TADPOLE_DIR="${TADPOLE_DIR:-/tmp/tadpole-soak}"
@@ -83,7 +85,14 @@ for t in "${TITLES[@]}"; do
         TDIR="/tmp/tadpole-soak-$$-$i"
         mkdir -p "$out"; rm -rf "$TDIR"; mkdir -p "$TDIR"
 
-        v="--no-viewer"; [ "$VIEWER" = 1 ] && v=""
+        # VIEWER=1 runs with a window and therefore with host-GPU replay; the
+        # default has no window, and host-GPU replay lives in the viewer. Since
+        # replay became the only supported path, tadpole.sh refuses --no-viewer
+        # unless the deprecated software rasteriser is asked for by name — so
+        # ask, but ONLY on the branch that actually has no viewer. Setting it
+        # globally would force software on the VIEWER=1 runs too.
+        v="--no-viewer"; sw="TADPOLE_GL_SOFTWARE=1"
+        [ "$VIEWER" = 1 ] && { v=""; sw=""; }
 
         # RUN IT IN THE BACKGROUND AND WATCH, rather than `timeout` and hope.
         #
@@ -94,7 +103,7 @@ for t in "${TITLES[@]}"; do
         # claim on its own — a black screen does not crash either — and the
         # screenshot is what turns the sweep into evidence that a title
         # actually launched.
-        TADPOLE_DIR="$TDIR" TADPOLE_CRASHDIR="$out" setsid \
+        env $sw TADPOLE_DIR="$TDIR" TADPOLE_CRASHDIR="$out" setsid \
             "$PROJ/tadpole.sh" --app "$t" $v > "$out/run.log" 2>&1 < /dev/null &
         deadline=$(( $(date +%s) + ${SOAK_TIMEOUT:-45} ))
         while [ "$(date +%s)" -lt "$deadline" ]; do

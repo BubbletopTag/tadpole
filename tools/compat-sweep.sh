@@ -173,8 +173,16 @@ for d in "$PF"/*/; do
     cd="$OUT/shots/$pkg"; mkdir -p "$cd"
     reap; rm -rf "$TDIR"; mkdir -p "$TDIR"
 
+    # TADPOLE_GL_SOFTWARE=1 IS NOT A DETAIL, IT IS THE CAVEAT ABOVE MADE
+    # EXECUTABLE. --no-viewer means no host GPU, and the host GPU is now the
+    # only supported way to render: asking for the software rasteriser by name
+    # is the price of a sweep that needs no window. Every verdict this script
+    # produces is therefore a SOFTWARE-PATH verdict, and the software path
+    # samples one texture unit and ignores the blend factors — so it cannot see
+    # a whole class of bug. Two were found by hand this month that every sweep
+    # here had scored "ok". Read the results with that in mind.
     TADPOLE_QEMU="$EMU" TADPOLE_DIR="$TDIR" TADPOLE_CRASHDIR="$cd" \
-    TADPOLE_SYSROOT="$SYSROOT" setsid \
+    TADPOLE_SYSROOT="$SYSROOT" TADPOLE_GL_SOFTWARE=1 setsid \
         "$PROJ/tadpole.sh" --app "$pkg" --no-viewer \
         > "$cd/run.log" 2>&1 < /dev/null &
     guest_pid=$!

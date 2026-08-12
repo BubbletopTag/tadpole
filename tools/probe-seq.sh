@@ -11,6 +11,14 @@
 # Coordinates are FRAMEBUFFER pixels (480x272), same as tools/tap.py.
 
 set -u
+
+# NO VIEWER MEANS NO HOST GPU. Host-GPU replay is the only supported rendering
+# path now, so a run that deliberately has no window has to ask for the
+# deprecated software rasteriser by name — tadpole.sh refuses otherwise, rather
+# than quietly rendering with something that cannot express multitexturing or
+# the blend factors. Whatever this script measures, it measures on that path.
+export TADPOLE_GL_SOFTWARE=1
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(dirname "$HERE")"
 OUT="${1:?usage: probe-seq.sh OUTDIR \"x,y[,delay] ...\"}"

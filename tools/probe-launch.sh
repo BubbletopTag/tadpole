@@ -14,6 +14,14 @@
 #                         Camera(245,215)  Music(335,215)
 
 set -u
+
+# NO VIEWER MEANS NO HOST GPU. Host-GPU replay is the only supported rendering
+# path now, so a run that deliberately has no window has to ask for the
+# deprecated software rasteriser by name — tadpole.sh refuses otherwise, rather
+# than quietly rendering with something that cannot express multitexturing or
+# the blend factors. Whatever this script measures, it measures on that path.
+export TADPOLE_GL_SOFTWARE=1
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(dirname "$HERE")"
 APP="${1:-music}"

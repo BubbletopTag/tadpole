@@ -432,14 +432,59 @@ Anything set here wins over the saved settings.
 | | |
 |---|---|
 | `TADPOLE_GL=0` | use the stock GPU stack (titles will assert — for debugging) |
-| `TADPOLE_GL_HLE=1` | host-GPU rendering |
-| `TADPOLE_HLE_STRICT=1` | crash rather than silently fall back to software |
+| `TADPOLE_GL_SOFTWARE=1` | the deprecated software rasteriser — see below |
+| `TADPOLE_HLE_STRICT=1` | stop the guest outright when replay dies, instead of showing the dialog |
 | `TADPOLE_HZ=n` | frame cap (default 60; `0` uncaps) |
 | `TADPOLE_DIR=path` | where the shared framebuffers and FIFOs live |
 | `TADPOLE_DEBUG=1` | verbose shim logging (what debug level 2 sets) |
 | `TADPOLE_STRACE=1` | every guest syscall (what debug level 3 sets) |
 | `TADPOLE_QEMU=path` | a specific qemu-arm, instead of the bundled or installed one |
 | `TADPOLE_DEPS=dir` | where the bundled qemu and Python live (the AppImage sets this) |
+
+### The software rasteriser is deprecated
+
+Host-GPU replay is the only supported way to render. The software rasteriser is
+still in the binary, and it is still the right tool for exactly one job —
+telling whether a rendering fault is in the shared GL core or only in the replay
+— but it is years behind, several times slower, and it cannot express things the
+titles rely on: it samples one texture unit and it ignores the blend factors.
+Two bugs found this month were invisible on it for that reason, having been
+scored "ok" by every compatibility sweep, which runs headless and therefore in
+software.
+
+So it is no longer reachable by accident:
+
+* **Options → Graphics → "Host GPU replay"** is ticked, greyed and always on.
+  A saved setting that turned it off is ignored.
+* **If replay dies mid-session**, the guest no longer drops quietly to software.
+  It raises a dialog — *GPU render engine CRASHED. Please restart Tadpole.* —
+  because the frames after that point would be wrong rather than merely slow.
+* **`--no-viewer` refuses** unless you ask for software by name; there is no
+  host GPU without a viewer.
+
+To use it deliberately:
+
+```sh
+TADPOLE_GL_SOFTWARE=1 ./tadpole.sh --app "Ben 10"
+TADPOLE_GL_SOFTWARE=1 ./tadpole.sh --boot --no-viewer      # headless
+```
+
+On Windows, set it in the shell before launching:
+
+```bat
+set TADPOLE_GL_SOFTWARE=1
+"%LOCALAPPDATA%\Programs\Glasspole\Glasspole.exe"
+```
+
+or in PowerShell:
+
+```powershell
+$env:TADPOLE_GL_SOFTWARE = 1
+& "$env:LOCALAPPDATA\Programs\Glasspole\Glasspole.exe"
+```
+
+The viewer passes its own environment down to the guest, so setting it before
+launch is all that is needed on either platform.
 
 ---
 
