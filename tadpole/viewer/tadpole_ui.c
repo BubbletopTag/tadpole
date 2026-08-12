@@ -1287,6 +1287,13 @@ static void cfg_load(void)
 	 * could give the choice back; it is simply not read as an off switch.
 	 * TADPOLE_GL_SOFTWARE=1 is the deliberate way to the old path. */
 	g_cfg.gl_hle = 1;
+	/* AND THE ROW THAT USED TO TURN THIS ON IS GONE. An install that ticked
+	 * "Stop if HLE falls back" has `hle_strict 1` written down, and honouring it
+	 * now would abort the title on a fallback — the behaviour this release
+	 * replaced with a dialog — with nothing in the UI to untick. The env var
+	 * TADPOLE_HLE_STRICT is the way to ask for it, and guest_setenv() leaves an
+	 * environment that already has it alone. */
+	g_cfg.hle_strict = 0;
 }
 
 /* ---- menu model ---------------------------------------------------------- */
@@ -1894,16 +1901,14 @@ static void row_check(SDL_Renderer *r, const struct dlg *d, int i,
 /* A setting that is no longer a choice: ticked, dimmed, and inert. Shown rather
  * than removed because it has been in this dialog for a long time and its
  * absence would read as "the feature went away" — the opposite of what
- * happened. `note` says why it cannot be changed. */
+ * happened. Dimmed and inert IS the explanation; a trailing "- always on" was
+ * tried and only made the row longer. */
 static void row_check_locked(SDL_Renderer *r, const struct dlg *d, int i,
-                             const char *label, const char *note)
+                             const char *label)
 {
 	int y = row_y(d, i);
 	text(r, d->x + 10, y, GL_CHECK_1, C_TEXT_DIM);
 	text(r, d->x + 22, y, label, C_TEXT_DIM);
-	if (note)
-		text(r, d->x + 22 + (int)strlen(label) * GLYPH_ADV + GLYPH_ADV, y,
-		     note, C_TEXT_DIM);
 }
 
 static void row_value(SDL_Renderer *r, const struct dlg *d, int i,
@@ -2194,44 +2199,32 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		 * choosing that quietly, which is the thing being removed. It stays
 		 * visible, ticked and greyed; TADPOLE_GL_SOFTWARE=1 is the way to the
 		 * old path for anyone deliberately comparing the two. */
-		row_check_locked(r, &d, 1, "Host GPU replay (HLE)", "- always on");
-		/* Only meaningful on the host-GPU path: the software rasteriser has
-		 * no samples to average. Shown greyed rather than hidden, so the
-		 * setting does not appear and disappear as HLE is toggled. */
+		row_check_locked(r, &d, 1, "Host GPU replay (HLE)");
+		/* Host-GPU only, which since the deprecation means always: these two
+		 * used to grey out when replay was off, and replay can no longer be
+		 * off. */
 		if (g_cfg.msaa) snprintf(buf, sizeof(buf), "%dx", g_cfg.msaa);
 		else            snprintf(buf, sizeof(buf), "off");
-		{
-			int y = row_y(&d, 2);
-			int hot = row_hit(&d, 2, g_mx, g_my);
-			if (hot && g_cfg.gl_hle) fill(r, d.x + 6, y - 3, d.w - 12, ROW_H, C_PANEL_HI);
-			text(r, d.x + 10, y, "Anti-aliasing",
-			     g_cfg.gl_hle ? C_TEXT : C_TEXT_DIM);
-			text(r, d.x + d.w - 12 - text_w(buf), y, buf,
-			     g_cfg.gl_hle ? C_ACCENT : C_TEXT_DIM);
-		}
+		row_value(r, &d, 2, "Anti-aliasing", buf, row_hit(&d, 2, g_mx, g_my));
 		/* Render scale. Also HLE-only, and worth keeping next to AA: they are
 		 * the same idea spent two different ways. */
 		if (g_cfg.render_scale > 1) snprintf(buf, sizeof(buf), "%dx", g_cfg.render_scale);
 		else                        snprintf(buf, sizeof(buf), "native");
-		{
-			int y = row_y(&d, 3);
-			int hot = row_hit(&d, 3, g_mx, g_my);
-			if (hot && g_cfg.gl_hle) fill(r, d.x + 6, y - 3, d.w - 12, ROW_H, C_PANEL_HI);
-			text(r, d.x + 10, y, "Render scale", g_cfg.gl_hle ? C_TEXT : C_TEXT_DIM);
-			text(r, d.x + d.w - 12 - text_w(buf), y, buf,
-			     g_cfg.gl_hle ? C_ACCENT : C_TEXT_DIM);
-		}
-		row_check(r, &d, 4, "Stop if HLE falls back", g_cfg.hle_strict,
-		          row_hit(&d, 4, g_mx, g_my));
+		row_value(r, &d, 3, "Render scale", buf, row_hit(&d, 3, g_mx, g_my));
+		/* "Stop if HLE falls back" used to live here. It described a choice
+		 * that no longer exists for a user: replay dying now raises a dialog
+		 * either way, and the setting only chose between that and killing the
+		 * title outright. TADPOLE_HLE_STRICT=1 still does the latter, which is
+		 * a debugging tool and belongs in the environment, not in a menu. */
 		if (g_cfg.frame_cap) snprintf(buf, sizeof(buf), "%d fps", g_cfg.frame_cap);
 		else                 snprintf(buf, sizeof(buf), "uncapped");
-		row_value(r, &d, 5, "Frame cap", buf, row_hit(&d, 5, g_mx, g_my));
+		row_value(r, &d, 4, "Frame cap", buf, row_hit(&d, 4, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%d deg", g_cfg.rotate);
-		row_value(r, &d, 6, "Orientation", buf, row_hit(&d, 6, g_mx, g_my));
+		row_value(r, &d, 5, "Orientation", buf, row_hit(&d, 5, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%dx", g_cfg.scale);
-		row_value(r, &d, 7, "Window scale", buf, row_hit(&d, 7, g_mx, g_my));
-		row_check(r, &d, 8, "Touch debug overlay", g_cfg.touch_debug,
-		          row_hit(&d, 8, g_mx, g_my));
+		row_value(r, &d, 6, "Window scale", buf, row_hit(&d, 6, g_mx, g_my));
+		row_check(r, &d, 7, "Touch debug overlay", g_cfg.touch_debug,
+		          row_hit(&d, 7, g_mx, g_my));
 		text(r, d.x + 10, d.y + d.h - 30,
 		     g_running ? "GL: reboot to apply."
 		               : "GL applies at next boot.",
@@ -3404,7 +3397,7 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			ui_status("Host GPU replay is always on "
 			          "(TADPOLE_GL_SOFTWARE=1 for the old path)");
 		}
-		else if (row_hit(&d, 2, mx, my) && g_cfg.gl_hle) {
+		else if (row_hit(&d, 2, mx, my)) {
 			static const int s[] = { 0, 2, 4, 8 };
 			int i, k = 0;
 			for (i = 0; i < 4; i++)
@@ -3414,7 +3407,7 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			 * the next frame, so this takes effect while you watch — which is
 			 * the only way to judge whether it was worth having. */
 		}
-		else if (row_hit(&d, 3, mx, my) && g_cfg.gl_hle) {
+		else if (row_hit(&d, 3, mx, my)) {
 			/* Up to 8x, which is 3840x2176 — 4K for a 480x272 panel. The
 			 * driver's own ceiling is asked for at build time and the
 			 * request clamped to it, so an ambitious setting costs frames
@@ -3425,20 +3418,19 @@ static int dialog_click(int lw, int lh, int mx, int my)
 				if (steps[i] == g_cfg.render_scale) k = (i + 1) % 6;
 			g_cfg.render_scale = steps[k];
 		}
-		else if (row_hit(&d, 4, mx, my)) g_cfg.hle_strict = !g_cfg.hle_strict;
-		else if (row_hit(&d, 5, mx, my)) {
+		else if (row_hit(&d, 4, mx, my)) {
 			static const int hz[] = { 60, 30, 0 };   /* 0 = uncapped */
 			int i, k = 0;
 			for (i = 0; i < 3; i++)
 				if (hz[i] == g_cfg.frame_cap) k = (i + 1) % 3;
 			g_cfg.frame_cap = hz[k];
 		}
-		else if (row_hit(&d, 6, mx, my)) cycle_rotate();
-		else if (row_hit(&d, 7, mx, my)) {
+		else if (row_hit(&d, 5, mx, my)) cycle_rotate();
+		else if (row_hit(&d, 6, mx, my)) {
 			g_cfg.scale = g_cfg.scale % 4 + 1;
 			g_action = UI_ACT_RELAYOUT;
 		}
-		else if (row_hit(&d, 8, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
+		else if (row_hit(&d, 7, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
 		ui_cfg_save();
 		return 1;
 	}

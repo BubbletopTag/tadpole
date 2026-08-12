@@ -1384,10 +1384,23 @@ static void guest_setenv(const struct ui_settings *c)
 		unsetenv("TADPOLE_GL_HLE");
 	else
 		setenv("TADPOLE_GL_HLE", "1", 1);
+	/* This guest is launched WITH --no-viewer, but not headless: we are the
+	 * viewer, already running, and we read the shared arena this guest writes
+	 * into for host-GPU replay same as if it had opened its own window.
+	 * tadpole.sh's --no-viewer refusal exists for the OTHER case — a caller
+	 * with no viewer anywhere in the picture — and cannot tell the two apart
+	 * on its own, so we say so. */
+	setenv("TADPOLE_SUPERVISED", "1", 1);
 	if (c->gl_dumpframe) setenv("TADPOLE_GL_DUMPFRAME", "1", 1);else unsetenv("TADPOLE_GL_DUMPFRAME");
 	if (c->gl_dumptex)   setenv("TADPOLE_GL_DUMPTEX", "1", 1);  else unsetenv("TADPOLE_GL_DUMPTEX");
 	if (c->touch_debug)  setenv("TADPOLE_TOUCH_DEBUG", "1", 1); else unsetenv("TADPOLE_TOUCH_DEBUG");
-	if (c->hle_strict)   setenv("TADPOLE_HLE_STRICT", "1", 1);  else unsetenv("TADPOLE_HLE_STRICT");
+	/* NOT unset when absent from the settings, unlike its neighbours. The
+	 * "Stop if HLE falls back" row is gone — replay dying raises a dialog now,
+	 * and the only remaining choice was between that and killing the title,
+	 * which is a debugging preference rather than a setting. So the environment
+	 * is the only way to ask for it, and clearing it here would take that away
+	 * from anyone who did. */
+	if (c->hle_strict) setenv("TADPOLE_HLE_STRICT", "1", 1);
 	if (c->tslib)        setenv("TADPOLE_TSLIB", "1", 1);       else unsetenv("TADPOLE_TSLIB");
 
 	/* Level 2 turns on the shim's own tracing and the GL layer's; level 3 adds

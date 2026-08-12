@@ -151,7 +151,16 @@ done
 # So say it here, once, in the launcher, rather than letting the guest abort a
 # few seconds later with less context. Modes that never render are exempt:
 # --list and --shell draw nothing.
+#
+# ALSO EXEMPT: TADPOLE_SUPERVISED. tadpole-view sets it when IT is the one
+# invoking us — "Run System Menu" and friends run us with --no-viewer because
+# the window we would otherwise open is the one already on screen, not
+# because nobody is watching. Real host-GPU replay happens there, same as it
+# would through our own viewer. Without this, the front end's own boot path
+# hit the same refusal meant for genuinely headless callers and could not
+# start the guest at all.
 if [ "$use_viewer" = 0 ] && [ "$mode" != list ] && [ "$mode" != shell ] \
+   && [ -z "${TADPOLE_SUPERVISED:-}" ] \
    && { [ -z "${TADPOLE_GL_SOFTWARE:-}" ] || [ "${TADPOLE_GL_SOFTWARE}" = 0 ]; }; then
     echo "tadpole: --no-viewer has no host GPU to replay to, and the software" >&2
     echo "  rasteriser is deprecated — it cannot express multitexturing or the" >&2
