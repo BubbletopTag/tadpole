@@ -46,7 +46,7 @@
  * Dark green, a few flat tones, 1px bevels. Deliberately few colours: pixel
  * interfaces read better with a tight palette than with gradients.
  */
-#define C_VOID      0x0C1E14U     /* behind everything */
+#define C_VOID      0x07150DU     /* behind everything */
 /* TWO PALETTES, ONE CODEBASE.
  *
  * Tadpole runs the LeapPad's software under qemu-arm. Glasspole runs it under
@@ -62,20 +62,28 @@
  * possibility of the two drifting apart.
  *
  * The blue is the green rotated towards cyan at the same lightness, so the
- * layout, contrast and bevels behave identically. */
+ * layout, contrast and bevels behave identically.
+ *
+ * DEEPER THAN THEY WERE, now that the panels are translucent. Flat opaque
+ * chrome wants a mid tone or it reads as a hole; glass wants a dark one,
+ * because the light in it comes from what is BEHIND it and a pale sheet has
+ * nowhere left to brighten. Only the structural tones moved — bar, panel,
+ * their highlights and the bevel edges. Text, dim text and the accent are
+ * untouched, so every one of them gained contrast against the darker ground
+ * rather than losing it. */
 struct palette {
 	unsigned bar, bar_hi, panel, panel_hi, edge_lt, edge_dk;
 	unsigned text, text_dim, accent, shadow;
 };
 
 static const struct palette pal_tadpole = {
-	0x14301FU, 0x2A6642U, 0x14301FU, 0x2A6642U, 0x4E9C6BU, 0x08180FU,
-	0xD8F5E4U, 0x6E9B80U, 0x8CE0A6U, 0x030806U
+	0x0E2416U, 0x1D4A2FU, 0x0E2416U, 0x1D4A2FU, 0x3C7A53U, 0x05110AU,
+	0xD8F5E4U, 0x6E9B80U, 0x8CE0A6U, 0x020604U
 };
 
 static const struct palette pal_glasspole = {
-	0x142A30U, 0x2A5A66U, 0x142A30U, 0x2A5A66U, 0x4E8C9CU, 0x081418U,
-	0xD8EEF5U, 0x6E8F9BU, 0x8CCFE0U, 0x030608U
+	0x0E1F25U, 0x1C4451U, 0x0E1F25U, 0x1C4451U, 0x3A6C7CU, 0x050E12U,
+	0xD8EEF5U, 0x6E8F9BU, 0x8CCFE0U, 0x020506U
 };
 
 static const struct palette *g_pal = &pal_tadpole;
@@ -664,7 +672,7 @@ static void chip(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
 {
 	float rad = rr_radius(w, h);
 	rr_fill_ex(r, NULL, (float)x, (float)y, (float)w, (float)h,
-	          rad, rad, rad, rad, col, 214);
+	          rad, rad, rad, rad, col, 190);
 	rr_stroke(r, (float)x, (float)y, (float)w, (float)h, rad,
 	         raised ? C_EDGE_LT : C_EDGE_DK, raised ? 170 : 130, 1.0f);
 }
@@ -824,7 +832,7 @@ static void panel_glass(SDL_Renderer *r, int x, int y, int w, int h,
 	}
 
 	rr_geom(r, NULL, NULL, (float)x, (float)y, (float)w, (float)h,
-	       rad, rad, rad, rad, C_PANEL_HI, 232, C_PANEL, 244);
+	       rad, rad, rad, rad, C_PANEL_HI, 202, C_PANEL, 220);
 
 	if (blur) {
 		SDL_FRect uv = glass_uv(r);
@@ -2329,7 +2337,7 @@ static void row_check(SDL_Renderer *r, const struct dlg *d, int i,
                       const char *label, int on, int hot)
 {
 	int y = row_y(d, i);
-	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 200);
+	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 178);
 	text(r, d->x + 10, y, on ? GL_CHECK_1 : GL_CHECK_0, on ? C_ACCENT : C_TEXT_DIM);
 	text(r, d->x + 22, y, label, C_TEXT);
 }
@@ -2351,7 +2359,7 @@ static void row_value(SDL_Renderer *r, const struct dlg *d, int i,
                       const char *label, const char *val, int hot)
 {
 	int y = row_y(d, i);
-	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 200);
+	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 178);
 	text(r, d->x + 10, y, label, C_TEXT);
 	text(r, d->x + d->w - 12 - text_w(val), y, val, C_ACCENT);
 }
@@ -2401,7 +2409,7 @@ static void draw_bar(SDL_Renderer *r, int lw)
 	for (i = 0; i < NMENUS; i++) {
 		int hot = (g_open_menu == i) ||
 		          (g_open_menu < 0 && inside(g_mx, g_my, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1));
-		if (hot) rfill(r, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1, C_BAR_HI, 200);
+		if (hot) rfill(r, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1, C_BAR_HI, 178);
 		text(r, MENUS[i].x + 5, 3, MENUS[i].title, hot ? C_ACCENT : C_TEXT);
 	}
 
@@ -2443,7 +2451,7 @@ static void draw_dropdown(SDL_Renderer *r)
 			continue;
 		}
 		if (g_hot_item == i && item_enabled(it))
-			rfill(r, x + 2, iy - 1, w - 4, 12, C_PANEL_HI, 200);
+			rfill(r, x + 2, iy - 1, w - 4, 12, C_PANEL_HI, 178);
 		text(r, x + 8, iy + 1, it->label,
 		     item_enabled(it) ? (g_hot_item == i ? C_ACCENT : C_TEXT) : C_TEXT_DIM);
 	}
@@ -2498,7 +2506,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	{
 		float hrad = rr_radius_panel(d.w, d.h) - 1.0f;
 		rr_geom(r, NULL, NULL, d.x + 1.0f, d.y + 1.0f, d.w - 2.0f, 11.0f,
-		       hrad, hrad, 0, 0, C_BAR_HI, 235, C_BAR_HI, 200);
+		       hrad, hrad, 0, 0, C_BAR_HI, 208, C_BAR_HI, 172);
 	}
 	text(r, d.x + 6, d.y + 3, title, C_ACCENT);
 
@@ -3272,7 +3280,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			char nm[64];
 			unsigned col = C_TEXT;
 
-			if (k == g_gm_sel) rfill(r, lx + 1, ry - 1, lw2 - 2, GM_ROW_H, C_PANEL_HI, 200);
+			if (k == g_gm_sel) rfill(r, lx + 1, ry - 1, lw2 - 2, GM_ROW_H, C_PANEL_HI, 178);
 
 			/* tick box, so a batch install is one obvious gesture */
 			text(r, tx, ry + 3, e->checked ? GL_CHECK_1 : GL_CHECK_0,
@@ -3402,7 +3410,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			char nm[47];
 			unsigned col = g_fb_list[k].isdir ? C_ACCENT : C_TEXT;
 			if (k == g_fb_sel) {
-				rfill(r, d.x + 8, ry - 1, d.w - 16, 11, C_PANEL_HI, 200);
+				rfill(r, d.x + 8, ry - 1, d.w - 16, 11, C_PANEL_HI, 178);
 				col = C_TEXT;
 			}
 			nm[0] = g_fb_list[k].isdir ? GL_SUB[0] : ' ';
