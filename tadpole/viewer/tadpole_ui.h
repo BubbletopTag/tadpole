@@ -76,6 +76,10 @@ enum ui_action {
 	UI_ACT_INSTALL_PKG,      /* path filled in */
 	UI_ACT_CONVERT_CART,     /* path = a raw cartridge dump to turn into .tar */
 	UI_ACT_SETUP_FIRMWARE,   /* path filled in */
+	UI_ACT_SETUP_DIDJ,       /* path = DIDJ.zip, the Didj compatibility files */
+	UI_ACT_SETUP_DIDJ_OVERLAY, /* path = ControlOverlay.zip */
+	UI_ACT_FETCH_DIDJ,       /* download the compatibility files, then install */
+	UI_ACT_FETCH_DIDJ_OVERLAY, /* download the controller overlay */
 	UI_ACT_ERASE_FW,         /* wipe the installed system files */
 	UI_ACT_BUILD_SYSROOT,    /* regenerate runtime/sysroot from the rootfs */
 	UI_ACT_ONLINE_UPDATE,    /* fetch the system files from LeapFrog */

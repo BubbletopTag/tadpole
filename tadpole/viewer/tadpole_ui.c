@@ -415,7 +415,11 @@ static void path_tail(char *dst, size_t n, const char *src)
  * Every page re-tests real state rather than remembering that it ran, so this
  * doubles as a repair tool: reopen it and it shows exactly what is missing.
  */
-enum { WIZ_WELCOME = 0, WIZ_SYSTEM, WIZ_PROFILE, WIZ_GAMES, WIZ_DONE,
+/* WIZ_DIDJ SITS RIGHT AFTER WIZ_SYSTEM because it depends on it: the
+ * compatibility files are installed INTO LF/Base, so there has to be a LF/Base
+ * first. It is also entirely optional — most people have no Didj dumps — so the
+ * page says so and Next skips past it without doing anything. */
+enum { WIZ_WELCOME = 0, WIZ_SYSTEM, WIZ_DIDJ, WIZ_PROFILE, WIZ_GAMES, WIZ_DONE,
        WIZ_PAGES };
 static int g_wiz_page;
 
@@ -444,7 +448,12 @@ static int  g_prof_made;         /* one was created this session */
  * here" when it is, and names the missing piece when it is not. Four pages
  * instead of five, and none of them is a lecture.
  */
-struct prereq { int rootfs, sysroot, games, qemu, qemu_bundled, fwtools; };
+/* didj: the compatibility files are in LF/Base. didj_overlay: the controller
+ * overlay is staged. Both are needed before a Didj game will install, and they
+ * are reported separately because they come from two different downloads and a
+ * user who has one and not the other should be told which. */
+struct prereq { int rootfs, sysroot, games, qemu, qemu_bundled, fwtools,
+                didj, didj_overlay; };
 
 static int dir_has_entries(const char *path)
 {
@@ -517,6 +526,15 @@ static void prereq_check(struct prereq *p)
 	p->sysroot = dir_has_entries(path);
 	path_join(path, sizeof(path), g_proj, "runtime/sysroot/LF/Bulk/ProgramFiles");
 	p->games = dir_has_entries(path);
+
+	/* THE SAME TWO QUESTIONS install-didj.sh ASKS, and deliberately the same
+	 * answers: "is Didj support installed" means AppManager can find the
+	 * patches, not that some stamp file was written. A user who followed the
+	 * community guide by hand is then correctly shown as already set up. */
+	path_join(path, sizeof(path), g_proj, "runtime/sysroot/LF/Base/DidjPatches");
+	p->didj = dir_has_entries(path);
+	path_join(path, sizeof(path), g_proj, "runtime/didj/overlay");
+	p->didj_overlay = dir_has_entries(path);
 
 	/* The bundle first, then the host — the same order tools/lib-deps.sh uses,
 	 * so the wizard never says "missing" about something Tadpole brought with
@@ -2251,7 +2269,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		int bx = d.x + 62, by = d.y + 20, i2;
 		char welcome[48];
 		const char *TITLES[WIZ_PAGES] = {
-			welcome, "System files", "Who is playing?",
+			welcome, "System files", "Didj support", "Who is playing?",
 			"Games", "Ready"
 		};
 		snprintf(welcome, sizeof(welcome), "Welcome to %s", ui_brand_name());
@@ -2388,6 +2406,101 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				text(r, b.x + b.w + 8, b.y + 4, "124 MB", C_TEXT_DIM);
 				text(r, bx, by + 111, "from digitalcontent.leapfrog.com",
 				     C_TEXT_DIM);
+			}
+			break;
+		/* ---- Didj games (optional) ----
+		 *
+		 * The Didj is a 2008 LeapFrog handheld two generations older than the
+		 * LeapPad2. Its games run — the firmware already carries the
+		 * compatibility layer and loads it on every boot — but the DATA that
+		 * layer needs is LeapFrog's, so Tadpole cannot ship it and this page is
+		 * where a user supplies it.
+		 *
+		 * SHAPED LIKE THE SYSTEM PAGE ON PURPOSE: same tick list, same rule,
+		 * same Browse buttons. Two files, reported separately, because they are
+		 * two different downloads and "which one am I missing" is the only
+		 * question this page has to answer.
+		 *
+		 * Nothing here is required. A user with no Didj dumps presses Next. */
+		/* LAYOUT MIRRORS WIZ_SYSTEM ON PURPOSE — same tick list at the top, same
+		 * rule under it, same 76px "Browse..." buttons — because it is the same
+		 * kind of page and the two sit next to each other in the flow.
+		 *
+		 * ASCII ONLY IN UI STRINGS. The bitmap font in tadpole_font.h has 96
+		 * glyphs, ASCII 32..127, and text() draws anything outside that as the
+		 * fallback arrow. An em-dash in a label therefore renders as a stray
+		 * "▶" — which is exactly what the first draft of this page did, three
+		 * times. Nothing else in this file uses one; hyphens throughout.
+		 *
+		 * BUTTON LABELS STAY SHORT for the same reason they are "Browse..." on
+		 * the system page: text_c centres inside a fixed box and does not clip,
+		 * so a label wider than its button spills out both sides. At GLYPH_ADV
+		 * of 6px, "Choose ControlOverlay.zip" is 150px and did precisely that in
+		 * a 132px box. The filename belongs in the line above, where there is
+		 * room for it. */
+		case WIZ_DIDJ:
+			text(r, bx, by, "Optional. Only for Didj game dumps.", C_TEXT_DIM);
+			{
+				static const char *NAMES[2] = { "Didj compatibility files",
+				                                "Controller overlay" };
+				int ok[2], i3;
+				ok[0] = pq.didj; ok[1] = pq.didj_overlay;
+				for (i3 = 0; i3 < 2; i3++) {
+					int yy = by + 14 + i3 * 11;
+					text(r, bx, yy, ok[i3] ? GL_CHECK_1 : GL_CHECK_0,
+					     ok[i3] ? C_ACCENT : C_TEXT_DIM);
+					text(r, bx + 12, yy, NAMES[i3], ok[i3] ? C_TEXT : C_TEXT_DIM);
+					text(r, bx + d.w - 132, yy, ok[i3] ? "ready" : "missing",
+					     ok[i3] ? C_ACCENT : C_TEXT_DIM);
+				}
+				fill(r, bx, by + 38, d.w - 76, 1, C_EDGE_DK);
+			}
+			/* THE ORDER MATTERS AND THE PAGE SAYS SO. The compatibility files are
+			 * installed INTO LF/Base, so without system files there is nowhere to
+			 * put them, and the button would fail with an error about a path
+			 * rather than about the step that was skipped. */
+			if (!pq.rootfs || !pq.sysroot) {
+				text(r, bx, by + 46, "Install the system files first.", C_TEXT);
+				text(r, bx, by + 58, "These are added to them.", C_TEXT_DIM);
+				break;
+			}
+			/* TWO WAYS TO GET EACH PIECE, side by side: fetch it, or point at one
+			 * already on disk. Browse comes first because it is the path that
+			 * always works — Download depends on a source being published, and
+			 * for the compatibility files that question is still open. */
+			text(r, bx, by + 46, "1. DIDJ.zip", C_TEXT);
+			text(r, bx + 12, by + 57, "the Leapster Explorer's Didj files",
+			     C_TEXT_DIM);
+			{
+				SDL_Rect b = { bx + 12, by + 69, 76, 13 };
+				SDL_Rect g = { bx + 96, by + 69, 76, 13 };
+				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+				int hotg = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
+				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+				bevel(r, b.x, b.y, b.w, b.h, 1);
+				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
+				fill(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL);
+				bevel(r, g.x, g.y, g.w, g.h, 1);
+				text_c(r, g.x, g.w, g.y + 3, "Download", hotg ? C_ACCENT : C_TEXT);
+				if (pq.didj)
+					text(r, g.x + g.w + 10, g.y + 3, "installed", C_ACCENT);
+			}
+			text(r, bx, by + 90, "2. ControlOverlay.zip", C_TEXT);
+			text(r, bx + 12, by + 101, "on-screen buttons the LeapPad2 lacks",
+			     C_TEXT_DIM);
+			{
+				SDL_Rect b = { bx + 12, by + 113, 76, 13 };
+				SDL_Rect g = { bx + 96, by + 113, 76, 13 };
+				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+				int hotg = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
+				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
+				bevel(r, b.x, b.y, b.w, b.h, 1);
+				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
+				fill(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL);
+				bevel(r, g.x, g.y, g.w, g.h, 1);
+				text_c(r, g.x, g.w, g.y + 3, "Download", hotg ? C_ACCENT : C_TEXT);
+				if (pq.didj_overlay)
+					text(r, g.x + g.w + 10, g.y + 3, "installed", C_ACCENT);
 			}
 			break;
 		case WIZ_PROFILE: {
@@ -2914,6 +3027,42 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			 * user with a loose .lfp should not have to know the difference. */
 			fb_open("Firmware folder or package", start, "",
 			        UI_ACT_SETUP_FIRMWARE);
+			return 1;
+		}
+		/* Both Didj buttons open the file browser on the user's Downloads, which
+		 * is where a freshly fetched DIDJ.zip or ControlOverlay.zip actually is.
+		 * Gated on the system files for the reason the page states: they are
+		 * installed INTO LF/Base and there has to be one. */
+		if (g_wiz_page == WIZ_DIDJ && pq.rootfs && pq.sysroot) {
+			const char *home = getenv("HOME");
+			char dl[PATHMAX * 2];
+			if (home && *home) snprintf(dl, sizeof(dl), "%s/Downloads", home);
+			else               snprintf(dl, sizeof(dl), "%s", g_proj);
+			if (access(dl, R_OK) != 0)
+				snprintf(dl, sizeof(dl), "%s", home && *home ? home : g_proj);
+			/* by = d.y + 38, and the two buttons are at by+69 and by+113,
+			 * indented 12px under their numbered headings. Kept in step with the
+			 * draw code by hand, as every other page here does. */
+			if (inside(mx, my, d.x + 74, d.y + 107, 76, 13)) {
+				fb_open("Didj compatibility files (DIDJ.zip)", dl, ".zip",
+				        UI_ACT_SETUP_DIDJ);
+				return 1;
+			}
+			if (inside(mx, my, d.x + 158, d.y + 107, 76, 13)) {
+				g_action = UI_ACT_FETCH_DIDJ;
+				g_fb_return = M_WIZARD;    /* back to setup when it finishes */
+				return 1;
+			}
+			if (inside(mx, my, d.x + 74, d.y + 151, 76, 13)) {
+				fb_open("Controller overlay (ControlOverlay.zip)", dl, ".zip",
+				        UI_ACT_SETUP_DIDJ_OVERLAY);
+				return 1;
+			}
+			if (inside(mx, my, d.x + 158, d.y + 151, 76, 13)) {
+				g_action = UI_ACT_FETCH_DIDJ_OVERLAY;
+				g_fb_return = M_WIZARD;
+				return 1;
+			}
 			return 1;
 		}
 		if (g_wiz_page == WIZ_PROFILE) {

@@ -1700,6 +1700,7 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 			{ "tools/install-game.sh",     "tools/install-game.py"     },
 			{ "tools/scan-games.sh",       "tools/scan-games.py"       },
 			{ "tools/install-firmware.sh", "tools/install-firmware.py" },
+			{ "tools/install-didj.sh",     "tools/install-didj.py"     },
 			{ "tools/online-update.sh",    "tools/online-update.py"    },
 			{ "tools/make-profile.sh",     "tools/make-profile.py"     },
 			{ "tools/erase-firmware.sh",   "tools/erase-firmware.py"   },
@@ -3259,11 +3260,25 @@ int main(int argc, char **argv)
 			 * reads that folder — so the result appears where the user is
 			 * already looking rather than next to a 128 MB image they now
 			 * have to go and find. */
+			/* ARGUMENTS ONLY — tool_runv() puts the script in argv[0] itself.
+			 *
+			 * This listed the script here as well, so the command that actually
+			 * ran was
+			 *     tools/cart2tar.py tools/cart2tar.py -o <games> <dump.bin>
+			 * and argparse bound its `images` positional to the FIRST contiguous
+			 * run of positionals — the duplicated script name — consumed -o, and
+			 * then had the real .bin left over with nowhere to put it:
+			 *     error: unrecognized arguments: /home/…/dump.bin
+			 *
+			 * So Convert Cartridge Dump could never have worked from the menu,
+			 * and had argparse been more permissive it would have been worse:
+			 * the tool would have tried to convert its own source file. Every
+			 * other tool_runv caller here passes arguments only; this was the
+			 * one that did not. */
 			char *av[6];
 			char gd[600];
 			const char *dir = ui_cfg()->games_dir;
 			int n = 0;
-			av[n++] = (char *)"tools/cart2tar.py";
 			if (dir && *dir) {
 				snprintf(gd, sizeof(gd), "%s", dir);
 				av[n++] = (char *)"-o";
@@ -3286,6 +3301,23 @@ int main(int argc, char **argv)
 			break;
 		case UI_ACT_SETUP_FIRMWARE:
 			tool_run("firmware", "tools/install-firmware.sh", actpath);
+			break;
+		/* Two buttons, two halves of the same setup — see the Didj page in
+		 * tadpole_ui.c. Split because they are two separate downloads and the
+		 * file browser hands back one path at a time. */
+		case UI_ACT_SETUP_DIDJ:
+			tool_run2("didj", "tools/install-didj.sh", "--setup", actpath);
+			break;
+		case UI_ACT_SETUP_DIDJ_OVERLAY:
+			tool_run2("didj", "tools/install-didj.sh", "--overlay", actpath);
+			break;
+		/* Fetch-and-install, one button each. No path: the URLs live in
+		 * install-didj.py beside the note on where each piece comes from. */
+		case UI_ACT_FETCH_DIDJ:
+			tool_run("didj", "tools/install-didj.sh", "--fetch-compat");
+			break;
+		case UI_ACT_FETCH_DIDJ_OVERLAY:
+			tool_run("didj", "tools/install-didj.sh", "--fetch-overlay");
 			break;
 		case UI_ACT_BUILD_SYSROOT:
 			tool_run("sysroot", "runtime/setup-sysroot.sh", NULL);

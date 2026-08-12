@@ -55,8 +55,25 @@
  * call past 1.1 must be added to the table, the defines and gl_resolve()
  * together — and the compiler enforces the first: without GL_GLEXT_PROTOTYPES
  * there is no prototype for it to quietly fall back on. */
+/* OUR OWN TYPEDEF, because this one cannot be relied on to exist. Mesa's
+ * GL/gl.h defines GL_VERSION_1_3 before SDL_opengl_glext.h is reached, so that
+ * header skips its whole 1.3 block — the block holding
+ * PFNGLCLIENTACTIVETEXTUREPROC — while GL/gl.h itself declares a bare
+ * glClientActiveTexture prototype and no function-pointer type to go with it.
+ * Naming it ourselves sidesteps the question of which header won.
+ *
+ * It stays behind the resolver rather than being called directly for the reason
+ * in the comment above: glClientActiveTexture is GL 1.3, Windows' opengl32.dll
+ * exports 1.1, and a direct call would not link there. */
+typedef void (APIENTRYP tad_clientactivetexture_fn)(GLenum texture);
+
 static struct {
 	PFNGLACTIVETEXTUREPROC                  ActiveTexture;
+	/* The CLIENT-side twin of ActiveTexture: selects which unit
+	 * glTexCoordPointer and glEnable/DisableClientState(GL_TEXTURE_COORD_ARRAY)
+	 * address. Needed since the guest started sending a second coordinate set —
+	 * see setup_arrays(). */
+	tad_clientactivetexture_fn              ClientActiveTexture;
 	PFNGLGENFRAMEBUFFERSPROC                GenFramebuffers;
 	PFNGLBINDFRAMEBUFFERPROC                BindFramebuffer;
 	PFNGLDELETEFRAMEBUFFERSPROC             DeleteFramebuffers;
@@ -94,6 +111,7 @@ static int gl_resolve(void)
 {
 	const struct { const char *name; void **slot; } tab[] = {
 		{ "glActiveTexture",         (void **)&g_gl.ActiveTexture },
+		{ "glClientActiveTexture",   (void **)&g_gl.ClientActiveTexture },
 		{ "glGenFramebuffers",       (void **)&g_gl.GenFramebuffers },
 		{ "glBindFramebuffer",       (void **)&g_gl.BindFramebuffer },
 		{ "glDeleteFramebuffers",    (void **)&g_gl.DeleteFramebuffers },
@@ -915,17 +933,38 @@ static void want_tex_if_missing(void)
 		g_notex_logged++;
 }
 
+/* WHICH TEXTURE UNIT A SLOT'S CLIENT STATE BELONGS TO, or -1 for the arrays
+ * that are not per-unit. GL_TEXTURE_COORD_ARRAY's enable bit, and the pointer
+ * behind it, live on the unit selected by glClientActiveTexture; vertex, colour
+ * and normal have exactly one each and must not be touched by that selector. */
+static int slot_texunit(int slot)
+{
+	if (slot == TADGL_ARR_TEXCOORD)  return 0;
+	if (slot == TADGL_ARR_TEXCOORD1) return 1;
+	return -1;
+}
+
 static void setup_arrays(unsigned int nverts)
 {
 	static const GLenum client[TADGL_ARR_COUNT] = {
 		GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_TEXTURE_COORD_ARRAY,
-		GL_NORMAL_ARRAY };
+		GL_NORMAL_ARRAY, GL_TEXTURE_COORD_ARRAY };
 	int i;
 
 	for (i = 0; i < TADGL_ARR_COUNT; i++) {
 		const void *p = bind_array(i, nverts);
 		struct harr *a = &g_arr[i];
 		unsigned int stride;
+		int unit = slot_texunit(i);
+
+		/* SELECT THE UNIT BEFORE TOUCHING ITS CLIENT STATE. Without this every
+		 * glTexCoordPointer landed on whichever unit was selected last — in
+		 * practice unit 0, forever — so a title with two coordinate sets had
+		 * both writes hit one unit and the second silently won. That is what put
+		 * a pink patch over Pet Pals 2's dogs: unit 0 held the 256x256 skin and
+		 * was handed the 512x512 eye atlas's coordinates. */
+		if (unit >= 0 && g_gl.ClientActiveTexture)
+			g_gl.ClientActiveTexture(GL_TEXTURE0 + (GLenum)unit);
 
 		if (!p) {
 			if (i == TADGL_ARR_VERTEX) g_de_noarr++;   /* nothing to draw from */
@@ -945,7 +984,10 @@ static void setup_arrays(unsigned int nverts)
 			glColorPointer(a->size, a->type == GLES_FIXED ? GL_FLOAT : a->type,
 			               (GLsizei)stride, p);
 			break;
+		/* Both texcoord slots take the same call; they differ only in the unit
+		 * selected above. */
 		case TADGL_ARR_TEXCOORD:
+		case TADGL_ARR_TEXCOORD1:
 			glTexCoordPointer(a->size, a->type == GLES_FIXED ? GL_FLOAT : a->type,
 			                  (GLsizei)stride, p);
 			break;
@@ -955,6 +997,12 @@ static void setup_arrays(unsigned int nverts)
 			break;
 		}
 	}
+	/* HAND THE CLIENT SELECTOR BACK TO UNIT 0. Nothing else in this file sets
+	 * it, so leaving it on unit 1 would make the next draw's first
+	 * glTexCoordPointer land on the wrong unit — the same class of leak as the
+	 * matrix mode in skin_end(). */
+	if (g_gl.ClientActiveTexture)
+		g_gl.ClientActiveTexture(GL_TEXTURE0);
 }
 
 /* ---- the replay loop ---------------------------------------------------- */

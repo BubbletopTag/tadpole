@@ -39,6 +39,11 @@
  * tadpole_gles_debug.c.
  */
 #include "tadpole_gles_debug.h"
+/* For enum tadgl_array only. The wire slot a client array travels in is now a
+ * named value on both sides rather than a literal 2 here and a #define there —
+ * adding the second texcoord unit is exactly the kind of change that silently
+ * breaks when the two ends disagree about what slot 4 means. */
+#include "tadpole_glcmd.h"
 
 typedef unsigned char  u8;
 typedef unsigned short u16;
@@ -329,6 +334,12 @@ int g_swaps, g_clears;
  * textured. Track the unit; the sampler still reads unit 0, which is the only
  * one a single-textured draw may use. */
 #define MAX_TEXUNITS 4
+/* HOW MANY TEXCOORD ARRAYS EXIST, which is not the same number. Binding a
+ * texture is per unit up to MAX_TEXUNITS; the COORDINATE arrays are plumbed
+ * through the wire protocol to the host, and there are two of those because
+ * glGetIntegerv(GL_MAX_TEXTURE_UNITS) answers 2 — the device's own limit and
+ * therefore the most a title may legally use. See glClientActiveTexture. */
+#define TEXCOORD_UNITS 2
 static GLenum g_active_tex;              /* 0-based unit index */
 static int    g_tex2d_unit[MAX_TEXUNITS];
 static int    g_blend_on;
@@ -1417,51 +1428,21 @@ void glActiveTexture(GLenum t)
 {
 	GLenum u = t - 0x84C0;                    /* GL_TEXTURE0 */
 	tr2("glActiveTexture unit", (int)u, 0);
-	if (u != 0) {
-		/* The companion to the glClientActiveTexture note below. This one IS
-		 * forwarded and the host does bind per unit, so a second unit's
-		 * TEXTURE is handled; what is missing is its texcoord ARRAY. Saying so
-		 * separately keeps "the title multitextures" and "we drop its UVs"
-		 * distinguishable in a log. */
+	/* ONLY PAST WHAT WE ACTUALLY SUPPORT. This used to fire for any unit != 0
+	 * and was the flag that identified Pet Pals 2 as a multitexturing title;
+	 * now that both of the device's two units carry their own texcoord array
+	 * end to end, unit 1 is ordinary and warning about it would train readers
+	 * to scroll past a line that no longer means anything is wrong. A unit past
+	 * TEXCOORD_UNITS still does — its coordinates have nowhere to go. */
+	if (u >= TEXCOORD_UNITS) {
 		static int said;
 		if (!said) { said = 1;
-			warn2("MULTITEXTURE: title selected texture unit != 0 (unit, of max)",
-			      (int)u, MAX_TEXUNITS); }
+			warn2("MULTITEXTURE: title selected texture unit past the device's"
+			      " GL_MAX_TEXTURE_UNITS (unit, of max)", (int)u, TEXCOORD_UNITS); }
 	}
 	if (u < MAX_TEXUNITS) g_active_tex = u;
 	if (hle_ready()) hle_activetexture(u);
 }
-/* THIS IS A NO-OP AND IT SHOULD NOT BE.
- *
- * glClientActiveTexture selects which texture unit the NEXT glTexCoordPointer
- * applies to. We keep exactly one texcoord array (g_tex), so a title that does
- *
- *     glClientActiveTexture(GL_TEXTURE0); glTexCoordPointer(uv0);
- *     glClientActiveTexture(GL_TEXTURE1); glTexCoordPointer(uv1);
- *
- * has its second array silently overwrite its first, and unit 0 then samples
- * with unit 1's coordinates. On a model where a small mesh carries its own UV
- * set — an eye, a tongue — that draws a patch of some unrelated part of the
- * atlas, which is what a pink blotch where an eye belongs looks like.
- *
- * The device reports MAX_TEXTURE_UNITS = 2, so this is real capability that
- * titles may use. Implementing it properly means per-unit texcoord arrays
- * through the draw path and the wire protocol, which is a real chunk of work —
- * so FIRST establish whether any title actually asks. One line, always on,
- * once per unit, and the answer arrives in an ordinary log. */
-void glClientActiveTexture(GLenum t)
-{
-	GLenum u = t - 0x84C0;                    /* GL_TEXTURE0 */
-	tr2("glClientActiveTexture unit", (int)u, 0);
-	if (u != 0) {
-		static int said;
-		if (!said) { said = 1;
-			warn2("MULTITEXTURE: glClientActiveTexture selected unit != 0, and"
-			      " we keep only ONE texcoord array — its UVs will overwrite"
-			      " unit 0's (unit)", (int)u, 0); }
-	}
-}
-
 void glViewport(GLint x, GLint y, GLsizei w, GLsizei h)
 { tr2("glViewport xy", x, y); tr2("glViewport wh", (int)w, (int)h); }
 
@@ -1595,7 +1576,20 @@ struct gl_texture {
 	GLenum gen_mipmap;
 };
 static struct gl_texture g_texs[MAX_TEXS];
-static GLuint g_bound_tex;
+/* THE BINDING IS PER TEXTURE UNIT, like the texcoord array that feeds it.
+ *
+ * This was one GLuint, so unit 1's glBindTexture moved unit 0's binding too and
+ * whichever unit bound LAST owned the whole draw. The software rasteriser then
+ * paired that texture with unit 0's coordinates — two different units' state in
+ * one sample, which is how Pet Pals 2's dogs came out with their eye atlas
+ * stretched over their bodies and their bodies left white.
+ *
+ * g_bound_tex stays spelled the same everywhere it is used, because every one of
+ * those uses — upload, sub-upload, glTexParameter, glGenerateMipmap — is defined
+ * by GL to act on the ACTIVE unit's binding, which is exactly what the macro now
+ * resolves to. Only the sampler wants a specific unit, and it says so. */
+static GLuint g_bound_tex_u[MAX_TEXUNITS];
+#define g_bound_tex (g_bound_tex_u[g_active_tex])
 static int    g_blend_on;
 
 #define GL_NEAREST_               0x2600
@@ -1746,7 +1740,25 @@ struct array { const u8 *ptr; GLuint buf; GLint size; GLenum type; GLsizei strid
  * sent one, because its entry point was a no-op. Same shape as
  * libopengles_lite.so and hle_deletetexture: the mechanism was built and never
  * wired up. */
-static struct array g_vtx, g_col, g_tex, g_nrm;
+static struct array g_vtx, g_col, g_nrm;
+
+/* ONE TEXCOORD ARRAY PER TEXTURE UNIT, because that is what GL says and what
+ * Pet Pals 2 needs. See glClientActiveTexture for the whole story; the short
+ * version is that this was a single `g_tex` and the title's second
+ * glTexCoordPointer overwrote its first, so the host sampled the dogs' SKIN
+ * with their EYE ATLAS's coordinates and drew a pink patch over one eye.
+ *
+ * TWO of them, not MAX_TEXUNITS: glGetIntegerv(GL_MAX_TEXTURE_UNITS) answers 2
+ * because the device answers 2, and an array a title cannot legally address is
+ * memory and wire protocol spent on nothing. The enable/pointer calls still
+ * ACCEPT higher units — they just warn and drop, as before, rather than writing
+ * out of bounds. */
+static struct array g_texa[TEXCOORD_UNITS];
+/* Which unit glTexCoordPointer / glEnableClientState(GL_TEXTURE_COORD_ARRAY)
+ * currently address. Distinct from g_active_tex, which selects the unit that
+ * glBindTexture and glEnable(GL_TEXTURE_2D) address — GL keeps two separate
+ * selectors and a title is free to leave them pointing at different units. */
+static u32 g_client_tex;
 /* Declared here with the other client arrays rather than beside the skinning
  * code, because glEnableClientState switches them on well before that point. */
 static struct array g_midx, g_wgt;      /* matrix indices, blend weights */
@@ -1770,9 +1782,74 @@ void glNormalPointer(GLenum t, GLsizei st, const void *p)
 void glColorPointer(GLint s, GLenum t, GLsizei st, const void *p)
 { g_col.buf = g_bound_array; g_col.size=s; g_col.type=t; g_col.stride=st; g_col.ptr=p;
   if (hle_ready()) hle_arraypointer(1, g_bound_array, s, t, st, (u32)(unsigned long)p); }
+/* IT ASKED. THE ANSWER WAS YES.
+ *
+ * This was a no-op with a warning, whose job was to find out whether any title
+ * genuinely uses a second texcoord array before the per-unit plumbing got
+ * built. Pet Pals 2 does — 3468 times in a 40-second capture — and this is the
+ * draw, straight from a TADPOLE_GL_DEBUG=1 trace of its dog select screen:
+ *
+ *     glClientActiveTexture(unit 0); glActiveTexture(unit 0)
+ *     upload to tex id 5, w 256                  <- the dog's SKIN
+ *     glTexCoordPointer size 2 type GL_FIXED stride 0 offset 8088
+ *     glClientActiveTexture(unit 1); glActiveTexture(unit 1)
+ *     upload to tex id 6, w 512                  <- the EYE ATLAS
+ *     glTexCoordPointer size 2 type GL_FIXED stride 0 offset 13480
+ *     glDrawElements(GL_TRIANGLES, 3000, GL_UNSIGNED_SHORT)
+ *
+ * Two coordinate sets, same VBO, 5392 bytes apart. With one array the second
+ * overwrote the first, and since the host binds per unit but only ever received
+ * ONE array — which it bound to unit 0, never having been told otherwise — unit
+ * 0's 256x256 SKIN got sampled with the 512x512 EYE ATLAS's coordinates. Those
+ * land in the skin's top-left corner, which is the pink tongue/mouth strip, so
+ * the dog wore a magenta patch over one eye. The on-screen pixels matched that
+ * corner byte for byte: (200,120,144), (192,120,136), (224,136,168).
+ *
+ * HLE-ONLY, and that is why no sweep ever caught it: tools/compat-sweep.sh runs
+ * --no-viewer, and the software rasteriser samples g_tex2d_unit[0] and nothing
+ * else, so it never multitextures and never had two arrays to confuse. It drew
+ * the eyes correctly and left the bodies white, which is the same bug wearing
+ * the opposite face.
+ *
+ * The unit only has to be recorded; glTexCoordPointer and glEnableClientState
+ * read it. Nothing is forwarded from here — the host is told which unit an
+ * array belongs to by the SLOT the array travels in, so a client-active-texture
+ * opcode would be a second source of truth for the same fact. */
+void glClientActiveTexture(GLenum t)
+{
+	GLenum u = t - 0x84C0;                    /* GL_TEXTURE0 */
+	tr2("glClientActiveTexture unit", (int)u, 0);
+	/* GLES 1.1: a unit past the advertised maximum is GL_INVALID_ENUM, not
+	 * something to clamp. Clamping would quietly redirect unit 2's coordinates
+	 * into unit 1's array and produce a wrong picture with no error anywhere. */
+	if (u >= TEXCOORD_UNITS) {
+		static int said;
+		if (!said) { said = 1;
+			warn2("MULTITEXTURE: glClientActiveTexture selected unit past"
+			      " GL_MAX_TEXTURE_UNITS (unit, max)", (int)u, TEXCOORD_UNITS); }
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glClientActiveTexture");
+		return;
+	}
+	g_client_tex = u;
+}
+
+/* Wire slot for a texcoord unit. Unit 0 keeps TADGL_ARR_TEXCOORD so every
+ * single-textured title's encoding is unchanged. */
+static u32 texcoord_slot(u32 unit)
+{ return unit ? (u32)TADGL_ARR_TEXCOORD1 : (u32)TADGL_ARR_TEXCOORD; }
+
+/* Addresses the CLIENT-active unit, not the server-active one. A title that
+ * leaves glActiveTexture on unit 1 while feeding unit 0's coordinates is doing
+ * something legal, and reading the wrong selector here would silently swap the
+ * two arrays over. */
 void glTexCoordPointer(GLint s, GLenum t, GLsizei st, const void *p)
-{ tr2("glTexCoordPointer size/type", s, (int)t); tr2("glTexCoordPointer stride/off", (int)st, (int)(unsigned long)p); g_tex.buf = g_bound_array; g_tex.size=s; g_tex.type=t; g_tex.stride=st; g_tex.ptr=p;
-  if (hle_ready()) hle_arraypointer(2, g_bound_array, s, t, st, (u32)(unsigned long)p); }
+{ tr2("glTexCoordPointer size/type", s, (int)t); tr2("glTexCoordPointer stride/off", (int)st, (int)(unsigned long)p);
+  tr2("glTexCoordPointer client unit", (int)g_client_tex, 0);
+  if (g_client_tex >= TEXCOORD_UNITS) return;    /* warned in glClientActiveTexture */
+  { struct array *a = &g_texa[g_client_tex];
+    a->buf = g_bound_array; a->size=s; a->type=t; a->stride=st; a->ptr=p; }
+  if (hle_ready()) hle_arraypointer(texcoord_slot(g_client_tex), g_bound_array,
+                                    s, t, st, (u32)(unsigned long)p); }
 
 /* WHICH WIRE SLOT AN ARRAY ENUM MEANS, or -1 for one the host has no notion of.
  *
@@ -1796,7 +1873,16 @@ static void client_state(GLenum a, int on)
 	int slot;
 	if (a == GL_VERTEX_ARRAY)             g_vtx.on = on;
 	else if (a == GL_COLOR_ARRAY)         g_col.on = on;
-	else if (a == GL_TEXTURE_COORD_ARRAY) g_tex.on = on;
+	/* PER UNIT, like the pointer it enables. GLES 1.1 §6.1.2 keeps this bit on
+	 * the texture unit, so unit 1's disable must not turn unit 0's array off —
+	 * which is what a single flag did, and why the dogs' skin was drawn with
+	 * whichever coordinate set happened to be written last. */
+	else if (a == GL_TEXTURE_COORD_ARRAY) {
+		if (g_client_tex >= TEXCOORD_UNITS) return;
+		g_texa[g_client_tex].on = on;
+		if (hle_ready()) hle_clientstate(texcoord_slot(g_client_tex), (u32)on);
+		return;
+	}
 	else if (a == GL_NORMAL_ARRAY_)       g_nrm.on = on;
 	/* Consumed here, never forwarded: the host has no such client arrays. */
 	else if (a == GL_MATRIX_INDEX_ARRAY_OES) { g_midx.on = on; return; }
@@ -1924,12 +2010,17 @@ static void raster_tri(struct vert a, struct vert b, struct vert c)
 	float area, mnx, mxx, mny, mxy;
 	int x0, x1, y0, y1, x, y;
 	u32 *dst;
-	struct gl_texture *tex = g_tex2d_on ? tex_find(g_bound_tex) : NULL;
+	/* UNIT 0's BINDING, NAMED EXPLICITLY. This path samples one texture unit —
+	 * g_tex2d_on is g_tex2d_unit[0] — and pairs it with g_texa[0]'s coordinates,
+	 * so it must read unit 0's binding rather than the active unit's. Reading
+	 * the active unit's is what let a title's last glBindTexture, on unit 1,
+	 * decide which texture the software path drew with. */
+	struct gl_texture *tex = g_tex2d_on ? tex_find(g_bound_tex_u[0]) : NULL;
 	if (g_tri_logged < 3)
-		tr2("tex: id / has-data", (int)g_bound_tex, tex ? (tex->argb ? (int)tex->w : -1) : -2);
+		tr2("tex: id / has-data", (int)g_bound_tex_u[0], tex ? (tex->argb ? (int)tex->w : -1) : -2);
 
 	if (tex && tex->argb) {
-		if (g_bound_tex <= MAX_TEXS) g_f_texused[g_bound_tex] = 1;
+		if (g_bound_tex_u[0] <= MAX_TEXS) g_f_texused[g_bound_tex_u[0]] = 1;
 	} else {
 		/* Flat-shaded triangle: the colour is whatever glColor last set. Log
 		 * a few per frame with their screen extent, because "70 untextured
@@ -1949,7 +2040,7 @@ static void raster_tri(struct vert a, struct vert b, struct vert c)
 			    "[gl] FLAT tri (%d,%d)(%d,%d)(%d,%d) argb %08x"
 			    " tex2d=%d boundtex=%d colarr=%d unit=%d\n",
 			    (int)a.x, (int)a.y, (int)b.x, (int)b.y, (int)c.x, (int)c.y,
-			    a.argb, g_tex2d_on, (int)g_bound_tex, g_col.on,
+			    a.argb, g_tex2d_on, (int)g_bound_tex_u[0], g_col.on,
 			    (int)g_active_tex);
 			if (n > 0) { u32 k = 0; while (msg[k]) k++; write(2, msg, k); }
 		}
@@ -1961,7 +2052,7 @@ static void raster_tri(struct vert a, struct vert b, struct vert c)
 	 * each offending name once; the id then says which upload went missing. */
 	if (g_tex2d_on && (!tex || !tex->argb)) {
 		static unsigned char seen[MAX_TEXS + 1];
-		unsigned id = g_bound_tex;
+		unsigned id = g_bound_tex_u[0];
 		if (id <= MAX_TEXS && !seen[id]) {
 			seen[id] = 1;
 			warn2("UNTEXTURED DRAW: bound name / has-slot",
@@ -2276,9 +2367,13 @@ static void build_vert(struct vert *v, u32 idx)
 	vec_xform(&mvp, in, out);
 	v->x = out[0]; v->y = out[1]; v->z = out[2]; v->w = out[3];
 
-	if (g_tex.on && array_base(&g_tex)) {
-		v->u = fetch(&g_tex, idx, 0);
-		v->v = fetch(&g_tex, idx, 1);
+	/* UNIT 0's array, explicitly. This path samples g_tex2d_unit[0] and only
+	 * that, so unit 0's coordinates are the only ones it can correctly use;
+	 * reading the client-selected unit here would pair unit 0's texture with
+	 * whichever array the title happened to bind last. */
+	if (g_texa[0].on && array_base(&g_texa[0])) {
+		v->u = fetch(&g_texa[0], idx, 0);
+		v->v = fetch(&g_texa[0], idx, 1);
 	} else { v->u = 0.0f; v->v = 0.0f; }
 
 	if (g_col.on && g_col.ptr) {
@@ -2338,7 +2433,7 @@ static void draw_indexed(GLenum mode, GLsizei count, const void *indices, GLenum
 		    "[gl] BIGDRAW count=%d tex2d=%d boundtex=%d blend=%d depth=%d"
 		    " depthfunc=%d depthmask=%d alphatest=%d alphafunc=%d ref=%d"
 		    " color=%08x\n",
-		    (int)count, g_tex2d_on, (int)g_bound_tex, g_blend_on,
+		    (int)count, g_tex2d_on, (int)g_bound_tex_u[0], g_blend_on,
 		    g_depth_test_on, (int)g_depth_func, g_depth_mask,
 		    g_alpha_test_on, (int)g_alpha_func, (int)g_alpha_ref,
 		    g_cur_color);
@@ -2346,7 +2441,7 @@ static void draw_indexed(GLenum mode, GLsizei count, const void *indices, GLenum
 	}
 	g_log_this_draw = g_drawlog ? 2 : 0;
 	if (g_drawlog) {
-		struct gl_texture *bt = tex_find(g_bound_tex);
+		struct gl_texture *bt = tex_find(g_bound_tex_u[0]);
 		/* Dump the actual index values — a degenerate second triangle points
 		 * at indices being read wrongly, not at the geometry being wrong. */
 		if (indices && count >= 6) {
@@ -2372,8 +2467,8 @@ static void draw_indexed(GLenum mode, GLsizei count, const void *indices, GLenum
 	}
 	if (g_bail_logged < 8) {
 		g_bail_logged++;
-		tr2("draw bufs: vtx.buf / tex.buf", (int)g_vtx.buf, (int)g_tex.buf);
-		tr2("draw modes: mode / tex.on", (int)mode, g_tex.on);
+		tr2("draw bufs: vtx.buf / tex.buf", (int)g_vtx.buf, (int)g_texa[0].buf);
+		tr2("draw modes: mode / tex.on", (int)mode, g_texa[0].on);
 	}
 	if (!g_fb || !g_vtx.on || !array_base(&g_vtx) || count < 3) return;
 
@@ -2453,9 +2548,18 @@ static void draw_indexed(GLenum mode, GLsizei count, const void *indices, GLenum
 #define HLE_CLIENT_TEX 4002
 #define HLE_CLIENT_IDX 4003
 #define HLE_CLIENT_NRM 4004
+/* Unit 1's texcoords need their own staging buffer for the same reason they
+ * need their own wire slot: they are a second array, and reusing unit 0's name
+ * would have the second upload overwrite the first — the exact bug this whole
+ * change exists to remove, moved one layer down. */
+#define HLE_CLIENT_TEX1 4005
 /* Must stay below tadpole_hle.c's MAX_BUF (4096) as well as above MAX_BUFS. */
 typedef char hle_client_names_above_maxbufs[
-	(HLE_CLIENT_VTX > MAX_BUFS && HLE_CLIENT_NRM < 4096) ? 1 : -1];
+	(HLE_CLIENT_VTX > MAX_BUFS && HLE_CLIENT_TEX1 < 4096) ? 1 : -1];
+
+/* Staging buffer name per texcoord unit, paired with texcoord_slot(). */
+static u32 texcoord_client_name(u32 unit)
+{ return unit ? (u32)HLE_CLIENT_TEX1 : (u32)HLE_CLIENT_TEX; }
 
 static void hle_send_array(struct array *a, u32 which, u32 nverts, u32 name)
 {
@@ -2987,10 +3091,15 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 	 * is not to rasterise here. */
 	if (hle_ready()) {
 		u32 nv = (u32)first + (u32)count;
+		u32 tu;
 		int sk = skin_begin(nv);
 		if (!sk) hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
 		hle_send_array(&g_col, 1, nv, HLE_CLIENT_COL);
-		hle_send_array(&g_tex, 2, nv, HLE_CLIENT_TEX);
+		/* BOTH units' coordinate sets. Sending only unit 0's left the host
+		 * multitexturing with one array — see glClientActiveTexture. */
+		for (tu = 0; tu < TEXCOORD_UNITS; tu++)
+			hle_send_array(&g_texa[tu], texcoord_slot(tu), nv,
+			               texcoord_client_name(tu));
 		/* ONLY WHEN THE DRAW IS NOT SKINNED. A skinned draw's normals are
 		 * sent by skin_begin(), already transformed by the same bone matrices
 		 * as its vertices; sending the raw bind-pose array as well would
@@ -3000,7 +3109,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 		skin_end(sk);
 		return;
 	}
-	const u8 *vs = g_vtx.ptr, *cs = g_col.ptr, *ts = g_tex.ptr;
+	const u8 *vs = g_vtx.ptr, *cs = g_col.ptr, *ts = g_texa[0].ptr;
 	if (first > 0) {
 		if (g_vtx.ptr)
 			g_vtx.ptr += (u32)first * (g_vtx.stride ? (u32)g_vtx.stride
@@ -3010,12 +3119,12 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 			                                        : elem_size(g_col.type, g_col.size));
 		/* The TEXCOORD array must be offset too. Latent today because every
 		 * observed call passes first=0, but wrong the moment one does not. */
-		if (g_tex.ptr)
-			g_tex.ptr += (u32)first * (g_tex.stride ? (u32)g_tex.stride
-			                                        : elem_size(g_tex.type, g_tex.size));
+		if (g_texa[0].ptr)
+			g_texa[0].ptr += (u32)first * (g_texa[0].stride ? (u32)g_texa[0].stride
+			                              : elem_size(g_texa[0].type, g_texa[0].size));
 	}
 	draw_indexed(mode, count, NULL, 0);
-	g_vtx.ptr = vs; g_col.ptr = cs; g_tex.ptr = ts;
+	g_vtx.ptr = vs; g_col.ptr = cs; g_texa[0].ptr = ts;
 }
 
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
@@ -3034,13 +3143,18 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
 		u32 nv = hle_max_index(indices, count, type);
 		u32 ebuf = g_bound_elem;
 		u32 eoff = (u32)(unsigned long)indices;
+		u32 tu;
 
 		/* Any array without a buffer has to travel by value — see the note on
 		 * client-side arrays above. */
 		int sk = skin_begin(nv);
 		if (!sk) hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
 		hle_send_array(&g_col, 1, nv, HLE_CLIENT_COL);
-		hle_send_array(&g_tex, 2, nv, HLE_CLIENT_TEX);
+		/* BOTH units' coordinate sets. Sending only unit 0's left the host
+		 * multitexturing with one array — see glClientActiveTexture. */
+		for (tu = 0; tu < TEXCOORD_UNITS; tu++)
+			hle_send_array(&g_texa[tu], texcoord_slot(tu), nv,
+			               texcoord_client_name(tu));
 		/* ONLY WHEN THE DRAW IS NOT SKINNED. A skinned draw's normals are
 		 * sent by skin_begin(), already transformed by the same bone matrices
 		 * as its vertices; sending the raw bind-pose array as well would
@@ -4574,7 +4688,11 @@ GLboolean glIsEnabled(GLenum c)
 	case GL_ALPHA_TEST:          return g_alpha_test_on ? 1 : 0;
 	case GL_VERTEX_ARRAY:        return g_vtx.on ? 1 : 0;
 	case GL_COLOR_ARRAY:         return g_col.on ? 1 : 0;
-	case GL_TEXTURE_COORD_ARRAY: return g_tex.on ? 1 : 0;
+	/* Per unit, and the unit is the CLIENT-active one — the same selector
+	 * glEnableClientState wrote through. This is the query glconform's
+	 * multitex.texcoord_array_per_unit asks. */
+	case GL_TEXTURE_COORD_ARRAY:
+		return (g_client_tex < TEXCOORD_UNITS && g_texa[g_client_tex].on) ? 1 : 0;
 	case GL_NORMAL_ARRAY:        return 0;
 	case GL_CULL_FACE:           return 0;   /* we never cull */
 	default:
@@ -4657,12 +4775,21 @@ void tad_gl_context_reset(void)
 		g_bufs[i].size = 0;
 	}
 
-	g_bound_tex   = 0;
+	/* EVERY unit's binding. Zeroing only the active one would leave the next
+	 * title inheriting a texture name on whichever unit this one left selected. */
+	for (i = 0; i < MAX_TEXUNITS; i++) g_bound_tex_u[i] = 0;
+	g_active_tex  = 0;
 	g_bound_array = 0;
 	g_bound_elem  = 0;
-	g_vtx.on  = g_col.on  = g_tex.on  = g_nrm.on  = 0;
-	g_vtx.ptr = g_col.ptr = g_tex.ptr = g_nrm.ptr = 0;
-	g_vtx.buf = g_col.buf = g_tex.buf = g_nrm.buf = 0;
+	g_vtx.on  = g_col.on  = g_nrm.on  = 0;
+	g_vtx.ptr = g_col.ptr = g_nrm.ptr = 0;
+	g_vtx.buf = g_col.buf = g_nrm.buf = 0;
+	/* EVERY unit's array, and the client selector with them. A stale selector
+	 * would send the next title's first glTexCoordPointer into unit 1. */
+	for (i = 0; i < TEXCOORD_UNITS; i++) {
+		g_texa[i].on = 0; g_texa[i].ptr = 0; g_texa[i].buf = 0;
+	}
+	g_client_tex = 0;
 	g_cur_color = 0xFFFFFFFFu;
 	g_tex_gen_fail = 0;
 	/* Back to the GLES 1.1 initial pair. These are answers to a state query, so

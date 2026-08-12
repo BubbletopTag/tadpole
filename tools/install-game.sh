@@ -143,10 +143,47 @@ if [ "${1:-}" = "--from-list" ]; then
     echo "installing $# title(s)"
 fi
 
+# IS THIS A DIDJ PACKAGE? -> 0 if yes.
+#
+# Didj games arrive here because this is the installer the viewer's "Install
+# .tar directly" runs, and a user with a Didj dump has no reason to know it is a
+# different kind of package. They need a conversion this script does not do — see
+# tools/install-didj.sh — so recognise them and hand them over rather than
+# installing something that will not launch.
+#
+# The test is Device="Didj" in a meta.inf, read from either archive shape: the
+# community's Didj dumps circulate as .zip while everything else here is .tar.
+is_didj() {                         # $1 = archive
+    local list m meta
+    if [ "$(head -c2 "$1" 2>/dev/null)" = "PK" ]; then
+        command -v unzip >/dev/null 2>&1 || return 1
+        list="$(unzip -Z1 "$1" 2>/dev/null)"
+    else
+        list="$(tar tf "$1" 2>/dev/null)"
+    fi
+    m="$(grep -E '(^|/)meta\.inf$' <<<"$list" | grep -v '/DAmeta\.inf$' | head -1)"
+    [ -n "$m" ] || return 1
+    if [ "$(head -c2 "$1" 2>/dev/null)" = "PK" ]; then
+        meta="$(unzip -p "$1" "$m" 2>/dev/null)"
+    else
+        meta="$(tar xOf "$1" "$m" 2>/dev/null)"
+    fi
+    grep -qE '^[[:space:]]*Device[[:space:]]*=[[:space:]]*"Didj"' <<<"$meta"
+}
+
 count=0; total=$#
 for tar in "$@"; do
     count=$((count+1))
     [ -f "$tar" ] || { echo "no such file: $tar" >&2; continue; }
+    if is_didj "$tar"; then
+        # DELEGATE, and let it report — including its own progress header, which
+        # is why this returns before the one below is printed. install-didj.sh
+        # refuses with a message naming the missing step when the compatibility
+        # files are not there, which is the one thing a user in this position
+        # needs told.
+        "$HERE/install-didj.sh" "$tar" || true
+        continue
+    fi
     # The viewer shows these lines as progress; with a batch of thirty, "which
     # one is it on" is the only question anyone has.
     echo "[$count/$total] $(basename "$tar"):"

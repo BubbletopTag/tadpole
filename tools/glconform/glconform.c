@@ -112,6 +112,12 @@ extern void glGetTexEnviv(GLenum target, GLenum pname, GLint *params);
 /* blending */
 extern void glBlendFunc(GLenum sfactor, GLenum dfactor);
 
+/* client arrays — per-unit texcoord state (see t_multitex_arrays) */
+extern void glClientActiveTexture(GLenum texture);
+extern void glEnableClientState(GLenum array);
+extern void glDisableClientState(GLenum array);
+extern GLboolean glIsEnabled(GLenum cap);
+
 /* point/line/polygon/stencil/clipplane (23 of 108) */
 extern void glPointSize(GLfloat size);
 extern void glLineWidth(GLfloat width);
@@ -159,6 +165,9 @@ extern void glGetClipPlanef(GLenum plane, GLfloat *eqn);
 #define GL_KEEP                         0x1E00
 #define GL_ALWAYS                       0x0207
 #define GL_CLIP_PLANE0                  0x3000
+#define GL_TEXTURE0                     0x84C0
+#define GL_TEXTURE1                     0x84C1
+#define GL_TEXTURE_COORD_ARRAY          0x8078
 #define GL_DONT_CARE                    0x1100
 #define GL_PERSPECTIVE_CORRECTION_HINT  0x0C50
 #define GL_UNPACK_ALIGNMENT             0x0CF5
@@ -609,6 +618,55 @@ static void t_state_setters(void)
 	       "GLES1 has no getters for most of these; the err code is the test");
 }
 
+/* PER-UNIT TEXCOORD ARRAY STATE — the Pet Pals 2 "pink eye" bug, reduced.
+ *
+ * GLES 1.1 §6.1.2: GL_TEXTURE_COORD_ARRAY, and the pointer/size/type/stride
+ * that go with it, are PER TEXTURE UNIT, and glClientActiveTexture selects
+ * which unit the client-array calls address. GL_VERTEX_ARRAY and
+ * GL_COLOR_ARRAY are not — there is exactly one of each — which is precisely
+ * the asymmetry an implementation is likely to miss.
+ *
+ * We missed it. The shim kept ONE texcoord array, so a title doing
+ *
+ *     glClientActiveTexture(GL_TEXTURE0); glTexCoordPointer(uv_skin);
+ *     glClientActiveTexture(GL_TEXTURE1); glTexCoordPointer(uv_eyes);
+ *
+ * had its second call overwrite its first. Pet Pals 2 does exactly that, 3468
+ * times in a 40-second capture: unit 0 carries a 256x256 skin at VBO offset
+ * 8088, unit 1 a 512x512 eye atlas at offset 13480. The host then sampled the
+ * SKIN with the EYE ATLAS's coordinates, which landed on the pink strip in the
+ * skin's top-left corner — a magenta patch over the dog's eye, whose pixels
+ * (200,120,144) and (192,120,136) matched that corner byte for byte.
+ *
+ * Enable state is the cheapest expression of it that needs no draw and no
+ * readback: set unit 0 on and unit 1 off, then ask each. One array cannot
+ * remember two answers.
+ */
+static void t_multitex_arrays(void)
+{
+	GLboolean on0, on1;
+	char detail[160];
+	drain();
+
+	glClientActiveTexture(GL_TEXTURE0);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	glClientActiveTexture(GL_TEXTURE1);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+	glClientActiveTexture(GL_TEXTURE0);
+	on0 = glIsEnabled(GL_TEXTURE_COORD_ARRAY);
+	glClientActiveTexture(GL_TEXTURE1);
+	on1 = glIsEnabled(GL_TEXTURE_COORD_ARRAY);
+
+	/* Leave the client unit where every other test expects it. */
+	glClientActiveTexture(GL_TEXTURE0);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+	snprintf(detail, sizeof detail,
+	         "want unit0=1 unit1=0 got unit0=%d unit1=%d", (int)on0, (int)on1);
+	result("multitex.texcoord_array_per_unit", on0 == 1 && on1 == 0, detail);
+}
+
 static void t_clipplane(void)
 {
 	GLfloat want[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
@@ -764,6 +822,7 @@ static int glconform_main(void)
 	t_blendfunc();
 
 	t_state_setters();
+	t_multitex_arrays();
 	t_clipplane();
 	t_negative_count();
 

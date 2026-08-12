@@ -34,6 +34,20 @@ PROJ = os.path.dirname(HERE)
 BULK = os.environ.get("TADPOLE_BULK") or os.path.join(PROJ, "runtime", "sysroot", "LF", "Bulk")
 BASE = os.environ.get("TADPOLE_BASE") or os.path.join(PROJ, "runtime", "sysroot", "LF", "Base")
 
+# BY PATH, because the file is called install-didj.py and a hyphen is not a
+# module name. Loading it this way keeps the tools' filenames consistent with
+# every other one here rather than renaming one of them to suit an import.
+def _load_didj():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "install_didj", os.path.join(HERE, "install-didj.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+install_didj = _load_didj()
+
 
 def field(meta, name):
     """Name="value" out of a meta.inf, first match, empty when absent."""
@@ -178,6 +192,18 @@ def main(argv):
     for n, path in enumerate(args, 1):
         if not os.path.isfile(path):
             sys.stderr.write("no such file: %s\n" % path)
+            continue
+        # DIDJ PACKAGES GO SOMEWHERE ELSE. They arrive here because this is what
+        # the viewer's "Install .tar directly" runs, and a user holding a Didj
+        # dump has no reason to know it is a different kind of package. They need
+        # a conversion this file does not do — see install_didj — so hand them
+        # over rather than installing something that will not launch. The
+        # delegate prints its own progress header, hence the early continue.
+        if install_didj.is_didj_archive(path):
+            try:
+                install_didj.install_archives([path])
+            except SystemExit:
+                pass          # it reported the missing step; keep the batch going
             continue
         print("[%d/%d] %s:" % (n, total, os.path.basename(path)), flush=True)
         try:
