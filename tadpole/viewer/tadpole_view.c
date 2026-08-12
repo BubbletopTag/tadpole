@@ -69,6 +69,9 @@ static int tp_fifo_fd(const char *path, int want_read)
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <dirent.h>              /* guest_sweep_stragglers walks /proc */
+#endif
 
 #define TADPOLE_MAGIC 0x54414450u   /* "TADP" */
 #define NUM_FB 3
@@ -1969,18 +1972,166 @@ static int guest_alive(void)
 	return 1;
 }
 
+/* THE ONE THAT LEFT THE GROUP. VideoDaemon daemonizes the textbook way — fork,
+ * setsid, close every descriptor (see tadpole_shim.c) — so it is in ITS OWN
+ * SESSION and no kill(-pgid) can ever reach it. Measured on a close:
+ *
+ *     pid     ppid   pgid    sid
+ *     172353  172322 172322  172290   the viewer's session — killed
+ *     172348  3853   172346  172346   its own — outlived every close
+ *
+ * tadpole.sh already knows this happens and reaps by TADPOLE_DIR, but it does
+ * so at STARTUP, which is a launch too late: between closing and next opening,
+ * a guest nobody can see is still running, holding the arena and the audio
+ * FIFO. Do it here, at the moment of closing, which is where it belongs.
+ *
+ * MATCHED EXACTLY, and ancestors skipped, for the reasons tadpole.sh gives at
+ * length: a prefix match makes /tmp/tadpole reap /tmp/tadpole-2, and our own
+ * launcher exports the same TADPOLE_DIR, so killing "anything that matches"
+ * kills the shell that started us.
+ */
+#ifdef __linux__
+static int is_our_ancestor(pid_t cand)
+{
+	pid_t p = getpid();
+	int hops;
+	for (hops = 0; p > 1 && hops < 64; hops++) {
+		char path[64];
+		FILE *f;
+		int ppid = 0;
+		if (p == cand) return 1;
+		snprintf(path, sizeof(path), "/proc/%d/stat", (int)p);
+		if (!(f = fopen(path, "r"))) return 0;
+		/* comm can contain spaces and parentheses; ppid is the field after
+		 * the last ')'. */
+		{
+			char buf[512], *rp;
+			size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+			buf[n] = 0;
+			rp = strrchr(buf, ')');
+			if (!rp || sscanf(rp + 1, " %*c %d", &ppid) != 1) ppid = 0;
+		}
+		fclose(f);
+		p = ppid;
+	}
+	return 0;
+}
+
+/* THE ENVIRONMENT VARIABLE ALONE IS NOT ENOUGH TO KILL SOMETHING OVER.
+ *
+ * TADPOLE_DIR is exported, so EVERY child of the launcher inherits it — during
+ * testing this sweep cheerfully killed a `sleep` that happened to be a sibling
+ * of the viewer. Anything the user ran from the same shell would go the same
+ * way. So the environment says WHICH session a process belongs to, and this
+ * says whether it is a guest at all: only the emulator binary is ever swept.
+ *
+ * TADPOLE_QEMU first, because that is what actually got launched — a user
+ * running Glasspole, or a bring-your-own build, is not covered by a hardcoded
+ * list. The two names are the fallback for when it is unset. */
+static int looks_like_a_guest(int pid)
+{
+	char path[64], comm[64], *nl;
+	const char *emu = getenv("TADPOLE_QEMU");
+	FILE *f;
+	size_t n;
+
+	snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+	if (!(f = fopen(path, "r"))) return 0;
+	n = fread(comm, 1, sizeof(comm) - 1, f);
+	fclose(f);
+	comm[n] = 0;
+	if ((nl = strchr(comm, '\n'))) *nl = 0;
+	if (!comm[0]) return 0;
+
+	if (emu && *emu) {
+		const char *b = strrchr(emu, '/');
+		b = b ? b + 1 : emu;
+		/* comm is truncated to 15 characters; compare on that. */
+		if (!strncmp(comm, b, 15)) return 1;
+	}
+	return !strcmp(comm, "qemu-arm") || !strcmp(comm, "glasspole");
+}
+
+static void guest_sweep_stragglers(void)
+{
+	char want[600];
+	DIR *d;
+	struct dirent *e;
+	size_t wlen;
+
+	if (!g_dir || !*g_dir) return;
+	wlen = (size_t)snprintf(want, sizeof(want), "TADPOLE_DIR=%s", g_dir);
+	if (wlen >= sizeof(want)) return;
+	if (!(d = opendir("/proc"))) return;
+
+	while ((e = readdir(d))) {
+		char path[64], buf[8192];
+		int pid = atoi(e->d_name);
+		FILE *f;
+		size_t n, i;
+		int hit = 0;
+
+		if (pid <= 1 || pid == (int)getpid()) continue;
+		snprintf(path, sizeof(path), "/proc/%d/environ", pid);
+		if (!(f = fopen(path, "r"))) continue;      /* gone, or not ours */
+		n = fread(buf, 1, sizeof(buf) - 1, f);
+		fclose(f);
+		buf[n] = 0;
+		/* environ is NUL-separated: compare whole entries, never a prefix. */
+		for (i = 0; i < n; i += strlen(buf + i) + 1) {
+			if (!strcmp(buf + i, want)) { hit = 1; break; }
+			if (!buf[i]) break;
+		}
+		if (!hit || is_our_ancestor((pid_t)pid)) continue;
+		if (!looks_like_a_guest(pid)) continue;
+		kill((pid_t)pid, SIGKILL);
+	}
+	closedir(d);
+}
+#else
+static void guest_sweep_stragglers(void) { }
+#endif
+
+/* SWEEP THE WHOLE GROUP, EVEN WHEN THE LEADER WENT QUIETLY.
+ *
+ * A guest is not one process. AppManager starts VideoDaemon, and both run in
+ * the process group this function signals. The SIGTERM goes to the group, but
+ * the wait loop only ever watched the LEADER — and returned the moment it was
+ * reaped, before the SIGKILL below. So a sibling that does not act on SIGTERM
+ * outlived every close, orphaned, holding $TADPOLE_DIR and its .lock.
+ *
+ * That is not theoretical: four VideoDaemon processes from a session hours
+ * earlier were still running when this was found, and one survives every
+ * `--boot` and close, measured. The next launch then meets
+ *
+ *     tadpole: another instance (pid NNN) is using /tmp/tadpole
+ *
+ * which is how "I closed it" and "it is still running" end up both true.
+ *
+ * So the SIGKILL is now unconditional. It costs one signal to an empty group
+ * in the common case, and kill(2) on a group with no members simply fails with
+ * ESRCH, which is the correct outcome and needs no test. */
 static void guest_stop(void)
 {
-	int i, st;
-	if (g_guest <= 0) return;
-	kill(-g_guest, SIGTERM);
-	for (i = 0; i < 40; i++) {                     /* up to 2s to go quietly */
-		if (waitpid(g_guest, &st, WNOHANG) == g_guest) { g_guest = 0; return; }
-		SDL_Delay(50);
+	int i, st, reaped = 0;
+
+	if (g_guest > 0) {
+		kill(-g_guest, SIGTERM);
+		for (i = 0; i < 40; i++) {             /* up to 2s to go quietly */
+			if (waitpid(g_guest, &st, WNOHANG) == g_guest) { reaped = 1; break; }
+			SDL_Delay(50);
+		}
+		kill(-g_guest, SIGKILL);
+		if (!reaped) waitpid(g_guest, &st, 0);
+		g_guest = 0;
 	}
-	kill(-g_guest, SIGKILL);
-	waitpid(g_guest, &st, 0);
-	g_guest = 0;
+	/* UNCONDITIONALLY, because the guest is very often not ours to wait on.
+	 * `./tadpole.sh --app X` — the normal way to start a title — launches the
+	 * emulator from the SCRIPT and the viewer beside it, so g_guest is 0 here
+	 * and the early return this used to take meant closing the window left the
+	 * whole guest running. The window went away and the emulator did not,
+	 * which is as close to "closing it does nothing" as makes no difference. */
+	guest_sweep_stragglers();
 }
 
 /* argv must be NULL-terminated; runs <proj>/<script> with the settings applied.

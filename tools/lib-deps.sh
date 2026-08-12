@@ -22,9 +22,20 @@ if [ -z "${PROJ:-}" ]; then
 fi
 : "${TADPOLE_DEPS:=$PROJ/build/deps}"
 
+# TADPOLE_QEMU/TADPOLE_PYTHON are read relative to the caller's cwd, same as
+# any other shell command — but guest() in tadpole.sh does `cd "$SYSROOT"`
+# before exec'ing whatever tad_qemu() returned. A relative override
+# (TADPOLE_QEMU=glasspole/build/glasspole) would silently resolve against the
+# sysroot instead, and fail with a path that looks nothing like what the user
+# typed. Absolutize it here, once, so every caller gets a path that still
+# works after an unrelated cd.
+tad_abspath() {
+    readlink -f -- "$1" 2>/dev/null || printf '%s/%s' "$PWD" "$1"
+}
+
 tad_qemu() {
     if [ -n "${TADPOLE_QEMU:-}" ] && [ -x "${TADPOLE_QEMU}" ]; then
-        printf '%s' "$TADPOLE_QEMU"; return 0
+        tad_abspath "$TADPOLE_QEMU"; return 0
     fi
     if [ -x "$TADPOLE_DEPS/bin/qemu-arm" ]; then
         printf '%s' "$TADPOLE_DEPS/bin/qemu-arm"; return 0
@@ -39,7 +50,7 @@ tad_qemu() {
 # through with ModuleNotFoundError.
 tad_python() {
     local cand
-    for cand in "${TADPOLE_PYTHON:-}" \
+    for cand in "${TADPOLE_PYTHON:+$(tad_abspath "$TADPOLE_PYTHON")}" \
                 "$TADPOLE_DEPS/python/bin/python3" \
                 "$(command -v python3 2>/dev/null)"; do
         [ -n "$cand" ] && [ -x "$cand" ] || continue
@@ -50,7 +61,7 @@ tad_python() {
 
 tad_python_with_ubireader() {
     local cand
-    for cand in "${TADPOLE_PYTHON:-}" \
+    for cand in "${TADPOLE_PYTHON:+$(tad_abspath "$TADPOLE_PYTHON")}" \
                 "$TADPOLE_DEPS/python/bin/python3" \
                 "$(command -v python3 2>/dev/null)"; do
         [ -n "$cand" ] && [ -x "$cand" ] || continue
