@@ -352,12 +352,39 @@ done
 # cart2tar.py and fatread.py go together — the converter is the front end and
 # the FAT reader is all of the work. Both are pure stdlib on purpose, so the
 # bundled 3.7 runs them with nothing added.
+#
+# THIS LIST IS THE WHOLE CONTRACT WITH WINDOWS, and it is easy to forget: the
+# viewer's .sh -> .py port table in tadpole_view.c decides what a menu item
+# RUNS, and this decides what actually SHIPS. A tool wired up there but missing
+# here fails at the user with Python's own "can't open file" — which is how
+# Didj setup shipped broken in 11082026-0003, since install-didj.py was mapped
+# and never staged. The `|| true` below is why nobody noticed at build time, so
+# it is now a hard failure instead.
 for t in install-game.py scan-games.py check-update.py fetch-firmware.py \
          install-firmware.py online-update.py make-profile.py \
          erase-firmware.py cart2tar.py fatread.py netssl.py \
+         install-didj.py \
          pkgtool.py fix-perms.py lf3.py scan-games.sh packagelists; do
-    cp -r "$PROJ/tools/$t" "$STAGE/tools/" 2>/dev/null || true
+    cp -r "$PROJ/tools/$t" "$STAGE/tools/" \
+        || { echo "could not stage tools/$t — it is in the ship list and" \
+                  "missing, so the feature that runs it would fail at the" \
+                  "user rather than here" >&2; exit 1; }
 done
+
+# EVERY PORTED TOOL THE VIEWER CAN INVOKE IS PRESENT. The check above catches a
+# name that is in this list and absent from tools/; this catches the opposite
+# and more likely mistake — a tool added to the port table and never added to
+# this list at all.
+missing=""
+for t in $(sed -n 's/.*{ "tools\/[a-z0-9-]*\.sh", *"tools\/\([a-z0-9-]*\.py\)".*/\1/p' \
+                  "$PROJ/tadpole/viewer/tadpole_view.c" | sort -u); do
+    [ -f "$STAGE/tools/$t" ] || missing="$missing $t"
+done
+if [ -n "$missing" ]; then
+    echo "the viewer's port table maps to tools that are not staged:$missing" >&2
+    echo "  add them to the ship list above" >&2
+    exit 1
+fi
 
 # ---- the Python the firmware tools need -----------------------------------
 # IT SHIPS, and that is a deliberate reversal. Telling a Windows user to go
@@ -483,9 +510,21 @@ if [ ! -f "$PYDIR/python.exe" ]; then
               /etc/ssl/cert.pem; do
         [ -r "$ca" ] && { cp "$ca" "$PYDIR/cacert.pem"; break; }
     done
+    # FATAL, NOT A WARNING. This used to warn and carry on, which means a build
+    # host without a CA bundle ships a package whose every HTTPS download —
+    # firmware, Didj files, and the update check itself — fails on the Windows 7
+    # this bundle exists for, with the failure landing on the user instead of
+    # here. A warning in the middle of a long release build is not seen; the
+    # release script refuses on far less than this.
     [ -f "$PYDIR/cacert.pem" ] || {
-        echo "WARNING: no CA bundle found on this host — HTTPS downloads will" >&2
-        echo "         fail on a Windows that lacks the DigiCert G2 root." >&2; }
+        echo "no CA bundle found on this host, so HTTPS would fail on any" >&2
+        echo "  Windows that lacks the DigiCert G2 root — which is every" >&2
+        echo "  un-updated Windows 7. Looked in:" >&2
+        echo "    /etc/ssl/certs/ca-certificates.crt" >&2
+        echo "    /etc/pki/tls/certs/ca-bundle.crt" >&2
+        echo "    /etc/ssl/cert.pem" >&2
+        echo "  Install your distribution's ca-certificates package." >&2
+        exit 1; }
 fi
 if [ -f "$PYDIR/python.exe" ]; then
     mkdir -p "$STAGE/build/deps"
@@ -495,6 +534,13 @@ if [ -f "$PYDIR/python.exe" ]; then
     find "$STAGE/build/deps/python" -name __pycache__ -type d \
          -exec rm -rf {} + 2>/dev/null || true
     echo "    bundled Python $PY_VER ($(du -sh "$STAGE/build/deps/python" | cut -f1))"
+    # AND IT SURVIVED THE COPY. netssl looks for the bundle beside the
+    # interpreter, so it has to be in the STAGED tree, not merely in $PYDIR —
+    # a .gitignore, a filter or a stale $PYDIR would each lose it silently and
+    # the loss only shows up as an unverifiable certificate on Windows 7.
+    [ -f "$STAGE/build/deps/python/cacert.pem" ] || {
+        echo "the CA bundle did not reach $STAGE/build/deps/python — HTTPS" >&2
+        echo "  would fail on Windows 7. See tools/netssl.py." >&2; exit 1; }
     # EVERY PIECE, CHECKED SEPARATELY. Any one of these missing produces the
     # same symptom on the user's machine — the firmware installer stops with
     # an ImportError — and the build is the only place that can tell them

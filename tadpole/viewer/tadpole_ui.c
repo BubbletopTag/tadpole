@@ -272,18 +272,101 @@ void ui_progress_begin(const char *title)
 	g_modal = M_PROGRESS;
 }
 
+/* WRAP, DO NOT TRUNCATE — the truncated half is where the reason lives.
+ *
+ * This used to snprintf into PROG_COLS and drop the rest, which is fine for the
+ * "==> extracting the root filesystem" lines it was written for and useless for
+ * the one line that matters. A Windows user reported Didj setup failing with
+ * nothing on screen but
+ *
+ *     C:/Users/tadpole/AppData/Local/Programs/Glasspole/build
+ *
+ * which is exactly 55 characters — PROG_COLS - 1. The real line was Python's
+ * own "…python.exe: can't open file '…\tools\install-didj.py': [Errno 2] No
+ * such file or directory", naming both the fault and the file, and every word
+ * of that was thrown away here. The same applies to a certificate failure:
+ * netssl.explain() writes a full sentence saying the certificate could not be
+ * verified and whether a CA bundle was found, and the user sees a path prefix.
+ *
+ * Breaking on a space where there is one keeps prose readable; paths and URLs
+ * have none, so a hard split is the fallback rather than the rule. */
+/* FOLD TO ASCII ON THE WAY IN, because the bitmap font is ASCII plus a handful
+ * of our own glyphs and has nothing for U+2014. The tools are written in the
+ * same prose style as the comments here, so 45 of their message strings contain
+ * an em-dash, and every one of them arrived as three bytes of garbage — on the
+ * Windows console the same line reads "LF\Base <?> install the system firmware
+ * first". Folding here fixes all fifteen tools at once, and any tool added
+ * later, which hand-editing their strings would not.
+ *
+ * -> bytes written. Only punctuation that has an honest ASCII equivalent is
+ * translated; anything else becomes '?' rather than silently vanishing, so a
+ * message that loses something says that it did. */
+static size_t ascii_fold(char *dst, size_t cap, const char *src)
+{
+	static const struct { const char *utf8, *ascii; } MAP[] = {
+		{ "\xE2\x80\x94", "-" },   { "\xE2\x80\x93", "-" },     /* em/en dash */
+		{ "\xE2\x80\xA6", "..." },                              /* ellipsis   */
+		{ "\xE2\x80\x98", "'" },   { "\xE2\x80\x99", "'" },     /* quotes     */
+		{ "\xE2\x80\x9C", "\"" },  { "\xE2\x80\x9D", "\"" },
+		{ "\xC2\xA0",     " " },                                /* nbsp       */
+		{ "\xE2\x86\x92", "->" },                               /* arrow      */
+	};
+	size_t o = 0, k;
+
+	while (*src && o + 1 < cap) {
+		const unsigned char c = (unsigned char)*src;
+		if (c < 0x80) { dst[o++] = *src++; continue; }
+		for (k = 0; k < sizeof(MAP) / sizeof(MAP[0]); k++) {
+			size_t l = strlen(MAP[k].utf8);
+			if (!strncmp(src, MAP[k].utf8, l)) {
+				size_t a = strlen(MAP[k].ascii);
+				if (o + a + 1 >= cap) { src += l; break; }
+				memcpy(dst + o, MAP[k].ascii, a);
+				o += a; src += l;
+				break;
+			}
+		}
+		if (k < sizeof(MAP) / sizeof(MAP[0])) continue;
+		/* Unknown: consume the whole UTF-8 sequence so its continuation bytes
+		 * do not each become their own '?'. */
+		dst[o++] = '?';
+		src++;
+		while (((unsigned char)*src & 0xC0) == 0x80) src++;
+	}
+	dst[o] = 0;
+	return o;
+}
+
 void ui_progress_line(const char *line)
 {
+	char buf[512];
+	const char *p;
 	size_t n;
+
 	if (!line || !*line) return;
-	/* A scrolling window over the tail: the interesting part of a long install
-	 * is always the most recent line. */
-	snprintf(g_prog[g_prog_n % PROG_LINES], PROG_COLS, "%s", line);
-	n = strlen(g_prog[g_prog_n % PROG_LINES]);
-	while (n && (g_prog[g_prog_n % PROG_LINES][n-1] == '\n' ||
-	             g_prog[g_prog_n % PROG_LINES][n-1] == '\r'))
-		g_prog[g_prog_n % PROG_LINES][--n] = 0;
-	g_prog_n++;
+
+	n = ascii_fold(buf, sizeof(buf), line);
+	while (n && (buf[n-1] == '\n' || buf[n-1] == '\r')) buf[--n] = 0;
+	if (!n) return;
+
+	for (p = buf; *p; ) {
+		size_t left = strlen(p), take = PROG_COLS - 1, i;
+		if (left > take) {
+			/* Last space that still fits, if one exists past the margin —
+			 * a break at column 3 of a 55-wide box wastes the line. */
+			size_t brk = 0;
+			for (i = 0; i < take; i++)
+				if (p[i] == ' ') brk = i;
+			if (brk > take / 4) take = brk;
+		} else {
+			take = left;
+		}
+		memcpy(g_prog[g_prog_n % PROG_LINES], p, take);
+		g_prog[g_prog_n % PROG_LINES][take] = 0;
+		g_prog_n++;
+		p += take;
+		while (*p == ' ') p++;         /* the break itself is not content */
+	}
 }
 
 void ui_progress_done(int ok)
@@ -2940,6 +3023,18 @@ void ui_debug_state(const char *spec)
 		ui_progress_line("  kernel: kernel.bin");
 		ui_progress_line("==> extracting the root filesystem");
 		ui_progress_line("    (a 53 MB volume - takes a minute or two)");
+		/* A REAL over-long line, so this capture also proves the wrap. This is
+		 * the message a Windows user actually saw cut off at 55 characters,
+		 * back when this panel truncated instead of wrapping. */
+		ui_progress_line("C:/Users/tadpole/AppData/Local/Programs/Glasspole/"
+		                 "build/deps/python/python.exe: can't open file "
+		                 "'C:/Users/tadpole/AppData/Local/Programs/Glasspole/"
+		                 "tools/install-didj.py': [Errno 2] No such file or "
+		                 "directory");
+		/* An em-dash and an ellipsis, exactly as the tools write them, so the
+		 * capture also proves the ASCII fold. */
+		ui_progress_line("install-didj: no LF/Base here \xE2\x80\x94 install "
+		                 "the system firmware first\xE2\x80\xA6");
 	}
 	else if (!strncmp(name, "wiz", 3)) {
 		g_modal = M_WIZARD;
