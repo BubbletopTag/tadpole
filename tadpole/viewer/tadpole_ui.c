@@ -393,22 +393,457 @@ static void fill(SDL_Renderer *r, int x, int y, int w, int h, unsigned col)
 	SDL_RenderFillRect(r, &rc);
 }
 
-/* 1px bevel: light top/left, dark bottom/right (raised) or the reverse. */
-static void bevel(SDL_Renderer *r, int x, int y, int w, int h, int raised)
+/* ---- rounded, softly antialiased shapes ----------------------------------
+ *
+ * The whole chrome used to be flat fills and 1px light/dark bevels — sharp
+ * rectangles, on purpose, because that is what a pixel-art interface is. This
+ * keeps that palette and that font but trades the hard rectangle for a
+ * rounded, translucent one: every corner below is a small polygon fan rather
+ * than a rect, with a one-pixel alpha feather doing the antialiasing SDL's
+ * flat SDL_RenderFillRect never had to worry about.
+ *
+ * RR_SEG points per 90-degree corner, computed once as a unit quarter-circle
+ * rather than called through cosf/sinf per frame — this file has never linked
+ * libm and a rounded rectangle is not a reason to start on every platform
+ * this cross-builds for. */
+#define RR_SEG      8
+#define RR_MAX_PTS  (4 * (RR_SEG + 1))
+#define RR_FEATHER  1.0f
+
+static const float RR_CX[RR_SEG + 1] = {
+	1.000000f, 0.980785f, 0.923880f, 0.831470f, 0.707107f,
+	0.555570f, 0.382683f, 0.195090f, 0.000000f
+};
+static const float RR_CY[RR_SEG + 1] = {
+	0.000000f, 0.195090f, 0.382683f, 0.555570f, 0.707107f,
+	0.831470f, 0.923880f, 0.980785f, 1.000000f
+};
+
+/* Traces a w x h rect clockwise from its top edge, rounding each corner by
+ * its own radius — 0 leaves that corner square. Used both for a uniformly
+ * rounded chip and for the dialog header strip, which rounds only the top
+ * two so it sits flush with the panel content below it. Writes at most
+ * RR_MAX_PTS points into `pts` and returns how many it used. */
+static int rr_build(SDL_FPoint *pts, float x, float y, float w, float h,
+                    float rtl, float rtr, float rbr, float rbl)
 {
-	unsigned lt = raised ? C_EDGE_LT : C_EDGE_DK;
-	unsigned dk = raised ? C_EDGE_DK : C_EDGE_LT;
-	fill(r, x, y, w, 1, lt);
-	fill(r, x, y, 1, h, lt);
-	fill(r, x, y + h - 1, w, 1, dk);
-	fill(r, x + w - 1, y, 1, h, dk);
+	int n = 0, k;
+
+	if (rtr > 0) {
+		float cx = x + w - rtr, cy = y + rtr;
+		for (k = 0; k <= RR_SEG; k++) {
+			pts[n].x = cx + rtr * RR_CY[k]; pts[n].y = cy - rtr * RR_CX[k]; n++;
+		}
+	} else { pts[n].x = x + w; pts[n].y = y; n++; }
+
+	if (rbr > 0) {
+		float cx = x + w - rbr, cy = y + h - rbr;
+		for (k = 0; k <= RR_SEG; k++) {
+			pts[n].x = cx + rbr * RR_CX[k]; pts[n].y = cy + rbr * RR_CY[k]; n++;
+		}
+	} else { pts[n].x = x + w; pts[n].y = y + h; n++; }
+
+	if (rbl > 0) {
+		float cx = x + rbl, cy = y + h - rbl;
+		for (k = 0; k <= RR_SEG; k++) {
+			pts[n].x = cx - rbl * RR_CY[k]; pts[n].y = cy + rbl * RR_CX[k]; n++;
+		}
+	} else { pts[n].x = x; pts[n].y = y + h; n++; }
+
+	if (rtl > 0) {
+		float cx = x + rtl, cy = y + rtl;
+		for (k = 0; k <= RR_SEG; k++) {
+			pts[n].x = cx - rtl * RR_CX[k]; pts[n].y = cy - rtl * RR_CY[k]; n++;
+		}
+	} else { pts[n].x = x; pts[n].y = y; n++; }
+
+	return n;
+}
+
+/* The workhorse: a filled rounded rect, flat-coloured when `tex` is NULL or
+ * sampling `tex` (stretched to x,y,w,h and modulated by the vertex colour)
+ * when it is not — that second form is the frosted-glass fill, see
+ * glass_capture() below. The colour runs top-to-bottom between two
+ * colour/alpha pairs, which is what lets one call draw a flat chip, a glass
+ * body with a gentle vertical falloff, or a highlight that fades to nothing.
+ *
+ * Either way the edge gets a genuine antialiased feather: a second, larger
+ * outline fades to zero alpha, and a triangle strip connects it to the solid
+ * one. */
+static void rr_geom(SDL_Renderer *r, SDL_Texture *tex, const SDL_FRect *uv,
+                    float x, float y, float w, float h, float rtl, float rtr,
+                    float rbr, float rbl, unsigned ctop, Uint8 atop,
+                    unsigned cbot, Uint8 abot)
+{
+	SDL_FPoint in[RR_MAX_PTS], out[RR_MAX_PTS];
+	SDL_Vertex verts[1 + RR_MAX_PTS * 2];
+	int idx[RR_MAX_PTS * 9];
+	int n, i, ni = 0;
+	struct rgb ct = unpack(ctop), cb = unpack(cbot);
+	/* Which rectangle of POSITION space maps to the texture's 0..1 — the
+	 * shape's own bounds unless the caller says otherwise. The glass needs
+	 * otherwise: its texture is a capture of the whole screen, and the panel
+	 * has to sample its own window onto it rather than stretching the entire
+	 * screen across itself. */
+	float ux = uv ? uv->x : x, uy = uv ? uv->y : y;
+	float uw = uv ? uv->w : w, uh = uv ? uv->h : h;
+
+	if (w <= 0 || h <= 0 || (atop == 0 && abot == 0)) return;
+	if (uw <= 0) uw = 1;
+	if (uh <= 0) uh = 1;
+	memset(verts, 0, sizeof(verts));
+
+	n = rr_build(in, x, y, w, h, rtl, rtr, rbr, rbl);
+	rr_build(out, x - RR_FEATHER, y - RR_FEATHER, w + 2 * RR_FEATHER, h + 2 * RR_FEATHER,
+	        rtl > 0 ? rtl + RR_FEATHER : 0, rtr > 0 ? rtr + RR_FEATHER : 0,
+	        rbr > 0 ? rbr + RR_FEATHER : 0, rbl > 0 ? rbl + RR_FEATHER : 0);
+
+#define RR_MIX(dst, py, a_scale) do {                                        \
+		float t_ = ((py) - y) / h;                                           \
+		if (t_ < 0) t_ = 0; else if (t_ > 1) t_ = 1;                         \
+		(dst).r = (Uint8)(ct.r + (cb.r - ct.r) * t_);                        \
+		(dst).g = (Uint8)(ct.g + (cb.g - ct.g) * t_);                        \
+		(dst).b = (Uint8)(ct.b + (cb.b - ct.b) * t_);                        \
+		(dst).a = (Uint8)((atop + (abot - atop) * t_) * (a_scale));          \
+	} while (0)
+
+	verts[0].position.x = x + w / 2; verts[0].position.y = y + h / 2;
+	RR_MIX(verts[0].color, y + h / 2, 1);
+	verts[0].tex_coord.x = (x + w / 2 - ux) / uw;
+	verts[0].tex_coord.y = (y + h / 2 - uy) / uh;
+	for (i = 0; i < n; i++) {
+		verts[1 + i].position = in[i];
+		RR_MIX(verts[1 + i].color, in[i].y, 1);
+		verts[1 + i].tex_coord.x = (in[i].x - ux) / uw;
+		verts[1 + i].tex_coord.y = (in[i].y - uy) / uh;
+		verts[1 + n + i].position = out[i];
+		RR_MIX(verts[1 + n + i].color, out[i].y, 0);
+		verts[1 + n + i].tex_coord.x = (out[i].x - ux) / uw;
+		verts[1 + n + i].tex_coord.y = (out[i].y - uy) / uh;
+	}
+#undef RR_MIX
+	for (i = 0; i < n; i++) {
+		int j = (i + 1) % n;
+		idx[ni++] = 0; idx[ni++] = 1 + i; idx[ni++] = 1 + j;
+	}
+	for (i = 0; i < n; i++) {
+		int j = (i + 1) % n;
+		idx[ni++] = 1 + i;     idx[ni++] = 1 + n + i; idx[ni++] = 1 + j;
+		idx[ni++] = 1 + j;     idx[ni++] = 1 + n + i; idx[ni++] = 1 + n + j;
+	}
+	/* Untextured geometry takes the RENDERER's blend mode; textured geometry
+	 * takes the TEXTURE's. Setting this one is therefore right for the flat
+	 * shapes and simply ignored for the glass, which the caller has already
+	 * put into whichever mode it wants. */
+	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+	SDL_RenderGeometry(r, tex, verts, 1 + 2 * n, idx, ni);
+}
+
+static void rr_fill_ex(SDL_Renderer *r, SDL_Texture *tex, float x, float y,
+                       float w, float h, float rtl, float rtr, float rbr,
+                       float rbl, unsigned col, Uint8 alpha)
+{
+	rr_geom(r, tex, NULL, x, y, w, h, rtl, rtr, rbr, rbl, col, alpha, col, alpha);
+}
+
+/* A thin rounded outline: antialiased on the outer edge, a hard inner edge
+ * against whatever fill it sits on top of (always the same tone at this
+ * thinness, so the seam is not visible in practice). */
+static void rr_stroke(SDL_Renderer *r, float x, float y, float w, float h,
+                      float rad, unsigned col, Uint8 alpha, float thick)
+{
+	SDL_FPoint outer[RR_MAX_PTS], inner[RR_MAX_PTS], feather[RR_MAX_PTS];
+	SDL_Vertex verts[RR_MAX_PTS * 3];
+	int idx[RR_MAX_PTS * 12];
+	int n, i, ni = 0, nv = 0;
+	struct rgb c = unpack(col);
+	SDL_Color solid = { c.r, c.g, c.b, alpha };
+	SDL_Color clear = { c.r, c.g, c.b, 0 };
+	float irad;
+
+	if (w <= 0 || h <= 0 || alpha == 0) return;
+	if (thick * 2 >= w) thick = w / 2 - 0.5f;
+	if (thick * 2 >= h) thick = h / 2 - 0.5f;
+	if (thick < 0.5f) thick = 0.5f;
+	irad = rad - thick; if (irad < 0) irad = 0;
+	memset(verts, 0, sizeof(verts));
+
+	n = rr_build(outer, x, y, w, h, rad, rad, rad, rad);
+	rr_build(inner, x + thick, y + thick, w - 2 * thick, h - 2 * thick,
+	        irad, irad, irad, irad);
+	rr_build(feather, x - RR_FEATHER, y - RR_FEATHER, w + 2 * RR_FEATHER,
+	        h + 2 * RR_FEATHER, rad + RR_FEATHER, rad + RR_FEATHER,
+	        rad + RR_FEATHER, rad + RR_FEATHER);
+
+	for (i = 0; i < n; i++) {
+		verts[nv].position = feather[i]; verts[nv].color = clear; nv++;
+		verts[nv].position = outer[i];   verts[nv].color = solid; nv++;
+		verts[nv].position = inner[i];   verts[nv].color = solid; nv++;
+	}
+	for (i = 0; i < n; i++) {
+		int j = (i + 1) % n;
+		int f0 = 3*i, o0 = 3*i+1, in0 = 3*i+2, f1 = 3*j, o1 = 3*j+1, in1 = 3*j+2;
+		idx[ni++] = f0;  idx[ni++] = o0;  idx[ni++] = f1;
+		idx[ni++] = f1;  idx[ni++] = o0;  idx[ni++] = o1;
+		idx[ni++] = o0;  idx[ni++] = in0; idx[ni++] = o1;
+		idx[ni++] = o1;  idx[ni++] = in0; idx[ni++] = in1;
+	}
+	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+	SDL_RenderGeometry(r, NULL, verts, nv, idx, ni);
+}
+
+/* A soft radial glow: one triangle fan, opaque at the centre and alpha 0 all
+ * the way round the rim, so the GPU interpolates the falloff.
+ *
+ * The first version of this stacked a dozen concentric circles at a low alpha
+ * instead. Do not go back to it: every circle contributes its own hard edge
+ * and the result is a set of visible rings — a bullseye, not a glow. One fan
+ * with the alpha in the vertices is both smoother and a single draw call. */
+static void glow(SDL_Renderer *r, int cx, int cy, int radius, unsigned col,
+                 Uint8 alpha)
+{
+	SDL_FPoint rim[RR_MAX_PTS];
+	SDL_Vertex v[1 + RR_MAX_PTS];
+	int idx[RR_MAX_PTS * 3];
+	int n, i, ni = 0;
+	struct rgb c = unpack(col);
+	float rf = (float)radius;
+
+	if (radius <= 0 || alpha == 0) return;
+	memset(v, 0, sizeof(v));
+	n = rr_build(rim, cx - rf, cy - rf, rf * 2, rf * 2, rf, rf, rf, rf);
+
+	v[0].position.x = (float)cx; v[0].position.y = (float)cy;
+	v[0].color.r = c.r; v[0].color.g = c.g; v[0].color.b = c.b;
+	v[0].color.a = alpha;
+	for (i = 0; i < n; i++) {
+		v[1 + i].position = rim[i];
+		v[1 + i].color.r = c.r; v[1 + i].color.g = c.g; v[1 + i].color.b = c.b;
+		v[1 + i].color.a = 0;
+	}
+	for (i = 0; i < n; i++) {
+		idx[ni++] = 0; idx[ni++] = 1 + i; idx[ni++] = 1 + ((i + 1) % n);
+	}
+	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+	SDL_RenderGeometry(r, NULL, v, 1 + n, idx, ni);
+}
+
+/* How much to round a rect this small: enough to read as "rounded" on a
+ * button or a list row without eating so much of a small chip that it turns
+ * into a lozenge. */
+static float rr_radius(int w, int h)
+{
+	float rad = 4.0f;
+	float m = (float)(w < h ? w : h) / 2.0f;
+	return rad < m ? rad : m;
+}
+
+static float rr_radius_panel(int w, int h)
+{
+	float rad = 10.0f;
+	float m = (float)(w < h ? w : h) / 2.0f;
+	return rad < m ? rad : m;
+}
+
+/* Flat rounded fill — the rounded replacement for a bare `fill()` call where
+ * a highlight or a box benefits from matching the rest of the chrome. */
+static void rfill(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
+                  Uint8 alpha)
+{
+	float rad = rr_radius(w, h);
+	rr_fill_ex(r, NULL, (float)x, (float)y, (float)w, (float)h,
+	          rad, rad, rad, rad, col, alpha);
+}
+
+/* A button or a sunken box: rounded fill plus a soft one-tone edge. This is
+ * what every `fill()` + `bevel()` pair in the dialogs collapsed into — same
+ * two arguments as bevel() ever needed (the rect and which way it faces),
+ * now drawing both the body and the edge in one call. */
+static void chip(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
+                 int raised)
+{
+	float rad = rr_radius(w, h);
+	rr_fill_ex(r, NULL, (float)x, (float)y, (float)w, (float)h,
+	          rad, rad, rad, rad, col, 214);
+	rr_stroke(r, (float)x, (float)y, (float)w, (float)h, rad,
+	         raised ? C_EDGE_LT : C_EDGE_DK, raised ? 170 : 130, 1.0f);
+}
+
+/* ---- frosted glass --------------------------------------------------------
+ *
+ * Captures whatever is already drawn and hands back a small, softly blurred
+ * copy of it: a few passes of "redraw at half size with linear filtering",
+ * which is a cheap, GPU-only stand-in for a real gaussian blur and is plenty
+ * convincing at this UI's scale. NULL on any failure (no render-target
+ * support, an unreadable target, mid-resize, ...) — callers fall back to a
+ * flat tint rather than depending on it.
+ *
+ * THE WHOLE TARGET, NOT THE PANEL'S RECTANGLE, AND THAT IS DELIBERATE.
+ * Everything this file draws is in the renderer's LOGICAL space, but
+ * SDL_RenderReadPixels does NOT interpret its rect that way: measured on
+ * SDL 2.32, a logical size of 100x100 on a 200x200 window (scale 2) and a
+ * read of rect (0,0,50,50) returns a 50x50 block of OUTPUT pixels — the rect
+ * goes through unscaled. So a logical rect both names the wrong region and
+ * disagrees with the buffer you sized for it: asking for a 340x232 panel at
+ * 2x filled a quarter of the allocation and left the rest uninitialised,
+ * which showed up on screen as a hard-edged bright rectangle across half the
+ * panel.
+ *
+ * Passing NULL sidesteps the entire question — it means "the whole render
+ * target" and nothing else — and the panels then pick their own region out of
+ * it with texture coordinates. One capture also does for every panel in the
+ * frame.
+ */
+static SDL_Texture *glass_blur(SDL_Renderer *r)
+{
+	unsigned char *px;
+	SDL_Texture *cur, *prev_target;
+	int w = 0, h = 0, steps;
+
+	SDL_GetRendererOutputSize(r, &w, &h);
+	if (w <= 0 || h <= 0) return NULL;
+
+	px = malloc((size_t)w * h * 4);
+	if (!px) return NULL;
+	if (SDL_RenderReadPixels(r, NULL, SDL_PIXELFORMAT_ARGB8888, px, w * 4) != 0) {
+		free(px);
+		return NULL;
+	}
+	cur = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+	if (!cur) { free(px); return NULL; }
+	SDL_UpdateTexture(cur, NULL, px, w * 4);
+	free(px);
+
+	/* Restore whatever was being drawn into rather than assuming the window:
+	 * this runs in the middle of somebody else's frame. */
+	prev_target = SDL_GetRenderTarget(r);
+	for (steps = 0; steps < 4 && w > 24 && h > 24; steps++) {
+		int nw = w / 2, nh = h / 2;
+		SDL_Texture *next = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888,
+		                                      SDL_TEXTUREACCESS_TARGET, nw, nh);
+		if (!next) break;
+		SDL_SetTextureScaleMode(cur, SDL_ScaleModeLinear);
+		SDL_SetTextureBlendMode(cur, SDL_BLENDMODE_NONE);
+		if (SDL_SetRenderTarget(r, next) != 0) {
+			SDL_DestroyTexture(next);
+			break;
+		}
+		SDL_RenderCopy(r, cur, NULL, NULL);
+		SDL_SetRenderTarget(r, prev_target);
+		SDL_DestroyTexture(cur);
+		cur = next;
+		w = nw; h = nh;
+	}
+	SDL_SetTextureScaleMode(cur, SDL_ScaleModeLinear);
+	return cur;
+}
+
+/* ONE CAPTURE, REUSED FOR A WHILE. A readback is a GPU-to-CPU stall and the
+ * downsample chain is four render-target switches; doing that every frame for
+ * a dialog that is sitting still is pure waste. What is behind a modal barely
+ * moves — the emulator is paused while one is up (see ui_modal) — so the
+ * capture is kept for a tenth of a second.
+ *
+ * Always taken BEFORE any panel is drawn in the frame, so it never contains
+ * last frame's glass reflected back into this one.
+ */
+static SDL_Texture *g_glass;
+static Uint32       g_glass_at;
+
+static void glass_free(void)
+{
+	if (g_glass) SDL_DestroyTexture(g_glass);
+	g_glass = NULL;
+	g_glass_at = 0;
+}
+
+static SDL_Texture *glass_capture(SDL_Renderer *r)
+{
+	Uint32 now = SDL_GetTicks();
+
+	if (g_glass && now - g_glass_at < 100)
+		return g_glass;
+
+	glass_free();
+	g_glass = glass_blur(r);
+	g_glass_at = now;
+	return g_glass;
+}
+
+/* The logical rectangle the captured texture covers, which is what the panels
+ * map their own position onto. The capture is the whole render target, so in
+ * logical terms that is the whole logical screen. */
+static SDL_FRect glass_uv(SDL_Renderer *r)
+{
+	SDL_FRect uv = { 0, 0, 0, 0 };
+	int lw = 0, lh = 0;
+
+	SDL_RenderGetLogicalSize(r, &lw, &lh);
+	if (lw <= 0 || lh <= 0)          /* no logical size set: output IS logical */
+		SDL_GetRendererOutputSize(r, &lw, &lh);
+	uv.w = (float)lw;
+	uv.h = (float)lh;
+	return uv;
+}
+
+/* A dialog or dropdown's outer frame: a soft shadow, a tinted body, the live
+ * blurred backdrop bleeding through it, and a bright rounded rim.
+ *
+ * WHY THE BLUR IS *ADDED* RATHER THAN USED AS THE BODY. The obvious build —
+ * fill the panel with the blurred backdrop and tint it — produces a black
+ * panel here, and it is worth writing down why, because it looks like a bug
+ * in the blur and is not. Frosted glass in a desktop UI reads as glass
+ * because there is a bright, busy desktop behind it. Behind this one is
+ * C_VOID: an almost-black field with a small logo on it. Blurring
+ * near-black gives near-black, and compositing that as the body can only
+ * ever darken what is underneath, so the panel came out looking like a hole
+ * cut in the window.
+ *
+ * So the body is a theme-coloured gradient — the floor the panel can never
+ * fall below — and the backdrop is ADDED on top of it. Additive is the whole
+ * trick: darkness behind contributes nothing and the tint survives, while
+ * anything bright behind (a running game, the logo's glow) bleeds through as
+ * light. It is also the physically sensible one: glass adds the light that
+ * passes through it to the light it reflects.
+ *
+ * `blur` may be NULL, and is owned by glass_capture() — never destroyed here.
+ */
+static void panel_glass(SDL_Renderer *r, int x, int y, int w, int h,
+                        SDL_Texture *blur)
+{
+	float rad = rr_radius_panel(w, h);
+	int i;
+
+	/* Three widening rings rather than one hard offset rectangle: a shadow
+	 * with an edge is a second border, not a shadow. */
+	for (i = 3; i >= 1; i--) {
+		float grow = (float)i * 2.5f;
+		rr_fill_ex(r, NULL, x - grow, y - grow + 3.0f, w + 2 * grow, h + 2 * grow,
+		          rad + grow, rad + grow, rad + grow, rad + grow,
+		          C_SHADOW, (Uint8)(26 * (4 - i)));
+	}
+
+	rr_geom(r, NULL, NULL, (float)x, (float)y, (float)w, (float)h,
+	       rad, rad, rad, rad, C_PANEL_HI, 232, C_PANEL, 244);
+
+	if (blur) {
+		SDL_FRect uv = glass_uv(r);
+		SDL_SetTextureBlendMode(blur, SDL_BLENDMODE_ADD);
+		SDL_SetTextureAlphaMod(blur, 255);
+		rr_geom(r, blur, &uv, (float)x, (float)y, (float)w, (float)h,
+		       rad, rad, rad, rad, 0x9FB4A8U, 150, 0x6F8478U, 96);
+	}
+
+	/* The light catching the top of the sheet, fading out before halfway. */
+	rr_geom(r, NULL, NULL, (float)x + 1, (float)y + 1, (float)w - 2, (float)h * 0.45f,
+	       rad - 1, rad - 1, 0, 0, C_EDGE_LT, 46, C_EDGE_LT, 0);
+
+	rr_stroke(r, (float)x, (float)y, (float)w, (float)h, rad, C_EDGE_LT, 150, 1.2f);
 }
 
 static void panel(SDL_Renderer *r, int x, int y, int w, int h)
 {
-	fill(r, x + 2, y + 2, w, h, C_SHADOW);      /* drop shadow */
-	fill(r, x, y, w, h, C_PANEL);
-	bevel(r, x, y, w, h, 1);
+	panel_glass(r, x, y, w, h, glass_capture(r));
 }
 
 static int text_w(const char *s) { return (int)strlen(s) * GLYPH_ADV; }
@@ -1580,6 +2015,7 @@ void ui_shutdown(void)
 {
 	if (g_font) SDL_DestroyTexture(g_font);
 	if (g_logo) SDL_DestroyTexture(g_logo);
+	glass_free();                 /* the cached backdrop behind the panels */
 	games_free();                 /* one texture per icon we ever drew */
 	free(g_fb_list);
 	free(g_logo_px);
@@ -1893,7 +2329,7 @@ static void row_check(SDL_Renderer *r, const struct dlg *d, int i,
                       const char *label, int on, int hot)
 {
 	int y = row_y(d, i);
-	if (hot) fill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI);
+	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 200);
 	text(r, d->x + 10, y, on ? GL_CHECK_1 : GL_CHECK_0, on ? C_ACCENT : C_TEXT_DIM);
 	text(r, d->x + 22, y, label, C_TEXT);
 }
@@ -1915,7 +2351,7 @@ static void row_value(SDL_Renderer *r, const struct dlg *d, int i,
                       const char *label, const char *val, int hot)
 {
 	int y = row_y(d, i);
-	if (hot) fill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI);
+	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 200);
 	text(r, d->x + 10, y, label, C_TEXT);
 	text(r, d->x + d->w - 12 - text_w(val), y, val, C_ACCENT);
 }
@@ -1965,7 +2401,7 @@ static void draw_bar(SDL_Renderer *r, int lw)
 	for (i = 0; i < NMENUS; i++) {
 		int hot = (g_open_menu == i) ||
 		          (g_open_menu < 0 && inside(g_mx, g_my, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1));
-		if (hot) fill(r, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1, C_BAR_HI);
+		if (hot) rfill(r, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1, C_BAR_HI, 200);
 		text(r, MENUS[i].x + 5, 3, MENUS[i].title, hot ? C_ACCENT : C_TEXT);
 	}
 
@@ -1974,8 +2410,7 @@ static void draw_bar(SDL_Renderer *r, int lw)
 	{
 		int x = rot_x(lw);
 		int hot = inside(g_mx, g_my, x, 1, ROT_W, UI_BAR_H - 3);
-		fill(r, x, 1, ROT_W, UI_BAR_H - 3, hot ? C_BAR_HI : C_PANEL);
-		bevel(r, x, 1, ROT_W, UI_BAR_H - 3, 1);
+		chip(r, x, 1, ROT_W, UI_BAR_H - 3, hot ? C_BAR_HI : C_PANEL, 1);
 		snprintf(buf, sizeof(buf), "ROT %d", g_cfg.rotate);
 		text_c(r, x, ROT_W, 3, buf, hot ? C_ACCENT : C_TEXT);
 	}
@@ -2008,7 +2443,7 @@ static void draw_dropdown(SDL_Renderer *r)
 			continue;
 		}
 		if (g_hot_item == i && item_enabled(it))
-			fill(r, x + 2, iy - 1, w - 4, 12, C_PANEL_HI);
+			rfill(r, x + 2, iy - 1, w - 4, 12, C_PANEL_HI, 200);
 		text(r, x + 8, iy + 1, it->label,
 		     item_enabled(it) ? (g_hot_item == i ? C_ACCENT : C_TEXT) : C_TEXT_DIM);
 	}
@@ -2041,14 +2476,30 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	default: break;
 	}
 
-	/* dim the world behind the modal */
-	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-	SDL_SetRenderDrawColor(r, 0, 8, 4, 160);
-	{ SDL_Rect all = { 0, UI_BAR_H, lw, lh - UI_BAR_H }; SDL_RenderFillRect(r, &all); }
-	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+	/* CAPTURE BEFORE DIMMING, or the glass is made of the dimmed picture and
+	 * there is nothing left in it to see. The dim belongs to the world AROUND
+	 * the panel; the panel itself wants the backdrop as it really is. */
+	{
+		SDL_Texture *blur = glass_capture(r);
 
-	panel(r, d.x, d.y, d.w, d.h);
-	fill(r, d.x + 1, d.y + 1, d.w - 2, 11, C_BAR_HI);
+		/* Lighter than it was: the panel now has a shadow and a lit rim to
+		 * separate it from the backdrop, so the dim no longer has to do that
+		 * job on its own — and a heavy dim leaves the glass nothing to pick
+		 * up. */
+		SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+		SDL_SetRenderDrawColor(r, 0, 8, 4, 104);
+		{ SDL_Rect all = { 0, UI_BAR_H, lw, lh - UI_BAR_H }; SDL_RenderFillRect(r, &all); }
+		SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+
+		panel_glass(r, d.x, d.y, d.w, d.h, blur);
+	}
+	/* Rounded to match the panel's own top corners — a square strip inset by
+	 * one pixel hangs visibly outside a 10px radius. */
+	{
+		float hrad = rr_radius_panel(d.w, d.h) - 1.0f;
+		rr_geom(r, NULL, NULL, d.x + 1.0f, d.y + 1.0f, d.w - 2.0f, 11.0f,
+		       hrad, hrad, 0, 0, C_BAR_HI, 235, C_BAR_HI, 200);
+	}
 	text(r, d.x + 6, d.y + 3, title, C_ACCENT);
 
 	switch (g_modal) {
@@ -2080,8 +2531,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect dst = { x, yy, 26, 26 };
 				SDL_RenderCopy(r, e->tex, NULL, &dst);
 			} else {
-				fill(r, x, yy, 26, 26, C_PANEL);
-				bevel(r, x, yy, 26, 26, 0);
+				chip(r, x, yy, 26, 26, C_PANEL, 0);
 			}
 			snprintf(line, sizeof(line), "%.40s", e->name);
 			text(r, x + 32, yy + 3, line, hot ? C_ACCENT : C_TEXT);
@@ -2116,8 +2566,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		listy = y + 24;
 		listh = d.y + d.h - 30 - listy;
 		vis = listh / row;
-		fill(r, x - 2, listy - 2, d.w - 16, listh + 2, C_EDGE_DK);
-		bevel(r, x - 2, listy - 2, d.w - 16, listh + 2, 0);
+		chip(r, x - 2, listy - 2, d.w - 16, listh + 2, C_EDGE_DK, 0);
 
 		/* Clamp here rather than at the scroll event: the visible count
 		 * depends on the dialog size, which depends on the window, which can
@@ -2151,8 +2600,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect b = up_btn(&d, i2);
 				int on = (i2 == 1) || g_up_asset[0] != 0;
 				int hot = on && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, L[i2],
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
@@ -2299,16 +2747,14 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		{
 			SDL_Rect b = { d.x + 10, row_y(&d, 3) + 2, 76, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-			bevel(r, b.x, b.y, b.w, b.h, 1);
+			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Game Library",
 			       hot ? C_ACCENT : C_TEXT);
 		}
 		{
 			SDL_Rect b = { d.x + 94, row_y(&d, 3) + 2, 96, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-			bevel(r, b.x, b.y, b.w, b.h, 1);
+			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Setup Wizard",
 			       hot ? C_ACCENT : C_TEXT);
 		}
@@ -2339,8 +2785,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		 * are wildly different and not knowable in advance — a fake percentage
 		 * would be a lie. This says "still working" honestly, and the log lines
 		 * below say what it is working on. */
-		fill(r, d.x + 8, ly, d.w - 16, 7, C_VOID);
-		bevel(r, d.x + 8, ly, d.w - 16, 7, 0);
+		chip(r, d.x + 8, ly, d.w - 16, 7, C_VOID, 0);
 		if (g_prog_running && g_prog_pct >= 0) {
 			/* A MEASURED bar, not a moving one: the downloader knows the
 			 * byte total before it starts, so this is the one step where a
@@ -2362,8 +2807,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			     g_prog_ok ? C_ACCENT : C_EDGE_LT);
 		}
 
-		fill(r, d.x + 8, ly + 12, d.w - 16, PROG_LINES * 9 + 4, C_VOID);
-		bevel(r, d.x + 8, ly + 12, d.w - 16, PROG_LINES * 9 + 4, 0);
+		chip(r, d.x + 8, ly + 12, d.w - 16, PROG_LINES * 9 + 4, C_VOID, 0);
 		for (i2 = first; i2 < g_prog_n; i2++)
 			text(r, d.x + 12, ly + 16 + (i2 - first) * 9,
 			     g_prog[i2 % PROG_LINES], C_TEXT_DIM);
@@ -2404,8 +2848,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		if (g_confirm) {
 			SDL_Rect b = { d.x + d.w - 96, d.y + d.h - 18, 44, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-			bevel(r, b.x, b.y, b.w, b.h, 1);
+			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Erase", hot ? C_ACCENT : C_TEXT);
 			/* Below the body, wherever it ended, rather than at a fixed offset
 			 * that a two-line body would collide with. */
@@ -2425,8 +2868,23 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		snprintf(welcome, sizeof(welcome), "Welcome to %s", ui_brand_name());
 		prereq_check(&pq);
 
-		/* Banner down the left — the wizard's whole visual signature. */
-		fill(r, d.x + 1, d.y + 12, 56, d.h - 30, C_VOID);
+		/* Banner down the left — the wizard's whole visual signature. Its
+		 * bottom-left corner follows the panel's, so the sidebar sits inside
+		 * the glass rather than cutting across it; the two right-hand corners
+		 * stay square because that edge is a seam against the content, not an
+		 * outside edge. A faint glow behind the mark picks up the same light
+		 * the idle backdrop has. */
+		{
+			float brad = rr_radius_panel(d.w, d.h) - 1.0f;
+			/* Both stops stay in the green (or the blue). Fading to C_SHADOW
+			 * was tried and reads as a black slab bolted to the side of the
+			 * panel; letting the glass through towards the bottom keeps it a
+			 * dark column of the same material. */
+			rr_geom(r, NULL, NULL, d.x + 1.0f, (float)d.y + 12.0f, 56.0f,
+			       (float)d.h - 30.0f, 0, 0, 0, brad,
+			       C_VOID, 232, C_VOID, 172);
+			glow(r, d.x + 29, d.y + 44, 46, C_ACCENT, 34);
+		}
 		if (g_logo) {
 			SDL_Rect dst = { d.x + 8, d.y + 20, 40, 40 };
 			SDL_RenderCopy(r, g_logo, NULL, &dst);
@@ -2513,8 +2971,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			{
 				SDL_Rect b = { bx, by + 54, 76, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
 			}
 			/* THE SYSROOT NEEDS ITS OWN BUTTON. Installing firmware builds it,
@@ -2524,8 +2981,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			if (pq.rootfs && !pq.sysroot) {
 				SDL_Rect b = { bx + 84, by + 54, 96, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Build sysroot",
 				       hot ? C_ACCENT : C_TEXT);
 			}
@@ -2549,8 +3005,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect b = { bx, by + 92, 132, 15 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				fill(r, b.x + 1, b.y + 1, b.w, b.h, C_SHADOW);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI, 1);
 				text_c(r, b.x, b.w, b.y + 4, "Online System Update",
 				       hot ? C_ACCENT : C_TEXT);
 				text(r, b.x + b.w + 8, b.y + 4, "124 MB", C_TEXT_DIM);
@@ -2626,11 +3081,9 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect g = { bx + 96, by + 69, 76, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				int hotg = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
-				fill(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL);
-				bevel(r, g.x, g.y, g.w, g.h, 1);
+				chip(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, g.x, g.w, g.y + 3, "Download", hotg ? C_ACCENT : C_TEXT);
 				if (pq.didj)
 					text(r, g.x + g.w + 10, g.y + 3, "installed", C_ACCENT);
@@ -2643,11 +3096,9 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect g = { bx + 96, by + 113, 76, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				int hotg = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
-				fill(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL);
-				bevel(r, g.x, g.y, g.w, g.h, 1);
+				chip(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, g.x, g.w, g.y + 3, "Download", hotg ? C_ACCENT : C_TEXT);
 				if (pq.didj_overlay)
 					text(r, g.x + g.w + 10, g.y + 3, "installed", C_ACCENT);
@@ -2666,8 +3117,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			{
 				SDL_Rect f = { bx + 40, fy + 4, 132, 14 };
 				int hot = inside(g_mx, g_my, f.x, f.y, f.w, f.h);
-				fill(r, f.x, f.y, f.w, f.h, C_VOID);
-				bevel(r, f.x, f.y, f.w, f.h, g_prof_focus ? 1 : 0);
+				chip(r, f.x, f.y, f.w, f.h, C_VOID, g_prof_focus ? 1 : 0);
 				text(r, f.x + 4, f.y + 4, g_prof_name, C_TEXT);
 				if (g_prof_focus && (SDL_GetTicks() / 450) % 2 == 0)
 					fill(r, f.x + 4 + text_w(g_prof_name), f.y + 3, 1, 8, C_ACCENT);
@@ -2681,8 +3131,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect g = { bx + 40, fy + 22, 60, 14 };
 				int hot = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
 				text(r, bx, fy + 26, "Grade", C_TEXT);
-				fill(r, g.x, g.y, g.w, g.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, g.x, g.y, g.w, g.h, 1);
+				chip(r, g.x, g.y, g.w, g.h, hot ? C_BAR_HI : C_PANEL, 1);
 				if (g_prof_grade <= 0) snprintf(gb, sizeof(gb), "Pre-K");
 				else                   snprintf(gb, sizeof(gb), "Grade %d", g_prof_grade);
 				text_c(r, g.x, g.w, g.y + 4, gb, hot ? C_ACCENT : C_TEXT);
@@ -2692,8 +3141,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect p2 = { bx + 40, fy + 40, 60, 14 };
 				int hot = inside(g_mx, g_my, p2.x, p2.y, p2.w, p2.h);
 				text(r, bx, fy + 44, "Photo", C_TEXT);
-				fill(r, p2.x, p2.y, p2.w, p2.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, p2.x, p2.y, p2.w, p2.h, 1);
+				chip(r, p2.x, p2.y, p2.w, p2.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, p2.x, p2.w, p2.y + 4, "Choose...",
 				       hot ? C_ACCENT : C_TEXT);
 				if (g_prof_pic[0]) {
@@ -2710,8 +3158,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				int on = g_prof_name[0] != 0;
 				int hot = on && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				fill(r, b.x + 1, b.y + 1, b.w, b.h, C_SHADOW);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI, 1);
 				text_c(r, b.x, b.w, b.y + 4, "Create profile",
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 				if (g_prof_made)
@@ -2732,8 +3179,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			{
 				SDL_Rect b = { bx, by + 62, 96, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Open Library",
 				       hot ? C_ACCENT : C_TEXT);
 			}
@@ -2767,8 +3213,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				int hot = on && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				const char *lab = (i2 == 1 && g_wiz_page == WIZ_PAGES - 1)
 				                ? "Finish" : L[i2];
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, lab,
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
@@ -2783,17 +3228,26 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		g_gm_rows = lh2 / GM_ROW_H;
 		if (g_gm_rows < 1) g_gm_rows = 1;
 
-		/* Where these came from, and how many there are. */
+		/* Where these came from, and how many there are.
+		 *
+		 * THE PATH IS TRUNCATED TO THE ROOM LEFT BY THE COUNT, not to a fixed
+		 * 40 characters. In portrait the dialog is 264 logical pixels wide,
+		 * 40 glyphs is 240 of them, and the count was drawn straight over the
+		 * tail of the path — the header read "…/leappad-emu/games473". */
 		{
 			char shown[40];
-			path_tail(shown, sizeof(shown), g_gm_dir[0] ? g_gm_dir : "(no folder chosen)");
-			text(r, d.x + 6, d.y + 15, shown, C_TEXT_DIM);
+			int room;
 			snprintf(buf, sizeof(buf), "%d", g_gm_n);
+			room = (d.w - 14 - 6 - text_w(buf)) / GLYPH_ADV;
+			if (room < 8) room = 8;
+			if (room > (int)sizeof(shown) - 1) room = (int)sizeof(shown) - 1;
+			path_tail(shown, (size_t)room + 1,
+			          g_gm_dir[0] ? g_gm_dir : "(no folder chosen)");
+			text(r, d.x + 6, d.y + 15, shown, C_TEXT_DIM);
 			text(r, d.x + d.w - 8 - text_w(buf), d.y + 15, buf, C_TEXT_DIM);
 		}
 
-		fill(r, lx, ly, lw2, lh2, C_VOID);
-		bevel(r, lx, ly, lw2, lh2, 0);
+		chip(r, lx, ly, lw2, lh2, C_VOID, 0);
 
 		if (g_gm_n == 0) {
 			/* THREE DIFFERENT NOTHINGS, and they need different advice. */
@@ -2818,7 +3272,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			char nm[64];
 			unsigned col = C_TEXT;
 
-			if (k == g_gm_sel) fill(r, lx + 1, ry - 1, lw2 - 2, GM_ROW_H, C_PANEL_HI);
+			if (k == g_gm_sel) rfill(r, lx + 1, ry - 1, lw2 - 2, GM_ROW_H, C_PANEL_HI, 200);
 
 			/* tick box, so a batch install is one obvious gesture */
 			text(r, tx, ry + 3, e->checked ? GL_CHECK_1 : GL_CHECK_0,
@@ -2831,8 +3285,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect dst = { tx, ry, 13, 13 };
 				SDL_RenderCopy(r, e->tex, NULL, &dst);
 			} else {
-				fill(r, tx, ry, 13, 13, C_PANEL);
-				bevel(r, tx, ry, 13, 13, 0);
+				chip(r, tx, ry, 13, 13, C_PANEL, 0);
 			}
 			tx += 17;
 
@@ -2865,8 +3318,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			int px = d.x + 6 + lw2 + 4, py = ly;
 			int side = pw - 10;
 			game_icon(r, e);
-			fill(r, px, py, pw - 4, lh2, C_VOID);
-			bevel(r, px, py, pw - 4, lh2, 0);
+			chip(r, px, py, pw - 4, lh2, C_VOID, 0);
 			if (e->tex) {
 				/* Fit, do not stretch: these are 83x91 and 90x77 and so on,
 				 * and a squashed icon looks like a decoding fault. */
@@ -2920,8 +3372,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			for (i3 = 0; i3 < 2; i3++) {
 				int hot = inside(g_mx, g_my, xs[i3], by, ws[i3], 13);
 				int on = (i3 == 0) || g_gm_dir[0];
-				fill(r, xs[i3], by, ws[i3], 13, hot && on ? C_BAR_HI : C_PANEL);
-				bevel(r, xs[i3], by, ws[i3], 13, 1);
+				chip(r, xs[i3], by, ws[i3], 13, hot && on ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, xs[i3], ws[i3], by + 3, L[i3],
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
@@ -2931,8 +3382,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				int hot = n && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				if (n) snprintf(buf, sizeof(buf), "Install %d", n);
 				else   snprintf(buf, sizeof(buf), "Install");
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, buf,
 				       !n ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
@@ -2945,15 +3395,14 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		path_tail(shown, sizeof(shown), g_fb_dir);
 		text(r, d.x + 6, ly, shown, C_TEXT_DIM);
 
-		fill(r, d.x + 6, ly + 11, d.w - 12, FB_ROWS * 11 + 2, C_VOID);
-		bevel(r, d.x + 6, ly + 11, d.w - 12, FB_ROWS * 11 + 2, 0);
+		chip(r, d.x + 6, ly + 11, d.w - 12, FB_ROWS * 11 + 2, C_VOID, 0);
 		for (i2 = 0; i2 < FB_ROWS && g_fb_top + i2 < g_fb_n; i2++) {
 			int k = g_fb_top + i2;
 			int ry = ly + 13 + i2 * 11;
 			char nm[47];
 			unsigned col = g_fb_list[k].isdir ? C_ACCENT : C_TEXT;
 			if (k == g_fb_sel) {
-				fill(r, d.x + 8, ry - 1, d.w - 16, 11, C_PANEL_HI);
+				rfill(r, d.x + 8, ry - 1, d.w - 16, 11, C_PANEL_HI, 200);
 				col = C_TEXT;
 			}
 			nm[0] = g_fb_list[k].isdir ? GL_SUB[0] : ' ';
@@ -2977,8 +3426,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	{
 		int busy = (g_modal == M_PROGRESS && g_prog_running);
 		int hot = !busy && inside(g_mx, g_my, cb.x, cb.y, cb.w, cb.h);
-		fill(r, cb.x, cb.y, cb.w, cb.h, hot ? C_BAR_HI : C_PANEL);
-		bevel(r, cb.x, cb.y, cb.w, cb.h, 1);
+		chip(r, cb.x, cb.y, cb.w, cb.h, hot ? C_BAR_HI : C_PANEL, 1);
 		text_c(r, cb.x, cb.w, cb.y + 3,
 		       g_modal == M_FILES ? "Cancel" : "Close",
 		       busy ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
@@ -2986,8 +3434,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	if (g_modal == M_FILES) {
 		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
 		int hot = inside(g_mx, g_my, ok.x, ok.y, ok.w, ok.h);
-		fill(r, ok.x, ok.y, ok.w, ok.h, hot ? C_BAR_HI : C_PANEL);
-		bevel(r, ok.x, ok.y, ok.w, ok.h, 1);
+		chip(r, ok.x, ok.y, ok.w, ok.h, hot ? C_BAR_HI : C_PANEL, 1);
 		text_c(r, ok.x, ok.w, ok.y + 3, "Open", hot ? C_ACCENT : C_TEXT);
 		/* Some things ARE the folder: an LFC_Downloads directory of firmware
 		 * packages, or a folder of game backups. A browser that can only open
@@ -3001,8 +3448,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		    g_fb_action == UI_ACT_SCAN_GAMES) {
 			SDL_Rect uf = { ok.x - 74, ok.y, 70, 13 };
 			int h2 = inside(g_mx, g_my, uf.x, uf.y, uf.w, uf.h);
-			fill(r, uf.x, uf.y, uf.w, uf.h, h2 ? C_BAR_HI : C_PANEL);
-			bevel(r, uf.x, uf.y, uf.w, uf.h, 1);
+			chip(r, uf.x, uf.y, uf.w, uf.h, h2 ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, uf.x, uf.w, uf.y + 3, "Use folder",
 			       h2 ? C_ACCENT : C_TEXT);
 		}
@@ -3012,7 +3458,21 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 void ui_draw_idle(SDL_Renderer *ren, int lw, int lh)
 {
 	int cy = UI_BAR_H + (lh - UI_BAR_H) / 2;
-	fill(ren, 0, UI_BAR_H, lw, lh - UI_BAR_H, C_VOID);
+	/* NOT A FLAT VOID ANY MORE. This was one fill of C_VOID, which is very
+	 * nearly black — fine as a backdrop for a picture, but it is also what
+	 * the glass panels are made of, and frosted glass over nothing looks
+	 * like a hole. A gentle top-down gradient and a glow behind the logo
+	 * give the panels something to pick up, and give an empty front end
+	 * some depth of its own. The bar is drawn after this and paints over
+	 * the overspill at the top. */
+	rr_geom(ren, NULL, NULL, -2.0f, (float)UI_BAR_H - 2.0f, (float)lw + 4.0f,
+	       (float)(lh - UI_BAR_H) + 4.0f, 0, 0, 0, 0,
+	       C_BAR, 255, C_VOID, 255);
+	/* Two fans rather than one: a wide, faint wash for the whole backdrop and
+	 * a tighter, warmer one right behind the mark. A single linear falloff
+	 * reads as a cone; two make it look like light. */
+	glow(ren, lw / 2, cy - 14, (lh - UI_BAR_H) * 3 / 4, C_ACCENT, 26);
+	glow(ren, lw / 2, cy - 14, (lh - UI_BAR_H) / 3, C_ACCENT, 30);
 	if (g_logo) {
 		SDL_Rect dst = { lw / 2 - 32, cy - 46, 64, 64 };
 		SDL_RenderCopy(ren, g_logo, NULL, &dst);
