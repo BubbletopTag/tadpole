@@ -1713,7 +1713,7 @@ void gp_syscall(Thread &t) {
         std::memset(u, 0, 6 * 65);
         std::strcpy(u + 0 * 65, "Linux");
         std::strcpy(u + 1 * 65, "leappad");
-        std::strcpy(u + 2 * 65, "2.6.32");
+        std::strcpy(u + 2 * 65, "2.6.37.4-leapfrog");
         std::strcpy(u + 3 * 65, "#1 PREEMPT");
         std::strcpy(u + 4 * 65, "armv7l");
         std::strcpy(u + 5 * 65, "(none)");
