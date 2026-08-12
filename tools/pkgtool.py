@@ -171,12 +171,54 @@ def cmd_ubi(image, dest):
         except (OSError, NotImplementedError):
             pending.append((src, dst))
 
+    # DEVICE NODES CANNOT BE MADE HERE, AND ARE NOT WANTED. os.mknod does not
+    # exist AT ALL on Windows, so ubi_reader's per-node try/except reports
+    #
+    #     Warn: DEV Fail: module 'os' has no attribute 'mknod'
+    #
+    # once per node — alarming enough to be reported as a bug, while the
+    # firmware it produced was in fact complete. On Linux the same nodes fail
+    # just as surely, with EPERM, because mknod on a character device is
+    # root-only and this runs as an ordinary user. So NEITHER platform has ever
+    # created one, the extraction has always been "missing" /dev/console and
+    # friends, and nothing has ever needed them: the guest's /dev is served by
+    # the shim, not by the image.
+    #
+    # Recording them rather than letting each one raise keeps the log honest —
+    # the count is reported below — and, unlike ubi_reader's use_dummy_devices,
+    # writes nothing to disk. A dummy REGULAR file at /dev/console would be
+    # worse than an absent one: the guest's open() would succeed and it would
+    # then read and write a file nobody drains.
+    real_mknod = getattr(os, "mknod", None)
+    skipped_devs = []
+
+    def recording_mknod(path, mode=0o600, device=0, *a, **k):
+        if real_mknod is None:
+            skipped_devs.append(path)
+            return
+        try:
+            real_mknod(path, mode, device, *a, **k)
+        except (OSError, NotImplementedError):
+            skipped_devs.append(path)
+
     os.symlink = recording_symlink
+    os.mknod = recording_mknod
     try:
         sys.argv = ["ubireader_extract_files", "-o", dest, image]
         rc = main() or 0
     finally:
         os.symlink = real_symlink
+        if real_mknod is None:
+            del os.mknod
+        else:
+            os.mknod = real_mknod
+
+    if skipped_devs:
+        sys.stderr.write(
+            "pkgtool: %d device node(s) not created (%s and the rest) - the "
+            "guest's /dev comes from the shim, so the extraction is complete "
+            "without them\n"
+            % (len(skipped_devs), os.path.basename(skipped_devs[0])))
 
     root = os.path.abspath(dest)
     for _ in range(8):                       # link-to-link chains, not loops
