@@ -556,20 +556,24 @@ static void rr_fill_ex(SDL_Renderer *r, SDL_Texture *tex, float x, float y,
 
 /* A thin rounded outline: antialiased on the outer edge, a hard inner edge
  * against whatever fill it sits on top of (always the same tone at this
- * thinness, so the seam is not visible in practice). */
-static void rr_stroke(SDL_Renderer *r, float x, float y, float w, float h,
-                      float rad, unsigned col, Uint8 alpha, float thick)
+ * thinness, so the seam is not visible in practice).
+ *
+ * The colour runs top-to-bottom like rr_geom's. A rim of ONE brightness all
+ * the way round is what a drawn rectangle looks like; a rim that is bright
+ * along the top and fades towards the bottom is what a lit sheet looks like,
+ * and it is most of the difference between "rounded box" and "glass". */
+static void rr_stroke_grad(SDL_Renderer *r, float x, float y, float w, float h,
+                           float rad, unsigned ctop, Uint8 atop,
+                           unsigned cbot, Uint8 abot, float thick)
 {
 	SDL_FPoint outer[RR_MAX_PTS], inner[RR_MAX_PTS], feather[RR_MAX_PTS];
 	SDL_Vertex verts[RR_MAX_PTS * 3];
 	int idx[RR_MAX_PTS * 12];
 	int n, i, ni = 0, nv = 0;
-	struct rgb c = unpack(col);
-	SDL_Color solid = { c.r, c.g, c.b, alpha };
-	SDL_Color clear = { c.r, c.g, c.b, 0 };
+	struct rgb ct = unpack(ctop), cb = unpack(cbot);
 	float irad;
 
-	if (w <= 0 || h <= 0 || alpha == 0) return;
+	if (w <= 0 || h <= 0 || (atop == 0 && abot == 0)) return;
 	if (thick * 2 >= w) thick = w / 2 - 0.5f;
 	if (thick * 2 >= h) thick = h / 2 - 0.5f;
 	if (thick < 0.5f) thick = 0.5f;
@@ -583,11 +587,21 @@ static void rr_stroke(SDL_Renderer *r, float x, float y, float w, float h,
 	        h + 2 * RR_FEATHER, rad + RR_FEATHER, rad + RR_FEATHER,
 	        rad + RR_FEATHER, rad + RR_FEATHER);
 
+#define RS_MIX(dst, py, a_scale) do {                                        \
+		float t_ = ((py) - y) / h;                                           \
+		if (t_ < 0) t_ = 0; else if (t_ > 1) t_ = 1;                         \
+		(dst).r = (Uint8)(ct.r + (cb.r - ct.r) * t_);                        \
+		(dst).g = (Uint8)(ct.g + (cb.g - ct.g) * t_);                        \
+		(dst).b = (Uint8)(ct.b + (cb.b - ct.b) * t_);                        \
+		(dst).a = (Uint8)((atop + (abot - atop) * t_) * (a_scale));          \
+	} while (0)
+
 	for (i = 0; i < n; i++) {
-		verts[nv].position = feather[i]; verts[nv].color = clear; nv++;
-		verts[nv].position = outer[i];   verts[nv].color = solid; nv++;
-		verts[nv].position = inner[i];   verts[nv].color = solid; nv++;
+		verts[nv].position = feather[i]; RS_MIX(verts[nv].color, feather[i].y, 0); nv++;
+		verts[nv].position = outer[i];   RS_MIX(verts[nv].color, outer[i].y, 1);   nv++;
+		verts[nv].position = inner[i];   RS_MIX(verts[nv].color, inner[i].y, 1);   nv++;
 	}
+#undef RS_MIX
 	for (i = 0; i < n; i++) {
 		int j = (i + 1) % n;
 		int f0 = 3*i, o0 = 3*i+1, in0 = 3*i+2, f1 = 3*j, o1 = 3*j+1, in1 = 3*j+2;
@@ -600,40 +614,89 @@ static void rr_stroke(SDL_Renderer *r, float x, float y, float w, float h,
 	SDL_RenderGeometry(r, NULL, verts, nv, idx, ni);
 }
 
-/* A soft radial glow: one triangle fan, opaque at the centre and alpha 0 all
- * the way round the rim, so the GPU interpolates the falloff.
+/* A soft ELLIPTICAL falloff: one triangle fan with the alpha in the vertices,
+ * so the GPU interpolates between the centre and the rim. Both directions are
+ * useful and they are the same shape:
  *
- * The first version of this stacked a dozen concentric circles at a low alpha
- * instead. Do not go back to it: every circle contributes its own hard edge
- * and the result is a set of visible rings — a bullseye, not a glow. One fan
- * with the alpha in the vertices is both smoother and a single draw call. */
-static void glow(SDL_Renderer *r, int cx, int cy, int radius, unsigned col,
-                 Uint8 alpha)
-{
-	SDL_FPoint rim[RR_MAX_PTS];
-	SDL_Vertex v[1 + RR_MAX_PTS];
-	int idx[RR_MAX_PTS * 3];
-	int n, i, ni = 0;
-	struct rgb c = unpack(col);
-	float rf = (float)radius;
+ *   a_mid > a_rim   a glow — light pooling outward from a point
+ *   a_mid < a_rim   a vignette — the edges of the picture falling away
+ *
+ * ITS OWN, FINER CIRCLE TABLE. The rounded rects get eight points per corner,
+ * which is ample for a 13px button, and reusing that here gave the vignette
+ * 36 rim points across the whole window — the iso-alpha contours came out as
+ * a visible polygon and the flat chords read as faint streaks across the
+ * backdrop. Sixty-four is smooth at that size. Still no libm: the quarter
+ * turn is a table, as RR_CX/RR_CY is.
+ *
+ * SEPARATE X AND Y RADII because the window is not square. A circular
+ * vignette on a 480x272 panel darkens the top and bottom edges long before
+ * it touches the sides, which is exactly the horizontal banding it was
+ * supposed to avoid; an ellipse of the frame's own proportions reaches all
+ * four corners at once.
+ *
+ * An earlier glow stacked a dozen concentric circles at a low alpha instead.
+ * Do not go back to it: every circle contributes its own hard edge and the
+ * result is a set of visible rings — a bullseye, not a glow. */
+#define RAD_SEG 16                      /* per quadrant; 64 round the ellipse */
+static const float RAD_CX[RAD_SEG + 1] = {
+	1.000000f, 0.995185f, 0.980785f, 0.956940f, 0.923880f,
+	0.881921f, 0.831470f, 0.773010f, 0.707107f, 0.634393f,
+	0.555570f, 0.471397f, 0.382683f, 0.290285f, 0.195090f,
+	0.098017f, 0.000000f
+};
+static const float RAD_CY[RAD_SEG + 1] = {
+	0.000000f, 0.098017f, 0.195090f, 0.290285f, 0.382683f,
+	0.471397f, 0.555570f, 0.634393f, 0.707107f, 0.773010f,
+	0.831470f, 0.881921f, 0.923880f, 0.956940f, 0.980785f,
+	0.995185f, 1.000000f
+};
 
-	if (radius <= 0 || alpha == 0) return;
+static void radial(SDL_Renderer *r, int cx, int cy, float rx, float ry,
+                   unsigned col, Uint8 a_mid, Uint8 a_rim)
+{
+	SDL_Vertex v[1 + 4 * RAD_SEG];
+	int idx[4 * RAD_SEG * 3];
+	int n = 4 * RAD_SEG, i, ni = 0;
+	struct rgb c = unpack(col);
+
+	if (rx <= 0 || ry <= 0 || (a_mid == 0 && a_rim == 0)) return;
 	memset(v, 0, sizeof(v));
-	n = rr_build(rim, cx - rf, cy - rf, rf * 2, rf * 2, rf, rf, rf, rf);
 
 	v[0].position.x = (float)cx; v[0].position.y = (float)cy;
 	v[0].color.r = c.r; v[0].color.g = c.g; v[0].color.b = c.b;
-	v[0].color.a = alpha;
+	v[0].color.a = a_mid;
+
+	/* One quarter-turn table, four quadrants, by the rotation identities —
+	 * cos(90+f) = -sin f, sin(90+f) = cos f, and so on round. Written out
+	 * rather than folded into sign tricks because a mirrored quadrant that
+	 * walks the table the wrong way makes a lopsided ellipse, and that is
+	 * a tedious thing to see and a worse one to debug. */
 	for (i = 0; i < n; i++) {
-		v[1 + i].position = rim[i];
+		int q = i / RAD_SEG, j = i % RAD_SEG;
+		float ux, uy;
+		switch (q) {
+		default:
+		case 0: ux =  RAD_CX[j]; uy =  RAD_CY[j]; break;
+		case 1: ux = -RAD_CY[j]; uy =  RAD_CX[j]; break;
+		case 2: ux = -RAD_CX[j]; uy = -RAD_CY[j]; break;
+		case 3: ux =  RAD_CY[j]; uy = -RAD_CX[j]; break;
+		}
+		v[1 + i].position.x = cx + rx * ux;
+		v[1 + i].position.y = cy + ry * uy;
 		v[1 + i].color.r = c.r; v[1 + i].color.g = c.g; v[1 + i].color.b = c.b;
-		v[1 + i].color.a = 0;
+		v[1 + i].color.a = a_rim;
 	}
 	for (i = 0; i < n; i++) {
 		idx[ni++] = 0; idx[ni++] = 1 + i; idx[ni++] = 1 + ((i + 1) % n);
 	}
 	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
 	SDL_RenderGeometry(r, NULL, v, 1 + n, idx, ni);
+}
+
+static void glow(SDL_Renderer *r, int cx, int cy, int radius, unsigned col,
+                 Uint8 alpha)
+{
+	radial(r, cx, cy, (float)radius, (float)radius, col, alpha, 0);
 }
 
 /* How much to round a rect this small: enough to read as "rounded" on a
@@ -663,18 +726,37 @@ static void rfill(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
 	          rad, rad, rad, rad, col, alpha);
 }
 
-/* A button or a sunken box: rounded fill plus a soft one-tone edge. This is
- * what every `fill()` + `bevel()` pair in the dialogs collapsed into — same
- * two arguments as bevel() ever needed (the rect and which way it faces),
- * now drawing both the body and the edge in one call. */
+/* A button or a sunken box. This is what every `fill()` + `bevel()` pair in
+ * the dialogs collapsed into — same two arguments bevel() ever needed (the
+ * rect and which way it faces), now drawing the body and the edge together.
+ *
+ * `raised` still means what it did, but it is no longer a choice of which two
+ * sides get the light. Both states carry a vertical gradient and a graded rim;
+ * they differ in DIRECTION, which is what the old light-top-left/dark-bottom-
+ * right bevel was really encoding:
+ *
+ *   raised  body brightens upward, rim bright along the top   — a button
+ *   sunken  body darkens upward, rim dark along the top       — a well
+ *
+ * A flat fill with a single-tone outline was the first version and it read as
+ * a sticker: correct shape, no light on it. */
 static void chip(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
                  int raised)
 {
 	float rad = rr_radius(w, h);
-	rr_fill_ex(r, NULL, (float)x, (float)y, (float)w, (float)h,
-	          rad, rad, rad, rad, col, 190);
-	rr_stroke(r, (float)x, (float)y, (float)w, (float)h, rad,
-	         raised ? C_EDGE_LT : C_EDGE_DK, raised ? 170 : 130, 1.0f);
+	float fx = (float)x, fy = (float)y, fw = (float)w, fh = (float)h;
+
+	if (raised) {
+		rr_geom(r, NULL, NULL, fx, fy, fw, fh, rad, rad, rad, rad,
+		       col, 176, col, 202);
+		rr_stroke_grad(r, fx, fy, fw, fh, rad,
+		              C_EDGE_LT, 185, C_EDGE_LT, 96, 1.0f);
+	} else {
+		rr_geom(r, NULL, NULL, fx, fy, fw, fh, rad, rad, rad, rad,
+		       col, 208, col, 176);
+		rr_stroke_grad(r, fx, fy, fw, fh, rad,
+		              C_EDGE_DK, 165, C_EDGE_LT, 78, 1.0f);
+	}
 }
 
 /* ---- frosted glass --------------------------------------------------------
@@ -836,13 +918,17 @@ static void panel_glass(SDL_Renderer *r, int x, int y, int w, int h,
 	float rad = rr_radius_panel(w, h);
 	int i;
 
-	/* Three widening rings rather than one hard offset rectangle: a shadow
-	 * with an edge is a second border, not a shadow. */
-	for (i = 3; i >= 1; i--) {
-		float grow = (float)i * 2.5f;
-		rr_fill_ex(r, NULL, x - grow, y - grow + 3.0f, w + 2 * grow, h + 2 * grow,
+	/* Widening rings rather than one hard offset rectangle: a shadow with an
+	 * edge is a second border, not a shadow. Six thin ones instead of three
+	 * fat ones — same total darkness, spread over twice the distance, and
+	 * with each step small enough that the banding between rings disappears.
+	 * The offset grows faster than the spread so the light stays overhead. */
+	for (i = 6; i >= 1; i--) {
+		float grow = (float)i * 2.2f;
+		rr_fill_ex(r, NULL, x - grow, y - grow + 1.0f + grow * 0.55f,
+		          w + 2 * grow, h + 2 * grow,
 		          rad + grow, rad + grow, rad + grow, rad + grow,
-		          C_SHADOW, (Uint8)(26 * (4 - i)));
+		          C_SHADOW, (Uint8)(13 * (7 - i)));
 	}
 
 	rr_geom(r, NULL, NULL, (float)x, (float)y, (float)w, (float)h,
@@ -860,7 +946,12 @@ static void panel_glass(SDL_Renderer *r, int x, int y, int w, int h,
 	rr_geom(r, NULL, NULL, (float)x + 1, (float)y + 1, (float)w - 2, (float)h * 0.45f,
 	       rad - 1, rad - 1, 0, 0, C_EDGE_LT, 46, C_EDGE_LT, 0);
 
-	rr_stroke(r, (float)x, (float)y, (float)w, (float)h, rad, C_EDGE_LT, 150, 1.2f);
+	/* The rim, brightest along the top and falling to almost nothing at the
+	 * bottom. A rim of one brightness all the way round is a drawn outline;
+	 * this is an edge with a light above it, and it is the single change that
+	 * did most for making the panels read as sheets of something. */
+	rr_stroke_grad(r, (float)x, (float)y, (float)w, (float)h, rad,
+	              C_EDGE_LT, 190, C_EDGE_LT, 70, 1.2f);
 }
 
 static void panel(SDL_Renderer *r, int x, int y, int w, int h)
@@ -2417,7 +2508,21 @@ static void draw_bar(SDL_Renderer *r, int lw)
 	int i;
 	char buf[32];
 
-	fill(r, 0, 0, lw, UI_BAR_H, C_BAR);
+	/* The bar is lit from above like everything else: a gradient body and a
+	 * hairline of light along the very top edge, closed off underneath by the
+	 * dark rule that was always there.
+	 *
+	 * EVERY PIXEL OF THIS STAYS ABOVE UI_BAR_H. A soft shadow falling from the
+	 * bar onto the picture below would look better and is not ours to draw —
+	 * everything from UI_BAR_H down belongs to the guest, and an emulator that
+	 * dims the top rows of the display it is emulating is lying about what the
+	 * hardware drew. The tempting version of this cost three rows.
+	 *
+	 * Drawn 1px oversize left, right and top so the antialiased feather falls
+	 * outside the window rather than leaving a dim seam along its edges. */
+	rr_geom(r, NULL, NULL, -1.0f, -1.0f, (float)lw + 2.0f, (float)UI_BAR_H,
+	       0, 0, 0, 0, C_BAR_HI, 255, C_BAR, 255);
+	fill(r, 0, 0, lw, 1, C_EDGE_LT);
 	fill(r, 0, UI_BAR_H - 1, lw, 1, C_EDGE_DK);
 
 	for (i = 0; i < NMENUS; i++) {
@@ -3479,22 +3584,35 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 
 void ui_draw_idle(SDL_Renderer *ren, int lw, int lh)
 {
-	int cy = UI_BAR_H + (lh - UI_BAR_H) / 2;
+	int ih = lh - UI_BAR_H;
+	int cy = UI_BAR_H + ih / 2;
+
 	/* NOT A FLAT VOID ANY MORE. This was one fill of C_VOID, which is very
 	 * nearly black — fine as a backdrop for a picture, but it is also what
-	 * the glass panels are made of, and frosted glass over nothing looks
-	 * like a hole. A gentle top-down gradient and a glow behind the logo
-	 * give the panels something to pick up, and give an empty front end
-	 * some depth of its own. The bar is drawn after this and paints over
-	 * the overspill at the top. */
+	 * the glass panels are made of, and frosted glass over nothing looks like
+	 * a hole. The bar is drawn after this and paints over the overspill at
+	 * the top.
+	 *
+	 * NO LAMP BEHIND THE LOGO. There were two glow fans centred on the mark,
+	 * and what they actually looked like was a torch pointed at the middle of
+	 * the window: a bright blob with the logo sitting in it, drawing the eye
+	 * to empty space rather than to the mark. Depth here comes from the
+	 * gradient and from the edges falling away instead — a vignette frames
+	 * the picture without ever becoming a thing you look at, and it still
+	 * gives the glass a tonal range to pick up.
+	 *
+	 * The gradient runs light-at-the-top to dark-at-the-bottom, which is the
+	 * direction every other lit thing in this UI agrees on: panel bodies,
+	 * their rims, and the chips all brighten upward. */
 	rr_geom(ren, NULL, NULL, -2.0f, (float)UI_BAR_H - 2.0f, (float)lw + 4.0f,
-	       (float)(lh - UI_BAR_H) + 4.0f, 0, 0, 0, 0,
+	       (float)ih + 4.0f, 0, 0, 0, 0,
 	       C_BAR, 255, C_VOID, 255);
-	/* Two fans rather than one: a wide, faint wash for the whole backdrop and
-	 * a tighter, warmer one right behind the mark. A single linear falloff
-	 * reads as a cone; two make it look like light. */
-	glow(ren, lw / 2, cy - 14, (lh - UI_BAR_H) * 3 / 4, C_ACCENT, 26);
-	glow(ren, lw / 2, cy - 14, (lh - UI_BAR_H) / 3, C_ACCENT, 30);
+	/* An ellipse through the four corners: with rx = w/2 and ry = h/2 scaled
+	 * by sqrt(2), (w/2)^2/rx^2 + (h/2)^2/ry^2 = 1 lands the rim exactly on
+	 * the corners, so the picture darkens evenly towards its own frame
+	 * instead of towards a circle drawn inside it. */
+	radial(ren, lw / 2, cy, 0.7071f * (float)lw, 0.7071f * (float)ih,
+	      C_SHADOW, 0, 138);
 	if (g_logo) {
 		SDL_Rect dst = { lw / 2 - 32, cy - 46, 64, 64 };
 		SDL_RenderCopy(ren, g_logo, NULL, &dst);
