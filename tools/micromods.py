@@ -432,7 +432,16 @@ def cmd_ingest(src, dry):
                             fields[k.strip()] = v.strip().strip('"')
                     members = (c, names, os.path.dirname(metan))
             except (tarfile.TarError, OSError) as e:
-                print("  ! %s: %s" % (os.path.basename(c), e))
+                # .lf3 IS ENCRYPTED, and an Application usually. Reporting a
+                # five-line tarfile traceback for each one buried the actual
+                # results; a micromod that ships as .lf3 (they exist — Clam
+                # Prix's expansion is one) needs tools/lf3.py run over it
+                # first, so say that once and move on.
+                if c.endswith(".lf3"):
+                    print("  . %s: encrypted, run tools/lf3.py on it first"
+                          % os.path.basename(c))
+                else:
+                    print("  ! %s: %s" % (os.path.basename(c), str(e).split("\n")[0]))
                 continue
         if fields.get("Type") != "MicroDownload":
             continue
