@@ -184,6 +184,13 @@ void  ui_debug_state(const char *spec);
  * reason at all. Call before drawing a shot; there is no way back. */
 void  ui_anim_disable(void);
 
+/* The app launcher's list position, for --selftest-apps. Reading it from
+ * outside is the only way to check that a wheel or an arrow key actually
+ * moved the list: "the code looks right" is how it came to ship not
+ * scrolling in the first place. */
+void  ui_debug_apps(int *n, int *top, int *sel, int *rows);
+char  ui_debug_app_initial(int index);
+
 /* WHICH PRODUCT THIS IS PRESENTING ITSELF AS.
  *
  * Tadpole runs the guest under qemu-arm; Glasspole runs it under our own ARM

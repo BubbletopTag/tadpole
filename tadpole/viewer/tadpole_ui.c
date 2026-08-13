@@ -73,17 +73,22 @@
  * rather than losing it. */
 struct palette {
 	unsigned bar, bar_hi, panel, panel_hi, edge_lt, edge_dk;
-	unsigned text, text_dim, accent, shadow;
+	/* text_dimmest is a THIRD step down, for a caption that should be
+	 * readable when looked at and invisible when not — the package ID beside
+	 * an app's name is the only user so far. C_TEXT_DIM already carries real
+	 * information elsewhere (a version, a hint, a disabled menu item), and
+	 * reusing it here made the ID compete with the name it captions. */
+	unsigned text, text_dim, text_dimmest, accent, shadow;
 };
 
 static const struct palette pal_tadpole = {
 	0x0E2416U, 0x1D4A2FU, 0x0E2416U, 0x1D4A2FU, 0x3C7A53U, 0x05110AU,
-	0xD8F5E4U, 0x6E9B80U, 0x8CE0A6U, 0x020604U
+	0xD8F5E4U, 0x6E9B80U, 0x47665AU, 0x8CE0A6U, 0x020604U
 };
 
 static const struct palette pal_glasspole = {
 	0x0E1F25U, 0x1C4451U, 0x0E1F25U, 0x1C4451U, 0x3A6C7CU, 0x050E12U,
-	0xD8EEF5U, 0x6E8F9BU, 0x8CCFE0U, 0x020506U
+	0xD8EEF5U, 0x6E8F9BU, 0x47606AU, 0x8CCFE0U, 0x020506U
 };
 
 static const struct palette *g_pal = &pal_tadpole;
@@ -96,6 +101,7 @@ static const struct palette *g_pal = &pal_tadpole;
 #define C_EDGE_DK   (g_pal->edge_dk)  /* bevel dark */
 #define C_TEXT      (g_pal->text)
 #define C_TEXT_DIM  (g_pal->text_dim)
+#define C_DIMMEST   (g_pal->text_dimmest)
 #define C_ACCENT    (g_pal->accent)
 #define C_SHADOW    (g_pal->shadow)
 
@@ -414,6 +420,10 @@ static int    g_anim_off;
 static Uint32 g_modal_at, g_menu_at, g_wiz_at;
 
 void ui_anim_disable(void) { g_anim_off = 1; }
+
+/* Defined here rather than near the launcher so it sits with the other debug
+ * hooks; the statics it reads are declared further down. */
+void ui_debug_apps(int *n, int *top, int *sel, int *rows);
 
 /* 0 at `since`, 1 once `dur` has passed, eased so it decelerates into place. */
 static float anim_t(Uint32 since, Uint32 dur)
@@ -1569,6 +1579,22 @@ static void ap_reload(void)
 	}
 }
 
+/* The initial of entry i, so --selftest-apps can assert that a type-to-jump
+ * landed on the right letter without knowing anything about the library it is
+ * run against. 0 if the index is out of range. */
+char ui_debug_app_initial(int i)
+{
+	return (i >= 0 && i < g_ap_n) ? g_ap[i].name[0] : 0;
+}
+
+void ui_debug_apps(int *n, int *top, int *sel, int *rows)
+{
+	if (n)    *n    = g_ap_n;
+	if (top)  *top  = g_ap_top;
+	if (sel)  *sel  = g_ap_sel;
+	if (rows) *rows = g_ap_rows;
+}
+
 /* One decode attempt per entry, however it goes: a package with a missing or
  * unreadable Icon= should cost one failed open, not one every frame. */
 static void ap_icon(SDL_Renderer *r, struct ap_entry *e)
@@ -2497,7 +2523,10 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	switch (g_modal) {
 	case M_ABOUT: return dlg_fit(lw, lh, 210, 144);
 	/* Room for icons and two lines per row. */
-	case M_APPS:  return dlg_fit(lw, lh, 340, 232);
+	/* As wide as the library, and as tall as a 272px panel allows. It is a
+	 * list of four hundred things; the extra row and the room for a package
+	 * ID beside each name are worth more here than a tidy small box. */
+	case M_APPS:  return dlg_fit(lw, lh, 420, 252);
 	/* Wide and tall: this is a changelog, and a release body wrapped
 	 * into 30 columns would be unreadable. */
 	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
@@ -2517,6 +2546,35 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	case M_GAMES: return dlg_fit(lw, lh, 460, 260);
 	default:      { struct dlg z = {0,0,0,0}; return z; }
 	}
+}
+
+/* ---- app launcher geometry ----------------------------------------------
+ * ONE SET OF NUMBERS FOR THE DRAW AND THE HIT TEST. Both used to compute the
+ * row height and visible count inline, in two places, from the same three
+ * magic numbers — which is how the clickable width came to disagree with the
+ * drawn width once a scrollbar appeared beside it.
+ */
+#define AP_ROW_H 28
+/* THE LIST STARTS DIRECTLY UNDER THE TITLE STRIP. An earlier version kept a
+ * header line of its own for the hint and the count, which cost eleven pixels
+ * at the top and pushed the well down onto the footer — the "Enter launches"
+ * line ended up drawn along the well's bottom border in both orientations.
+ * The count moved into the title strip, which had room going spare, and the
+ * hint moved down beside the footer. */
+static int ap_list_y(const struct dlg *d) { return d->y + 18; }
+static int ap_list_h(const struct dlg *d) { return d->h - 18 - 26; }
+static int ap_rows_fit(const struct dlg *d)
+{
+	int v = ap_list_h(d) / AP_ROW_H;
+	return v < 1 ? 1 : v;
+}
+/* The scrollbar takes its width out of the rows, so a click near the right
+ * edge lands on the row rather than in a gap. */
+static int ap_row_w(const struct dlg *d, int vis)
+{
+	/* Wide enough to clear the scrollbar AND the gap either side of it, so
+	 * the row highlight stops short of the bar rather than running under it. */
+	return d->w - 16 - (g_ap_n > vis ? 10 : 0);
 }
 
 /* Does the library have room for the preview panel on the right? In portrait
@@ -2749,86 +2807,110 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 
 	switch (g_modal) {
 	case M_APPS: {
-		int x = d.x + 10, y = d.y + 20, i, row = 30;
-		int listh = d.h - 30 - 22, vis = listh / row;
+		int x   = d.x + 8;
+		int y   = ap_list_y(&d);
+		int vis = ap_rows_fit(&d);
+		int rw  = ap_row_w(&d, vis);
+		int i;
 		char line[128];
 
-		if (vis < 1) vis = 1;
 		g_ap_rows = vis;
 		/* Keep the selected row on screen. Arrow keys move the selection and
 		 * the view follows it, which is the half of "scrolling" this list
-		 * never had — the wheel worked, but nothing else did, and with no
-		 * selection and no scrollbar there was nothing to suggest the list
-		 * went any further than the six rows you could see. */
+		 * never had — the wheel worked, and nothing else did. */
 		if (g_ap_sel < 0) g_ap_sel = 0;
 		if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;
-		if (g_ap_sel >= 0) {
-			if (g_ap_sel < g_ap_top) g_ap_top = g_ap_sel;
-			if (g_ap_sel >= g_ap_top + vis) g_ap_top = g_ap_sel - vis + 1;
-		}
+		if (g_ap_sel < g_ap_top) g_ap_top = g_ap_sel;
+		if (g_ap_sel >= g_ap_top + vis) g_ap_top = g_ap_sel - vis + 1;
 		if (g_ap_top > g_ap_n - vis) g_ap_top = g_ap_n - vis;
 		if (g_ap_top < 0) g_ap_top = 0;
 
 		if (!g_ap_n) {
-			text(r, x, y + 10, "No apps installed yet.", C_TEXT);
-			text(r, x, y + 26, "File > Game Library installs your", C_TEXT_DIM);
-			text(r, x, y + 36, "cartridge backups. Help > Setup", C_TEXT_DIM);
-			text(r, x, y + 46, "Wizard fetches the system files.", C_TEXT_DIM);
+			text(r, x + 2, y + 14, "No apps installed yet.", C_TEXT);
+			text(r, x + 2, y + 32, "File " GL_SUB " Game Library installs your", C_TEXT_DIM);
+			text(r, x + 2, y + 42, "cartridge backups.", C_TEXT_DIM);
+			text(r, x + 2, y + 58, "Help " GL_SUB " Setup Wizard fetches the", C_TEXT_DIM);
+			text(r, x + 2, y + 68, "system files they need.", C_TEXT_DIM);
 			break;
 		}
+
+		/* WHERE YOU ARE, ON THE TITLE STRIP. The range rather than the bare
+		 * total: the total never changes and stops being information after
+		 * the first glance, while "196-202 of 462" is the answer to the
+		 * question a long list actually raises. */
+		snprintf(line, sizeof(line), "%d-%d of %d", g_ap_top + 1,
+		         g_ap_top + vis < g_ap_n ? g_ap_top + vis : g_ap_n, g_ap_n);
+		text(r, d.x + d.w - 8 - text_w(line), d.y + 3, line, C_TEXT_DIM);
+
+		/* The well the rows sit in, so the list reads as one object rather
+		 * than as text floating on the panel. */
+		chip(r, x - 4, y - 4, d.w - 16, vis * AP_ROW_H + 6, C_VOID, 0);
+
 		for (i = 0; i < vis && g_ap_top + i < g_ap_n; i++) {
 			struct ap_entry *e = &g_ap[g_ap_top + i];
-			int yy = y + i * row;
-			int rw = d.w - 16 - (g_ap_n > vis ? 6 : 0);
-			int hot = inside(g_mx, g_my, x - 2, yy - 2, rw, row - 2);
-			int sel = (g_ap_top + i) == g_ap_sel;
+			int k   = g_ap_top + i;
+			int yy  = y + i * AP_ROW_H;
+			int hot = inside(g_mx, g_my, x - 2, yy, rw, AP_ROW_H - 2);
+			int sel = k == g_ap_sel;
+			int tx  = x + 32;
 
 			/* Hover and selection are different things and have to look
 			 * different: the pointer is wherever it happens to be, the
 			 * selection is where Enter will act. The accent bar down the left
 			 * is the one that means "this one". */
 			if (hot || sel)
-				rfill(r, x - 2, yy - 2, rw, row - 2,
+				rfill(r, x - 2, yy, rw, AP_ROW_H - 2,
 				      hot ? C_BAR_HI : C_PANEL_HI, hot ? 178 : 190);
 			if (sel)
-				rfill(r, x - 2, yy - 2, 2, row - 2, C_ACCENT, 235);
+				rfill(r, x - 2, yy, 2, AP_ROW_H - 2, C_ACCENT, 235);
+
+			/* EVERY ROW GETS A TILE, drawn before the artwork rather than
+			 * instead of it. Package icons are not all the same size and not
+			 * all present; without something behind them the rows with art
+			 * and the rows without looked like two different lists. */
+			chip(r, x + 3, yy + 2, 22, 22, C_PANEL, 0);
 			ap_icon(r, e);
 			if (e->tex) {
-				SDL_Rect dst = { x, yy, 26, 26 };
+				SDL_Rect dst = { x + 4, yy + 3, 20, 20 };
+				SDL_SetTextureAlphaMod(e->tex, g_alpha);
 				SDL_RenderCopy(r, e->tex, NULL, &dst);
-			} else {
-				chip(r, x, yy, 26, 26, C_PANEL, 0);
 			}
-			snprintf(line, sizeof(line), "%.40s", e->name);
-			text(r, x + 32, yy + 3, line, hot ? C_ACCENT : C_TEXT);
-			snprintf(line, sizeof(line), "%s%s%.28s",
-			         e->version[0] ? "v" : "", e->version,
-			         e->version[0] ? "" : e->pkg);
-			text(r, x + 32, yy + 15, line, C_TEXT_DIM);
+
+			/* The package ID, right-aligned and dim. Four hundred titles
+			 * include several genuine duplicate NAMES — two "Wheel Works",
+			 * two "Ben 10: Ultimate Alien" — and without this the list offers
+			 * you the same row twice with no way to tell which is which. */
+			{
+				int idw = text_w(e->pkg);
+				int room = rw - 40;
+				if (idw + text_w(e->name) + 24 < room)
+					text(r, x - 2 + rw - 6 - idw, yy + 12, e->pkg, C_DIMMEST);
+			}
+			snprintf(line, sizeof(line), "%.34s", e->name);
+			text(r, tx, yy + 3, line, sel || hot ? C_ACCENT : C_TEXT);
+			if (e->version[0]) {
+				snprintf(line, sizeof(line), "v%.20s", e->version);
+				text(r, tx, yy + 13, line, C_TEXT_DIM);
+			}
 		}
+
 		/* Scrollbar, for the same reason the game library has one: with four
 		 * hundred packages, "where am I and how much is left" is a real
-		 * question, and six rows of a list that reaches 454 gives no clue on
-		 * its own. */
+		 * question that six visible rows cannot answer. */
 		if (g_ap_n > vis) {
-			int track = vis * row - 4;
+			int track = vis * AP_ROW_H - 2;
 			int knob  = track * vis / g_ap_n;
 			int pos   = track * g_ap_top / g_ap_n;
-			int sx    = d.x + d.w - 12;
-			if (knob < 8) knob = 8;
+			int sx    = d.x + d.w - 18;   /* inside the well, clear of the rows */
+			if (knob < 10) knob = 10;
 			if (pos > track - knob) pos = track - knob;
 			if (pos < 0) pos = 0;
-			rfill(r, sx, y - 2, 3, track, C_VOID, 190);
-			rfill(r, sx, y - 2 + pos, 3, knob, C_EDGE_LT, 200);
-
-			snprintf(line, sizeof(line), "%d-%d of %d", g_ap_top + 1,
-			         g_ap_top + vis < g_ap_n ? g_ap_top + vis : g_ap_n, g_ap_n);
-			text(r, d.x + d.w - 12 - text_w(line), d.y + d.h - 26, line, C_TEXT_DIM);
+			rfill(r, sx, y, 4, track, C_SHADOW, 170);
+			rfill(r, sx, y + pos, 4, knob, C_EDGE_LT, 210);
 		}
-		/* This line used to read "Install apps to see them here." whether or
-		 * not any were installed, sitting next to a counter saying there were
-		 * 160 of them. The empty case has its own paragraph above. */
-		text(r, x, d.y + d.h - 26, "Arrows to choose, Enter to launch.", C_TEXT_DIM);
+
+		text(r, x + 2, d.y + d.h - 26,
+		     "Type a letter to jump " GL_DIAMOND " Enter launches", C_TEXT_DIM);
 		break;
 	}
 	case M_UPDATE: {
@@ -3948,13 +4030,14 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	SDL_Rect cb = close_rect(&d);
 
 	if (g_modal == M_APPS && g_ap_n) {
-		int x = d.x + 10, y = d.y + 20, i, row = 30;
-		int listh = d.h - 30 - 22, vis = listh / row;
-		/* Same inset the draw uses once a scrollbar is present, so the last
-		 * few pixels of a row are not a dead strip under the bar. */
-		int rw = d.w - 16 - (g_ap_n > vis ? 6 : 0);
+		/* The same helpers the draw uses, so the clickable row and the drawn
+		 * row cannot drift apart — they did once already, when a scrollbar
+		 * appeared beside rows whose hit test still ran under it. */
+		int x = d.x + 8, y = ap_list_y(&d), i;
+		int vis = ap_rows_fit(&d);
+		int rw = ap_row_w(&d, vis);
 		for (i = 0; i < vis && g_ap_top + i < g_ap_n; i++) {
-			if (!inside(mx, my, x - 2, y + i * row - 2, rw, row - 2))
+			if (!inside(mx, my, x - 2, y + i * AP_ROW_H, rw, AP_ROW_H - 2))
 				continue;
 			g_ap_sel = g_ap_top + i;
 			snprintf(g_action_path, sizeof(g_action_path), "%s",
@@ -4440,7 +4523,32 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 			case SDLK_PAGEDOWN: g_ap_sel += g_ap_rows; break;
 			case SDLK_HOME:     g_ap_sel = 0; break;
 			case SDLK_END:      g_ap_sel = g_ap_n - 1; break;
-			default: return 1;      /* any other key: swallowed by the modal */
+			default:
+				/* TYPE A LETTER TO JUMP TO IT. Four hundred and sixty-two
+				 * titles is seventy-odd presses of PageDown end to end, and
+				 * the list is already sorted by name — the letter you want is
+				 * the one thing you reliably know about where you are going.
+				 *
+				 * The search starts one PAST the selection and wraps, so
+				 * pressing the same letter again walks the matches instead of
+				 * sticking on the first. That is what makes it usable for the
+				 * dozen titles here beginning with "L". */
+				{
+					SDL_Keycode k = e->key.keysym.sym;
+					int i, start;
+					char want;
+					if (k < SDLK_a || k > SDLK_z)
+						return 1;    /* not a letter: the modal swallows it */
+					want = (char)('a' + (k - SDLK_a));
+					start = g_ap_sel + 1;
+					for (i = 0; i < g_ap_n; i++) {
+						int j = (start + i) % g_ap_n;
+						char c = g_ap[j].name[0];
+						if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+						if (c == want) { g_ap_sel = j; break; }
+					}
+				}
+				break;
 			}
 			if (g_ap_sel < 0) g_ap_sel = 0;
 			if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;

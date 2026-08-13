@@ -1229,6 +1229,128 @@ static int ui_shot(SDL_Renderer *ren, SDL_Window *win, const char *state,
 	return ok;
 }
 
+/* ---- --selftest-apps: does the launcher actually scroll? -------------------
+ *
+ * The list is fed real SDL_Event structs through ui_event(), the same call the
+ * main loop makes, and the position is read back after each one. That is the
+ * only thing that answers the question: an earlier round of this shipped with
+ * a launcher whose scrolling "looked right" in the source and did almost
+ * nothing in the hand — the wheel worked, and nothing else did.
+ *
+ * Needs a renderer, because ui_init() builds the font atlas, so it runs after
+ * the window exists rather than as a bare unit test.
+ */
+static int st_check(const char *what, int got, int want, int *bad)
+{
+	int ok = (got == want);
+	printf("  %-34s %4d  expected %4d  %s\n", what, got, want, ok ? "ok" : "FAIL");
+	if (!ok) (*bad)++;
+	return ok;
+}
+
+static void st_key(int lw, int lh, SDL_Keycode k)
+{
+	SDL_Event e;
+	memset(&e, 0, sizeof(e));
+	e.type = SDL_KEYDOWN;
+	e.key.keysym.sym = k;
+	ui_event(&e, lw, lh);
+}
+
+static void st_wheel(int lw, int lh, int y)
+{
+	SDL_Event e;
+	memset(&e, 0, sizeof(e));
+	e.type = SDL_MOUSEWHEEL;
+	e.wheel.y = y;
+	ui_event(&e, lw, lh);
+}
+
+static int selftest_apps(SDL_Renderer *ren, int rotate, int w, int h)
+{
+	int lw = (rotate == 90 || rotate == 270) ? h : w;
+	int lh = ((rotate == 90 || rotate == 270) ? w : h) + UI_BAR_H;
+	int n = 0, top = 0, sel = 0, rows = 0, bad = 0;
+
+	ui_anim_disable();
+	ui_debug_state("apps");
+	/* One frame, so the draw sets how many rows actually fit — the paging
+	 * keys and the wheel clamp both work off it. */
+	ui_draw(ren, lw, lh);
+	ui_debug_apps(&n, &top, &sel, &rows);
+
+	printf("app launcher: %d installed, %d rows visible\n\n", n, rows);
+	if (n < 8) {
+		printf("SKIPPED — needs a populated sysroot to mean anything\n");
+		return 0;
+	}
+
+	printf("wheel\n");
+	st_wheel(lw, lh, -1);                       /* one notch down */
+	ui_debug_apps(NULL, &top, NULL, NULL);
+	st_check("top after one notch down", top, 2, &bad);
+	st_wheel(lw, lh, 1);
+	ui_debug_apps(NULL, &top, NULL, NULL);
+	st_check("top after one notch back up", top, 0, &bad);
+
+	printf("arrows\n");
+	st_key(lw, lh, SDLK_DOWN);
+	ui_debug_apps(NULL, NULL, &sel, NULL);
+	st_check("selection after Down", sel, 1, &bad);
+	st_key(lw, lh, SDLK_UP);
+	ui_debug_apps(NULL, NULL, &sel, NULL);
+	st_check("selection after Up", sel, 0, &bad);
+
+	printf("the view follows the selection\n");
+	{
+		int i;
+		for (i = 0; i < rows + 3; i++) st_key(lw, lh, SDLK_DOWN);
+		ui_debug_apps(NULL, &top, &sel, NULL);
+		st_check("selection after rows+3 Downs", sel, rows + 3, &bad);
+		st_check("top scrolled to keep it visible", top, sel - rows + 1, &bad);
+	}
+
+	printf("paging and ends\n");
+	st_key(lw, lh, SDLK_HOME);
+	ui_debug_apps(NULL, &top, &sel, NULL);
+	st_check("selection after Home", sel, 0, &bad);
+	st_check("top after Home", top, 0, &bad);
+	st_key(lw, lh, SDLK_PAGEDOWN);
+	ui_debug_apps(NULL, NULL, &sel, NULL);
+	st_check("selection after PageDown", sel, rows, &bad);
+	st_key(lw, lh, SDLK_END);
+	ui_debug_apps(NULL, &top, &sel, NULL);
+	st_check("selection after End", sel, n - 1, &bad);
+	st_check("top after End", top, n - rows, &bad);
+
+	printf("type to jump\n");
+	st_key(lw, lh, SDLK_HOME);
+	st_key(lw, lh, SDLK_w);
+	ui_debug_apps(NULL, &top, &sel, NULL);
+	{
+		/* Assert the LETTER, not an index: whatever somebody else's library
+		 * holds, a jump to "w" has to land on a "w" and has to drag the view
+		 * with it. */
+		char c = ui_debug_app_initial(sel);
+		int hit = (c == 'w' || c == 'W');
+		printf("  %-34s  '%c'  expected  'w'  %s\n",
+		       "first letter after pressing w", c ? c : '?', hit ? "ok" : "FAIL");
+		if (!hit) bad++;
+		st_check("view followed the jump", sel >= top && sel < top + rows, 1, &bad);
+	}
+	{
+		int again;
+		st_key(lw, lh, SDLK_w);
+		ui_debug_apps(NULL, NULL, &again, NULL);
+		st_check("pressing w again advances", again != sel, 1, &bad);
+	}
+
+	printf("\n%s\n", bad
+	       ? "FAILED — the launcher does not scroll"
+	       : "PASS — wheel, arrows, paging, ends and type-to-jump all move the list");
+	return bad ? 1 : 0;
+}
+
 /* The input FIFOs are made by the SHIM, so on a cold start they do not exist
  * until a guest has booted. Opening them once at startup — which is all the
  * viewer used to need, because tadpole.sh created them before launching it —
@@ -2567,6 +2689,7 @@ int main(int argc, char **argv)
 	char actpath[1024];
 	int selftest_want = 0;
 	const char *shot_state = NULL, *shot_out = NULL;
+	int apps_test = 0;
 	int boot_now = 0, power_announced = 0;
 	const char *env;
 
@@ -2638,6 +2761,8 @@ int main(int argc, char **argv)
 			shot_state = argv[++i];
 			shot_out   = argv[++i];
 		}
+		else if (!strcmp(argv[i], "--selftest-apps"))
+			apps_test = 1;
 	}
 	if (selftest_want)
 		return selftest(rotate, scale);
@@ -2680,6 +2805,14 @@ int main(int argc, char **argv)
 	{
 		SDL_Surface *ico = ui_icon_surface();
 		if (ico) { SDL_SetWindowIcon(win, ico); SDL_FreeSurface(ico); }
+	}
+	if (apps_test) {
+		int rc = selftest_apps(ren, rotate, w, h);
+		ui_shutdown();
+		SDL_DestroyRenderer(ren);
+		SDL_DestroyWindow(win);
+		SDL_Quit();
+		return rc;
 	}
 	if (shot_state) {
 		int rc = ui_shot(ren, win, shot_state, shot_out, rotate, w, h) ? 0 : 1;
