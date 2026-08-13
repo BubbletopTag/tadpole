@@ -4,6 +4,7 @@
     ./tools/install-game.py games/FOF.tar [more.tar ...]
     ./tools/install-game.py --from-list list.txt
     ./tools/install-game.py --fix-saves
+    ./tools/install-game.py --fix-meta
 
 A faithful port of tools/install-game.sh, which stays the Linux entry point.
 This exists because Windows has no bash: the viewer there runs Python for its
@@ -137,8 +138,23 @@ def install_one(tar, path, metapath):
         except OSError:
             have = True
         if not have:
+            # THE NEWLINE IS NOT OPTIONAL — see the note in install-game.sh.
+            # Plenty of these files end without one, and appending straight to
+            # the end welds two fields into `DeviceAccess=1ProfileAccess=...`,
+            # losing both: the title installs and then never appears on the
+            # home screen.
+            nl = ""
+            try:
+                with open(mi, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    if f.tell():
+                        f.seek(-1, os.SEEK_END)
+                        if f.read(1) not in (b"\n", b"\r"):
+                            nl = "\n"
+            except OSError:
+                nl = "\n"
             with open(mi, "a", encoding="utf-8") as f:
-                f.write('ProfileAccess=-1,0,1,2,3\n')
+                f.write(nl + 'ProfileAccess=-1,0,1,2,3\n')
         for prof in profiles():
             os.makedirs(os.path.join(prof, pid), exist_ok=True)
 
@@ -168,6 +184,51 @@ def fix_saves():
     return 0
 
 
+def fix_meta():
+    """Repair meta.inf files an earlier append welded together.
+
+    The bug is described in install-game.sh: appending ProfileAccess to a file
+    that did not end in a newline produced
+
+        DeviceAccess=1ProfileAccess=-1,0,1,2,3
+
+    which loses both fields, and the title stops appearing on the home screen.
+    This splits them back apart wherever a field has been run onto the end of
+    another one. It is idempotent, and it only touches lines that are actually
+    malformed."""
+    pf = os.path.join(BULK, "ProgramFiles")
+    fixed = 0
+    for d in sorted(os.listdir(pf)) if os.path.isdir(pf) else []:
+        mi = os.path.join(pf, d, "meta.inf")
+        if not os.path.isfile(mi):
+            continue
+        try:
+            with open(mi, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        # ONLY THE FIELD WE APPEND, and only where it is not already at the
+        # start of a line. Splitting on any `Word=` found mid-line would be
+        # the more general repair and also a way to corrupt a value that
+        # legitimately contains one — this fixes the damage this tool caused
+        # and nothing else. Idempotent: once split, the lookbehind fails.
+        new = re.sub(r'(?<=[^\n])(ProfileAccess=)', r'\n\1', text)
+        if new == text:
+            continue
+        if not new.endswith("\n"):
+            new += "\n"
+        with open(mi, "w", encoding="utf-8") as f:
+            f.write(new)
+        name = ""
+        m = re.search(r'^Name="?([^"\n]*)', new, re.M)
+        if m:
+            name = m.group(1)
+        print("  repaired %-30s %s" % (d, name))
+        fixed += 1
+    print("repaired %d meta.inf files" % fixed)
+    return 0
+
+
 def main(argv):
     args = argv[1:]
     if not args:
@@ -175,6 +236,8 @@ def main(argv):
         return 2
     if args[0] == "--fix-saves":
         return fix_saves()
+    if args[0] == "--fix-meta":
+        return fix_meta()
     if args[0] == "--from-list":
         # One path per line: twenty ticked titles, each of whose names may hold
         # spaces and brackets, do not belong on a command line.

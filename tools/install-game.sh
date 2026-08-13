@@ -65,7 +65,24 @@ install_one() {                     # $1=tar  $2=meta.inf path inside it
         tar xf "$tar" -C "$dest" --strip-components=1 "$prefix"
     fi
 
+    # THE NEWLINE IS NOT OPTIONAL. A good number of these meta.inf files end
+    # WITHOUT one — the last line is `DeviceAccess=1` and then the file simply
+    # stops — so appending straight to the end produced
+    #
+    #     DeviceAccess=1ProfileAccess=-1,0,1,2,3
+    #
+    # which is two fields lost at once: DeviceAccess reads as garbage, and
+    # ProfileAccess is no longer at the start of a line so nothing finds it.
+    # The title installs, reports success, and then never appears on the home
+    # screen, because that is exactly what a missing ProfileAccess does. Six
+    # titles here were in that state.
+    #
+    # It also hides itself: the `grep -q '^ProfileAccess='` guard cannot see
+    # the mangled copy either, so re-installing appends a SECOND one and the
+    # line grows.
     if [ "$type" = Application ] && ! grep -q '^ProfileAccess=' "$dest/meta.inf" 2>/dev/null; then
+        [ -s "$dest/meta.inf" ] && [ -n "$(tail -c 1 "$dest/meta.inf")" ] &&
+            printf '\n' >> "$dest/meta.inf"
         printf 'ProfileAccess=-1,0,1,2,3\n' >> "$dest/meta.inf"
     fi
 
