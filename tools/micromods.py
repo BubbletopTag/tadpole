@@ -92,7 +92,15 @@ CATALOGUE = {
 # match the family of the build that actually runs, which is why the same
 # unlock ships as both LPAD- and MULT-: installing only one leaves the other
 # build seeing nothing.
-FAMILIES = ("LPAD", "MULT", "MHRS", "PADS", "PAD2")
+FAMILIES = ("LPAD", "MULT", "MHRS", "PADS", "PAD2", "LST3", "PHRS")
+
+# HOW FAR TO SWEEP, when sweeping by slot. Bonus unlocks start at 000001 and
+# run consecutively — Clam Prix has three, Ni Hao Kai-lan eleven — and the
+# separately-sold expansions start at 100000. Both ceilings are generous
+# rather than derived: an empty slot costs one inert directory, and a slot
+# that stops short costs a micromod nobody gets.
+SLOT_BONUS = 12
+SLOT_PAID = 3
 
 META_TEMPLATE = """MetaVersion="1.0"
 Device="{device}"
@@ -377,6 +385,69 @@ def cmd_enable(which, dry):
               "choice is per profile\nand this tool does not touch profiles.")
 
 
+def cmd_enable_slots(product, bonus, paid, dry):
+    """Write a title's micromod slots without knowing what they are called.
+
+    THE BET THIS MAKES, stated plainly because it is not yet proven. Every
+    sign says a title finds a micromod by its SLOT NUMBER and treats the
+    meta.inf `Name` as display text:
+
+      * sys::getMicroModsPath(char*, int) is indexed by an int, not a name.
+      * isExist(MICROMOD_TYPE) is an enum lookup — the title walks its OWN
+        list and asks whether each one is present.
+      * the engine's leftover format string builds `...-%06d/meta.inf`, a
+        path assembled FROM a slot number.
+      * and the real packages line up with it exactly: Clam Prix's three
+        music unlocks are slots 000001..000003 and its expansion is 100000;
+        Ni Hao Kai-lan's eleven are 000001..000011 in menu order.
+
+    If that is right, this unlocks a title's bonus content with no catalogue,
+    no names and no network. If it is wrong, every package written here is
+    inert — the title reads it, does not recognise it, ignores it — and
+    --uninstall takes them all back out. That asymmetry is the reason this is
+    worth trying before the disassembly that would settle it.
+
+    THE EXPERIMENT THAT SETTLES IT is Ni Hao Kai-lan, because its real
+    packages are on this machine and its micromods are visible things —
+    clothes, collectables, seasonal themes. Sweep its slots with the
+    placeholder names below; if its dress-up items appear in game, the slot
+    is the key and this generalises to every title. If they do not, run
+    --uninstall then --ingest on the real packages: those carry the true
+    names, and if THEY work, the name is the key and this approach is dead.
+    """
+    titles = installed_titles()
+    pkgs = titles.get(product, [])
+    fams = sorted({p.split("-")[0] for p in pkgs if p.split("-")[0] in FAMILIES})
+    if not fams:
+        print("%s: not installed here" % product)
+        return
+    man = load_manifest()
+    print("%s  families: %s" % (product, ", ".join(fams)))
+    print("  slots 000001-%06d and 100000-%06d, placeholder names" % (bonus, 100000 + paid - 1))
+    made = 0
+    slots = ["%06d" % i for i in range(1, bonus + 1)]
+    slots += ["%06d" % (100000 + i) for i in range(paid)]
+    for slot in slots:
+        for fam in fams:
+            pkgid = "%s-%s-%s" % (fam, product, slot)
+            name = "MICROMOD_%s" % slot.lstrip("0").rjust(1, "0")
+            r = make_package(pkgid, product, name, name.lower(), False, dry)
+            if r == "made":
+                man["made"].append(pkgid)
+                made += 1
+            elif r == "would":
+                made += 1
+            elif r == "exists":
+                print("    = %-28s left alone" % pkgid)
+    if not dry:
+        save_manifest(man)
+    print("  wrote %d%s" % (made, " (dry run)" if dry else ""))
+    if made and not dry:
+        print("\nNow play the title and look at its Micromods menu.\n"
+              "  something appeared -> the slot is the key; this works everywhere\n"
+              "  nothing appeared   -> --uninstall, then --ingest the real packages")
+
+
 def cmd_discover(product):
     titles = installed_titles()
     pkgs = titles.get(product, [])
@@ -507,6 +578,12 @@ def cmd_uninstall(dry):
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--enable", metavar="PRODUCTID|all")
+    ap.add_argument("--enable-slots", metavar="PRODUCTID",
+                    help="sweep a title's slots without knowing the names")
+    ap.add_argument("--bonus", type=int, default=SLOT_BONUS,
+                    help="how many 0000NN bonus slots (default %d)" % SLOT_BONUS)
+    ap.add_argument("--paid", type=int, default=SLOT_PAID,
+                    help="how many 1000NN expansion slots (default %d)" % SLOT_PAID)
     ap.add_argument("--discover", metavar="PRODUCTID")
     ap.add_argument("--ingest", metavar="DIR")
     ap.add_argument("--uninstall", action="store_true")
@@ -525,6 +602,8 @@ def main():
         cmd_ingest(a.ingest, a.dry_run)
     elif a.discover:
         cmd_discover(a.discover)
+    elif a.enable_slots:
+        cmd_enable_slots(a.enable_slots, a.bonus, a.paid, a.dry_run)
     elif a.enable:
         cmd_enable(a.enable, a.dry_run)
     else:
