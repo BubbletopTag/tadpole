@@ -1613,13 +1613,20 @@ char ui_debug_app_initial(int i)
  * where "all micromods" is not.
  */
 #define MM_MAX 64
+/* ONE ROW PER MICROMOD, NOT PER PACKAGE. The same unlock ships once for every
+ * device family a title was built for — LPAD-...-000001 and MULT-...-000001
+ * are the same bonus item packaged for different hardware — so listing the
+ * files gave Ni Hao Kai-lan "60" when what it has is fifteen slots across four
+ * families. The slot is the micromod; the families are which builds can see
+ * it. */
 struct mm_entry {
-	char pkg[64];
+	char slot[8];            /* 000001, 100000, ... — the identity */
 	char name[72];
 };
 static struct mm_entry g_mm[MM_MAX];
 static int g_mm_n, g_mm_top, g_mm_rows = 6;
 static char g_mm_product[16];    /* the 0x........ this screen is about */
+static char g_mm_family[8];      /* ...and which build of it — see below */
 static char g_mm_title[72];      /* the game's name, for the heading */
 
 /* Pull one quoted field out of a meta.inf. Same shape as the launcher's
@@ -1639,7 +1646,20 @@ static int mm_field(const char *line, const char *key, char *out, size_t n)
 	return out[0] != 0;
 }
 
-static void mm_reload(const char *product)
+/* A PRODUCTID DOES NOT IDENTIFY A GAME, so this takes the family as well.
+ *
+ * 0x00180025 is SpongeBob SquarePants: The Clam Prix as LPAD and MULT — and
+ * the French "M. Crayon sauve Bourgribouille" as LST3. Two unrelated games,
+ * one ProductID. Filtering the Downloads folder on the ProductID alone put
+ * Clam Prix's kart tracks and background music on Mr Pencil's Micromods
+ * screen, which is nonsense in the way that is easy to miss: the packages
+ * really do share an ID, and only the family tells them apart.
+ *
+ * Twelve of the 258 ProductIDs installed here differ in title across their
+ * families. Most are harmless — "Toy Story 3" against "Disney-Pixar Toy Story
+ * 3" — but two are genuinely different products, so the pair is the identity
+ * and the ProductID on its own is not. */
+static void mm_reload(const char *product, const char *family)
 {
 	char dir[PATHMAX], meta[PATHMAX + 32], line[512];
 	DIR *d;
@@ -1648,6 +1668,7 @@ static void mm_reload(const char *product)
 	g_mm_n = 0;
 	g_mm_top = 0;
 	snprintf(g_mm_product, sizeof(g_mm_product), "%s", product ? product : "");
+	snprintf(g_mm_family, sizeof(g_mm_family), "%s", family ? family : "");
 	if (!g_mm_product[0]) return;
 	snprintf(dir, sizeof(dir), "%s/runtime/sysroot/LF/Bulk/Downloads", g_proj);
 	if (!(d = opendir(dir))) return;
@@ -1680,15 +1701,41 @@ static void mm_reload(const char *product)
 		}
 		fclose(f);
 		if (!is_mm || !mine) continue;
-		snprintf(e.pkg, sizeof(e.pkg), "%s", de->d_name);
-		g_mm[g_mm_n++] = e;
+		{
+			/* Split FAM-PRODUCT-SLOT. Anything shaped differently is left
+			 * alone rather than guessed at. */
+			const char *a = strchr(de->d_name, '-');
+			const char *b = a ? strchr(a + 1, '-') : NULL;
+			char fam[16];
+			int k, found = -1;
+			if (!a || !b || (size_t)(a - de->d_name) >= sizeof(fam)) continue;
+			memcpy(fam, de->d_name, (size_t)(a - de->d_name));
+			fam[a - de->d_name] = 0;
+			if (g_mm_family[0] && strcmp(fam, g_mm_family)) continue;
+			snprintf(e.slot, sizeof(e.slot), "%.7s", b + 1);
+
+			for (k = 0; k < g_mm_n; k++)
+				if (!strcmp(g_mm[k].slot, e.slot)) { found = k; break; }
+			if (found < 0) {
+				if (g_mm_n >= MM_MAX) continue;
+				g_mm[g_mm_n++] = e;
+			} else if (e.name[0]) {
+				/* A real package's name beats the placeholder a slot sweep
+				 * writes. Only reachable if a family somehow appears twice,
+				 * which it should not — kept because losing a real name to a
+				 * placeholder would be silent and confusing. */
+				struct mm_entry *g = &g_mm[found];
+				if (!g->name[0] || !strncmp(g->name, "MICROMOD_", 9))
+					snprintf(g->name, sizeof(g->name), "%s", e.name);
+			}
+		}
 	}
 	closedir(d);
 	{
 		int i, j;
 		for (i = 1; i < g_mm_n; i++) {
 			struct mm_entry t = g_mm[i];
-			for (j = i - 1; j >= 0 && strcmp(g_mm[j].pkg, t.pkg) > 0; j--)
+			for (j = i - 1; j >= 0 && strcmp(g_mm[j].slot, t.slot) > 0; j--)
 				g_mm[j + 1] = g_mm[j];
 			g_mm[j + 1] = t;
 		}
@@ -3037,9 +3084,20 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		if (g_mm_top > g_mm_n - vis) g_mm_top = g_mm_n - vis;
 		if (g_mm_top < 0) g_mm_top = 0;
 
-		snprintf(line, sizeof(line), "%d installed", g_mm_n);
-		text(r, d.x + d.w - 8 - text_w(line), d.y + 3, line, C_TEXT_DIM);
+		{
+			/* Say what the number counts. "60" was the file count, and it
+			 * read as sixty pieces of bonus content when the title has
+			 * fifteen slots built for four device families. */
+			snprintf(line, sizeof(line), "%d micromods", g_mm_n);
+			text(r, d.x + d.w - 8 - text_w(line), d.y + 3, line, C_TEXT_DIM);
+		}
 		text(r, x, d.y + 16, g_mm_title, C_ACCENT);
+		if (g_mm_family[0]) {
+			/* Which build, because the same ProductID can be two different
+			 * games on different hardware. */
+			snprintf(line, sizeof(line), "%s build", g_mm_family);
+			text(r, d.x + d.w - 8 - text_w(line), d.y + 16, line, C_DIMMEST);
+		}
 
 		if (!g_mm_n) {
 			text(r, x, y + 14, "None installed for this game.", C_TEXT);
@@ -3053,8 +3111,10 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		for (i = 0; i < vis && g_mm_top + i < g_mm_n; i++) {
 			struct mm_entry *e = &g_mm[g_mm_top + i];
 			int yy = y + i * 11;
-			text(r, x + 2, yy, e->name[0] ? e->name : e->pkg, C_TEXT);
-			text(r, d.x + d.w - 14 - text_w(e->pkg), yy, e->pkg, C_DIMMEST);
+			/* The slot IS the micromod, so it leads. The families beside it
+			 * say which builds of the title can see it. */
+			text(r, x + 2, yy, e->slot, C_TEXT_DIM);
+			text(r, x + 48, yy, e->name[0] ? e->name : "(unnamed)", C_TEXT);
 		}
 		if (g_mm_n > vis) {
 			snprintf(line, sizeof(line), "%d-%d of %d", g_mm_top + 1,
@@ -4134,16 +4194,34 @@ void ui_debug_state(const char *spec)
 		ap_reload();
 		g_modal = M_MICROMODS;
 		if (name[9]) {
-			int i;
-			/* Name it the way the real screen does — the title, not the
-			 * ProductID — by finding an installed app with that ID. */
+			int i, best = -1;
+			/* A PRODUCTID IS NOT A TITLE. Two different games can share one:
+			 * 0x00180025 is SpongeBob's Clam Prix as LPAD/MULT and the French
+			 * "M. Crayon sauve Bourgribouille" as LST3, and taking the first
+			 * match alphabetically named this screen after the wrong game.
+			 * The real screen has no such problem — it is handed the row the
+			 * user selected — so this only has to pick sensibly: prefer the
+			 * LeapPad2 build, which is the one Tadpole runs. */
 			snprintf(g_mm_title, sizeof(g_mm_title), "%s", name + 9);
-			for (i = 0; i < g_ap_n; i++)
-				if (strstr(g_ap[i].pkg, name + 9)) {
-					snprintf(g_mm_title, sizeof(g_mm_title), "%s", g_ap[i].name);
-					break;
+			for (i = 0; i < g_ap_n; i++) {
+				if (!strstr(g_ap[i].pkg, name + 9)) continue;
+				if (best < 0) best = i;
+				if (!strncmp(g_ap[i].pkg, "MULT", 4)) { best = i; break; }
+			}
+			if (best >= 0) {
+				char fam[8];
+				const char *dash = strchr(g_ap[best].pkg, '-');
+				snprintf(g_mm_title, sizeof(g_mm_title), "%s", g_ap[best].name);
+				if (dash && (size_t)(dash - g_ap[best].pkg) < sizeof(fam)) {
+					memcpy(fam, g_ap[best].pkg, (size_t)(dash - g_ap[best].pkg));
+					fam[dash - g_ap[best].pkg] = 0;
+					mm_reload(name + 9, fam);
+				} else {
+					mm_reload(name + 9, NULL);
 				}
-			mm_reload(name + 9);
+			} else {
+				mm_reload(name + 9, NULL);
+			}
 		} else if (g_ap_n) {
 			const char *pkg = g_ap[0].pkg;
 			const char *a = strchr(pkg, '-'), *b = a ? strchr(a + 1, '-') : NULL;
@@ -4152,8 +4230,12 @@ void ui_debug_state(const char *spec)
 				size_t n2 = (size_t)(b - a - 1);
 				if (n2 < sizeof(prod)) {
 					memcpy(prod, a + 1, n2); prod[n2] = 0;
+					char fam2[8];
+					size_t fl = (size_t)(a - pkg);
 					snprintf(g_mm_title, sizeof(g_mm_title), "%s", g_ap[0].name);
-					mm_reload(prod);
+					if (fl < sizeof(fam2)) { memcpy(fam2, pkg, fl); fam2[fl] = 0; }
+					else fam2[0] = 0;
+					mm_reload(prod, fam2[0] ? fam2 : NULL);
 				}
 			}
 		}
@@ -4459,13 +4541,16 @@ static int dialog_click(int lw, int lh, int mx, int my)
 				const char *a = strchr(pid, '-');
 				const char *b2 = a ? strchr(a + 1, '-') : NULL;
 				g_mm_title[0] = 0;
-				if (a && b2 && (size_t)(b2 - a - 1) < sizeof(g_mm_product)) {
-					char prod[16];
+				if (a && b2 && (size_t)(b2 - a - 1) < sizeof(g_mm_product)
+				    && (size_t)(a - pid) < sizeof(g_mm_family)) {
+					char prod[16], fam[8];
 					memcpy(prod, a + 1, (size_t)(b2 - a - 1));
 					prod[b2 - a - 1] = 0;
+					memcpy(fam, pid, (size_t)(a - pid));
+					fam[a - pid] = 0;
 					snprintf(g_mm_title, sizeof(g_mm_title), "%.60s",
 					         g_gm[g_gm_sel].name);
-					mm_reload(prod);
+					mm_reload(prod, fam);
 				}
 				g_modal = M_MICROMODS;
 			}
