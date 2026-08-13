@@ -222,7 +222,8 @@ static int  g_hot_item  = -1;
 
 /* modal */
 enum modal_kind { M_NONE = 0, M_ABOUT, M_UPDATE, M_GFX, M_AUDIO, M_PAD, M_DEBUG, M_SYSTEM,
-                  M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES, M_APPS };
+                  M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES, M_APPS,
+                  M_MICROMODS };
 static enum modal_kind g_modal;
 
 /* ---- update check state -------------------------------------------------
@@ -1587,6 +1588,113 @@ char ui_debug_app_initial(int i)
 	return (i >= 0 && i < g_ap_n) ? g_ap[i].name[0] : 0;
 }
 
+/* ---- micromods -----------------------------------------------------------
+ *
+ * LeapFrog's bonus content: alternate music, expansion tracks, dress-up items.
+ * A child earned badges, a parent connected the device to LFConnect, and the
+ * points bought them. A device that was never connected has none, and there
+ * is no LFConnect to talk to now.
+ *
+ * A micromod carries NO CONTENT. It is a directory under LF/Bulk/Downloads
+ * holding a ~260-byte meta.inf, a checksum and sometimes a preview image; the
+ * material it "delivers" already shipped inside the game. SpongeBob's
+ * KART_TRACK_EXPANSION is a meta.inf and an icon, while the four tracks it
+ * unlocks sit in the base package's own Data/Sound/. The package is a flag
+ * saying the child earned it.
+ *
+ * So this screen reads what is installed for one title and can write the rest.
+ * The writing is tools/micromods.py's job, not this file's — the viewer asks
+ * for it the same way it asks for a firmware install.
+ *
+ * ONE TITLE AT A TIME, on purpose. Nothing on the device enumerates every
+ * micromod that exists; that list only ever lived in LeapFrog's catalogue.
+ * But a game only cares about its own, and filters by ProductID when it reads
+ * the folder — so "the micromods for this game" is a question with an answer,
+ * where "all micromods" is not.
+ */
+#define MM_MAX 64
+struct mm_entry {
+	char pkg[64];
+	char name[72];
+};
+static struct mm_entry g_mm[MM_MAX];
+static int g_mm_n, g_mm_top, g_mm_rows = 6;
+static char g_mm_product[16];    /* the 0x........ this screen is about */
+static char g_mm_title[72];      /* the game's name, for the heading */
+
+/* Pull one quoted field out of a meta.inf. Same shape as the launcher's
+ * meta_field(), kept separate because that one lives with the app list and
+ * this runs over a different directory. */
+static int mm_field(const char *line, const char *key, char *out, size_t n)
+{
+	const char *p = line, *q;
+	size_t klen = strlen(key);
+	while (*p == ' ' || *p == '\t') p++;
+	if (strncmp(p, key, klen) != 0) return 0;
+	p += klen;
+	if (!(q = strchr(p, '"'))) return 0;
+	if ((size_t)(q - p) >= n) return 0;
+	memcpy(out, p, (size_t)(q - p));
+	out[q - p] = 0;
+	return out[0] != 0;
+}
+
+static void mm_reload(const char *product)
+{
+	char dir[PATHMAX], meta[PATHMAX + 32], line[512];
+	DIR *d;
+	struct dirent *de;
+
+	g_mm_n = 0;
+	g_mm_top = 0;
+	snprintf(g_mm_product, sizeof(g_mm_product), "%s", product ? product : "");
+	if (!g_mm_product[0]) return;
+	snprintf(dir, sizeof(dir), "%s/runtime/sysroot/LF/Bulk/Downloads", g_proj);
+	if (!(d = opendir(dir))) return;
+	while ((de = readdir(d)) && g_mm_n < MM_MAX) {
+		FILE *f;
+		struct mm_entry e;
+		char type[32], prod[32];
+		int is_mm = 0, mine = 0;
+
+		if (de->d_name[0] == '.') continue;
+		/* The ProductID is the middle field of the directory's own name, so
+		 * the ones that cannot belong to this title are skipped without
+		 * opening anything. */
+		if (!strstr(de->d_name, g_mm_product)) continue;
+		snprintf(meta, sizeof(meta), "%s/%s/meta.inf", dir, de->d_name);
+		if (!(f = fopen(meta, "r"))) continue;
+		memset(&e, 0, sizeof(e));
+		type[0] = prod[0] = 0;
+		while (fgets(line, sizeof(line), f)) {
+			if (!type[0] && mm_field(line, "Type=\"", type, sizeof(type)))
+				is_mm = !strcmp(type, "MicroDownload");
+			if (!e.name[0]) mm_field(line, "Name=\"", e.name, sizeof(e.name));
+			/* ProductID is written unquoted, so it is read off the line
+			 * rather than through mm_field(). */
+			if (!strncmp(line, "ProductID=", 10)) {
+				snprintf(prod, sizeof(prod), "%s", line + 10);
+				prod[strcspn(prod, " \t\r\n")] = 0;
+				mine = !strcasecmp(prod, g_mm_product);
+			}
+		}
+		fclose(f);
+		if (!is_mm || !mine) continue;
+		snprintf(e.pkg, sizeof(e.pkg), "%s", de->d_name);
+		g_mm[g_mm_n++] = e;
+	}
+	closedir(d);
+	{
+		int i, j;
+		for (i = 1; i < g_mm_n; i++) {
+			struct mm_entry t = g_mm[i];
+			for (j = i - 1; j >= 0 && strcmp(g_mm[j].pkg, t.pkg) > 0; j--)
+				g_mm[j + 1] = g_mm[j];
+			g_mm[j + 1] = t;
+		}
+	}
+}
+
 void ui_debug_apps(int *n, int *top, int *sel, int *rows)
 {
 	if (n)    *n    = g_ap_n;
@@ -2527,6 +2635,7 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	 * list of four hundred things; the extra row and the room for a package
 	 * ID beside each name are worth more here than a tidy small box. */
 	case M_APPS:  return dlg_fit(lw, lh, 420, 252);
+	case M_MICROMODS: return dlg_fit(lw, lh, 380, 214);
 	/* Wide and tall: this is a changelog, and a release body wrapped
 	 * into 30 columns would be unreadable. */
 	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
@@ -2773,6 +2882,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 	case M_MSG:   title = g_msg_title; break;
 	case M_UPDATE: title = "Update available"; break;
 	case M_APPS:  title = "Launch App"; break;
+	case M_MICROMODS: title = "Micromods"; break;
 	default: break;
 	}
 
@@ -2913,6 +3023,43 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		     "Type a letter to jump " GL_DIAMOND " Enter launches", C_TEXT_DIM);
 		break;
 	}
+	case M_MICROMODS: {
+		int x = d.x + 8, y = d.y + 26, i;
+		int vis = (d.h - 26 - 40) / 11;
+		char line[128];
+
+		if (vis < 1) vis = 1;
+		g_mm_rows = vis;
+		if (g_mm_top > g_mm_n - vis) g_mm_top = g_mm_n - vis;
+		if (g_mm_top < 0) g_mm_top = 0;
+
+		text(r, x, d.y + 15, g_mm_title, C_ACCENT);
+		snprintf(line, sizeof(line), "%d installed", g_mm_n);
+		text(r, d.x + d.w - 8 - text_w(line), d.y + 15, line, C_TEXT_DIM);
+
+		if (!g_mm_n) {
+			text(r, x, y + 14, "None installed for this game.", C_TEXT);
+			text(r, x, y + 32, "Bonus content is earned on the device and", C_TEXT_DIM);
+			text(r, x, y + 42, "redeemed through LFConnect, which Tadpole", C_TEXT_DIM);
+			text(r, x, y + 52, "cannot reach. Unlock writes the packages", C_TEXT_DIM);
+			text(r, x, y + 62, "the game looks for.", C_TEXT_DIM);
+			break;
+		}
+		chip(r, x - 4, y - 4, d.w - 16, vis * 11 + 6, C_VOID, 0);
+		for (i = 0; i < vis && g_mm_top + i < g_mm_n; i++) {
+			struct mm_entry *e = &g_mm[g_mm_top + i];
+			int yy = y + i * 11;
+			text(r, x + 2, yy, e->name[0] ? e->name : e->pkg, C_TEXT);
+			text(r, d.x + d.w - 14 - text_w(e->pkg), yy, e->pkg, C_DIMMEST);
+		}
+		if (g_mm_n > vis) {
+			snprintf(line, sizeof(line), "%d-%d of %d", g_mm_top + 1,
+			         g_mm_top + vis < g_mm_n ? g_mm_top + vis : g_mm_n, g_mm_n);
+			text(r, d.x + d.w - 8 - text_w(line), d.y + d.h - 26, line, C_TEXT_DIM);
+		}
+		break;
+	}
+
 	case M_UPDATE: {
 		int x = d.x + 10, y = d.y + 20, i;
 		int listy, listh, row = FONT_H + 2, vis;
@@ -3819,6 +3966,23 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		       g_modal == M_FILES ? "Cancel" : "Close",
 		       busy ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 	}
+	/* THE ONE ACTION THIS SCREEN HAS. Writes the packages the selected title
+	 * looks for; the child still turns each one on in the game's own menu,
+	 * because that choice is stored per profile in the save data. */
+	if (g_modal == M_MICROMODS) {
+		SDL_Rect ul = { cb.x - 62, cb.y, 58, 13 };
+		int hot = inside(g_mx, g_my, ul.x, ul.y, ul.w, ul.h);
+		chip(r, ul.x, ul.y, ul.w, ul.h, hot ? C_BAR_HI : C_PANEL, 1);
+		text_c(r, ul.x, ul.w, ul.y + 3, "Unlock", hot ? C_ACCENT : C_TEXT);
+	}
+	/* Reached from the launcher, because "micromods for this game" only means
+	 * anything once a game is picked. */
+	if (g_modal == M_APPS && g_ap_n) {
+		SDL_Rect mb = { cb.x - 82, cb.y, 78, 13 };
+		int hot = inside(g_mx, g_my, mb.x, mb.y, mb.w, mb.h);
+		chip(r, mb.x, mb.y, mb.w, mb.h, hot ? C_BAR_HI : C_PANEL, 1);
+		text_c(r, mb.x, mb.w, mb.y + 3, "Micromods", hot ? C_ACCENT : C_TEXT);
+	}
 	if (g_modal == M_FILES) {
 		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
 		int hot = inside(g_mx, g_my, ok.x, ok.y, ok.w, ok.h);
@@ -3950,6 +4114,29 @@ void ui_debug_state(const char *spec)
 	 * which is how a scrolled list gets captured — the view follows the
 	 * selection, so `apps400` proves the thing scrolls without anyone
 	 * touching a wheel. `appsend` goes to the last one. */
+	/* micromods<ProductID>: the launcher's Micromods screen for one title.
+	 * Bare `micromods` picks the first app, which is enough to see the
+	 * empty-state wording. */
+	else if (!strncmp(name, "micromods", 9)) {
+		ap_reload();
+		g_modal = M_MICROMODS;
+		if (name[9]) {
+			snprintf(g_mm_title, sizeof(g_mm_title), "%s", name + 9);
+			mm_reload(name + 9);
+		} else if (g_ap_n) {
+			const char *pkg = g_ap[0].pkg;
+			const char *a = strchr(pkg, '-'), *b = a ? strchr(a + 1, '-') : NULL;
+			if (a && b) {
+				char prod[16];
+				size_t n2 = (size_t)(b - a - 1);
+				if (n2 < sizeof(prod)) {
+					memcpy(prod, a + 1, n2); prod[n2] = 0;
+					snprintf(g_mm_title, sizeof(g_mm_title), "%s", g_ap[0].name);
+					mm_reload(prod);
+				}
+			}
+		}
+	}
 	else if (!strncmp(name, "apps", 4)) {
 		ap_reload();
 		g_modal = M_APPS;
@@ -4028,6 +4215,42 @@ static int dialog_click(int lw, int lh, int mx, int my)
 {
 	struct dlg d = cur_dlg(lw, lh);
 	SDL_Rect cb = close_rect(&d);
+
+	/* Micromods, for whichever title the launcher has selected. The ProductID
+	 * is the middle field of the PackageID — MULT-0x00180025-000000 — and it
+	 * is what a game filters the Downloads folder by, so it is the only part
+	 * of the name this screen needs. */
+	if (g_modal == M_APPS && g_ap_n) {
+		SDL_Rect mb = { cb.x - 82, cb.y, 78, 13 };
+		if (inside(mx, my, mb.x, mb.y, mb.w, mb.h)) {
+			const char *pkg = g_ap[g_ap_sel].pkg;
+			const char *a = strchr(pkg, '-');
+			const char *b = a ? strchr(a + 1, '-') : NULL;
+			g_mm_title[0] = 0;
+			if (a && b && (size_t)(b - a - 1) < sizeof(g_mm_product)) {
+				char prod[16];
+				memcpy(prod, a + 1, (size_t)(b - a - 1));
+				prod[b - a - 1] = 0;
+				snprintf(g_mm_title, sizeof(g_mm_title), "%.60s",
+				         g_ap[g_ap_sel].name);
+				mm_reload(prod);
+			}
+			g_modal = M_MICROMODS;
+			return 1;
+		}
+	}
+	if (g_modal == M_MICROMODS) {
+		SDL_Rect ul = { cb.x - 62, cb.y, 58, 13 };
+		if (inside(mx, my, ul.x, ul.y, ul.w, ul.h)) {
+			snprintf(g_action_path, sizeof(g_action_path), "%s", g_mm_product);
+			g_action = UI_ACT_MICROMODS;
+			return 1;
+		}
+		if (inside(mx, my, cb.x, cb.y, cb.w, cb.h)) {
+			g_modal = M_APPS;      /* back to the list you came from */
+			return 1;
+		}
+	}
 
 	if (g_modal == M_APPS && g_ap_n) {
 		/* The same helpers the draw uses, so the clickable row and the drawn
@@ -4449,6 +4672,12 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 			g_gm_top -= e->wheel.y * 2;
 			if (g_gm_top > g_gm_n - g_gm_rows) g_gm_top = g_gm_n - g_gm_rows;
 			if (g_gm_top < 0) g_gm_top = 0;
+			return 1;
+		}
+		if (g_modal == M_MICROMODS) {
+			g_mm_top -= e->wheel.y * 2;
+			if (g_mm_top > g_mm_n - g_mm_rows) g_mm_top = g_mm_n - g_mm_rows;
+			if (g_mm_top < 0) g_mm_top = 0;
 			return 1;
 		}
 		if (g_modal == M_APPS) {

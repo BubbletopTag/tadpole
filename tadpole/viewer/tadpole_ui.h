@@ -88,6 +88,9 @@ enum ui_action {
 	UI_ACT_INSTALL_GAMES,    /* path = file listing the archives to install */
 	UI_ACT_CHECK_UPDATE,     /* ask GitHub whether a newer release exists */
 	UI_ACT_DO_UPDATE,        /* download it; path = where to write */
+	/* path = a ProductID (0x........). Writes the micromod packages the
+	 * title looks for; see the note in tadpole_ui.c. */
+	UI_ACT_MICROMODS,
 	UI_ACT_STOP,
 	UI_ACT_QUIT,
 	UI_ACT_RELAYOUT          /* rotate/scale changed; viewer must resize */

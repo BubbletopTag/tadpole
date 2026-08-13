@@ -3619,6 +3619,13 @@ int main(int argc, char **argv)
 			tool_runv("converting cartridge", "tools/cart2tar.py", av);
 			break;
 		}
+		/* One title's bonus content. --enable-slots writes the slots rather
+		 * than named packages, because nothing on the device enumerates what
+		 * a title's micromods are called — see tools/micromods.py. */
+		case UI_ACT_MICROMODS:
+			tool_run2("micromods", "tools/micromods.py",
+			          "--enable-slots", actpath);
+			break;
 		case UI_ACT_SCAN_GAMES:
 			tool_run("reading games", "tools/scan-games.sh", actpath);
 			break;
