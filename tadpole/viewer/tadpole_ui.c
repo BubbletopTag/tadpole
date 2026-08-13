@@ -3024,8 +3024,12 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		break;
 	}
 	case M_MICROMODS: {
-		int x = d.x + 8, y = d.y + 26, i;
-		int vis = (d.h - 26 - 40) / 11;
+		/* +29, not +26: at +26 the header line and the well's rounded top
+		 * edge abutted exactly and the count was sliced along its baseline —
+		 * the same fault the app launcher had, for the same reason. The
+		 * count moved onto the title strip, which has room going spare. */
+		int x = d.x + 8, y = d.y + 29, i;
+		int vis = (d.h - 29 - 40) / 11;
 		char line[128];
 
 		if (vis < 1) vis = 1;
@@ -3033,9 +3037,9 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		if (g_mm_top > g_mm_n - vis) g_mm_top = g_mm_n - vis;
 		if (g_mm_top < 0) g_mm_top = 0;
 
-		text(r, x, d.y + 15, g_mm_title, C_ACCENT);
 		snprintf(line, sizeof(line), "%d installed", g_mm_n);
-		text(r, d.x + d.w - 8 - text_w(line), d.y + 15, line, C_TEXT_DIM);
+		text(r, d.x + d.w - 8 - text_w(line), d.y + 3, line, C_TEXT_DIM);
+		text(r, x, d.y + 16, g_mm_title, C_ACCENT);
 
 		if (!g_mm_n) {
 			text(r, x, y + 14, "None installed for this game.", C_TEXT);
@@ -3904,6 +3908,19 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			static const char *L[4] = { "Folder...", "Rescan", "", "" };
 			int xs[2] = { d.x + 6, d.x + 6 + 56 };
 			int ws[2] = { 52, 44 };
+			/* MICROMODS BELONGS WITH THE LIBRARY, not with the launcher.
+			 * The launcher is a list of things to START; this is a question
+			 * about a title you OWN, which is what the library is a list of.
+			 * It reads the selected row's PackageID, so it works whether or
+			 * not that title is installed yet. */
+			{
+				SDL_Rect mb = { d.x + 6 + 56 + 48, by, 76, 13 };
+				int on = g_gm_n > 0;
+				int hot = on && inside(g_mx, g_my, mb.x, mb.y, mb.w, mb.h);
+				chip(r, mb.x, mb.y, mb.w, mb.h, hot ? C_BAR_HI : C_PANEL, 1);
+				text_c(r, mb.x, mb.w, mb.y + 3, "Micromods",
+				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
+			}
 			for (i3 = 0; i3 < 2; i3++) {
 				int hot = inside(g_mx, g_my, xs[i3], by, ws[i3], 13);
 				int on = (i3 == 0) || g_gm_dir[0];
@@ -3971,17 +3988,13 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 	 * because that choice is stored per profile in the save data. */
 	if (g_modal == M_MICROMODS) {
 		SDL_Rect ul = { cb.x - 62, cb.y, 58, 13 };
+		SDL_Rect ua = { cb.x - 62 - 76, cb.y, 72, 13 };
 		int hot = inside(g_mx, g_my, ul.x, ul.y, ul.w, ul.h);
+		int hot2 = inside(g_mx, g_my, ua.x, ua.y, ua.w, ua.h);
+		chip(r, ua.x, ua.y, ua.w, ua.h, hot2 ? C_BAR_HI : C_PANEL, 1);
+		text_c(r, ua.x, ua.w, ua.y + 3, "Unlock all", hot2 ? C_ACCENT : C_TEXT);
 		chip(r, ul.x, ul.y, ul.w, ul.h, hot ? C_BAR_HI : C_PANEL, 1);
 		text_c(r, ul.x, ul.w, ul.y + 3, "Unlock", hot ? C_ACCENT : C_TEXT);
-	}
-	/* Reached from the launcher, because "micromods for this game" only means
-	 * anything once a game is picked. */
-	if (g_modal == M_APPS && g_ap_n) {
-		SDL_Rect mb = { cb.x - 82, cb.y, 78, 13 };
-		int hot = inside(g_mx, g_my, mb.x, mb.y, mb.w, mb.h);
-		chip(r, mb.x, mb.y, mb.w, mb.h, hot ? C_BAR_HI : C_PANEL, 1);
-		text_c(r, mb.x, mb.w, mb.y + 3, "Micromods", hot ? C_ACCENT : C_TEXT);
 	}
 	if (g_modal == M_FILES) {
 		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
@@ -4121,7 +4134,15 @@ void ui_debug_state(const char *spec)
 		ap_reload();
 		g_modal = M_MICROMODS;
 		if (name[9]) {
+			int i;
+			/* Name it the way the real screen does — the title, not the
+			 * ProductID — by finding an installed app with that ID. */
 			snprintf(g_mm_title, sizeof(g_mm_title), "%s", name + 9);
+			for (i = 0; i < g_ap_n; i++)
+				if (strstr(g_ap[i].pkg, name + 9)) {
+					snprintf(g_mm_title, sizeof(g_mm_title), "%s", g_ap[i].name);
+					break;
+				}
 			mm_reload(name + 9);
 		} else if (g_ap_n) {
 			const char *pkg = g_ap[0].pkg;
@@ -4216,38 +4237,24 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	struct dlg d = cur_dlg(lw, lh);
 	SDL_Rect cb = close_rect(&d);
 
-	/* Micromods, for whichever title the launcher has selected. The ProductID
-	 * is the middle field of the PackageID — MULT-0x00180025-000000 — and it
-	 * is what a game filters the Downloads folder by, so it is the only part
-	 * of the name this screen needs. */
-	if (g_modal == M_APPS && g_ap_n) {
-		SDL_Rect mb = { cb.x - 82, cb.y, 78, 13 };
-		if (inside(mx, my, mb.x, mb.y, mb.w, mb.h)) {
-			const char *pkg = g_ap[g_ap_sel].pkg;
-			const char *a = strchr(pkg, '-');
-			const char *b = a ? strchr(a + 1, '-') : NULL;
-			g_mm_title[0] = 0;
-			if (a && b && (size_t)(b - a - 1) < sizeof(g_mm_product)) {
-				char prod[16];
-				memcpy(prod, a + 1, (size_t)(b - a - 1));
-				prod[b - a - 1] = 0;
-				snprintf(g_mm_title, sizeof(g_mm_title), "%.60s",
-				         g_ap[g_ap_sel].name);
-				mm_reload(prod);
-			}
-			g_modal = M_MICROMODS;
-			return 1;
-		}
-	}
 	if (g_modal == M_MICROMODS) {
 		SDL_Rect ul = { cb.x - 62, cb.y, 58, 13 };
+		SDL_Rect ua = { cb.x - 62 - 76, cb.y, 72, 13 };
 		if (inside(mx, my, ul.x, ul.y, ul.w, ul.h)) {
 			snprintf(g_action_path, sizeof(g_action_path), "%s", g_mm_product);
 			g_action = UI_ACT_MICROMODS;
 			return 1;
 		}
+		/* Every title that has the code for them. The tool reports how many
+		 * packages that is; it is thousands, and they all land in one folder
+		 * that every game reads at startup. */
+		if (inside(mx, my, ua.x, ua.y, ua.w, ua.h)) {
+			snprintf(g_action_path, sizeof(g_action_path), "all");
+			g_action = UI_ACT_MICROMODS;
+			return 1;
+		}
 		if (inside(mx, my, cb.x, cb.y, cb.w, cb.h)) {
-			g_modal = M_APPS;      /* back to the list you came from */
+			g_modal = M_GAMES;     /* back to the list you came from */
 			return 1;
 		}
 	}
@@ -4439,6 +4446,28 @@ static int dialog_click(int lw, int lh, int mx, int my)
 				snprintf(g_action_path, sizeof(g_action_path), "%s", g_gm_dir);
 				g_action = UI_ACT_SCAN_GAMES;
 				g_fb_return = M_GAMES;   /* the progress panel comes back here */
+			}
+			return 1;
+		}
+		if (inside(mx, my, d.x + 110, by, 76, 13)) {    /* Micromods */
+			/* The ProductID is the middle field of the selected row's
+			 * PackageID — MULT-0x00180025-000000 — and it is the only part
+			 * of the name this needs: a title filters the Downloads folder
+			 * by exactly that when it looks for its bonus content. */
+			if (g_gm_n && g_gm_sel >= 0 && g_gm_sel < g_gm_n) {
+				const char *pid = g_gm[g_gm_sel].pid;
+				const char *a = strchr(pid, '-');
+				const char *b2 = a ? strchr(a + 1, '-') : NULL;
+				g_mm_title[0] = 0;
+				if (a && b2 && (size_t)(b2 - a - 1) < sizeof(g_mm_product)) {
+					char prod[16];
+					memcpy(prod, a + 1, (size_t)(b2 - a - 1));
+					prod[b2 - a - 1] = 0;
+					snprintf(g_mm_title, sizeof(g_mm_title), "%.60s",
+					         g_gm[g_gm_sel].name);
+					mm_reload(prod);
+				}
+				g_modal = M_MICROMODS;
 			}
 			return 1;
 		}
