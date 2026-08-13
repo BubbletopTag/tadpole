@@ -725,7 +725,21 @@ static SDL_Texture *glass_blur(SDL_Renderer *r)
 	/* Restore whatever was being drawn into rather than assuming the window:
 	 * this runs in the middle of somebody else's frame. */
 	prev_target = SDL_GetRenderTarget(r);
-	for (steps = 0; steps < 4 && w > 24 && h > 24; steps++) {
+	/* HOW BLURRED, AND WHY THE STEP COUNT IS WHAT SETS IT.
+	 *
+	 * Each pass halves the capture with linear filtering, so the radius
+	 * doubles per step and the result is 1/2^steps of the screen whatever the
+	 * window size — the strength is scale-invariant as long as the chain runs
+	 * to completion. That is why the floor below is as low as it is: it exists
+	 * only to stop a degenerate texture, not to end the chain, and a floor
+	 * high enough to end it early would quietly make the blur weaker on small
+	 * windows than on large ones.
+	 *
+	 * Four steps looked like a smeared photograph of the backdrop — the logo
+	 * still read as a logo. Seven is a wash you take for frosted glass rather
+	 * than for a picture of what is behind it. */
+#define GLASS_STEPS 7
+	for (steps = 0; steps < GLASS_STEPS && w > 4 && h > 4; steps++) {
 		int nw = w / 2, nh = h / 2;
 		SDL_Texture *next = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888,
 		                                      SDL_TEXTUREACCESS_TARGET, nw, nh);
