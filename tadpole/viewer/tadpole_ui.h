@@ -178,6 +178,12 @@ void  ui_draw_idle(SDL_Renderer *ren, int lw, int lh);
  * tadpole_ui.c. Used by --ui-shot. */
 void  ui_debug_state(const char *spec);
 
+/* Render everything settled, with no entrance animations. A --ui-shot draws
+ * ONE frame; without this it would catch whatever fraction of a panel's fade
+ * that frame landed on, and every capture would differ from the last for no
+ * reason at all. Call before drawing a shot; there is no way back. */
+void  ui_anim_disable(void);
+
 /* WHICH PRODUCT THIS IS PRESENTING ITSELF AS.
  *
  * Tadpole runs the guest under qemu-arm; Glasspole runs it under our own ARM

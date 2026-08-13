@@ -1205,6 +1205,9 @@ static int ui_shot(SDL_Renderer *ren, SDL_Window *win, const char *state,
 	 * always renders the idle case, so it cannot show a greyed-out File menu —
 	 * exactly the thing being debugged when Run System Menu stuck disabled. */
 	ui_set_running(guest_external());
+	/* Settled, not mid-entrance: this renders one frame, and an animated one
+	 * would capture whatever part of the fade it happened to catch. */
+	ui_anim_disable();
 	ui_debug_state(state);
 	SDL_SetRenderDrawColor(ren, 12, 30, 20, 255);
 	SDL_RenderClear(ren);

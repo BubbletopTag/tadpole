@@ -391,13 +391,71 @@ void ui_progress_pct(int pct)
 
 int ui_progress_active(void) { return g_modal == M_PROGRESS; }
 
+/* ---- animation -----------------------------------------------------------
+ *
+ * Enough motion to say where a panel came from, and no more. The viewer
+ * already redraws continuously — the progress marquee and the profile
+ * cursor have always been time-driven — so this needs no timer, no
+ * invalidation and no state machine: everything is a pure function of "how
+ * long ago did this appear".
+ *
+ * WHAT DECIDES WHEN SOMETHING APPEARED. Not the twenty-odd places that
+ * assign g_modal; the draw notices the value changed since last frame and
+ * stamps the clock. Every path that opens a dialog — a menu item, the
+ * wizard's Next, an alert raised by the frame pump — is covered without
+ * touching any of them.
+ *
+ * ANIMATIONS ARE OFF FOR --ui-shot. A capture renders a single frame, so an
+ * animated one would catch whatever fraction of the entrance that frame
+ * happened to land on, and every regression capture would differ from the
+ * last for no reason. ui_anim_disable() pins everything settled.
+ */
+static int    g_anim_off;
+static Uint32 g_modal_at, g_menu_at, g_wiz_at;
+
+void ui_anim_disable(void) { g_anim_off = 1; }
+
+/* 0 at `since`, 1 once `dur` has passed, eased so it decelerates into place. */
+static float anim_t(Uint32 since, Uint32 dur)
+{
+	Uint32 now;
+	float t, inv;
+
+	if (g_anim_off || !since || !dur) return 1.0f;
+	now = SDL_GetTicks();
+	if (now <= since) return 0.0f;
+	if (now - since >= dur) return 1.0f;
+	t = (float)(now - since) / (float)dur;
+	inv = 1.0f - t;
+	return 1.0f - inv * inv * inv;        /* ease-out cubic */
+}
+
+/* Notices a changed value and restamps the clock. */
+static void anim_watch(int cur, int *seen, Uint32 *stamp)
+{
+	if (cur != *seen) { *seen = cur; *stamp = SDL_GetTicks(); }
+}
+
 /* ---- primitives ---------------------------------------------------------- */
+
+/* EVERYTHING BELOW IS DRAWN THROUGH THIS. A fade has to reach the panel body,
+ * its rim, its shadow, the chips inside it and the text on them, or the parts
+ * that ignored it pop in while the rest fades and the whole thing looks
+ * broken. One multiplier applied in the four primitives covers all of it. */
+static Uint8 g_alpha = 255;
+
+static Uint8 amul(Uint8 a)
+{
+	return g_alpha == 255 ? a : (Uint8)((int)a * g_alpha / 255);
+}
 
 static void fill(SDL_Renderer *r, int x, int y, int w, int h, unsigned col)
 {
 	SDL_Rect rc = { x, y, w, h };
 	struct rgb c = unpack(col);
-	SDL_SetRenderDrawColor(r, c.r, c.g, c.b, 255);
+	SDL_SetRenderDrawBlendMode(r, g_alpha == 255 ? SDL_BLENDMODE_NONE
+	                                             : SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(r, c.r, c.g, c.b, amul(255));
 	SDL_RenderFillRect(r, &rc);
 }
 
@@ -512,7 +570,7 @@ static void rr_geom(SDL_Renderer *r, SDL_Texture *tex, const SDL_FRect *uv,
 		(dst).r = (Uint8)(ct.r + (cb.r - ct.r) * t_);                        \
 		(dst).g = (Uint8)(ct.g + (cb.g - ct.g) * t_);                        \
 		(dst).b = (Uint8)(ct.b + (cb.b - ct.b) * t_);                        \
-		(dst).a = (Uint8)((atop + (abot - atop) * t_) * (a_scale));          \
+		(dst).a = amul((Uint8)((atop + (abot - atop) * t_) * (a_scale)));    \
 	} while (0)
 
 	verts[0].position.x = x + w / 2; verts[0].position.y = y + h / 2;
@@ -593,7 +651,7 @@ static void rr_stroke_grad(SDL_Renderer *r, float x, float y, float w, float h,
 		(dst).r = (Uint8)(ct.r + (cb.r - ct.r) * t_);                        \
 		(dst).g = (Uint8)(ct.g + (cb.g - ct.g) * t_);                        \
 		(dst).b = (Uint8)(ct.b + (cb.b - ct.b) * t_);                        \
-		(dst).a = (Uint8)((atop + (abot - atop) * t_) * (a_scale));          \
+		(dst).a = amul((Uint8)((atop + (abot - atop) * t_) * (a_scale)));    \
 	} while (0)
 
 	for (i = 0; i < n; i++) {
@@ -664,7 +722,7 @@ static void radial(SDL_Renderer *r, int cx, int cy, float rx, float ry,
 
 	v[0].position.x = (float)cx; v[0].position.y = (float)cy;
 	v[0].color.r = c.r; v[0].color.g = c.g; v[0].color.b = c.b;
-	v[0].color.a = a_mid;
+	v[0].color.a = amul(a_mid);
 
 	/* One quarter-turn table, four quadrants, by the rotation identities —
 	 * cos(90+f) = -sin f, sin(90+f) = cos f, and so on round. Written out
@@ -684,7 +742,7 @@ static void radial(SDL_Renderer *r, int cx, int cy, float rx, float ry,
 		v[1 + i].position.x = cx + rx * ux;
 		v[1 + i].position.y = cy + ry * uy;
 		v[1 + i].color.r = c.r; v[1 + i].color.g = c.g; v[1 + i].color.b = c.b;
-		v[1 + i].color.a = a_rim;
+		v[1 + i].color.a = amul(a_rim);
 	}
 	for (i = 0; i < n; i++) {
 		idx[ni++] = 0; idx[ni++] = 1 + i; idx[ni++] = 1 + ((i + 1) % n);
@@ -965,6 +1023,7 @@ static void text(SDL_Renderer *r, int x, int y, const char *s, unsigned col)
 {
 	struct rgb c = unpack(col);
 	SDL_SetTextureColorMod(g_font, c.r, c.g, c.b);
+	SDL_SetTextureAlphaMod(g_font, g_alpha);
 	for (; *s; s++, x += GLYPH_ADV) {
 		int idx = (unsigned char)*s - UI_FONT_FIRST;
 		SDL_Rect src, dst;
@@ -1370,7 +1429,13 @@ static void logo_load(SDL_Renderer *ren, const char *path)
  * not start a native title at all, because those need AppManager rather than
  * saplayer. The list is read from the installed packages' own meta.inf.
  */
-#define AP_MAX 160
+/* GROWN ON DEMAND, NOT CAPPED AT 160.
+ *
+ * This was a fixed `g_ap[160]` and the reload loop stopped filling it at the
+ * ceiling. A real install here has 454 launchable packages, so the launcher
+ * listed the first 160 alphabetically and there was no amount of scrolling
+ * that reached the rest — the list simply ended at "1-6 of 160". Same growth
+ * pattern as the game library, which never had a ceiling. */
 struct ap_entry {
 	char pkg[64];
 	char name[72];
@@ -1379,8 +1444,8 @@ struct ap_entry {
 	SDL_Texture *tex;
 	int tw, th, tried;
 };
-static struct ap_entry g_ap[AP_MAX];
-static int g_ap_n, g_ap_top, g_ap_rows = 6;
+static struct ap_entry *g_ap;
+static int g_ap_n, g_ap_cap, g_ap_top, g_ap_sel, g_ap_rows = 6;
 
 /* WHAT IS WORTH OFFERING TO LAUNCH.
  *
@@ -1401,7 +1466,24 @@ static void ap_free(void)
 	int i;
 	for (i = 0; i < g_ap_n; i++)
 		if (g_ap[i].tex) { SDL_DestroyTexture(g_ap[i].tex); g_ap[i].tex = NULL; }
-	g_ap_n = 0;
+	free(g_ap);
+	g_ap = NULL;
+	g_ap_n = g_ap_cap = 0;
+}
+
+/* -> 0 if the list could not grow, in which case the caller stops adding
+ * rather than writing past the end. */
+static int ap_push(const struct ap_entry *e)
+{
+	if (g_ap_n == g_ap_cap) {
+		int cap = g_ap_cap ? g_ap_cap * 2 : 64;
+		struct ap_entry *t = realloc(g_ap, sizeof(*t) * (size_t)cap);
+		if (!t) return 0;
+		g_ap = t;
+		g_ap_cap = cap;
+	}
+	g_ap[g_ap_n++] = *e;
+	return 1;
 }
 
 /* Copy one quoted meta.inf field into a fixed buffer.
@@ -1439,10 +1521,11 @@ static void ap_reload(void)
 
 	ap_free();
 	g_ap_top = 0;
+	g_ap_sel = 0;
 	snprintf(dir, sizeof(dir), "%s/runtime/sysroot/LF/Bulk/ProgramFiles", g_proj);
 	if (!(d = opendir(dir)))
 		return;
-	while ((de = readdir(d)) && g_ap_n < AP_MAX) {
+	while ((de = readdir(d))) {
 		FILE *f;
 		struct ap_entry e;
 		int have_name = 0, have_so = 0;
@@ -1471,7 +1554,8 @@ static void ap_reload(void)
 		snprintf(e.pkg, sizeof(e.pkg), "%s", de->d_name);
 		if (icon[0])
 			snprintf(e.icon, sizeof(e.icon), "%s/%s/%s", dir, de->d_name, icon);
-		g_ap[g_ap_n++] = e;
+		if (!ap_push(&e))
+			break;
 	}
 	closedir(d);
 	{
@@ -2392,7 +2476,23 @@ static struct dlg dlg_fit(int lw, int lh, int w, int h)
 	return dlg_rect(lw, lh, w, h);
 }
 
+/* THE ANIMATED RECT, used by the draw AND the hit test.
+ *
+ * A modal rises the last few pixels into place as it fades in. Both the
+ * drawing and dialog_click() read their geometry from here, so the two agree
+ * on every frame of that: a click during the entrance lands on the panel
+ * where it currently looks, not where it is about to be. Offsetting only the
+ * draw would have made the panel briefly lie about its own buttons. */
+static struct dlg cur_dlg_settled(int lw, int lh);
+
 static struct dlg cur_dlg(int lw, int lh)
+{
+	struct dlg d = cur_dlg_settled(lw, lh);
+	d.y += (int)((1.0f - anim_t(g_modal_at, 150)) * 10.0f);
+	return d;
+}
+
+static struct dlg cur_dlg_settled(int lw, int lh)
 {
 	switch (g_modal) {
 	case M_ABOUT: return dlg_fit(lw, lh, 210, 144);
@@ -2552,14 +2652,24 @@ static void draw_bar(SDL_Renderer *r, int lw)
 
 static void draw_dropdown(SDL_Renderer *r)
 {
+	static int seen = -1;
 	const struct menu *m;
 	int w, h, x, y, i;
+	float t;
 
+	anim_watch(g_open_menu, &seen, &g_menu_at);
 	if (g_open_menu < 0) return;
 	m = &MENUS[g_open_menu];
 	w = menu_width(m);
 	h = m->n * 12 + 6;
 	x = m->x; y = UI_BAR_H;
+
+	/* Drops out from under the bar: short, because a menu is something you
+	 * are already reaching for and anything slower is in the way. */
+	t = anim_t(g_menu_at, 110);
+	g_alpha = (Uint8)(255.0f * t);
+	y -= (int)((1.0f - t) * 5.0f);
+
 	panel(r, x, y, w, h);
 
 	for (i = 0; i < m->n; i++) {
@@ -2574,11 +2684,16 @@ static void draw_dropdown(SDL_Renderer *r)
 		text(r, x + 8, iy + 1, it->label,
 		     item_enabled(it) ? (g_hot_item == i ? C_ACCENT : C_TEXT) : C_TEXT_DIM);
 	}
+	g_alpha = 255;
 }
 
 static const char *onoff(int v) { return v ? "ON" : "OFF"; }
 
-static void draw_dialog(SDL_Renderer *r, int lw, int lh)
+/* The body. Wrapped by draw_dialog() below, which owns the entrance fade —
+ * this function has an early return in it, and a fade that has to be undone
+ * on the way out is exactly the kind of thing that leaks through one branch
+ * and tints the rest of the frame. */
+static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 {
 	struct dlg d = cur_dlg(lw, lh);
 	SDL_Rect cb;
@@ -2614,7 +2729,10 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		 * job on its own — and a heavy dim leaves the glass nothing to pick
 		 * up. */
 		SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-		SDL_SetRenderDrawColor(r, 0, 8, 4, 104);
+		/* Comes up with the panel. Drawn straight rather than through fill(),
+		 * so it takes the entrance curve by hand. */
+		SDL_SetRenderDrawColor(r, 0, 8, 4,
+		                       (Uint8)(104 * anim_t(g_modal_at, 150)));
 		{ SDL_Rect all = { 0, UI_BAR_H, lw, lh - UI_BAR_H }; SDL_RenderFillRect(r, &all); }
 		SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
@@ -2637,6 +2755,17 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 
 		if (vis < 1) vis = 1;
 		g_ap_rows = vis;
+		/* Keep the selected row on screen. Arrow keys move the selection and
+		 * the view follows it, which is the half of "scrolling" this list
+		 * never had — the wheel worked, but nothing else did, and with no
+		 * selection and no scrollbar there was nothing to suggest the list
+		 * went any further than the six rows you could see. */
+		if (g_ap_sel < 0) g_ap_sel = 0;
+		if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;
+		if (g_ap_sel >= 0) {
+			if (g_ap_sel < g_ap_top) g_ap_top = g_ap_sel;
+			if (g_ap_sel >= g_ap_top + vis) g_ap_top = g_ap_sel - vis + 1;
+		}
 		if (g_ap_top > g_ap_n - vis) g_ap_top = g_ap_n - vis;
 		if (g_ap_top < 0) g_ap_top = 0;
 
@@ -2650,9 +2779,19 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		for (i = 0; i < vis && g_ap_top + i < g_ap_n; i++) {
 			struct ap_entry *e = &g_ap[g_ap_top + i];
 			int yy = y + i * row;
-			int hot = inside(g_mx, g_my, x - 2, yy - 2, d.w - 16, row - 2);
+			int rw = d.w - 16 - (g_ap_n > vis ? 6 : 0);
+			int hot = inside(g_mx, g_my, x - 2, yy - 2, rw, row - 2);
+			int sel = (g_ap_top + i) == g_ap_sel;
 
-			if (hot) fill(r, x - 2, yy - 2, d.w - 16, row - 2, C_BAR_HI);
+			/* Hover and selection are different things and have to look
+			 * different: the pointer is wherever it happens to be, the
+			 * selection is where Enter will act. The accent bar down the left
+			 * is the one that means "this one". */
+			if (hot || sel)
+				rfill(r, x - 2, yy - 2, rw, row - 2,
+				      hot ? C_BAR_HI : C_PANEL_HI, hot ? 178 : 190);
+			if (sel)
+				rfill(r, x - 2, yy - 2, 2, row - 2, C_ACCENT, 235);
 			ap_icon(r, e);
 			if (e->tex) {
 				SDL_Rect dst = { x, yy, 26, 26 };
@@ -2667,12 +2806,29 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			         e->version[0] ? "" : e->pkg);
 			text(r, x + 32, yy + 15, line, C_TEXT_DIM);
 		}
+		/* Scrollbar, for the same reason the game library has one: with four
+		 * hundred packages, "where am I and how much is left" is a real
+		 * question, and six rows of a list that reaches 454 gives no clue on
+		 * its own. */
 		if (g_ap_n > vis) {
+			int track = vis * row - 4;
+			int knob  = track * vis / g_ap_n;
+			int pos   = track * g_ap_top / g_ap_n;
+			int sx    = d.x + d.w - 12;
+			if (knob < 8) knob = 8;
+			if (pos > track - knob) pos = track - knob;
+			if (pos < 0) pos = 0;
+			rfill(r, sx, y - 2, 3, track, C_VOID, 190);
+			rfill(r, sx, y - 2 + pos, 3, knob, C_EDGE_LT, 200);
+
 			snprintf(line, sizeof(line), "%d-%d of %d", g_ap_top + 1,
 			         g_ap_top + vis < g_ap_n ? g_ap_top + vis : g_ap_n, g_ap_n);
 			text(r, d.x + d.w - 12 - text_w(line), d.y + d.h - 26, line, C_TEXT_DIM);
 		}
-		text(r, x, d.y + d.h - 26, "Install apps to see them here.", C_TEXT_DIM);
+		/* This line used to read "Install apps to see them here." whether or
+		 * not any were installed, sitting next to a counter saying there were
+		 * 160 of them. The empty case has its own paragraph above. */
+		text(r, x, d.y + d.h - 26, "Arrows to choose, Enter to launch.", C_TEXT_DIM);
 		break;
 	}
 	case M_UPDATE: {
@@ -2987,6 +3143,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_WIZARD: {
 		struct prereq pq;
 		int bx = d.x + 62, by = d.y + 20, i2;
+		Uint8 wiz_alpha;
 		char welcome[48];
 		const char *TITLES[WIZ_PAGES] = {
 			welcome, "System files", "Didj support", "Who is playing?",
@@ -3037,6 +3194,26 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		text(r, bx, by, TITLES[g_wiz_page], C_ACCENT);
 		fill(r, bx, by + 10, d.w - 70, 1, C_EDGE_DK);
 		by += 18;
+
+		/* PAGE TURN. Only the page's own content moves — the sidebar, the
+		 * step markers, the heading rule and the Back/Next row are the parts
+		 * that stay put between pages, and sliding them too would turn a step
+		 * forward into the whole dialog twitching.
+		 *
+		 * Nested inside the entrance fade rather than replacing it: opening
+		 * the wizard fades the panel in AND deals its first page, and one
+		 * multiplied by the other is what makes that read as a single motion.
+		 * `wiz_alpha` is restored right after the switch. */
+		{
+			static int wseen = -1;
+			anim_watch(g_wiz_page, &wseen, &g_wiz_at);
+		}
+		{
+			float wt = anim_t(g_wiz_at, 130);
+			wiz_alpha = g_alpha;
+			g_alpha = (Uint8)(wiz_alpha * wt);
+			bx += (int)((1.0f - wt) * 9.0f);
+		}
 
 		switch (g_wiz_page) {
 		case WIZ_WELCOME:
@@ -3330,6 +3507,8 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			}
 			break;
 		}
+		g_alpha = wiz_alpha;      /* the page turn ends here; the frame's own
+		                           * entrance fade carries on below */
 
 		/* buttons */
 		{
@@ -3627,6 +3806,22 @@ void ui_draw_idle(SDL_Renderer *ren, int lw, int lh)
 	text_c(ren, 0, lw, cy + 40, "File " GL_SUB " Run System Menu", C_TEXT_DIM);
 }
 
+/* The entrance, and the guarantee that it is undone. A modal fades up and
+ * rises the last ten pixels into place; cur_dlg() carries the offset so the
+ * hit test follows. 150ms — long enough to read as motion, short enough that
+ * nobody waiting to click a Close button ever notices it. */
+static void draw_dialog(SDL_Renderer *r, int lw, int lh)
+{
+	static int seen = M_NONE;
+
+	anim_watch((int)g_modal, &seen, &g_modal_at);
+	if (g_modal == M_NONE) return;
+
+	g_alpha = (Uint8)(255.0f * anim_t(g_modal_at, 150));
+	draw_dialog_body(r, lw, lh);
+	g_alpha = 255;
+}
+
 void ui_draw(SDL_Renderer *r, int lw, int lh)
 {
 	draw_bar(r, lw);
@@ -3669,7 +3864,18 @@ void ui_debug_state(const char *spec)
 	else if (!strcmp(name, "about"))   g_modal = M_ABOUT;
 	/* `apps@x,y` renders the launcher with the pointer at x,y, so a row can be
 	 * shown highlighted without anyone touching a mouse. */
-	else if (!strcmp(name, "apps"))    { ap_reload(); g_modal = M_APPS; }
+	/* `apps` opens the launcher at the top; `apps<N>` selects the Nth entry,
+	 * which is how a scrolled list gets captured — the view follows the
+	 * selection, so `apps400` proves the thing scrolls without anyone
+	 * touching a wheel. `appsend` goes to the last one. */
+	else if (!strncmp(name, "apps", 4)) {
+		ap_reload();
+		g_modal = M_APPS;
+		if (!strcmp(name + 4, "end")) g_ap_sel = g_ap_n - 1;
+		else if (name[4])             g_ap_sel = atoi(name + 4);
+		if (g_ap_sel < 0) g_ap_sel = 0;
+		if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;
+	}
 	else if (!strcmp(name, "games")) {
 		ui_games_reload();
 		if (!g_gm_dir[0] && g_cfg.games_dir[0])
@@ -3744,11 +3950,15 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	if (g_modal == M_APPS && g_ap_n) {
 		int x = d.x + 10, y = d.y + 20, i, row = 30;
 		int listh = d.h - 30 - 22, vis = listh / row;
+		/* Same inset the draw uses once a scrollbar is present, so the last
+		 * few pixels of a row are not a dead strip under the bar. */
+		int rw = d.w - 16 - (g_ap_n > vis ? 6 : 0);
 		for (i = 0; i < vis && g_ap_top + i < g_ap_n; i++) {
-			if (!inside(mx, my, x - 2, y + i * row - 2, d.w - 16, row - 2))
+			if (!inside(mx, my, x - 2, y + i * row - 2, rw, row - 2))
 				continue;
+			g_ap_sel = g_ap_top + i;
 			snprintf(g_action_path, sizeof(g_action_path), "%s",
-			         g_ap[g_ap_top + i].pkg);
+			         g_ap[g_ap_sel].pkg);
 			g_action = UI_ACT_RUN_APP;
 			g_modal = M_NONE;
 			return 1;
@@ -4207,6 +4417,39 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 				g_prof_focus = 0;
 				return 1;
 			}
+		}
+		/* THE LAUNCHER HAD NO KEYBOARD AT ALL. Every other list in this file
+		 * has arrows, paging and Home/End; this one fell through to the
+		 * generic "a modal is up" branch below, which swallows the key and
+		 * does nothing — so the only way to move through four hundred apps
+		 * was the wheel, and nothing on screen said even that would work. */
+		if (g_modal == M_APPS && g_ap_n &&
+		    e->key.keysym.sym != SDLK_ESCAPE) {   /* Escape closes, below */
+			switch (e->key.keysym.sym) {
+			case SDLK_RETURN:
+				if (g_ap_sel >= 0 && g_ap_sel < g_ap_n) {
+					snprintf(g_action_path, sizeof(g_action_path), "%s",
+					         g_ap[g_ap_sel].pkg);
+					g_action = UI_ACT_RUN_APP;
+					g_modal = M_NONE;
+				}
+				return 1;
+			case SDLK_UP:       g_ap_sel--; break;
+			case SDLK_DOWN:     g_ap_sel++; break;
+			case SDLK_PAGEUP:   g_ap_sel -= g_ap_rows; break;
+			case SDLK_PAGEDOWN: g_ap_sel += g_ap_rows; break;
+			case SDLK_HOME:     g_ap_sel = 0; break;
+			case SDLK_END:      g_ap_sel = g_ap_n - 1; break;
+			default: return 1;      /* any other key: swallowed by the modal */
+			}
+			if (g_ap_sel < 0) g_ap_sel = 0;
+			if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;
+			/* The view follows the selection; the draw clamps g_ap_top
+			 * against the row count it actually has room for. */
+			if (g_ap_sel < g_ap_top) g_ap_top = g_ap_sel;
+			if (g_ap_sel >= g_ap_top + g_ap_rows)
+				g_ap_top = g_ap_sel - g_ap_rows + 1;
+			return 1;
 		}
 		if (g_modal == M_GAMES) {
 			switch (e->key.keysym.sym) {
