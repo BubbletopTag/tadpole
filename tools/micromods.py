@@ -416,6 +416,20 @@ def cmd_enable_slots(product, bonus, paid, dry):
     names, and if THEY work, the name is the key and this approach is dead.
     """
     titles = installed_titles()
+
+    # "all" is every title whose binary carries the micromod subsystem. The
+    # ones without it would take the packages and never look at them.
+    if product == "all":
+        n = 0
+        for prod, pkgs in sorted(titles.items()):
+            if not any(has_micromod_code(os.path.join(PROGRAMFILES, p))
+                       for p in pkgs):
+                continue
+            cmd_enable_slots(prod, bonus, paid, dry)
+            n += 1
+        print("\n%d titles" % n)
+        return
+
     pkgs = titles.get(product, [])
     fams = sorted({p.split("-")[0] for p in pkgs if p.split("-")[0] in FAMILIES})
     if not fams:
