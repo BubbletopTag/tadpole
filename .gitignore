@@ -19,6 +19,9 @@ runtime/tone
 # what tools/micromods.py wrote into this checkout's Downloads, so it can
 # take exactly that back out again. Local state about a local sysroot.
 runtime/micromods-made.json
+# Micromod packages downloaded from LeapFrog. Kept so a re-scan or a sysroot
+# reset costs the server nothing; it is their content, not ours to redistribute.
+runtime/micromods-cache/
 *.o
 
 # Captures and scratch

@@ -1,46 +1,56 @@
 #!/usr/bin/env python3
-"""micromods.py — turn on the bonus content the device was never connected to get.
+"""micromods.py — get the bonus content the device was never connected to earn.
 
-    ./tools/micromods.py                      what is installed, what is missing
-    ./tools/micromods.py --ingest DIR         install real micromod packages
-    ./tools/micromods.py --enable 0x00180025  write the catalogued ones
-    ./tools/micromods.py --enable all
-    ./tools/micromods.py --discover 0x00180025    candidate names, for review
-    ./tools/micromods.py --uninstall          undo exactly what this tool made
+    ./tools/micromods.py                       what is installed
+    ./tools/micromods.py --scan 0x00180002     what LeapFrog still serves for it
+    ./tools/micromods.py --scan 0x00180002 --install
+    ./tools/micromods.py --scan 0x00180002 --install --only 000009,000011
+    ./tools/micromods.py --ingest DIR          install packages you already have
+    ./tools/micromods.py --fix-access          repair ones installed inert
+    ./tools/micromods.py --uninstall           undo exactly what this tool made
 
-WHAT A MICROMOD IS, read off this firmware rather than guessed. LeapFrog's
-bonus content — alternate music, expansion tracks, home-screen themes — is a
-package with NO CONTENT IN IT:
+Micromods are LeapFrog's free extras — alternate music, expansion tracks,
+dress-up clothes, seasonal themes. A child earned badges, a parent connected
+the device to LFConnect, and points bought them. A device that was never
+connected has none, and Tadpole cannot talk to LFConnect.
 
-    LF/Bulk/Downloads/<PackageID>/
-        meta.inf              ~260 bytes, the whole thing
-        packagefiles.md5      one md5 per file
-        <preview>.png         optional, for the picker
+BUT THE PACKAGES ARE STILL SERVED, and that is the whole tool:
 
-The game already ships the material. SpongeBob's KART_TRACK_EXPANSION unpacks
-to a meta.inf, a 70x69 icon and a checksum, while the four expansion tracks it
-"delivers" are sitting in the base package's own Data/Sound/Material/voice/ the
-whole time. The package is a flag saying the child earned it, not a delivery
-mechanism — which is why writing the flag is enough.
+    https://digitalcontent.leapfrog.com/packages/<ProductID>/<PackageID>.lf2
 
-HOW A TITLE FINDS THEM. sys::getMicroModsPath() builds the Downloads path,
-DjMicroMod::readPackageInfo() reads what is sitting in it, and isExist() is
-answered by presence. What the game matches on is the meta.inf `Name` — the
-uppercase token, e.g. KART_TRACK_EXPANSION, which is in the title's own binary.
-The lowercase `MDLType` beside it is NOT in the binary and appears to be for
-LFConnect's benefit.
+--scan asks for exactly the slots a title could have, stops at the first gap,
+and caches what comes back. Nothing is enumerated, nothing is crawled, and
+every request names one package belonging to a title already installed here.
 
-The player then switches a micromod on in the game's own Micromods menu, and
-that choice is per profile: MicromodState::serialize() writes it into the
-profile's save data. So this tool makes content AVAILABLE. Turning it on is
-still done in the game, which is also why nothing here touches a profile.
+WHY DOWNLOADING BEATS SYNTHESISING, which is what this tool used to do. A
+micromod carries no content — the game already ships the material — so it
+looked like a flag that could simply be written. It is a flag. It is not the
+same flag twice:
 
-WHY THERE IS A CATALOGUE INSTEAD OF A CLEVER SCAN. A title's micromod names
-can only be guessed from outside it. Clam Prix's binary holds 123 strings
-shaped like a micromod name and exactly 4 of them are one, so a scan that
-installs what it finds would write 119 packages that mean nothing. --discover
-prints candidates and installs none of them; the catalogue below holds only
-entries taken from real packages or from what is already installed here.
+  * SpongeBob's Clam Prix (DjMicroMod::readPackageInfo) compares the meta.inf
+    `Name` against a table of eight strings compiled into its own binary:
+    BACKGROUND_MUSIC_1..3, KART_TRACK_EXPANSION, then KART_TRACK four times.
+    A name outside that table means nothing to it.
+  * Ni Hao Kai-lan (CheckMDLFiles) never reads the name. It looks INSIDE the
+    package for clothes.txt, collectable.txt or theme.txt, each holding one
+    digit, and builds a bitmask from them — clothes 1..7, collectables 1..3,
+    themes 1..3.
+  * 125 installed ProductIDs call LTM::CMicroDownloads::get. Only five use an
+    engine anybody here has read.
+
+So there is no universal flag to write, and a slot number is not one either.
+The real package always carries whatever its own title looks for, which is why
+this fetches instead of guessing.
+
+WHAT THE FIRMWARE DEMANDS FIRST. Before a title sees anything,
+LTM::CMicroDownloads::get filters LF/Bulk/Downloads by: no `doom` file, a
+meta.inf, Type="MicroDownload", a ProductID equal to the running title's, and
+then DeviceAccess=1 or a ProfileAccess naming the signed-in player. A package
+as SERVED has neither of those last two — LFConnect adds one on install — so
+everything installed here gets one written. See ensure_access.
+
+Turning a micromod on is still done in the game's own menu, per profile, so
+nothing here touches a profile.
 
 NOTHING IS OVERWRITTEN and everything is logged. A package this tool did not
 create is never touched, and --uninstall works from the manifest it wrote, so
@@ -48,12 +58,16 @@ it cannot remove a micromod that came off the real device.
 """
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import sys
 import tarfile
+import time
+import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HERE)
@@ -62,15 +76,44 @@ BULK = os.environ.get("TADPOLE_BULK") or os.path.join(SYSROOT, "LF", "Bulk")
 DOWNLOADS = os.path.join(BULK, "Downloads")
 PROGRAMFILES = os.path.join(BULK, "ProgramFiles")
 MANIFEST = os.path.join(PROJ, "runtime", "micromods-made.json")
+CACHE = os.path.join(PROJ, "runtime", "micromods-cache")
+
+# ---- LeapFrog's content server -------------------------------------------
+#
+# The layout is the one tools/fetch-firmware.py already uses for firmware:
+#
+#     https://digitalcontent.leapfrog.com/packages/<ProductID>/<PackageID>.lf2
+#
+# ASK ONLY FOR WHAT WE HAVE A REASON TO WANT. The bucket answers a bare GET
+# with an S3 listing, and it is tempting to read the catalogue straight out of
+# it — but it returns only the first 1000 keys and ignores `prefix` and
+# `marker` (CloudFront drops the query string), so that is both a dead end and
+# somebody's boundary. Every request this tool makes names one exact package,
+# derived from the ProductID of a title the user already owns and has
+# installed. Nothing is enumerated and nothing is crawled.
+#
+# ONLY THE MULT FAMILY IS SERVED. LPAD and LST3 micromods are not on the CDN
+# at all. That is not a problem: LTM::CMicroDownloads::get filters on the
+# ProductID and never looks at the family, so a MULT package is read by an
+# LPAD or LST3 build of the same title.
+CDN = "https://digitalcontent.leapfrog.com/packages"
+CDN_FAMILY = "MULT"
+UA = "tadpole-micromods/1 (+https://github.com/BubbletopTag/leappad-emu)"
+# Between requests. A scan is a dozen of them; there is no reason to be quick
+# about it.
+CDN_DELAY = 0.3
 
 # ---- the catalogue --------------------------------------------------------
 #
 # ProductID -> list of (slot, Name, MDLType, depends_on_cartridge)
 #
-# ONLY ENTRIES WITH A PROVENANCE. Every one below was read out of a real
-# LFConnect package or off a package already installed on this firmware. When
-# a title's micromods are not known, it does not get a guess — it gets left
-# out, and --discover tells you what to go and confirm.
+# ONLY ENTRIES WITH A PROVENANCE, and only for the offline path. --scan gets
+# the real packages from LeapFrog and needs none of this; the catalogue is what
+# --enable falls back on when there is no network, and it holds nothing that
+# was not read out of a real package.
+#
+# It is also NOT a description of a title's micromods. Clam Prix's binary
+# accepts a fifth name, KART_TRACK, which no LFConnect package here carries.
 #
 # `depends` marks the ones whose real package carries
 # Depends="<SYS>-<ProductID>-999999" — "prove you own the cartridge". The
@@ -85,6 +128,8 @@ CATALOGUE = {
         ("000002", "BACKGROUND_MUSIC_2", "background_music_2", True),
         ("000003", "BACKGROUND_MUSIC_3", "background_music_3", True),
         ("100000", "KART_TRACK_EXPANSION", "kart_track_expansion", False),
+        # In the binary's name table (entries 4-7) but in no package here.
+        ("000004", "KART_TRACK", "kart_track", True),
     ],
 }
 
@@ -93,14 +138,6 @@ CATALOGUE = {
 # unlock ships as both LPAD- and MULT-: installing only one leaves the other
 # build seeing nothing.
 FAMILIES = ("LPAD", "MULT", "MHRS", "PADS", "PAD2", "LST3", "PHRS")
-
-# HOW FAR TO SWEEP, when sweeping by slot. Bonus unlocks start at 000001 and
-# run consecutively — Clam Prix has three, Ni Hao Kai-lan eleven — and the
-# separately-sold expansions start at 100000. Both ceilings are generous
-# rather than derived: an empty slot costs one inert directory, and a slot
-# that stops short costs a micromod nobody gets.
-SLOT_BONUS = 12
-SLOT_PAID = 3
 
 META_TEMPLATE = """MetaVersion="1.0"
 Device="{device}"
@@ -241,6 +278,124 @@ def write_checksums(pkgdir):
             p = os.path.join(pkgdir, n)
             if os.path.isfile(p):
                 f.write("%s  ./%s\n" % (md5_file(p), n))
+
+
+# ---- talking to the CDN ---------------------------------------------------
+
+def _ssl_ready():
+    """LeapFrog's chain is rooted at DigiCert Global Root G2, which an
+    un-updated Windows 7 does not carry. netssl is the sibling tool that
+    installs a bundle for it; importing it is the whole setup."""
+    try:
+        sys.path.insert(0, HERE)
+        import netssl  # noqa: F401 — imported for its import-time side effect
+    except Exception:
+        pass
+
+
+def cdn_url(pkgid, ext="lf2"):
+    return "%s/%s/%s.%s" % (CDN, pkgid.split("-")[1], pkgid, ext)
+
+
+def cdn_fetch(pkgid, timeout=30):
+    """-> package bytes, or None when the CDN does not have it.
+
+    None means 404 and nothing else. A refused connection or a timeout raises,
+    because "the server is unreachable" and "this micromod does not exist" are
+    the two answers a scan must never confuse: treating the first as the second
+    would quietly report that a title has no bonus content."""
+    req = urllib.request.Request(cdn_url(pkgid), headers={"User-Agent": UA})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            return None
+        raise
+
+
+def tar_meta(blob):
+    """-> (fields, members) read from a package's meta.inf, or (None, None)."""
+    try:
+        t = tarfile.open(fileobj=io.BytesIO(blob))
+        names = t.getnames()
+    except (tarfile.TarError, OSError):
+        return None, None
+    metan = next((n for n in names if os.path.basename(n) == "meta.inf"), None)
+    if not metan:
+        return None, None
+    f = t.extractfile(metan)
+    fields = {}
+    if f:
+        for line in f.read().decode("utf-8", "replace").splitlines():
+            k, _, v = line.partition("=")
+            if k.strip():
+                fields[k.strip()] = v.strip().strip('"')
+    return fields, names
+
+
+def cache_dir(product):
+    return os.path.join(CACHE, product)
+
+
+def cached(pkgid):
+    p = os.path.join(cache_dir(pkgid.split("-")[1]), pkgid + ".lf2")
+    return p if os.path.isfile(p) else None
+
+
+def cache_put(pkgid, blob):
+    d = cache_dir(pkgid.split("-")[1])
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, pkgid + ".lf2")
+    with open(p, "wb") as f:
+        f.write(blob)
+    return p
+
+
+# HOW FAR EACH RUN GOES BEFORE GIVING UP. Slots are consecutive within a run
+# and the runs are far apart — Ni Hao Kai-lan is 000001..000011, Clam Prix is
+# 000001..000003 and then 100000 — so a scan walks each run until one miss and
+# stops. The ceiling is a backstop against a title with more bonus content
+# than anyone here has seen, not a number anything depends on.
+# 999999 is not a micromod but the CartridgeData stub they name in Depends —
+# "prove you own the cartridge". One request, and it saves synthesising one.
+RUNS = ((1, 24), (100000, 8), (999999, 1))
+
+
+def scan_online(product, refresh=False, quiet=False):
+    """Ask the CDN which micromods this title has. -> [(pkgid, fields, names)]
+
+    One request per slot, stopping at the first gap in each run, plus one for
+    the CartridgeData stub the micromods declare Depends on. That is fourteen
+    requests for the largest title here and seven for the smallest."""
+    _ssl_ready()
+    out, misses = [], 0
+    for start, span in RUNS:
+        for i in range(span):
+            pkgid = "%s-%s-%06d" % (CDN_FAMILY, product, start + i)
+            hit = cached(pkgid)
+            if hit and not refresh:
+                blob = open(hit, "rb").read()
+            else:
+                try:
+                    blob = cdn_fetch(pkgid)
+                except Exception as e:
+                    print("  ! %s: %s" % (pkgid, str(e)[:70]), file=sys.stderr)
+                    return out, False
+                time.sleep(CDN_DELAY)
+                if blob is None:
+                    misses += 1
+                    break
+                cache_put(pkgid, blob)
+            fields, names = tar_meta(blob)
+            if fields is None:
+                continue
+            out.append((pkgid, fields, names))
+            if not quiet:
+                print("    %-28s %-26s %s"
+                      % (pkgid, fields.get("Name", "")[:26],
+                         "preview" if any(n.endswith(".png") for n in names) else ""))
+    return out, True
 
 
 PROFILE_ACCESS = "ProfileAccess=0,1,2,3"
@@ -384,8 +539,9 @@ def cmd_scan():
                     missing += 1
     if not missing:
         print("    (none)")
-    print("\n--enable <ProductID> writes them. --discover <ProductID> lists "
-          "candidates for a title\nthat is not catalogued yet.")
+    print("\n--scan <ProductID> asks LeapFrog what that title actually has, "
+          "which beats\nanything catalogued here. --enable writes the "
+          "catalogued ones with no network.")
 
 
 def cmd_enable(which, dry):
@@ -435,101 +591,6 @@ def cmd_enable(which, dry):
               "choice is per profile\nand this tool does not touch profiles.")
 
 
-def cmd_enable_slots(product, bonus, paid, dry):
-    """Write a title's micromod slots without knowing what they are called.
-
-    THE BET THIS MAKES, stated plainly because it is not yet proven. Every
-    sign says a title finds a micromod by its SLOT NUMBER and treats the
-    meta.inf `Name` as display text:
-
-      * sys::getMicroModsPath(char*, int) is indexed by an int, not a name.
-      * isExist(MICROMOD_TYPE) is an enum lookup — the title walks its OWN
-        list and asks whether each one is present.
-      * the engine's leftover format string builds `...-%06d/meta.inf`, a
-        path assembled FROM a slot number.
-      * and the real packages line up with it exactly: Clam Prix's three
-        music unlocks are slots 000001..000003 and its expansion is 100000;
-        Ni Hao Kai-lan's eleven are 000001..000011 in menu order.
-
-    If that is right, this unlocks a title's bonus content with no catalogue,
-    no names and no network. If it is wrong, every package written here is
-    inert — the title reads it, does not recognise it, ignores it — and
-    --uninstall takes them all back out. That asymmetry is the reason this is
-    worth trying before the disassembly that would settle it.
-
-    THE EXPERIMENT THAT SETTLES IT is Ni Hao Kai-lan, because its real
-    packages are on this machine and its micromods are visible things —
-    clothes, collectables, seasonal themes. Sweep its slots with the
-    placeholder names below; if its dress-up items appear in game, the slot
-    is the key and this generalises to every title. If they do not, run
-    --uninstall then --ingest on the real packages: those carry the true
-    names, and if THEY work, the name is the key and this approach is dead.
-    """
-    titles = installed_titles()
-
-    # "all" is every title whose binary carries the micromod subsystem. The
-    # ones without it would take the packages and never look at them.
-    if product == "all":
-        n = 0
-        for prod, pkgs in sorted(titles.items()):
-            if not any(has_micromod_code(os.path.join(PROGRAMFILES, p))
-                       for p in pkgs):
-                continue
-            cmd_enable_slots(prod, bonus, paid, dry)
-            n += 1
-        print("\n%d titles" % n)
-        return
-
-    pkgs = titles.get(product, [])
-    fams = sorted({p.split("-")[0] for p in pkgs if p.split("-")[0] in FAMILIES})
-    if not fams:
-        print("%s: not installed here" % product)
-        return
-    man = load_manifest()
-    print("%s  families: %s" % (product, ", ".join(fams)))
-    print("  slots 000001-%06d and 100000-%06d, placeholder names" % (bonus, 100000 + paid - 1))
-    made = 0
-    slots = ["%06d" % i for i in range(1, bonus + 1)]
-    slots += ["%06d" % (100000 + i) for i in range(paid)]
-    for slot in slots:
-        for fam in fams:
-            pkgid = "%s-%s-%s" % (fam, product, slot)
-            name = "MICROMOD_%s" % slot.lstrip("0").rjust(1, "0")
-            r = make_package(pkgid, product, name, name.lower(), False, dry)
-            if r == "made":
-                man["made"].append(pkgid)
-                made += 1
-            elif r == "would":
-                made += 1
-            elif r == "exists":
-                print("    = %-28s left alone" % pkgid)
-    if not dry:
-        save_manifest(man)
-    print("  wrote %d%s" % (made, " (dry run)" if dry else ""))
-    if made and not dry:
-        print("\nNow play the title and look at its Micromods menu.\n"
-              "  something appeared -> the slot is the key; this works everywhere\n"
-              "  nothing appeared   -> --uninstall, then --ingest the real packages")
-
-
-def cmd_discover(product):
-    titles = installed_titles()
-    pkgs = titles.get(product, [])
-    if not pkgs:
-        print("%s: not installed here" % product)
-        return
-    for p in pkgs:
-        d = os.path.join(PROGRAMFILES, p)
-        if not has_micromod_code(d):
-            print("%s: no micromod code in this build" % p)
-            continue
-        toks = caps_tokens(d)
-        print("%s: %d candidate names — READ THESE, do not trust them" % (p, len(toks)))
-        for t in toks:
-            print("    %s" % t)
-        print("  Most are not micromods. The real ones are the tokens the "
-              "title's Micromods\n  menu offers; confirm against a real "
-              "package before adding to CATALOGUE.")
 
 
 def cmd_ingest(src, dry):
@@ -621,6 +682,96 @@ def cmd_ingest(src, dry):
     print("installed %d" % made)
 
 
+def install_blob(pkgid, blob, dry):
+    """Unpack one downloaded package into Downloads. -> 'made'|'exists'|'would'"""
+    dest = os.path.join(DOWNLOADS, pkgid)
+    if os.path.exists(dest):
+        return "exists"
+    if dry:
+        return "would"
+    t = tarfile.open(fileobj=io.BytesIO(blob))
+    names = t.getnames()
+    metan = next(n for n in names if os.path.basename(n) == "meta.inf")
+    prefix = os.path.dirname(metan)
+    os.makedirs(dest)
+    for n in names:
+        m = t.getmember(n)
+        if not m.isfile():
+            continue
+        rel = os.path.relpath(n, prefix) if prefix else n
+        if rel.startswith(".."):
+            continue
+        out = os.path.join(dest, rel)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        ex = t.extractfile(m)
+        if ex:
+            with open(out, "wb") as w:
+                shutil.copyfileobj(ex, w)
+    # WITHOUT THIS THE DOWNLOAD IS INERT. See ensure_access — the CDN copy
+    # carries no access field at all, and the firmware drops such a package
+    # before the title is asked about it.
+    ensure_access(dest)
+    return "made"
+
+
+def cmd_scan_online(product, refresh, install, only, dry):
+    """Scan a title's micromods on LeapFrog's server, and optionally take them.
+
+    --scan on its own is read-only: it downloads each package into the cache
+    and prints what is there, so the choosing can be done with the real names
+    in front of you rather than slot numbers."""
+    titles = installed_titles()
+    products = sorted(titles) if product == "all" else [product]
+    if product != "all" and product not in titles:
+        print("%s: not installed here — micromods are only useful for a title "
+              "you own" % product)
+        return
+    man = load_manifest()
+    total = 0
+    for prod in products:
+        pkgs = titles.get(prod, [])
+        name = ""
+        for p in pkgs:
+            name = meta_fields(os.path.join(PROGRAMFILES, p, "meta.inf")).get("Name", "")
+            if name:
+                break
+        print("%s  %s" % (prod, name))
+        found, ok = scan_online(prod, refresh=refresh)
+        if not ok:
+            print("  (server unreachable — nothing concluded about this title)")
+            return
+        mods = [(k, f, n) for k, f, n in found
+                if f.get("Type") == "MicroDownload"]
+        deps = [(k, f, n) for k, f, n in found
+                if f.get("Type") != "MicroDownload"]
+        if not mods:
+            print("  no micromods on the server for this title")
+            continue
+        total += len(mods)
+        if not install:
+            print("  %d available%s — --scan %s --install to take them"
+                  % (len(mods), ", plus a cartridge stub" if deps else "", prod))
+            continue
+        inst = installed_micromods()
+        # The CartridgeData stub first: the micromods declare Depends on it,
+        # and a dependency naming an absent package is exactly the kind of
+        # thing a picker filters out quietly.
+        for pkgid, fields, _names in deps + mods:
+            if only and pkgid.rsplit("-", 1)[1] not in only:
+                continue
+            blob = open(cached(pkgid), "rb").read()
+            r = install_blob(pkgid, blob, dry)
+            mark = {"made": "+", "exists": "=", "would": "?"}[r]
+            print("  %s %-28s %s" % (mark, pkgid, fields.get("Name", "")))
+            if r == "made":
+                man["made"].append(pkgid)
+        if not dry:
+            save_manifest(man)
+    if not install and total:
+        print("\ncached under runtime/micromods-cache — re-scanning costs "
+              "LeapFrog nothing.")
+
+
 def cmd_fix_access(dry):
     """Repair micromods already installed without an access field.
 
@@ -666,17 +817,18 @@ def cmd_uninstall(dry):
 def main():
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("--enable", metavar="PRODUCTID|all")
-    ap.add_argument("--enable-slots", metavar="PRODUCTID",
-                    help="sweep a title's slots without knowing the names")
-    ap.add_argument("--bonus", type=int, default=SLOT_BONUS,
-                    help="how many 0000NN bonus slots (default %d)" % SLOT_BONUS)
-    ap.add_argument("--paid", type=int, default=SLOT_PAID,
-                    help="how many 1000NN expansion slots (default %d)" % SLOT_PAID)
-    ap.add_argument("--discover", metavar="PRODUCTID")
     ap.add_argument("--ingest", metavar="DIR")
     ap.add_argument("--uninstall", action="store_true")
     ap.add_argument("--fix-access", action="store_true",
                     help="add ProfileAccess to installed micromods missing it")
+    ap.add_argument("--scan", metavar="PRODUCTID|all",
+                    help="ask LeapFrog's server what this title's micromods are")
+    ap.add_argument("--install", action="store_true",
+                    help="with --scan: install what the scan found")
+    ap.add_argument("--only", metavar="SLOT[,SLOT...]",
+                    help="with --install: just these slots, e.g. 000009,000011")
+    ap.add_argument("--refresh", action="store_true",
+                    help="with --scan: re-download instead of using the cache")
     ap.add_argument("-n", "--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -690,12 +842,11 @@ def main():
         cmd_uninstall(a.dry_run)
     elif a.fix_access:
         cmd_fix_access(a.dry_run)
+    elif a.scan:
+        only = set(s.strip() for s in a.only.split(",")) if a.only else None
+        cmd_scan_online(a.scan, a.refresh, a.install, only, a.dry_run)
     elif a.ingest:
         cmd_ingest(a.ingest, a.dry_run)
-    elif a.discover:
-        cmd_discover(a.discover)
-    elif a.enable_slots:
-        cmd_enable_slots(a.enable_slots, a.bonus, a.paid, a.dry_run)
     elif a.enable:
         cmd_enable(a.enable, a.dry_run)
     else:
