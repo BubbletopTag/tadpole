@@ -473,25 +473,62 @@ def cache_put(pkgid, blob):
     return p
 
 
-# HOW FAR EACH RUN GOES BEFORE GIVING UP. Slots are consecutive within a run
-# and the runs are far apart — Ni Hao Kai-lan is 000001..000011, Clam Prix is
-# 000001..000003 and then 100000 — so a scan walks each run until one miss and
-# stops. The ceiling is a backstop against a title with more bonus content
-# than anyone here has seen, not a number anything depends on.
-# 999999 is not a micromod but the CartridgeData stub they name in Depends —
-# "prove you own the cartridge". One request, and it saves synthesising one.
-RUNS = ((1, 24), (100000, 8), (999999, 1))
+# WHERE A TITLE'S SLOTS LIVE. Slots are consecutive within a run and the runs
+# are far apart, so a scan walks each run and gives up when it stops finding
+# things. The spans are backstops against a title with more bonus content than
+# anyone here has seen, not numbers anything depends on.
+#
+# THE STARTS ARE EVIDENCE, NOT GUESSES, and the first three were not enough.
+# This began as 1, 100000 and 999999 — everything Ni Hao Kai-lan, Clam Prix and
+# Bubble Guppies between them use — and reported "no micromods on the server"
+# for Mr. Pencil Saves Doodleburg, which has two. They are at 003001 and
+# 003002, nowhere near anything being asked for, and LeapFrog serves 003001 to
+# this day: 5.2 MB of coloring book, 404 on every slot the scan actually
+# walked. A negative result from a search that never looked is worse than no
+# search, because it is believed.
+#
+# Every start below is a slot some real package on a real device uses:
+#
+#   000001   Kai-lan 1..11, Bubble Guppies 1..5, Clam Prix 1..3
+#   003001   Mr. Pencil 0x00180015 and 0x00180022 — MDLType "Leaplet",
+#            confirmed served by the CDN as MULT-0x00180015-003001
+#   004001   0x00180024, also a Leaplet
+#   100000   Clam Prix's kart track
+#   200000   0x00210008, and 0x1F1E0002 at 200001..200003
+#   300000   0x1F1E0002 at 300000..300016
+#   900000   0x001E0010
+#   999999   not a micromod but the CartridgeData stub the packages name in
+#            Depends — "prove you own the cartridge". One request, and it
+#            saves synthesising one.
+#
+# WHAT IS STILL NOT FOUND, said plainly rather than left to be discovered: a
+# run that starts late. 0x001E0010's slots begin at 000007, so a walk from
+# 000001 misses on its first request and stops. Finding that would mean asking
+# for slots there is no reason to think exist, one after another, which is the
+# crawl this tool is written not to be. A title in that position is still
+# reachable through --ingest with the package in hand.
+RUNS = ((1, 24), (3001, 24), (4001, 24), (100000, 8), (200000, 8),
+        (300000, 24), (900000, 4), (999999, 1))
+
+# HOW MANY HOLES A RUN SURVIVES, once it has produced something. 0x1F1E0002
+# has 300008 and 300011 with nothing between them, so stopping at the first
+# miss loses six packages that are there. The tolerance is deliberately only
+# extended to runs that have ALREADY found something: an empty run still costs
+# exactly one request, which is what keeps a scan of a title with no bonus
+# content at eight requests rather than twenty-four.
+RUN_GAP = 2
 
 
 def scan_online(product, refresh=False, quiet=False):
     """Ask the CDN which micromods this title has. -> [(pkgid, fields, names)]
 
-    One request per slot, stopping at the first gap in each run, plus one for
-    the CartridgeData stub the micromods declare Depends on. That is fourteen
-    requests for the largest title here and seven for the smallest."""
+    One request per slot. A run that finds nothing stops at its first miss, so
+    a title with no bonus content at all costs one request per run — eight —
+    and a title that has some pays only for the runs it actually uses."""
     _ssl_ready()
-    out, misses = [], 0
+    out = []
     for start, span in RUNS:
+        got, gap = 0, 0
         for i in range(span):
             pkgid = "%s-%s-%06d" % (CDN_FAMILY, product, start + i)
             hit = cached(pkgid)
@@ -504,12 +541,19 @@ def scan_online(product, refresh=False, quiet=False):
                     print("  ! %s: %s" % (pkgid, str(e)[:70]), file=sys.stderr)
                     return out, False
                 if blob is None:
-                    misses += 1
-                    break
+                    # A run that has found nothing is not this title's run, and
+                    # stops dead. One that has found something is allowed a
+                    # hole or two, because real runs have them. See RUN_GAP.
+                    gap += 1
+                    if not got or gap > RUN_GAP:
+                        break
+                    continue
+                gap = 0
                 cache_put(pkgid, blob)
             fields, names = tar_meta(blob)
             if fields is None:
                 continue
+            got += 1              # this run is real; it may now survive a hole
             out.append((pkgid, fields, names))
             if not quiet:
                 print("    %-28s %-26s %s"
