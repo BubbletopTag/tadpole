@@ -16,23 +16,38 @@
 #   TADPOLE_GL=0 ./tadpole.sh    use the stock GPU stack (titles will assert)
 #   ./tadpole.sh -r 90 ...       rotate the display (portrait titles)
 #
+# Runs on Glasspole, this project's own ARM JIT, whenever one is built or
+# bundled; qemu-arm is the fallback. TADPOLE_QEMU="$(command -v qemu-arm)"
+# puts a single run back on qemu.
+#
 # Viewer controls:  arrows = D-pad, Z/X = A/B, Home = menu, Esc = back,
 #                   mouse click/drag = stylus, Ctrl+Q = quit.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# The bundled qemu-arm if Tadpole has one, the host's otherwise. A user who
-# installed qemu-user themselves keeps working; a user who did nothing at all
-# gets the static copy that ships with the AppImage.
+# WHICH ENGINE RUNS THE GUEST. Glasspole if this checkout has one built, the
+# bundled or installed qemu-arm otherwise — tad_qemu() owns that order and the
+# reasoning behind it. A user who installed qemu-user themselves keeps working
+# either way; nothing here needs to know which of the two it got.
 PROJ="$HERE"
 . "$HERE/tools/lib-deps.sh"
 QEMU="$(tad_qemu || true)"
 if [ -z "$QEMU" ]; then
-    echo "tadpole: no qemu-arm." >&2
-    echo "  ./tools/fetch-deps.sh   stages one into build/deps (installs nothing)" >&2
+    echo "tadpole: no ARM engine — neither glasspole nor qemu-arm." >&2
+    echo "  cd glasspole && ./fetch-deps.sh && cmake -S . -B build -GNinja && ninja -C build" >&2
+    echo "  ./tools/fetch-deps.sh   stages a qemu-arm into build/deps instead" >&2
     echo "  or install your distribution's qemu-user package" >&2
     exit 1
 fi
+# TELL THE REST OF TADPOLE WHAT IT IS ACTUALLY RUNNING ON.
+#
+# The viewer needs this for two things it cannot work out for itself: the
+# straggler sweep, which only kills processes whose comm matches the engine
+# that was launched, and the About box, which used to name qemu unconditionally
+# and would now be wrong for most people. It was already read from here when
+# the user set it by hand; setting it ourselves means the answer no longer
+# depends on whether they did.
+export TADPOLE_QEMU="$QEMU"
 # DISCOVER the rootfs rather than hardcoding one firmware version. Whatever
 # install-firmware.sh extracted lands under rootfs/<version>/…/ubi_rfs, and the
 # version is whatever the user's own device shipped with.

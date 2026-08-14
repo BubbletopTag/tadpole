@@ -43,42 +43,58 @@
 #define GL_ROTATE   "\x89"
 
 /* ---- theme --------------------------------------------------------------
- * Dark green, a few flat tones, 1px bevels. Deliberately few colours: pixel
+ * Dark blue, a few flat tones, 1px bevels. Deliberately few colours: pixel
  * interfaces read better with a tight palette than with gradients.
  */
-#define C_VOID      0x0C1E14U     /* behind everything */
-/* TWO PALETTES, ONE CODEBASE.
+/* TWO PALETTES, ONE CODEBASE — AND THE COLOUR IS NOT THE PRODUCT NAME.
  *
- * Tadpole runs the LeapPad's software under qemu-arm. Glasspole runs it under
- * our own ARM emulator, which is the only option on Windows. They are the same
- * application and the same viewer, but they are NOT the same product: their
- * compatibility differs, and a user who is told "Tadpole runs this title"
- * should not be looking at a screen driven by the other one.
+ * These started as one thing. Green meant "Tadpole, running the guest under
+ * qemu-arm"; blue meant "Glasspole, running it under our own ARM JIT", which
+ * was the only option on Windows. One boolean picked the wordmark, the logo
+ * and the palette together, so the colour on screen was a promise about which
+ * engine was behind the picture.
  *
- * So the window says which it is, and the chrome changes colour with it —
- * green for Tadpole, blue for Glasspole. Every call site below is unchanged;
- * the C_* names now read through the active palette instead of being
- * compile-time constants, so there is exactly one copy of this code and no
- * possibility of the two drifting apart.
+ * Glasspole is now the default engine everywhere (see tools/lib-deps.sh), and
+ * that promise would have repainted the whole application on people who never
+ * asked for a different product. So the two questions are separated:
+ *
+ *   what it is CALLED   Tadpole. Always, on every engine. The one exception is
+ *                       the Windows installer's own build, which ships under
+ *                       the Glasspole name and has to keep answering to it.
+ *   what COLOUR it is   blue, on both. It is the house colour now, not a
+ *                       status light.
  *
  * The blue is the green rotated towards cyan at the same lightness, so the
- * layout, contrast and bevels behave identically. */
+ * layout, contrast and bevels behave identically — which is what makes this a
+ * palette swap and not a redesign. The green is kept and reachable with
+ * TADPOLE_THEME=green: it is the look every screenshot in the docs was taken
+ * in, and deleting it would make those a lie with no way back.
+ *
+ * C_VOID JOINS THE STRUCT, which is a bug fix hiding in a rename. It was the
+ * one colour left as a compile-time constant, so the blue chrome has been
+ * drawing on a dark GREEN backdrop this whole time — visible as a green cast
+ * behind the idle logo and down the wizard's banner, on the one build nobody
+ * here runs day to day. Both palettes now carry their own. */
+#define C_VOID      (g_pal->void_bg)  /* behind everything */
 struct palette {
+	unsigned void_bg;
 	unsigned bar, bar_hi, panel, panel_hi, edge_lt, edge_dk;
 	unsigned text, text_dim, accent, shadow;
 };
 
-static const struct palette pal_tadpole = {
+static const struct palette pal_green = {
+	0x0C1E14U,
 	0x14301FU, 0x2A6642U, 0x14301FU, 0x2A6642U, 0x4E9C6BU, 0x08180FU,
 	0xD8F5E4U, 0x6E9B80U, 0x8CE0A6U, 0x030806U
 };
 
-static const struct palette pal_glasspole = {
+static const struct palette pal_blue = {
+	0x0C1A1EU,
 	0x142A30U, 0x2A5A66U, 0x142A30U, 0x2A5A66U, 0x4E8C9CU, 0x081418U,
 	0xD8EEF5U, 0x6E8F9BU, 0x8CCFE0U, 0x030608U
 };
 
-static const struct palette *g_pal = &pal_tadpole;
+static const struct palette *g_pal = &pal_blue;
 
 #define C_BAR       (g_pal->bar)      /* menu bar */
 #define C_BAR_HI    (g_pal->bar_hi)   /* hovered/open bar item */
@@ -93,15 +109,21 @@ static const struct palette *g_pal = &pal_tadpole;
 
 /* WHICH PRODUCT IS THIS?
  *
- * Decided once, at startup, from what is actually going to run the guest:
+ * IT IS NO LONGER A QUESTION ABOUT THE ENGINE. This used to answer "Glasspole"
+ * whenever TADPOLE_QEMU named a glasspole binary, back when choosing that
+ * binary was an unusual thing to do on purpose. tadpole.sh now sets that
+ * variable for everyone, on every run, so the same test would rename the
+ * application out from under every user on this platform. Which engine is
+ * running is reported by ui_engine_name(), where a fact about the engine
+ * belongs; it does not decide what the program is called.
  *
- *   1. TADPOLE_BRAND, if set, wins. An escape hatch for testing either look.
- *   2. On Windows it is always Glasspole. qemu-arm's user mode cannot exist
- *      there, so there is nothing else it could be.
- *   3. TADPOLE_QEMU naming a glasspole binary — that is how tadpole.sh selects
- *      the emulator, so it is the most direct statement of intent available.
- *   4. Otherwise Tadpole, which is the historical default and stays the
- *      default: a source checkout with qemu installed behaves as it always has.
+ *   1. TADPOLE_BRAND, if set, wins. An escape hatch for capturing either look
+ *      without a Windows machine to do it on.
+ *   2. On Windows it is Glasspole, because that is the name the installer
+ *      writes into Programs\Glasspole and the Start menu. A window titled
+ *      Tadpole above a Start menu entry called Glasspole is worse than either
+ *      name on its own.
+ *   3. Everywhere else, Tadpole. On every engine, including glasspole.
  */
 int ui_brand_is_glasspole(void)
 {
@@ -115,12 +137,10 @@ int ui_brand_is_glasspole(void)
 	}
 #ifdef _WIN32
 	cached = 1;
-	return cached;
 #else
-	const char *q = getenv("TADPOLE_QEMU");
-	cached = (q && *q && strstr(q, "glasspole") != NULL);
-	return cached;
+	cached = 0;
 #endif
+	return cached;
 }
 
 const char *ui_brand_name(void)
@@ -128,9 +148,45 @@ const char *ui_brand_name(void)
 	return ui_brand_is_glasspole() ? "Glasspole" : "Tadpole";
 }
 
+/* WHAT IS ACTUALLY BEHIND THE PICTURE, for the About box.
+ *
+ * tadpole.sh exports TADPOLE_QEMU as the engine it launched, so this is the
+ * binary the guest's code is really executing on rather than a guess. Anything
+ * unrecognised is named as itself: a bring-your-own build is a legitimate
+ * thing to be running and deserves a truthful answer, not "qemu-user".
+ */
+const char *ui_engine_name(void)
+{
+	const char *e = getenv("TADPOLE_QEMU"), *b;
+	if (!e || !*e) {
+#ifdef _WIN32
+		/* Nothing else can be running: the viewer builds the glasspole
+		 * command line itself here, and qemu-user has no Windows port. */
+		return "Glasspole JIT";
+#else
+		/* tadpole-view run by hand rather than through tadpole.sh. */
+		return "an ARM engine";
+#endif
+	}
+	b = strrchr(e, '/');
+#ifdef _WIN32
+	{
+		const char *bs = strrchr(e, '\\');
+		if (bs && (!b || bs > b)) b = bs;
+	}
+#endif
+	b = b ? b + 1 : e;
+	if (strstr(b, "glasspole")) return "Glasspole JIT";
+	if (strstr(b, "qemu"))      return "qemu-user";
+	return b;
+}
+
+/* The palette is the house style, not a report on the engine — see the note
+ * above the two of them. TADPOLE_THEME=green brings back the original. */
 void ui_brand_apply(void)
 {
-	g_pal = ui_brand_is_glasspole() ? &pal_glasspole : &pal_tadpole;
+	const char *t = getenv("TADPOLE_THEME");
+	g_pal = (t && strcmp(t, "green") == 0) ? &pal_green : &pal_blue;
 }
 
 struct rgb { Uint8 r, g, b; };
@@ -627,8 +683,15 @@ static void prereq_check(struct prereq *p)
 		const char *deps = getenv("TADPOLE_DEPS");
 		char cand[PATHMAX * 2];
 		if (deps && *deps) {
-			snprintf(cand, sizeof(cand), "%s/bin/qemu-arm", deps);
+			/* Glasspole first, matching tad_qemu(): a bundle carrying it is
+			 * self-contained, and saying otherwise would send an AppImage
+			 * user to install qemu-user for an engine it never runs. */
+			snprintf(cand, sizeof(cand), "%s/bin/glasspole", deps);
 			if (access(cand, X_OK) == 0) { p->qemu = 1; p->qemu_bundled = 1; }
+			if (!p->qemu) {
+				snprintf(cand, sizeof(cand), "%s/bin/qemu-arm", deps);
+				if (access(cand, X_OK) == 0) { p->qemu = 1; p->qemu_bundled = 1; }
+			}
 			snprintf(cand, sizeof(cand), "%s/python/bin/python3", deps);
 			if (access(cand, X_OK) == 0) p->fwtools = 1;
 		}
@@ -2183,7 +2246,16 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		text(r, lx + 62, ly + 38,
 		     strcmp(TADPOLE_VERSION, "dev") ? TADPOLE_VERSION
 		                                    : "dev (unreleased)", C_ACCENT);
-		text(r, lx, ly + 60, "qemu-user + guest shim +", C_TEXT_DIM);
+		/* NAMED, NOT ASSUMED. This line read "qemu-user" whether or not
+		 * qemu was anywhere near the machine, which was survivable while
+		 * qemu ran every guest and is simply false now that glasspole
+		 * does. It is also the first thing a bug report needs, and the
+		 * only place in the program that answers it. */
+		{
+			char line[40];
+			snprintf(line, sizeof(line), "%s + guest shim +", ui_engine_name());
+			text(r, lx, ly + 60, line, C_TEXT_DIM);
+		}
 		text(r, lx, ly + 70, "software GLES1 rasteriser", C_TEXT_DIM);
 		text(r, lx, ly + 84, "A childhood preserved.", C_ACCENT);
 		break;
@@ -2455,10 +2527,12 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 
 		switch (g_wiz_page) {
 		case WIZ_WELCOME:
-			/* Glasspole says cross-platform because it IS the reason it
-			 * exists: qemu-arm's user mode is Linux-only, so Tadpole cannot
-			 * follow it to Windows and Glasspole can. Tadpole keeps the plain
-			 * line rather than claiming something it does not do. */
+			/* The Windows build says cross-platform because being able to
+			 * exist there is the reason its engine was written: qemu-user
+			 * is Linux-only. This build says the plain line — not because
+			 * the engine underneath differs any more (it does not), but
+			 * because "cross-platform" is a claim about where you can get
+			 * it, and the thing you can get here runs on Linux. */
 			text(r, bx, by, ui_brand_is_glasspole()
 			                ? "A cross-platform LeapPad2 emulator."
 			                : "A LeapPad2 emulator.", C_TEXT);
@@ -2479,7 +2553,11 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				                     : GL_CHECK_1 " Your system has what it needs.",
 				     C_TEXT);
 			else if (!pq.qemu)
-				text(r, bx, by + 78, GL_CHECK_0 " qemu-arm is missing.", C_ACCENT);
+				/* NOT "qemu-arm is missing" any more: glasspole satisfies
+				 * this check and is what a default install runs, so naming
+				 * one of the two engines would send people after the one
+				 * they do not need. */
+				text(r, bx, by + 78, GL_CHECK_0 " No ARM engine installed.", C_ACCENT);
 			else
 				text(r, bx, by + 78, GL_CHECK_0 " No firmware extractor.", C_ACCENT);
 			if (!pq.qemu || !pq.fwtools)

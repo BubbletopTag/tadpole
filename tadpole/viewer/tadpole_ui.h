@@ -178,15 +178,20 @@ void  ui_draw_idle(SDL_Renderer *ren, int lw, int lh);
  * tadpole_ui.c. Used by --ui-shot. */
 void  ui_debug_state(const char *spec);
 
-/* WHICH PRODUCT THIS IS PRESENTING ITSELF AS.
+/* WHICH PRODUCT THIS IS PRESENTING ITSELF AS, and what is running the guest.
+ * They are two different questions and they used to be one: the chrome was
+ * green for Tadpole-on-qemu and blue for Glasspole, so the colour was a claim
+ * about the engine. Glasspole is the default engine now, on every platform, so
+ * the colour says nothing about it — the chrome is blue either way and the
+ * program is Tadpole except in the Windows installer's build, which ships
+ * under the other name. ui_engine_name() is the honest answer about the
+ * engine, and the About box is where it is given.
  *
- * Tadpole runs the guest under qemu-arm; Glasspole runs it under our own ARM
- * emulator, which is the only option on Windows. Same viewer, same code, but
- * different compatibility — so the window title and the chrome colour say
- * which one is actually behind the picture. See tadpole_ui.c for how it is
- * decided. Call ui_brand_apply() before drawing anything. */
+ * Call ui_brand_apply() before drawing anything; it selects the palette
+ * (TADPOLE_THEME=green for the original). */
 int         ui_brand_is_glasspole(void);
 const char *ui_brand_name(void);
+const char *ui_engine_name(void);
 void        ui_brand_apply(void);
 
 #endif /* TADPOLE_UI_H */

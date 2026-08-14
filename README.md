@@ -36,7 +36,7 @@ Every installed title, launched in turn and screenshotted:
 ```sh
 ./tools/compat-sweep.sh          # launch each one, capture it, record a verdict
 ./tools/compat-report.py         # -> build/compat/<date>/index.html
-COMPAT_EMU=glasspole/build/glasspole ./tools/compat-sweep.sh    # the other engine
+COMPAT_EMU="$(command -v qemu-arm)" ./tools/compat-sweep.sh     # the other engine
 ./tools/compat-compare.py --a <qemu-run> --b <glasspole-run>    # both, side by side
 ```
 
@@ -52,7 +52,13 @@ firmware the same hour:
 | — of which native Brio | 68/95 | 71/95 |
 
 **The two engines are effectively one-to-one on this catalogue.** Glasspole is
-the from-scratch ARM JIT (see `glasspole/`); qemu-arm is the reference. Three
+the from-scratch ARM JIT (see `glasspole/`); qemu-arm is the reference. That
+result is why Glasspole is now the engine Tadpole runs by default, on Linux as
+well as Windows: when the numbers are the same, the engine worth putting in
+front of people is the one whose bugs are ours to fix. qemu-arm stays as the
+fallback when no Glasspole is built, and as the reference the sweep diffs
+against — `TADPOLE_QEMU="$(command -v qemu-arm)" ./tadpole.sh` for a single run
+on it. Three
 titles either way is inside the run-to-run spread — the guest's own dynamic
 loader has an unlocked `dlopen`, so a title that loads two libraries at once
 can fault on one run and reach its menu on the next, and each engine dodges
@@ -84,8 +90,8 @@ chmod +x Tadpole-x86_64.AppImage
 ./Tadpole-x86_64.AppImage
 ```
 
-One file, no install step, no dependencies to hunt down — a static `qemu-arm`
-and the firmware toolchain ride along inside it. The setup wizard opens on the
+One file, no install step, no dependencies to hunt down — the ARM engine and
+the firmware toolchain ride along inside it. The setup wizard opens on the
 first run and asks for the two things Tadpole cannot ship: your device's system
 files, and your cartridge backups.
 
@@ -95,8 +101,14 @@ To build that file yourself:
 ./tools/fetch-deps.sh          # stage qemu and the firmware tools (~70 MB)
 ./tools/online-update.sh       # system files, straight from LeapFrog
 cd tadpole && make && cd ..    # the shim and the viewer
+(cd glasspole && ./fetch-deps.sh && cmake -S . -B build -GNinja && ninja -C build)
 ./tools/build-appimage.sh      # -> build/Tadpole-x86_64.AppImage, ~22 MB
 ```
+
+**The Glasspole line is not optional if you want the image people download.**
+It is the engine Tadpole runs on by default, and `build-appimage.sh` can only
+bundle one that exists — skip it and the image you built falls back to the
+bundled qemu-arm, which is a different program from the one being released.
 
 **The firmware step is not optional, and it comes before `make`.** The ARM shim
 links against the LeapPad's own uClibc, which is LeapFrog's and cannot be
@@ -112,9 +124,10 @@ is the only way to find out whether the instructions above are true.
 
 ## Requirements
 
-**If you have the AppImage, there are none.** It carries a static `qemu-arm` and
-a private Python with `ubi_reader`, so there is nothing to install and nothing
-to look up for your distribution. Download it, `chmod +x`, run it.
+**If you have the AppImage, there are none.** It carries Glasspole — the ARM
+engine it runs on by default — a static `qemu-arm` behind it, and a private
+Python with `ubi_reader`, so there is nothing to install and nothing to look up
+for your distribution. Download it, `chmod +x`, run it.
 
 Everything below is for building from source.
 
@@ -146,7 +159,7 @@ Roughly 70 MB, pinned by SHA-256, re-fetchable at any time
 
 | | Arch | Debian / Ubuntu | Fedora | Why |
 |---|---|---|---|---|
-| qemu-arm | `qemu-user` | `qemu-user` | `qemu-user` | runs the guest's 32-bit ARM code — *or bundled* |
+| an ARM engine | `qemu-user` | `qemu-user` | `qemu-user` | runs the guest's 32-bit ARM code — *or bundled, and a built `glasspole/` satisfies it too* |
 | SDL2 | `sdl2-compat` | `libsdl2-dev` | `SDL2-devel` | window, input, audio |
 | OpenGL | `mesa` | `libgl1-mesa-dev` | `mesa-libGL-devel` | host-GPU rendering (HLE) |
 | zlib | `zlib` | `zlib1g-dev` | `zlib-ng-compat-devel` | the viewer decodes its own icon |
@@ -438,8 +451,9 @@ Anything set here wins over the saved settings.
 | `TADPOLE_DIR=path` | where the shared framebuffers and FIFOs live |
 | `TADPOLE_DEBUG=1` | verbose shim logging (what debug level 2 sets) |
 | `TADPOLE_STRACE=1` | every guest syscall (what debug level 3 sets) |
-| `TADPOLE_QEMU=path` | a specific qemu-arm, instead of the bundled or installed one |
-| `TADPOLE_DEPS=dir` | where the bundled qemu and Python live (the AppImage sets this) |
+| `TADPOLE_QEMU=path` | a specific engine, instead of the default Glasspole — `"$(command -v qemu-arm)"` to run on qemu |
+| `TADPOLE_DEPS=dir` | where the bundled engine and Python live (the AppImage sets this) |
+| `TADPOLE_THEME=green` | the original green chrome, instead of blue |
 
 ### The software rasteriser is deprecated
 

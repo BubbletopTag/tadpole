@@ -96,6 +96,24 @@ if [ -n "${TADPOLE_VERSION:-}" ] && [ "$TADPOLE_VERSION" != dev ]; then
   Refusing to package an image that would misreport its own version — that is
   the bug that made a release tell every user it was an unreleased build."
     echo "    viewer reports $TADPOLE_VERSION"
+
+    # AND THE ENGINE, which is now one of this image's shipped binaries rather
+    # than something only Windows carried. glasspole takes its version through
+    # a CMake cache variable, and file(GENERATE) rewrites gp_version.c only
+    # when the string differs — so this is a relink on a release and a no-op
+    # otherwise. Same refusal as above if the stamp did not take: an engine
+    # that cannot say what it is undoes the reason the viewer's check exists.
+    if [ -d "$PROJ/glasspole/build" ] && command -v cmake >/dev/null 2>&1; then
+        echo "==> stamping glasspole as $TADPOLE_VERSION"
+        cmake -S "$PROJ/glasspole" -B "$PROJ/glasspole/build" \
+              -DTADPOLE_VERSION="$TADPOLE_VERSION" >/dev/null &&
+        cmake --build "$PROJ/glasspole/build" --target glasspole >/dev/null \
+            || die "could not build glasspole — nothing has been packaged"
+        strings "$PROJ/glasspole/build/glasspole" 2>/dev/null |
+            grep -Fx -- "$TADPOLE_VERSION" >/dev/null \
+            || die "glasspole does not carry $TADPOLE_VERSION after building."
+        echo "    glasspole reports $TADPOLE_VERSION"
+    fi
 fi
 
 # ---- 1. everything must be built first ----------------------------------
@@ -179,9 +197,46 @@ done
 # ---- 3b. the staged runtime dependencies ----------------------------------
 # These are NOT copied into the user's data directory later: they are read-only
 # and large, so AppRun points at them where they sit in the mounted image.
-if [ -d "$PROJ/build/deps/bin" ] || [ -d "$PROJ/build/deps/python" ]; then
+if [ -d "$PROJ/build/deps/bin" ] || [ -d "$PROJ/build/deps/python" ] ||
+   [ -x "$PROJ/glasspole/build/glasspole" ]; then
     echo "==> bundling the staged dependencies"
     mkdir -p "$APPDIR/deps"
+    # THE DEFAULT ENGINE HAS TO BE IN THE IMAGE, or it is not the default for
+    # anyone who did not build this themselves: tad_qemu() picks glasspole
+    # first, finds none inside the AppImage, and every download quietly runs on
+    # qemu instead. It is one 7 MB file that needs no libraries beyond libc —
+    # see the -static-libstdc++ note in glasspole/CMakeLists.txt.
+    if [ -x "$PROJ/glasspole/build/glasspole" ]; then
+        mkdir -p "$APPDIR/deps/bin"
+        cp -a "$PROJ/glasspole/build/glasspole" "$APPDIR/deps/bin/"
+        gpver="$(strings "$PROJ/glasspole/build/glasspole" 2>/dev/null |
+                 grep -Ex '[0-9]{8}-[0-9]{4}' | head -1)"
+        echo "  glasspole      ${gpver:-unversioned}"
+        # A LIBRARY THE HOST MAY NOT HAVE IS NOT A BUNDLE. Refusing here beats
+        # shipping an engine that dies with a linker error on someone else's
+        # machine, which is exactly the failure the image exists to prevent.
+        miss="$(ldd "$PROJ/glasspole/build/glasspole" 2>/dev/null |
+                awk '/not found/ {print $1}')"
+        [ -z "$miss" ] || die "glasspole is missing $miss — rebuild it before packaging"
+        case "$(ldd "$PROJ/glasspole/build/glasspole" 2>/dev/null)" in
+            *libstdc++*) echo "  WARNING: glasspole links libstdc++ dynamically. Rebuild it" ;
+                         echo "           (cmake -S . -B build && ninja -C build) so the" ;
+                         echo "           image does not depend on this machine's C++ runtime." ;;
+        esac
+    else
+        # NOT FATAL, BUT NOT QUIET EITHER. The image still works — tad_qemu()
+        # falls through to the bundled qemu-arm — but it is then a different
+        # program from the one being released, tested and reported on, and the
+        # only clue would have been a compat number that moved for no reason.
+        cat <<'MSG'
+
+  NOTE: no glasspole in glasspole/build, so this image will run on qemu-arm.
+        That is NOT the default configuration any more. To build the engine:
+            cd glasspole && ./fetch-deps.sh && cmake -S . -B build -GNinja
+            ninja -C build
+
+MSG
+    fi
     [ -x "$PROJ/build/deps/bin/qemu-arm" ] && {
         mkdir -p "$APPDIR/deps/bin"
         cp -a "$PROJ/build/deps/bin/qemu-arm" "$APPDIR/deps/bin/"
@@ -242,11 +297,19 @@ if [ -d "$HERE/deps" ]; then
     export TADPOLE_DEPS="$HERE/deps"
 fi
 
-# Neither bundled nor installed is the only remaining way to have no qemu, and
-# it should say so in a window as well as a terminal — someone launching from a
-# desktop icon never sees stderr.
-if [ ! -x "${TADPOLE_DEPS:-}/bin/qemu-arm" ] && ! command -v qemu-arm >/dev/null 2>&1; then
-    MSG="This build of Tadpole does not carry qemu-arm, and this machine has none.
+# NO ENGINE AT ALL is the only remaining way to have nothing to run the guest
+# on, and it should say so in a window as well as a terminal — someone
+# launching from a desktop icon never sees stderr.
+#
+# GLASSPOLE COUNTS. It is what a normal image carries and what tad_qemu() picks
+# first; a build with glasspole and no qemu-arm is complete, and telling that
+# user to install qemu-user would send them after a package Tadpole will not
+# even look at.
+if [ ! -x "${TADPOLE_DEPS:-}/bin/glasspole" ] &&
+   [ ! -x "${TADPOLE_DEPS:-}/bin/qemu-arm" ] &&
+   ! command -v glasspole >/dev/null 2>&1 &&
+   ! command -v qemu-arm  >/dev/null 2>&1; then
+    MSG="This build of Tadpole carries no ARM engine, and this machine has none.
 
 Install your distribution's qemu-user package:
 

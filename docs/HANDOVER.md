@@ -5153,6 +5153,15 @@ Resolution order is in `tools/lib-deps.sh` and is the same everywhere:
 PATH. A source checkout with the system packages installed keeps working
 exactly as before.
 
+The engine half of that order now prefers **glasspole** at every step — the
+bundle's, then `glasspole/build/glasspole`, then qemu-arm — so a checkout that
+has built the JIT runs on it without being asked, and the AppImage carries it
+in `deps/bin` beside qemu. `TADPOLE_QEMU="$(command -v qemu-arm)"` still puts
+any single run back on qemu, which is what the compatibility sweep does when it
+wants the reference. `tadpole.sh` exports whichever it chose, so the viewer's
+About box and its straggler reaper both name the engine that is actually
+running instead of assuming qemu.
+
 Verified by hiding the host's tools: with a PATH containing no `qemu-arm` and
 no `python3`, the extracted AppImage boots AppManager (433 lines of serial log)
 and scans 87 game backups.

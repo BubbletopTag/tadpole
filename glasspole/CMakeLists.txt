@@ -84,6 +84,19 @@ if(WIN32)
 else()
     find_package(Threads REQUIRED)
     target_link_libraries(glasspole PRIVATE Threads::Threads)
+    # THE C++ RUNTIME COMES WITH IT, for the same reason -static does on
+    # Windows: this binary now ships inside the AppImage as the default engine,
+    # and it is built on whatever distribution the release was rolled on.
+    #
+    # The alternative was copying the build machine's libstdc++.so.6 into the
+    # image's usr/lib, and that is the AppImage mistake everyone makes once: the
+    # bundled library goes in front of the host's for EVERY process in the
+    # image, including the GL driver the viewer loads, and a mesa built against
+    # a newer libstdc++ than the one we shipped fails to load with a GLIBCXX_3.4
+    # version error that names neither Tadpole nor the library it came from.
+    # Statically linking the runtime into the one binary that needs it leaves
+    # the host's own libraries alone.
+    target_link_options(glasspole PRIVATE -static-libstdc++ -static-libgcc)
 endif()
 
 # ---- the host-side tests ---------------------------------------------------

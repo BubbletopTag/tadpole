@@ -33,13 +33,41 @@ tad_abspath() {
     readlink -f -- "$1" 2>/dev/null || printf '%s/%s' "$PWD" "$1"
 }
 
+# WHICH ENGINE RUNS THE GUEST — GLASSPOLE FIRST, qemu-arm BEHIND IT.
+#
+# Glasspole is this project's own ARM JIT (see glasspole/). It started as the
+# Windows-only option, because qemu-user is Linux-only and Windows had to run
+# something; qemu-arm ran everything here. The most recent sweep puts the two
+# one-to-one across 110 titles — 85 launches against 82, which is inside the
+# run-to-run spread — so the argument for keeping qemu in front had run out.
+# The engine we can fix is the one that should be in front of people, and a bug
+# nobody hits because it is behind a flag never gets fixed.
+#
+# qemu-arm is NOT going anywhere: it stays the fallback for a checkout with no
+# glasspole built, and it stays the reference the compatibility sweep diffs
+# against. Nothing in the tree has stopped supporting it.
+#
+#   TADPOLE_QEMU="$(command -v qemu-arm)" ./tadpole.sh    for one run on qemu
+#
+# The name of the variable is now a little wrong — it selects an engine, not a
+# qemu — but it is written into saved sweep runs, tools/compat-sweep.sh and
+# every set of notes anyone has, so it keeps the name it has always had.
 tad_qemu() {
     if [ -n "${TADPOLE_QEMU:-}" ] && [ -x "${TADPOLE_QEMU}" ]; then
         tad_abspath "$TADPOLE_QEMU"; return 0
     fi
+    if [ -x "$TADPOLE_DEPS/bin/glasspole" ]; then
+        printf '%s' "$TADPOLE_DEPS/bin/glasspole"; return 0
+    fi
+    # A source checkout builds it in place rather than staging it, so this is
+    # where it is for everyone working on the project.
+    if [ -x "$PROJ/glasspole/build/glasspole" ]; then
+        printf '%s' "$PROJ/glasspole/build/glasspole"; return 0
+    fi
     if [ -x "$TADPOLE_DEPS/bin/qemu-arm" ]; then
         printf '%s' "$TADPOLE_DEPS/bin/qemu-arm"; return 0
     fi
+    command -v glasspole 2>/dev/null && return 0
     command -v qemu-arm 2>/dev/null && return 0
     return 1
 }
@@ -73,7 +101,11 @@ tad_python_with_ubireader() {
 
 # Is this Tadpole self-contained? Used by check-deps.sh and the wizard to say
 # "bundled" instead of asking for a package the user does not need.
+#
+# EITHER ENGINE COUNTS. An AppImage that carries glasspole and no qemu-arm is
+# exactly as self-contained as one carrying qemu — asking that user to install
+# qemu-user would be asking for something the build does not use.
 tad_have_bundle() {
-    [ -x "$TADPOLE_DEPS/bin/qemu-arm" ] &&
+    { [ -x "$TADPOLE_DEPS/bin/glasspole" ] || [ -x "$TADPOLE_DEPS/bin/qemu-arm" ]; } &&
     [ -x "$TADPOLE_DEPS/python/bin/python3" ]
 }

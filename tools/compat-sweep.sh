@@ -52,11 +52,17 @@ mkdir -p "$OUT/shots" || exit 1
 TSV="$OUT/results.tsv"
 [ -f "$TSV" ] || printf 'pkg\tname\tkind\tverdict\tearly_lit\tearly_col\tlate_lit\tlate_col\talive\tsignal\tsite\tnote\temu\tended\temufault\n' > "$TSV"
 
-# WHICH EMULATOR IS UNDER TEST. Default qemu-arm, exactly as before; set
-# COMPAT_EMU to a glasspole binary to sweep that instead. tadpole.sh already
-# chooses through TADPOLE_QEMU, so the whole front end comes along unchanged
-# and the two runs differ in one variable — which is the only way the numbers
-# they produce are comparable.
+# WHICH EMULATOR IS UNDER TEST. Whatever tad_qemu() would run — glasspole in
+# any checkout that has one built — so a sweep with no arguments measures what
+# users actually get. Set COMPAT_EMU to sweep the other one:
+#
+#   COMPAT_EMU="$(command -v qemu-arm)" ./tools/compat-sweep.sh
+#
+# tadpole.sh chooses through TADPOLE_QEMU, so the whole front end comes along
+# unchanged and the two runs differ in one variable — which is the only way the
+# numbers they produce are comparable. The engine's name is recorded in the
+# `emu` column of every row, so an old run is never ambiguous about which one
+# it was: nothing here depends on remembering what the default was that week.
 EMU="${COMPAT_EMU:-}"
 if [ -n "$EMU" ]; then
     [ -x "$EMU" ] || { echo "no emulator at $EMU" >&2; exit 1; }
