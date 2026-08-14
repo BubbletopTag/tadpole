@@ -1344,25 +1344,65 @@ static int selftest_apps(SDL_Renderer *ren, int rotate, int w, int h)
 	st_check("top after End", top, n - rows, &bad);
 
 	printf("type to jump\n");
-	st_key(lw, lh, SDLK_HOME);
-	st_key(lw, lh, SDLK_w);
-	ui_debug_apps(NULL, &top, &sel, NULL);
 	{
-		/* Assert the LETTER, not an index: whatever somebody else's library
-		 * holds, a jump to "w" has to land on a "w" and has to drag the view
-		 * with it. */
-		char c = ui_debug_app_initial(sel);
-		int hit = (c == 'w' || c == 'W');
-		printf("  %-34s  '%c'  expected  'w'  %s\n",
-		       "first letter after pressing w", c ? c : '?', hit ? "ok" : "FAIL");
-		if (!hit) bad++;
-		st_check("view followed the jump", sel >= top && sel < top + rows, 1, &bad);
-	}
-	{
-		int again;
-		st_key(lw, lh, SDLK_w);
-		ui_debug_apps(NULL, NULL, &again, NULL);
-		st_check("pressing w again advances", again != sel, 1, &bad);
+		/* THE LETTER COMES FROM THE LIBRARY, not from this file.
+		 *
+		 * It used to press 'w' and require a 'w' title, which was true of the
+		 * install it was written on and of nobody else's. On a sysroot with
+		 * 23 titles and no W the launcher was working perfectly and the test
+		 * printed "FAILED — the launcher does not scroll", which is the worst
+		 * thing a self-test can do: it spends the credibility that makes the
+		 * real failure worth reading.
+		 *
+		 * So: count the initials, and probe with the commonest one. Two
+		 * entries under it makes the "press again" check meaningful; with
+		 * one, jumping is still testable and advancing is not, so that check
+		 * is skipped rather than failed. */
+		int counts[26], i, n = 0, best = -1;
+		char letter;
+		memset(counts, 0, sizeof(counts));
+		ui_debug_apps(&n, NULL, NULL, NULL);
+		for (i = 0; i < n; i++) {
+			char c = ui_debug_app_initial(i);
+			if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+			if (c >= 'a' && c <= 'z') counts[c - 'a']++;
+		}
+		for (i = 0; i < 26; i++)
+			if (best < 0 || counts[i] > counts[best]) best = i;
+		if (best < 0 || counts[best] == 0) {
+			printf("  no title starts with a letter — nothing to jump to\n");
+		} else {
+			letter = (char)('a' + best);
+			st_key(lw, lh, SDLK_HOME);
+			st_key(lw, lh, SDLK_a + best);
+			ui_debug_apps(NULL, &top, &sel, NULL);
+			{
+				/* Assert the LETTER, not an index: whatever somebody else's
+				 * library holds, a jump to a letter has to land on that
+				 * letter and has to drag the view with it. */
+				char c = ui_debug_app_initial(sel);
+				int hit = (c == letter || c == letter - 'a' + 'A');
+				char label[48];
+				snprintf(label, sizeof(label),
+				         "first letter after pressing %c", letter);
+				printf("  %-34s  '%c'  expected  '%c'  %s\n",
+				       label, c ? c : '?', letter, hit ? "ok" : "FAIL");
+				if (!hit) bad++;
+				st_check("view followed the jump",
+				         sel >= top && sel < top + rows, 1, &bad);
+			}
+			if (counts[best] > 1) {
+				int again;
+				char label[48];
+				snprintf(label, sizeof(label),
+				         "pressing %c again advances", letter);
+				st_key(lw, lh, SDLK_a + best);
+				ui_debug_apps(NULL, NULL, &again, NULL);
+				st_check(label, again != sel, 1, &bad);
+			} else {
+				printf("  only one %c title — nothing to advance to\n", letter);
+			}
+		}
 	}
 
 	printf("\n%s\n", bad
@@ -3658,9 +3698,20 @@ int main(int argc, char **argv)
 			          "--scan", actpath);
 			break;
 		case UI_ACT_MICROMODS_INSTALL: {
+			/* ARGUMENTS ONLY. tool_runv() puts the script in argv[0], so
+			 * naming it here as well ran
+			 *     micromods.py micromods.py --scan 0x… --install --only …
+			 * and argparse, which has no positional to bind that to, exited 2
+			 * with "unrecognized arguments: tools/micromods.py". Install
+			 * therefore failed for every title, every time, while Scan — which
+			 * goes through tool_run2 and passes its arguments correctly —
+			 * worked, so the screen looked half alive rather than broken.
+			 *
+			 * This is the SECOND time this exact mistake has shipped; see the
+			 * note on UI_ACT_CONVERT_CART above, which is the same bug with
+			 * the same symptom. */
 			char *av[7];
 			int n = 0;
-			av[n++] = (char *)"tools/micromods.py";
 			av[n++] = (char *)"--scan";
 			av[n++] = actpath;
 			av[n++] = (char *)"--install";

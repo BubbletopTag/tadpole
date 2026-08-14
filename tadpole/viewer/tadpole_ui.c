@@ -3359,14 +3359,33 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			}
 			/* The slot IS the micromod, so it leads. */
 			text(r, x + 14, yy, e->slot, C_TEXT_DIM);
-			text(r, x + 60, yy, e->name[0] ? e->name : "(unnamed)",
-			     e->installed ? C_TEXT : can ? C_TEXT : C_TEXT_DIM);
 			{
+				/* CLIPPED TO WHERE THE STATUS BEGINS. Bubble Guppies names
+				 * a micromod "New clickable decoration for Save the Puppy
+				 * Park", which is 20 characters past the column the status
+				 * is right-aligned in, so the two drew straight through
+				 * each other and the row read "...Save the Pupinstalledark".
+				 * Nothing was wrong with either string; there was simply no
+				 * rule about what happens when they meet. */
 				const char *tag = e->dep ? "cartridge"
 				                : e->installed ? "installed"
 				                : e->avail ? "on server" : "";
+				int tagx = d.x + d.w - 16 - text_w(tag);
+				int room = (tag[0] ? tagx - 6 : d.x + d.w - 10) - (x + 60);
+				char nm[96];
+				const char *full = e->name[0] ? e->name : "(unnamed)";
+				int fit = room / GLYPH_ADV;
+				if (fit < 1) fit = 1;
+				if (fit > (int)sizeof(nm) - 1) fit = (int)sizeof(nm) - 1;
+				snprintf(nm, (size_t)fit + 1, "%s", full);
+				/* An ellipsis rather than a hard cut, so a clipped name
+				 * looks clipped instead of looking like the name. */
+				if ((int)strlen(full) > fit && fit >= 2)
+					nm[fit - 1] = nm[fit - 2] = '.';
+				text(r, x + 60, yy, nm,
+				     e->installed ? C_TEXT : can ? C_TEXT : C_TEXT_DIM);
 				if (tag[0])
-					text(r, d.x + d.w - 16 - text_w(tag), yy, tag,
+					text(r, tagx, yy, tag,
 					     e->installed ? C_DIMMEST : C_TEXT_DIM);
 			}
 		}
@@ -4594,6 +4613,39 @@ static void cycle_rotate(void)
 	ui_cfg_save();
 }
 
+/* WHERE CLOSING A PANEL GOES BACK TO — decided in ONE place.
+ *
+ * A panel that was opened from somewhere records that in g_fb_return, and
+ * honouring it is the whole rule: a Cancel or a finished install returns the
+ * user to setup, or to the library, rather than to an empty screen. But the
+ * two ways to close a panel each enumerated the destinations they would
+ * honour, and the lists had already drifted apart — the Close button allowed
+ * the wizard and the Game Library, the Escape key allowed only the wizard, so
+ * closing the same panel two ways landed you in two different places.
+ *
+ * The Micromods screen is what made that expensive. Scan and Install open the
+ * progress panel over it, and neither list mentioned Micromods, so finishing
+ * a scan dropped the user onto the idle screen — precisely when they wanted
+ * to look at the list the scan had just filled in. Adding it to two lists
+ * would have made three copies of one decision. There is one now, and any
+ * panel that records where it came from returns there.
+ */
+static void modal_dismiss(void)
+{
+	/* Only panels that can be opened FROM something consult g_fb_return; a
+	 * value left over from an earlier open must not teleport anyone. */
+	if ((g_modal == M_FILES || g_modal == M_PROGRESS || g_modal == M_MSG) &&
+	    g_fb_return != M_NONE) {
+		g_modal = g_fb_return;
+		g_fb_return = M_NONE;
+	} else if (g_modal == M_GAMES) {
+		g_modal = g_gm_return;
+		g_gm_return = M_NONE;
+	} else {
+		g_modal = M_NONE;
+	}
+}
+
 static int dialog_click(int lw, int lh, int mx, int my)
 {
 	struct dlg d = cur_dlg(lw, lh);
@@ -4609,6 +4661,11 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		if (inside(mx, my, sc.x, sc.y, sc.w, sc.h)) {
 			snprintf(g_action_path, sizeof(g_action_path), "%s", g_mm_product);
 			g_action = UI_ACT_MICROMODS_SCAN;
+			/* The progress panel opens over this screen; closing it comes
+			 * back here, to the list the scan has just filled in. Without
+			 * this it returned to nothing, which reads as "the scan threw
+			 * my results away". */
+			g_fb_return = M_MICROMODS;
 			return 1;
 		}
 		if (inside(mx, my, in.x, in.y, in.w, in.h) &&
@@ -4620,6 +4677,7 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			         g_mm_product);
 			snprintf(g_action_arg, sizeof(g_action_arg), "%s", picked);
 			g_action = UI_ACT_MICROMODS_INSTALL;
+			g_fb_return = M_MICROMODS;   /* and back to the list afterwards */
 			return 1;
 		}
 		if (inside(mx, my, cb.x, cb.y, cb.w, cb.h)) {
@@ -4797,19 +4855,7 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		if (g_modal == M_PROGRESS && g_prog_running)
 			return 1;                 /* cannot dismiss mid-install */
 		g_confirm = 0;
-		/* Back to whatever we came from, so a Cancel or a finished install
-		 * returns the user to setup — or to the library — rather than to an
-		 * empty screen. */
-		if ((g_modal == M_FILES || g_modal == M_PROGRESS || g_modal == M_MSG) &&
-		    (g_fb_return == M_WIZARD || g_fb_return == M_GAMES)) {
-			g_modal = g_fb_return;
-			g_fb_return = M_NONE;
-		} else if (g_modal == M_GAMES) {
-			g_modal = g_gm_return;
-			g_gm_return = M_NONE;
-		} else {
-			g_modal = M_NONE;
-		}
+		modal_dismiss();
 		ui_cfg_save();
 		return 1;
 	}
@@ -5262,12 +5308,10 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 			    e->key.keysym.sym == SDLK_RETURN) {
 				if (g_modal == M_PROGRESS && g_prog_running)
 					return 1;
-				if (g_modal == M_PROGRESS && g_fb_return == M_WIZARD) {
-					g_modal = M_WIZARD;
-					g_fb_return = M_NONE;
-				} else {
-					g_modal = M_NONE;
-				}
+				/* The same decision the Close button makes. It used to be a
+				 * second, smaller copy of it, which is why Escape forgot the
+				 * Game Library when the mouse did not. */
+				modal_dismiss();
 				ui_cfg_save();
 			}
 			return 1;
