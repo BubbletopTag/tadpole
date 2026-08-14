@@ -300,14 +300,71 @@ def md5_file(path):
     return h.hexdigest()
 
 
-def write_checksums(pkgdir):
-    """packagefiles.md5 in the device's own format: `<md5>  ./<name>`."""
-    names = sorted(n for n in os.listdir(pkgdir) if n != "packagefiles.md5")
+def pkg_files(pkgdir):
+    """Every file in a package, as ./-relative paths, sorted. NOT just the top.
+
+    os.listdir() was what this used, and for the flat packages it was written
+    against — a meta.inf and a marker file — the difference never showed."""
+    out = []
+    for root, _dirs, files in os.walk(pkgdir):
+        for fn in files:
+            if fn == "packagefiles.md5":
+                continue
+            p = os.path.join(root, fn)
+            rel = os.path.relpath(p, pkgdir).replace(os.sep, "/")
+            out.append(("./" + rel, p))
+    return sorted(out)
+
+
+def write_checksums(pkgdir, sep="  "):
+    """packagefiles.md5 for a package built here, listing every file in it.
+
+    THIS USED TO TRUNCATE THE MANIFEST TO THE TOP LEVEL, and quietly. Mr.
+    Pencil's Leaplets are 249 files in nine subdirectories, and installing one
+    rewrote its 248-line manifest as two lines: download.json and meta.inf.
+    Every other checksum — every coloring book page, every scene, every ogg —
+    was deleted from the record of what the package is supposed to contain.
+    Kai-lan and Bubble Guppies never showed it because their packages have no
+    subdirectories at all.
+
+    `sep` is the gap between hash and path, because the packages do not agree:
+    LeapFrog's own Bubble Guppies and Kai-lan manifests use two spaces and Mr.
+    Pencil's use one. When rewriting somebody else's file, keep theirs."""
     with open(os.path.join(pkgdir, "packagefiles.md5"), "w") as f:
-        for n in names:
-            p = os.path.join(pkgdir, n)
-            if os.path.isfile(p):
-                f.write("%s  ./%s\n" % (md5_file(p), n))
+        for rel, path in pkg_files(pkgdir):
+            f.write("%s%s%s\n" % (md5_file(path), sep, rel))
+
+
+def update_checksum(pkgdir, name):
+    """Re-hash ONE file in an existing manifest, leaving every other line as
+    the vendor wrote it — order, spacing and all.
+
+    Rewriting the whole file was the mistake: this package came from LeapFrog
+    with a complete manifest, we changed exactly one byte range in exactly one
+    file, and the honest edit is one line. Regenerating it can only lose
+    information — and did."""
+    man = os.path.join(pkgdir, "packagefiles.md5")
+    target = "./" + name
+    try:
+        with open(man, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        write_checksums(pkgdir)          # no manifest: make a complete one
+        return
+    digest = md5_file(os.path.join(pkgdir, name))
+    out, done = [], False
+    for line in lines:
+        parts = line.split(None, 1)
+        if len(parts) == 2 and parts[1].strip() == target:
+            sep = line[len(parts[0]):len(line) - len(parts[1])]
+            out.append("%s%s%s" % (digest, sep, parts[1]))
+            done = True
+        else:
+            out.append(line)
+    if not done:
+        out.append("%s  %s" % (digest, target))
+    with open(man, "w") as f:
+        f.write("\n".join(out) + "\n")
 
 
 # ---- talking to the CDN ---------------------------------------------------
@@ -610,7 +667,8 @@ def ensure_access(pkgdir):
     # `Size=20480ProfileAccess=0,1,2,3`, losing both.
     with open(meta, "a", encoding="utf-8") as f:
         f.write(("" if text.endswith(("\n", "\r")) else "\n") + PROFILE_ACCESS + "\n")
-    write_checksums(pkgdir)
+    # ONE LINE, not the whole manifest — see update_checksum.
+    update_checksum(pkgdir, "meta.inf")
     return True
 
 
