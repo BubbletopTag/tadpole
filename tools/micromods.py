@@ -99,9 +99,39 @@ CACHE = os.path.join(PROJ, "runtime", "micromods-cache")
 CDN = "https://digitalcontent.leapfrog.com/packages"
 CDN_FAMILY = "MULT"
 UA = "tadpole-micromods/1 (+https://github.com/BubbletopTag/leappad-emu)"
-# Between requests. A scan is a dozen of them; there is no reason to be quick
-# about it.
+
+# ---- how hard this leans on somebody else's server ------------------------
+#
+# Three limits, for three different worries, all enforced inside cdn_fetch()
+# so no future caller can route around them by accident.
+#
+#   CDN_DELAY        between requests within one scan. A scan is a dozen of
+#                    them; there is no reason to be quick about it.
+#   SCAN_INTERVAL    between one scan REACHING THE NETWORK and the next. Held
+#                    across processes — each scan is a separate run of this
+#                    tool, so a stamp file is the only thing that can remember
+#                    — and it SLEEPS rather than refusing: someone clicking
+#                    Scan twice wants the scan, not an error message.
+#   SCAN_DEEP_*      a scan that keeps going gets slower. Past the 20th
+#                    request the gap becomes five seconds, so the deep walk a
+#                    title with unusual amounts of bonus content provokes
+#                    costs the server the same as several ordinary ones.
+#                    With RUNS as it stands that is slots 21..24 of the first
+#                    run and anything the later runs add on top.
 CDN_DELAY = 0.3
+SCAN_INTERVAL = 5.0
+SCAN_DEEP_AFTER = 20
+SCAN_DEEP_DELAY = 5.0
+
+# EVERY REQUEST, WRITTEN DOWN. This tool talks to a company's servers about
+# packages for titles the user owns, and until now the only record of what it
+# asked for was whatever scrolled past in the progress panel. One line per
+# request, appended, so "what did this actually send" has an answer tomorrow
+# as well as today. Cache hits are not requests and are not logged.
+REQUEST_LOG = os.path.join(PROJ, "runtime", "micromods-requests.log")
+# Touched when a scan is allowed through the gate; its mtime IS the record of
+# when the last one started.
+SCAN_STAMP = os.path.join(CACHE, ".last-scan")
 
 # ---- the catalogue --------------------------------------------------------
 #
@@ -297,20 +327,93 @@ def cdn_url(pkgid, ext="lf2"):
     return "%s/%s/%s.%s" % (CDN, pkgid.split("-")[1], pkgid, ext)
 
 
+def log_request(url, outcome):
+    """One line per request actually sent. Never raises.
+
+    A log that cannot be written is not a reason to abandon a scan, so every
+    failure here is swallowed — the worst case is a missing line, and the
+    alternative is a tool that dies because a directory is read-only."""
+    line = "%s  GET %s  %s\n" % (
+        time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), url, outcome)
+    try:
+        os.makedirs(os.path.dirname(REQUEST_LOG), exist_ok=True)
+        with open(REQUEST_LOG, "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+_gate_passed = False       # this process has already waited its turn
+_requests = 0              # requests SENT, not slots considered
+
+
+def scan_gate():
+    """Sleep until this scan is allowed to touch the network. Once per run.
+
+    Deliberately gated on the first REQUEST rather than on the tool starting.
+    A scan whose packages are all cached — which is exactly what --install
+    does, since it re-scans to find what it is installing — sends nothing to
+    LeapFrog, and making the user watch a five second stall for a run that
+    never opens a socket would be a limit on them rather than on us."""
+    global _gate_passed
+    if _gate_passed:
+        return
+    _gate_passed = True
+    try:
+        waited = time.time() - os.path.getmtime(SCAN_STAMP)
+    except OSError:
+        waited = SCAN_INTERVAL          # never scanned here before
+    if waited < SCAN_INTERVAL:
+        left = SCAN_INTERVAL - waited
+        print("  waiting %.1fs — one scan every %gs" % (left, SCAN_INTERVAL))
+        sys.stdout.flush()              # the progress panel reads this live
+        time.sleep(left)
+    try:
+        os.makedirs(os.path.dirname(SCAN_STAMP), exist_ok=True)
+        with open(SCAN_STAMP, "w") as f:
+            f.write(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) + "\n")
+    except OSError:
+        pass
+
+
 def cdn_fetch(pkgid, timeout=30):
     """-> package bytes, or None when the CDN does not have it.
 
     None means 404 and nothing else. A refused connection or a timeout raises,
     because "the server is unreachable" and "this micromod does not exist" are
     the two answers a scan must never confuse: treating the first as the second
-    would quietly report that a title has no bonus content."""
-    req = urllib.request.Request(cdn_url(pkgid), headers={"User-Agent": UA})
+    would quietly report that a title has no bonus content.
+
+    ALL THE PACING LIVES HERE, before the request rather than after it, so it
+    applies to the last request of a scan as well as the ones in the middle —
+    a delay that only runs afterwards is not a delay before the next caller's
+    first request."""
+    global _requests
+    url = cdn_url(pkgid)
+    scan_gate()
+    if _requests:
+        deep = _requests >= SCAN_DEEP_AFTER
+        if deep:
+            print("  %d requests in — pausing %gs" % (_requests, SCAN_DEEP_DELAY))
+            sys.stdout.flush()
+        time.sleep(SCAN_DEEP_DELAY if deep else CDN_DELAY)
+    _requests += 1
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read()
+            blob = r.read()
+            # .status is 3.9 and later on this object; .getcode() is what 3.7
+            # has, and the Windows 7 build is pinned to 3.7. See docs/.
+            code = getattr(r, "status", None) or r.getcode()
+            log_request(url, "%s %d bytes" % (code, len(blob)))
+            return blob
     except urllib.error.HTTPError as e:
+        log_request(url, str(e.code))
         if e.code in (403, 404):
             return None
+        raise
+    except Exception as e:
+        log_request(url, "FAILED %s" % str(e)[:80])
         raise
 
 
@@ -341,6 +444,24 @@ def cache_dir(product):
 def cached(pkgid):
     p = os.path.join(cache_dir(pkgid.split("-")[1]), pkgid + ".lf2")
     return p if os.path.isfile(p) else None
+
+
+def write_index(product, found):
+    """One line per package the server has, for the viewer to read.
+
+    TSV rather than JSON because the reader is 40 lines of C in the Micromods
+    screen, and a scan is the only thing that writes it."""
+    d = cache_dir(product)
+    os.makedirs(d, exist_ok=True)
+    tmp = os.path.join(d, "index.tsv.new")
+    with open(tmp, "w", encoding="utf-8") as f:
+        for pkgid, fields, names in found:
+            f.write("%s\t%s\t%s\t%s\n" % (
+                pkgid.rsplit("-", 1)[1],
+                "mod" if fields.get("Type") == "MicroDownload" else "dep",
+                (fields.get("Name", "") or "").replace("\t", " "),
+                "1" if any(n.lower().endswith(".png") for n in names) else "0"))
+    os.replace(tmp, os.path.join(d, "index.tsv"))
 
 
 def cache_put(pkgid, blob):
@@ -378,11 +499,10 @@ def scan_online(product, refresh=False, quiet=False):
                 blob = open(hit, "rb").read()
             else:
                 try:
-                    blob = cdn_fetch(pkgid)
+                    blob = cdn_fetch(pkgid)      # paces itself; see cdn_fetch
                 except Exception as e:
                     print("  ! %s: %s" % (pkgid, str(e)[:70]), file=sys.stderr)
                     return out, False
-                time.sleep(CDN_DELAY)
                 if blob is None:
                     misses += 1
                     break
@@ -395,6 +515,8 @@ def scan_online(product, refresh=False, quiet=False):
                 print("    %-28s %-26s %s"
                       % (pkgid, fields.get("Name", "")[:26],
                          "preview" if any(n.endswith(".png") for n in names) else ""))
+    if out:
+        write_index(product, out)
     return out, True
 
 
@@ -756,8 +878,21 @@ def cmd_scan_online(product, refresh, install, only, dry):
         # The CartridgeData stub first: the micromods declare Depends on it,
         # and a dependency naming an absent package is exactly the kind of
         # thing a picker filters out quietly.
-        for pkgid, fields, _names in deps + mods:
-            if only and pkgid.rsplit("-", 1)[1] not in only:
+        # --only NAMES MICROMODS, NOT DEPENDENCIES. The stub is not a micromod:
+        # the screen does not count it, does not let you tick it, and the
+        # micromods are the reason it is wanted at all — so filtering the
+        # picked slots through it meant an install from the UI could never
+        # produce one, while `--install` without --only always did. Two
+        # different results from the same tool for the same title.
+        #
+        # No package LeapFrog currently serves declares Depends, so this is
+        # belt-and-braces rather than a fix for something observed failing;
+        # the LFConnect copies that do declare it are the reason the stub is
+        # fetched in the first place.
+        for pkgid, fields, _names, is_dep in \
+                [(k, f, n, True) for k, f, n in deps] + \
+                [(k, f, n, False) for k, f, n in mods]:
+            if only and not is_dep and pkgid.rsplit("-", 1)[1] not in only:
                 continue
             blob = open(cached(pkgid), "rb").read()
             r = install_blob(pkgid, blob, dry)
@@ -770,6 +905,7 @@ def cmd_scan_online(product, refresh, install, only, dry):
     if not install and total:
         print("\ncached under runtime/micromods-cache — re-scanning costs "
               "LeapFrog nothing.")
+        print("every request sent is logged to runtime/micromods-requests.log")
 
 
 def cmd_fix_access(dry):
