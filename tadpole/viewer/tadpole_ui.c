@@ -70,28 +70,46 @@
  * TADPOLE_THEME=green: it is the look every screenshot in the docs was taken
  * in, and deleting it would make those a lie with no way back.
  *
- * C_VOID JOINS THE STRUCT, which is a bug fix hiding in a rename. It was the
- * one colour left as a compile-time constant, so the blue chrome has been
- * drawing on a dark GREEN backdrop this whole time — visible as a green cast
- * behind the idle logo and down the wizard's banner, on the one build nobody
- * here runs day to day. Both palettes now carry their own. */
+ * DEEPER THAN THEY WERE, now that the panels are translucent. Flat opaque
+ * chrome wants a mid tone or it reads as a hole; glass wants a dark one,
+ * because the light in it comes from what is BEHIND it and a pale sheet has
+ * nowhere left to brighten. Only the structural tones moved — bar, panel,
+ * their highlights and the bevel edges. Text, dim text and the accent are
+ * untouched, so every one of them gained contrast against the darker ground
+ * rather than losing it.
+ *
+ * C_VOID JOINS THE STRUCT, which was a small bug fix when the chrome was flat
+ * and is not optional now that it is glass. It was the one colour left as a
+ * compile-time constant, so blue chrome drew on a dark GREEN backdrop — and
+ * the backdrop is no longer just what shows around the panels: it is the light
+ * the glass gathers and blurs, so a green void tints every frosted surface on
+ * the screen from behind. Both palettes carry their own.
+ *
+ * The blue void is the green one taken through the same rotation as the rest
+ * of the pair — G scaled by ~0.86, B taking the green's old G — so the two
+ * looks are lit identically and only the hue differs. */
 #define C_VOID      (g_pal->void_bg)  /* behind everything */
 struct palette {
 	unsigned void_bg;
 	unsigned bar, bar_hi, panel, panel_hi, edge_lt, edge_dk;
-	unsigned text, text_dim, accent, shadow;
+	/* text_dimmest is a THIRD step down, for a caption that should be
+	 * readable when looked at and invisible when not — the package ID beside
+	 * an app's name is the only user so far. C_TEXT_DIM already carries real
+	 * information elsewhere (a version, a hint, a disabled menu item), and
+	 * reusing it here made the ID compete with the name it captions. */
+	unsigned text, text_dim, text_dimmest, accent, shadow;
 };
 
 static const struct palette pal_green = {
-	0x0C1E14U,
-	0x14301FU, 0x2A6642U, 0x14301FU, 0x2A6642U, 0x4E9C6BU, 0x08180FU,
-	0xD8F5E4U, 0x6E9B80U, 0x8CE0A6U, 0x030806U
+	0x07150DU,
+	0x0E2416U, 0x1D4A2FU, 0x0E2416U, 0x1D4A2FU, 0x3C7A53U, 0x05110AU,
+	0xD8F5E4U, 0x6E9B80U, 0x47665AU, 0x8CE0A6U, 0x020604U
 };
 
 static const struct palette pal_blue = {
-	0x0C1A1EU,
-	0x142A30U, 0x2A5A66U, 0x142A30U, 0x2A5A66U, 0x4E8C9CU, 0x081418U,
-	0xD8EEF5U, 0x6E8F9BU, 0x8CCFE0U, 0x030608U
+	0x071216U,
+	0x0E1F25U, 0x1C4451U, 0x0E1F25U, 0x1C4451U, 0x3A6C7CU, 0x050E12U,
+	0xD8EEF5U, 0x6E8F9BU, 0x47606AU, 0x8CCFE0U, 0x020506U
 };
 
 static const struct palette *g_pal = &pal_blue;
@@ -104,6 +122,7 @@ static const struct palette *g_pal = &pal_blue;
 #define C_EDGE_DK   (g_pal->edge_dk)  /* bevel dark */
 #define C_TEXT      (g_pal->text)
 #define C_TEXT_DIM  (g_pal->text_dim)
+#define C_DIMMEST   (g_pal->text_dimmest)
 #define C_ACCENT    (g_pal->accent)
 #define C_SHADOW    (g_pal->shadow)
 
@@ -264,7 +283,8 @@ static int  g_hot_item  = -1;
 
 /* modal */
 enum modal_kind { M_NONE = 0, M_ABOUT, M_UPDATE, M_GFX, M_AUDIO, M_PAD, M_DEBUG, M_SYSTEM,
-                  M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES, M_APPS };
+                  M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES, M_APPS,
+                  M_MICROMODS };
 static enum modal_kind g_modal;
 
 /* ---- update check state -------------------------------------------------
@@ -439,32 +459,634 @@ void ui_progress_pct(int pct)
 
 int ui_progress_active(void) { return g_modal == M_PROGRESS; }
 
+/* ---- animation -----------------------------------------------------------
+ *
+ * Enough motion to say where a panel came from, and no more. The viewer
+ * already redraws continuously — the progress marquee and the profile
+ * cursor have always been time-driven — so this needs no timer, no
+ * invalidation and no state machine: everything is a pure function of "how
+ * long ago did this appear".
+ *
+ * WHAT DECIDES WHEN SOMETHING APPEARED. Not the twenty-odd places that
+ * assign g_modal; the draw notices the value changed since last frame and
+ * stamps the clock. Every path that opens a dialog — a menu item, the
+ * wizard's Next, an alert raised by the frame pump — is covered without
+ * touching any of them.
+ *
+ * ANIMATIONS ARE OFF FOR --ui-shot. A capture renders a single frame, so an
+ * animated one would catch whatever fraction of the entrance that frame
+ * happened to land on, and every regression capture would differ from the
+ * last for no reason. ui_anim_disable() pins everything settled.
+ */
+static int    g_anim_off;
+static Uint32 g_modal_at, g_menu_at, g_wiz_at;
+
+void ui_anim_disable(void) { g_anim_off = 1; }
+
+/* Defined here rather than near the launcher so it sits with the other debug
+ * hooks; the statics it reads are declared further down. */
+void ui_debug_apps(int *n, int *top, int *sel, int *rows);
+
+/* 0 at `since`, 1 once `dur` has passed, eased so it decelerates into place. */
+static float anim_t(Uint32 since, Uint32 dur)
+{
+	Uint32 now;
+	float t, inv;
+
+	if (g_anim_off || !since || !dur) return 1.0f;
+	now = SDL_GetTicks();
+	if (now <= since) return 0.0f;
+	if (now - since >= dur) return 1.0f;
+	t = (float)(now - since) / (float)dur;
+	inv = 1.0f - t;
+	return 1.0f - inv * inv * inv;        /* ease-out cubic */
+}
+
+/* Notices a changed value and restamps the clock. */
+static void anim_watch(int cur, int *seen, Uint32 *stamp)
+{
+	if (cur != *seen) { *seen = cur; *stamp = SDL_GetTicks(); }
+}
+
 /* ---- primitives ---------------------------------------------------------- */
+
+/* EVERYTHING BELOW IS DRAWN THROUGH THIS. A fade has to reach the panel body,
+ * its rim, its shadow, the chips inside it and the text on them, or the parts
+ * that ignored it pop in while the rest fades and the whole thing looks
+ * broken. One multiplier applied in the four primitives covers all of it. */
+static Uint8 g_alpha = 255;
+
+static Uint8 amul(Uint8 a)
+{
+	return g_alpha == 255 ? a : (Uint8)((int)a * g_alpha / 255);
+}
 
 static void fill(SDL_Renderer *r, int x, int y, int w, int h, unsigned col)
 {
 	SDL_Rect rc = { x, y, w, h };
 	struct rgb c = unpack(col);
-	SDL_SetRenderDrawColor(r, c.r, c.g, c.b, 255);
+	SDL_SetRenderDrawBlendMode(r, g_alpha == 255 ? SDL_BLENDMODE_NONE
+	                                             : SDL_BLENDMODE_BLEND);
+	SDL_SetRenderDrawColor(r, c.r, c.g, c.b, amul(255));
 	SDL_RenderFillRect(r, &rc);
 }
 
-/* 1px bevel: light top/left, dark bottom/right (raised) or the reverse. */
-static void bevel(SDL_Renderer *r, int x, int y, int w, int h, int raised)
+/* ---- rounded, softly antialiased shapes ----------------------------------
+ *
+ * The whole chrome used to be flat fills and 1px light/dark bevels — sharp
+ * rectangles, on purpose, because that is what a pixel-art interface is. This
+ * keeps that palette and that font but trades the hard rectangle for a
+ * rounded, translucent one: every corner below is a small polygon fan rather
+ * than a rect, with a one-pixel alpha feather doing the antialiasing SDL's
+ * flat SDL_RenderFillRect never had to worry about.
+ *
+ * RR_SEG points per 90-degree corner, computed once as a unit quarter-circle
+ * rather than called through cosf/sinf per frame — this file has never linked
+ * libm and a rounded rectangle is not a reason to start on every platform
+ * this cross-builds for. */
+#define RR_SEG      8
+#define RR_MAX_PTS  (4 * (RR_SEG + 1))
+#define RR_FEATHER  1.0f
+
+static const float RR_CX[RR_SEG + 1] = {
+	1.000000f, 0.980785f, 0.923880f, 0.831470f, 0.707107f,
+	0.555570f, 0.382683f, 0.195090f, 0.000000f
+};
+static const float RR_CY[RR_SEG + 1] = {
+	0.000000f, 0.195090f, 0.382683f, 0.555570f, 0.707107f,
+	0.831470f, 0.923880f, 0.980785f, 1.000000f
+};
+
+/* Traces a w x h rect clockwise from its top edge, rounding each corner by
+ * its own radius — 0 leaves that corner square. Used both for a uniformly
+ * rounded chip and for the dialog header strip, which rounds only the top
+ * two so it sits flush with the panel content below it. Writes at most
+ * RR_MAX_PTS points into `pts` and returns how many it used. */
+static int rr_build(SDL_FPoint *pts, float x, float y, float w, float h,
+                    float rtl, float rtr, float rbr, float rbl)
 {
-	unsigned lt = raised ? C_EDGE_LT : C_EDGE_DK;
-	unsigned dk = raised ? C_EDGE_DK : C_EDGE_LT;
-	fill(r, x, y, w, 1, lt);
-	fill(r, x, y, 1, h, lt);
-	fill(r, x, y + h - 1, w, 1, dk);
-	fill(r, x + w - 1, y, 1, h, dk);
+	int n = 0, k;
+
+	if (rtr > 0) {
+		float cx = x + w - rtr, cy = y + rtr;
+		for (k = 0; k <= RR_SEG; k++) {
+			pts[n].x = cx + rtr * RR_CY[k]; pts[n].y = cy - rtr * RR_CX[k]; n++;
+		}
+	} else { pts[n].x = x + w; pts[n].y = y; n++; }
+
+	if (rbr > 0) {
+		float cx = x + w - rbr, cy = y + h - rbr;
+		for (k = 0; k <= RR_SEG; k++) {
+			pts[n].x = cx + rbr * RR_CX[k]; pts[n].y = cy + rbr * RR_CY[k]; n++;
+		}
+	} else { pts[n].x = x + w; pts[n].y = y + h; n++; }
+
+	if (rbl > 0) {
+		float cx = x + rbl, cy = y + h - rbl;
+		for (k = 0; k <= RR_SEG; k++) {
+			pts[n].x = cx - rbl * RR_CY[k]; pts[n].y = cy + rbl * RR_CX[k]; n++;
+		}
+	} else { pts[n].x = x; pts[n].y = y + h; n++; }
+
+	if (rtl > 0) {
+		float cx = x + rtl, cy = y + rtl;
+		for (k = 0; k <= RR_SEG; k++) {
+			pts[n].x = cx - rtl * RR_CX[k]; pts[n].y = cy - rtl * RR_CY[k]; n++;
+		}
+	} else { pts[n].x = x; pts[n].y = y; n++; }
+
+	return n;
+}
+
+/* The workhorse: a filled rounded rect, flat-coloured when `tex` is NULL or
+ * sampling `tex` (stretched to x,y,w,h and modulated by the vertex colour)
+ * when it is not — that second form is the frosted-glass fill, see
+ * glass_capture() below. The colour runs top-to-bottom between two
+ * colour/alpha pairs, which is what lets one call draw a flat chip, a glass
+ * body with a gentle vertical falloff, or a highlight that fades to nothing.
+ *
+ * Either way the edge gets a genuine antialiased feather: a second, larger
+ * outline fades to zero alpha, and a triangle strip connects it to the solid
+ * one. */
+static void rr_geom(SDL_Renderer *r, SDL_Texture *tex, const SDL_FRect *uv,
+                    float x, float y, float w, float h, float rtl, float rtr,
+                    float rbr, float rbl, unsigned ctop, Uint8 atop,
+                    unsigned cbot, Uint8 abot)
+{
+	SDL_FPoint in[RR_MAX_PTS], out[RR_MAX_PTS];
+	SDL_Vertex verts[1 + RR_MAX_PTS * 2];
+	int idx[RR_MAX_PTS * 9];
+	int n, i, ni = 0;
+	struct rgb ct = unpack(ctop), cb = unpack(cbot);
+	/* Which rectangle of POSITION space maps to the texture's 0..1 — the
+	 * shape's own bounds unless the caller says otherwise. The glass needs
+	 * otherwise: its texture is a capture of the whole screen, and the panel
+	 * has to sample its own window onto it rather than stretching the entire
+	 * screen across itself. */
+	float ux = uv ? uv->x : x, uy = uv ? uv->y : y;
+	float uw = uv ? uv->w : w, uh = uv ? uv->h : h;
+
+	if (w <= 0 || h <= 0 || (atop == 0 && abot == 0)) return;
+	if (uw <= 0) uw = 1;
+	if (uh <= 0) uh = 1;
+	memset(verts, 0, sizeof(verts));
+
+	n = rr_build(in, x, y, w, h, rtl, rtr, rbr, rbl);
+	rr_build(out, x - RR_FEATHER, y - RR_FEATHER, w + 2 * RR_FEATHER, h + 2 * RR_FEATHER,
+	        rtl > 0 ? rtl + RR_FEATHER : 0, rtr > 0 ? rtr + RR_FEATHER : 0,
+	        rbr > 0 ? rbr + RR_FEATHER : 0, rbl > 0 ? rbl + RR_FEATHER : 0);
+
+#define RR_MIX(dst, py, a_scale) do {                                        \
+		float t_ = ((py) - y) / h;                                           \
+		if (t_ < 0) t_ = 0; else if (t_ > 1) t_ = 1;                         \
+		(dst).r = (Uint8)(ct.r + (cb.r - ct.r) * t_);                        \
+		(dst).g = (Uint8)(ct.g + (cb.g - ct.g) * t_);                        \
+		(dst).b = (Uint8)(ct.b + (cb.b - ct.b) * t_);                        \
+		(dst).a = amul((Uint8)((atop + (abot - atop) * t_) * (a_scale)));    \
+	} while (0)
+
+	verts[0].position.x = x + w / 2; verts[0].position.y = y + h / 2;
+	RR_MIX(verts[0].color, y + h / 2, 1);
+	verts[0].tex_coord.x = (x + w / 2 - ux) / uw;
+	verts[0].tex_coord.y = (y + h / 2 - uy) / uh;
+	for (i = 0; i < n; i++) {
+		verts[1 + i].position = in[i];
+		RR_MIX(verts[1 + i].color, in[i].y, 1);
+		verts[1 + i].tex_coord.x = (in[i].x - ux) / uw;
+		verts[1 + i].tex_coord.y = (in[i].y - uy) / uh;
+		verts[1 + n + i].position = out[i];
+		RR_MIX(verts[1 + n + i].color, out[i].y, 0);
+		verts[1 + n + i].tex_coord.x = (out[i].x - ux) / uw;
+		verts[1 + n + i].tex_coord.y = (out[i].y - uy) / uh;
+	}
+#undef RR_MIX
+	for (i = 0; i < n; i++) {
+		int j = (i + 1) % n;
+		idx[ni++] = 0; idx[ni++] = 1 + i; idx[ni++] = 1 + j;
+	}
+	for (i = 0; i < n; i++) {
+		int j = (i + 1) % n;
+		idx[ni++] = 1 + i;     idx[ni++] = 1 + n + i; idx[ni++] = 1 + j;
+		idx[ni++] = 1 + j;     idx[ni++] = 1 + n + i; idx[ni++] = 1 + n + j;
+	}
+	/* Untextured geometry takes the RENDERER's blend mode; textured geometry
+	 * takes the TEXTURE's. Setting this one is therefore right for the flat
+	 * shapes and simply ignored for the glass, which the caller has already
+	 * put into whichever mode it wants. */
+	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+	SDL_RenderGeometry(r, tex, verts, 1 + 2 * n, idx, ni);
+}
+
+static void rr_fill_ex(SDL_Renderer *r, SDL_Texture *tex, float x, float y,
+                       float w, float h, float rtl, float rtr, float rbr,
+                       float rbl, unsigned col, Uint8 alpha)
+{
+	rr_geom(r, tex, NULL, x, y, w, h, rtl, rtr, rbr, rbl, col, alpha, col, alpha);
+}
+
+/* A thin rounded outline: antialiased on the outer edge, a hard inner edge
+ * against whatever fill it sits on top of (always the same tone at this
+ * thinness, so the seam is not visible in practice).
+ *
+ * The colour runs top-to-bottom like rr_geom's. A rim of ONE brightness all
+ * the way round is what a drawn rectangle looks like; a rim that is bright
+ * along the top and fades towards the bottom is what a lit sheet looks like,
+ * and it is most of the difference between "rounded box" and "glass". */
+static void rr_stroke_grad(SDL_Renderer *r, float x, float y, float w, float h,
+                           float rad, unsigned ctop, Uint8 atop,
+                           unsigned cbot, Uint8 abot, float thick)
+{
+	SDL_FPoint outer[RR_MAX_PTS], inner[RR_MAX_PTS], feather[RR_MAX_PTS];
+	SDL_Vertex verts[RR_MAX_PTS * 3];
+	int idx[RR_MAX_PTS * 12];
+	int n, i, ni = 0, nv = 0;
+	struct rgb ct = unpack(ctop), cb = unpack(cbot);
+	float irad;
+
+	if (w <= 0 || h <= 0 || (atop == 0 && abot == 0)) return;
+	if (thick * 2 >= w) thick = w / 2 - 0.5f;
+	if (thick * 2 >= h) thick = h / 2 - 0.5f;
+	if (thick < 0.5f) thick = 0.5f;
+	irad = rad - thick; if (irad < 0) irad = 0;
+	memset(verts, 0, sizeof(verts));
+
+	n = rr_build(outer, x, y, w, h, rad, rad, rad, rad);
+	rr_build(inner, x + thick, y + thick, w - 2 * thick, h - 2 * thick,
+	        irad, irad, irad, irad);
+	rr_build(feather, x - RR_FEATHER, y - RR_FEATHER, w + 2 * RR_FEATHER,
+	        h + 2 * RR_FEATHER, rad + RR_FEATHER, rad + RR_FEATHER,
+	        rad + RR_FEATHER, rad + RR_FEATHER);
+
+#define RS_MIX(dst, py, a_scale) do {                                        \
+		float t_ = ((py) - y) / h;                                           \
+		if (t_ < 0) t_ = 0; else if (t_ > 1) t_ = 1;                         \
+		(dst).r = (Uint8)(ct.r + (cb.r - ct.r) * t_);                        \
+		(dst).g = (Uint8)(ct.g + (cb.g - ct.g) * t_);                        \
+		(dst).b = (Uint8)(ct.b + (cb.b - ct.b) * t_);                        \
+		(dst).a = amul((Uint8)((atop + (abot - atop) * t_) * (a_scale)));    \
+	} while (0)
+
+	for (i = 0; i < n; i++) {
+		verts[nv].position = feather[i]; RS_MIX(verts[nv].color, feather[i].y, 0); nv++;
+		verts[nv].position = outer[i];   RS_MIX(verts[nv].color, outer[i].y, 1);   nv++;
+		verts[nv].position = inner[i];   RS_MIX(verts[nv].color, inner[i].y, 1);   nv++;
+	}
+#undef RS_MIX
+	for (i = 0; i < n; i++) {
+		int j = (i + 1) % n;
+		int f0 = 3*i, o0 = 3*i+1, in0 = 3*i+2, f1 = 3*j, o1 = 3*j+1, in1 = 3*j+2;
+		idx[ni++] = f0;  idx[ni++] = o0;  idx[ni++] = f1;
+		idx[ni++] = f1;  idx[ni++] = o0;  idx[ni++] = o1;
+		idx[ni++] = o0;  idx[ni++] = in0; idx[ni++] = o1;
+		idx[ni++] = o1;  idx[ni++] = in0; idx[ni++] = in1;
+	}
+	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+	SDL_RenderGeometry(r, NULL, verts, nv, idx, ni);
+}
+
+/* A soft ELLIPTICAL falloff: one triangle fan with the alpha in the vertices,
+ * so the GPU interpolates between the centre and the rim. Both directions are
+ * useful and they are the same shape:
+ *
+ *   a_mid > a_rim   a glow — light pooling outward from a point
+ *   a_mid < a_rim   a vignette — the edges of the picture falling away
+ *
+ * ITS OWN, FINER CIRCLE TABLE. The rounded rects get eight points per corner,
+ * which is ample for a 13px button, and reusing that here gave the vignette
+ * 36 rim points across the whole window — the iso-alpha contours came out as
+ * a visible polygon and the flat chords read as faint streaks across the
+ * backdrop. Sixty-four is smooth at that size. Still no libm: the quarter
+ * turn is a table, as RR_CX/RR_CY is.
+ *
+ * SEPARATE X AND Y RADII because the window is not square. A circular
+ * vignette on a 480x272 panel darkens the top and bottom edges long before
+ * it touches the sides, which is exactly the horizontal banding it was
+ * supposed to avoid; an ellipse of the frame's own proportions reaches all
+ * four corners at once.
+ *
+ * An earlier glow stacked a dozen concentric circles at a low alpha instead.
+ * Do not go back to it: every circle contributes its own hard edge and the
+ * result is a set of visible rings — a bullseye, not a glow. */
+#define RAD_SEG 16                      /* per quadrant; 64 round the ellipse */
+static const float RAD_CX[RAD_SEG + 1] = {
+	1.000000f, 0.995185f, 0.980785f, 0.956940f, 0.923880f,
+	0.881921f, 0.831470f, 0.773010f, 0.707107f, 0.634393f,
+	0.555570f, 0.471397f, 0.382683f, 0.290285f, 0.195090f,
+	0.098017f, 0.000000f
+};
+static const float RAD_CY[RAD_SEG + 1] = {
+	0.000000f, 0.098017f, 0.195090f, 0.290285f, 0.382683f,
+	0.471397f, 0.555570f, 0.634393f, 0.707107f, 0.773010f,
+	0.831470f, 0.881921f, 0.923880f, 0.956940f, 0.980785f,
+	0.995185f, 1.000000f
+};
+
+static void radial(SDL_Renderer *r, int cx, int cy, float rx, float ry,
+                   unsigned col, Uint8 a_mid, Uint8 a_rim)
+{
+	SDL_Vertex v[1 + 4 * RAD_SEG];
+	int idx[4 * RAD_SEG * 3];
+	int n = 4 * RAD_SEG, i, ni = 0;
+	struct rgb c = unpack(col);
+
+	if (rx <= 0 || ry <= 0 || (a_mid == 0 && a_rim == 0)) return;
+	memset(v, 0, sizeof(v));
+
+	v[0].position.x = (float)cx; v[0].position.y = (float)cy;
+	v[0].color.r = c.r; v[0].color.g = c.g; v[0].color.b = c.b;
+	v[0].color.a = amul(a_mid);
+
+	/* One quarter-turn table, four quadrants, by the rotation identities —
+	 * cos(90+f) = -sin f, sin(90+f) = cos f, and so on round. Written out
+	 * rather than folded into sign tricks because a mirrored quadrant that
+	 * walks the table the wrong way makes a lopsided ellipse, and that is
+	 * a tedious thing to see and a worse one to debug. */
+	for (i = 0; i < n; i++) {
+		int q = i / RAD_SEG, j = i % RAD_SEG;
+		float ux, uy;
+		switch (q) {
+		default:
+		case 0: ux =  RAD_CX[j]; uy =  RAD_CY[j]; break;
+		case 1: ux = -RAD_CY[j]; uy =  RAD_CX[j]; break;
+		case 2: ux = -RAD_CX[j]; uy = -RAD_CY[j]; break;
+		case 3: ux =  RAD_CY[j]; uy = -RAD_CX[j]; break;
+		}
+		v[1 + i].position.x = cx + rx * ux;
+		v[1 + i].position.y = cy + ry * uy;
+		v[1 + i].color.r = c.r; v[1 + i].color.g = c.g; v[1 + i].color.b = c.b;
+		v[1 + i].color.a = amul(a_rim);
+	}
+	for (i = 0; i < n; i++) {
+		idx[ni++] = 0; idx[ni++] = 1 + i; idx[ni++] = 1 + ((i + 1) % n);
+	}
+	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+	SDL_RenderGeometry(r, NULL, v, 1 + n, idx, ni);
+}
+
+static void glow(SDL_Renderer *r, int cx, int cy, int radius, unsigned col,
+                 Uint8 alpha)
+{
+	radial(r, cx, cy, (float)radius, (float)radius, col, alpha, 0);
+}
+
+/* How much to round a rect this small: enough to read as "rounded" on a
+ * button or a list row without eating so much of a small chip that it turns
+ * into a lozenge. */
+static float rr_radius(int w, int h)
+{
+	float rad = 4.0f;
+	float m = (float)(w < h ? w : h) / 2.0f;
+	return rad < m ? rad : m;
+}
+
+static float rr_radius_panel(int w, int h)
+{
+	float rad = 10.0f;
+	float m = (float)(w < h ? w : h) / 2.0f;
+	return rad < m ? rad : m;
+}
+
+/* Flat rounded fill — the rounded replacement for a bare `fill()` call where
+ * a highlight or a box benefits from matching the rest of the chrome. */
+static void rfill(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
+                  Uint8 alpha)
+{
+	float rad = rr_radius(w, h);
+	rr_fill_ex(r, NULL, (float)x, (float)y, (float)w, (float)h,
+	          rad, rad, rad, rad, col, alpha);
+}
+
+/* A button or a sunken box. This is what every `fill()` + `bevel()` pair in
+ * the dialogs collapsed into — same two arguments bevel() ever needed (the
+ * rect and which way it faces), now drawing the body and the edge together.
+ *
+ * `raised` still means what it did, but it is no longer a choice of which two
+ * sides get the light. Both states carry a vertical gradient and a graded rim;
+ * they differ in DIRECTION, which is what the old light-top-left/dark-bottom-
+ * right bevel was really encoding:
+ *
+ *   raised  body brightens upward, rim bright along the top   — a button
+ *   sunken  body darkens upward, rim dark along the top       — a well
+ *
+ * A flat fill with a single-tone outline was the first version and it read as
+ * a sticker: correct shape, no light on it. */
+static void chip(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
+                 int raised)
+{
+	float rad = rr_radius(w, h);
+	float fx = (float)x, fy = (float)y, fw = (float)w, fh = (float)h;
+
+	if (raised) {
+		rr_geom(r, NULL, NULL, fx, fy, fw, fh, rad, rad, rad, rad,
+		       col, 176, col, 202);
+		rr_stroke_grad(r, fx, fy, fw, fh, rad,
+		              C_EDGE_LT, 185, C_EDGE_LT, 96, 1.0f);
+	} else {
+		rr_geom(r, NULL, NULL, fx, fy, fw, fh, rad, rad, rad, rad,
+		       col, 208, col, 176);
+		rr_stroke_grad(r, fx, fy, fw, fh, rad,
+		              C_EDGE_DK, 165, C_EDGE_LT, 78, 1.0f);
+	}
+}
+
+/* ---- frosted glass --------------------------------------------------------
+ *
+ * Captures whatever is already drawn and hands back a small, softly blurred
+ * copy of it: a few passes of "redraw at half size with linear filtering",
+ * which is a cheap, GPU-only stand-in for a real gaussian blur and is plenty
+ * convincing at this UI's scale. NULL on any failure (no render-target
+ * support, an unreadable target, mid-resize, ...) — callers fall back to a
+ * flat tint rather than depending on it.
+ *
+ * THE WHOLE TARGET, NOT THE PANEL'S RECTANGLE, AND THAT IS DELIBERATE.
+ * Everything this file draws is in the renderer's LOGICAL space, but
+ * SDL_RenderReadPixels does NOT interpret its rect that way: measured on
+ * SDL 2.32, a logical size of 100x100 on a 200x200 window (scale 2) and a
+ * read of rect (0,0,50,50) returns a 50x50 block of OUTPUT pixels — the rect
+ * goes through unscaled. So a logical rect both names the wrong region and
+ * disagrees with the buffer you sized for it: asking for a 340x232 panel at
+ * 2x filled a quarter of the allocation and left the rest uninitialised,
+ * which showed up on screen as a hard-edged bright rectangle across half the
+ * panel.
+ *
+ * Passing NULL sidesteps the entire question — it means "the whole render
+ * target" and nothing else — and the panels then pick their own region out of
+ * it with texture coordinates. One capture also does for every panel in the
+ * frame.
+ */
+static SDL_Texture *glass_blur(SDL_Renderer *r)
+{
+	unsigned char *px;
+	SDL_Texture *cur, *prev_target;
+	int w = 0, h = 0, steps;
+
+	SDL_GetRendererOutputSize(r, &w, &h);
+	if (w <= 0 || h <= 0) return NULL;
+
+	px = malloc((size_t)w * h * 4);
+	if (!px) return NULL;
+	if (SDL_RenderReadPixels(r, NULL, SDL_PIXELFORMAT_ARGB8888, px, w * 4) != 0) {
+		free(px);
+		return NULL;
+	}
+	cur = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, w, h);
+	if (!cur) { free(px); return NULL; }
+	SDL_UpdateTexture(cur, NULL, px, w * 4);
+	free(px);
+
+	/* Restore whatever was being drawn into rather than assuming the window:
+	 * this runs in the middle of somebody else's frame. */
+	prev_target = SDL_GetRenderTarget(r);
+	/* HOW BLURRED, AND WHY THE STEP COUNT IS WHAT SETS IT.
+	 *
+	 * Each pass halves the capture with linear filtering, so the radius
+	 * doubles per step and the result is 1/2^steps of the screen whatever the
+	 * window size — the strength is scale-invariant as long as the chain runs
+	 * to completion. That is why the floor below is as low as it is: it exists
+	 * only to stop a degenerate texture, not to end the chain, and a floor
+	 * high enough to end it early would quietly make the blur weaker on small
+	 * windows than on large ones.
+	 *
+	 * Four steps looked like a smeared photograph of the backdrop — the logo
+	 * still read as a logo. Seven is a wash you take for frosted glass rather
+	 * than for a picture of what is behind it. */
+#define GLASS_STEPS 7
+	for (steps = 0; steps < GLASS_STEPS && w > 4 && h > 4; steps++) {
+		int nw = w / 2, nh = h / 2;
+		SDL_Texture *next = SDL_CreateTexture(r, SDL_PIXELFORMAT_ARGB8888,
+		                                      SDL_TEXTUREACCESS_TARGET, nw, nh);
+		if (!next) break;
+		SDL_SetTextureScaleMode(cur, SDL_ScaleModeLinear);
+		SDL_SetTextureBlendMode(cur, SDL_BLENDMODE_NONE);
+		if (SDL_SetRenderTarget(r, next) != 0) {
+			SDL_DestroyTexture(next);
+			break;
+		}
+		SDL_RenderCopy(r, cur, NULL, NULL);
+		SDL_SetRenderTarget(r, prev_target);
+		SDL_DestroyTexture(cur);
+		cur = next;
+		w = nw; h = nh;
+	}
+	SDL_SetTextureScaleMode(cur, SDL_ScaleModeLinear);
+	return cur;
+}
+
+/* ONE CAPTURE, REUSED FOR A WHILE. A readback is a GPU-to-CPU stall and the
+ * downsample chain is four render-target switches; doing that every frame for
+ * a dialog that is sitting still is pure waste. What is behind a modal barely
+ * moves — the emulator is paused while one is up (see ui_modal) — so the
+ * capture is kept for a tenth of a second.
+ *
+ * Always taken BEFORE any panel is drawn in the frame, so it never contains
+ * last frame's glass reflected back into this one.
+ */
+static SDL_Texture *g_glass;
+static Uint32       g_glass_at;
+
+static void glass_free(void)
+{
+	if (g_glass) SDL_DestroyTexture(g_glass);
+	g_glass = NULL;
+	g_glass_at = 0;
+}
+
+static SDL_Texture *glass_capture(SDL_Renderer *r)
+{
+	Uint32 now = SDL_GetTicks();
+
+	if (g_glass && now - g_glass_at < 100)
+		return g_glass;
+
+	glass_free();
+	g_glass = glass_blur(r);
+	g_glass_at = now;
+	return g_glass;
+}
+
+/* The logical rectangle the captured texture covers, which is what the panels
+ * map their own position onto. The capture is the whole render target, so in
+ * logical terms that is the whole logical screen. */
+static SDL_FRect glass_uv(SDL_Renderer *r)
+{
+	SDL_FRect uv = { 0, 0, 0, 0 };
+	int lw = 0, lh = 0;
+
+	SDL_RenderGetLogicalSize(r, &lw, &lh);
+	if (lw <= 0 || lh <= 0)          /* no logical size set: output IS logical */
+		SDL_GetRendererOutputSize(r, &lw, &lh);
+	uv.w = (float)lw;
+	uv.h = (float)lh;
+	return uv;
+}
+
+/* A dialog or dropdown's outer frame: a soft shadow, a tinted body, the live
+ * blurred backdrop bleeding through it, and a bright rounded rim.
+ *
+ * WHY THE BLUR IS *ADDED* RATHER THAN USED AS THE BODY. The obvious build —
+ * fill the panel with the blurred backdrop and tint it — produces a black
+ * panel here, and it is worth writing down why, because it looks like a bug
+ * in the blur and is not. Frosted glass in a desktop UI reads as glass
+ * because there is a bright, busy desktop behind it. Behind this one is
+ * C_VOID: an almost-black field with a small logo on it. Blurring
+ * near-black gives near-black, and compositing that as the body can only
+ * ever darken what is underneath, so the panel came out looking like a hole
+ * cut in the window.
+ *
+ * So the body is a theme-coloured gradient — the floor the panel can never
+ * fall below — and the backdrop is ADDED on top of it. Additive is the whole
+ * trick: darkness behind contributes nothing and the tint survives, while
+ * anything bright behind (a running game, the logo's glow) bleeds through as
+ * light. It is also the physically sensible one: glass adds the light that
+ * passes through it to the light it reflects.
+ *
+ * `blur` may be NULL, and is owned by glass_capture() — never destroyed here.
+ */
+static void panel_glass(SDL_Renderer *r, int x, int y, int w, int h,
+                        SDL_Texture *blur)
+{
+	float rad = rr_radius_panel(w, h);
+	int i;
+
+	/* Widening rings rather than one hard offset rectangle: a shadow with an
+	 * edge is a second border, not a shadow. Six thin ones instead of three
+	 * fat ones — same total darkness, spread over twice the distance, and
+	 * with each step small enough that the banding between rings disappears.
+	 * The offset grows faster than the spread so the light stays overhead. */
+	for (i = 6; i >= 1; i--) {
+		float grow = (float)i * 2.2f;
+		rr_fill_ex(r, NULL, x - grow, y - grow + 1.0f + grow * 0.55f,
+		          w + 2 * grow, h + 2 * grow,
+		          rad + grow, rad + grow, rad + grow, rad + grow,
+		          C_SHADOW, (Uint8)(13 * (7 - i)));
+	}
+
+	rr_geom(r, NULL, NULL, (float)x, (float)y, (float)w, (float)h,
+	       rad, rad, rad, rad, C_PANEL_HI, 202, C_PANEL, 220);
+
+	if (blur) {
+		SDL_FRect uv = glass_uv(r);
+		SDL_SetTextureBlendMode(blur, SDL_BLENDMODE_ADD);
+		SDL_SetTextureAlphaMod(blur, 255);
+		rr_geom(r, blur, &uv, (float)x, (float)y, (float)w, (float)h,
+		       rad, rad, rad, rad, 0x9FB4A8U, 150, 0x6F8478U, 96);
+	}
+
+	/* The light catching the top of the sheet, fading out before halfway. */
+	rr_geom(r, NULL, NULL, (float)x + 1, (float)y + 1, (float)w - 2, (float)h * 0.45f,
+	       rad - 1, rad - 1, 0, 0, C_EDGE_LT, 46, C_EDGE_LT, 0);
+
+	/* The rim, brightest along the top and falling to almost nothing at the
+	 * bottom. A rim of one brightness all the way round is a drawn outline;
+	 * this is an edge with a light above it, and it is the single change that
+	 * did most for making the panels read as sheets of something. */
+	rr_stroke_grad(r, (float)x, (float)y, (float)w, (float)h, rad,
+	              C_EDGE_LT, 190, C_EDGE_LT, 70, 1.2f);
 }
 
 static void panel(SDL_Renderer *r, int x, int y, int w, int h)
 {
-	fill(r, x + 2, y + 2, w, h, C_SHADOW);      /* drop shadow */
-	fill(r, x, y, w, h, C_PANEL);
-	bevel(r, x, y, w, h, 1);
+	panel_glass(r, x, y, w, h, glass_capture(r));
 }
 
 static int text_w(const char *s) { return (int)strlen(s) * GLYPH_ADV; }
@@ -473,6 +1095,7 @@ static void text(SDL_Renderer *r, int x, int y, const char *s, unsigned col)
 {
 	struct rgb c = unpack(col);
 	SDL_SetTextureColorMod(g_font, c.r, c.g, c.b);
+	SDL_SetTextureAlphaMod(g_font, g_alpha);
 	for (; *s; s++, x += GLYPH_ADV) {
 		int idx = (unsigned char)*s - UI_FONT_FIRST;
 		SDL_Rect src, dst;
@@ -885,7 +1508,13 @@ static void logo_load(SDL_Renderer *ren, const char *path)
  * not start a native title at all, because those need AppManager rather than
  * saplayer. The list is read from the installed packages' own meta.inf.
  */
-#define AP_MAX 160
+/* GROWN ON DEMAND, NOT CAPPED AT 160.
+ *
+ * This was a fixed `g_ap[160]` and the reload loop stopped filling it at the
+ * ceiling. A real install here has 454 launchable packages, so the launcher
+ * listed the first 160 alphabetically and there was no amount of scrolling
+ * that reached the rest — the list simply ended at "1-6 of 160". Same growth
+ * pattern as the game library, which never had a ceiling. */
 struct ap_entry {
 	char pkg[64];
 	char name[72];
@@ -894,8 +1523,8 @@ struct ap_entry {
 	SDL_Texture *tex;
 	int tw, th, tried;
 };
-static struct ap_entry g_ap[AP_MAX];
-static int g_ap_n, g_ap_top, g_ap_rows = 6;
+static struct ap_entry *g_ap;
+static int g_ap_n, g_ap_cap, g_ap_top, g_ap_sel, g_ap_rows = 6;
 
 /* WHAT IS WORTH OFFERING TO LAUNCH.
  *
@@ -916,7 +1545,24 @@ static void ap_free(void)
 	int i;
 	for (i = 0; i < g_ap_n; i++)
 		if (g_ap[i].tex) { SDL_DestroyTexture(g_ap[i].tex); g_ap[i].tex = NULL; }
-	g_ap_n = 0;
+	free(g_ap);
+	g_ap = NULL;
+	g_ap_n = g_ap_cap = 0;
+}
+
+/* -> 0 if the list could not grow, in which case the caller stops adding
+ * rather than writing past the end. */
+static int ap_push(const struct ap_entry *e)
+{
+	if (g_ap_n == g_ap_cap) {
+		int cap = g_ap_cap ? g_ap_cap * 2 : 64;
+		struct ap_entry *t = realloc(g_ap, sizeof(*t) * (size_t)cap);
+		if (!t) return 0;
+		g_ap = t;
+		g_ap_cap = cap;
+	}
+	g_ap[g_ap_n++] = *e;
+	return 1;
 }
 
 /* Copy one quoted meta.inf field into a fixed buffer.
@@ -954,10 +1600,11 @@ static void ap_reload(void)
 
 	ap_free();
 	g_ap_top = 0;
+	g_ap_sel = 0;
 	snprintf(dir, sizeof(dir), "%s/runtime/sysroot/LF/Bulk/ProgramFiles", g_proj);
 	if (!(d = opendir(dir)))
 		return;
-	while ((de = readdir(d)) && g_ap_n < AP_MAX) {
+	while ((de = readdir(d))) {
 		FILE *f;
 		struct ap_entry e;
 		int have_name = 0, have_so = 0;
@@ -986,7 +1633,8 @@ static void ap_reload(void)
 		snprintf(e.pkg, sizeof(e.pkg), "%s", de->d_name);
 		if (icon[0])
 			snprintf(e.icon, sizeof(e.icon), "%s/%s/%s", dir, de->d_name, icon);
-		g_ap[g_ap_n++] = e;
+		if (!ap_push(&e))
+			break;
 	}
 	closedir(d);
 	{
@@ -998,6 +1646,176 @@ static void ap_reload(void)
 			g_ap[j + 1] = t;
 		}
 	}
+}
+
+/* The initial of entry i, so --selftest-apps can assert that a type-to-jump
+ * landed on the right letter without knowing anything about the library it is
+ * run against. 0 if the index is out of range. */
+char ui_debug_app_initial(int i)
+{
+	return (i >= 0 && i < g_ap_n) ? g_ap[i].name[0] : 0;
+}
+
+/* ---- micromods -----------------------------------------------------------
+ *
+ * LeapFrog's bonus content: alternate music, expansion tracks, dress-up items.
+ * A child earned badges, a parent connected the device to LFConnect, and the
+ * points bought them. A device that was never connected has none, and there
+ * is no LFConnect to talk to now.
+ *
+ * A micromod carries NO CONTENT. It is a directory under LF/Bulk/Downloads
+ * holding a ~260-byte meta.inf, a checksum and sometimes a preview image; the
+ * material it "delivers" already shipped inside the game. SpongeBob's
+ * KART_TRACK_EXPANSION is a meta.inf and an icon, while the four tracks it
+ * unlocks sit in the base package's own Data/Sound/. The package is a flag
+ * saying the child earned it.
+ *
+ * So this screen reads what is installed for one title and can write the rest.
+ * The writing is tools/micromods.py's job, not this file's — the viewer asks
+ * for it the same way it asks for a firmware install.
+ *
+ * ONE TITLE AT A TIME, on purpose. Nothing on the device enumerates every
+ * micromod that exists; that list only ever lived in LeapFrog's catalogue.
+ * But a game only cares about its own, and filters by ProductID when it reads
+ * the folder — so "the micromods for this game" is a question with an answer,
+ * where "all micromods" is not.
+ */
+#define MM_MAX 64
+/* ONE ROW PER MICROMOD, NOT PER PACKAGE. The same unlock ships once for every
+ * device family a title was built for — LPAD-...-000001 and MULT-...-000001
+ * are the same bonus item packaged for different hardware — so listing the
+ * files gave Ni Hao Kai-lan "60" when what it has is fifteen slots across four
+ * families. The slot is the micromod; the families are which builds can see
+ * it. */
+struct mm_entry {
+	char slot[8];            /* 000001, 100000, ... — the identity */
+	char name[72];
+};
+static struct mm_entry g_mm[MM_MAX];
+static int g_mm_n, g_mm_top, g_mm_rows = 6;
+static char g_mm_product[16];    /* the 0x........ this screen is about */
+static char g_mm_family[8];      /* ...and which build of it — see below */
+static char g_mm_title[72];      /* the game's name, for the heading */
+
+/* Pull one quoted field out of a meta.inf. Same shape as the launcher's
+ * meta_field(), kept separate because that one lives with the app list and
+ * this runs over a different directory. */
+static int mm_field(const char *line, const char *key, char *out, size_t n)
+{
+	const char *p = line, *q;
+	size_t klen = strlen(key);
+	while (*p == ' ' || *p == '\t') p++;
+	if (strncmp(p, key, klen) != 0) return 0;
+	p += klen;
+	if (!(q = strchr(p, '"'))) return 0;
+	if ((size_t)(q - p) >= n) return 0;
+	memcpy(out, p, (size_t)(q - p));
+	out[q - p] = 0;
+	return out[0] != 0;
+}
+
+/* A PRODUCTID DOES NOT IDENTIFY A GAME, so this takes the family as well.
+ *
+ * 0x00180025 is SpongeBob SquarePants: The Clam Prix as LPAD and MULT — and
+ * the French "M. Crayon sauve Bourgribouille" as LST3. Two unrelated games,
+ * one ProductID. Filtering the Downloads folder on the ProductID alone put
+ * Clam Prix's kart tracks and background music on Mr Pencil's Micromods
+ * screen, which is nonsense in the way that is easy to miss: the packages
+ * really do share an ID, and only the family tells them apart.
+ *
+ * Twelve of the 258 ProductIDs installed here differ in title across their
+ * families. Most are harmless — "Toy Story 3" against "Disney-Pixar Toy Story
+ * 3" — but two are genuinely different products, so the pair is the identity
+ * and the ProductID on its own is not. */
+static void mm_reload(const char *product, const char *family)
+{
+	char dir[PATHMAX], meta[PATHMAX + 32], line[512];
+	DIR *d;
+	struct dirent *de;
+
+	g_mm_n = 0;
+	g_mm_top = 0;
+	snprintf(g_mm_product, sizeof(g_mm_product), "%s", product ? product : "");
+	snprintf(g_mm_family, sizeof(g_mm_family), "%s", family ? family : "");
+	if (!g_mm_product[0]) return;
+	snprintf(dir, sizeof(dir), "%s/runtime/sysroot/LF/Bulk/Downloads", g_proj);
+	if (!(d = opendir(dir))) return;
+	while ((de = readdir(d)) && g_mm_n < MM_MAX) {
+		FILE *f;
+		struct mm_entry e;
+		char type[32], prod[32];
+		int is_mm = 0, mine = 0;
+
+		if (de->d_name[0] == '.') continue;
+		/* The ProductID is the middle field of the directory's own name, so
+		 * the ones that cannot belong to this title are skipped without
+		 * opening anything. */
+		if (!strstr(de->d_name, g_mm_product)) continue;
+		snprintf(meta, sizeof(meta), "%s/%s/meta.inf", dir, de->d_name);
+		if (!(f = fopen(meta, "r"))) continue;
+		memset(&e, 0, sizeof(e));
+		type[0] = prod[0] = 0;
+		while (fgets(line, sizeof(line), f)) {
+			if (!type[0] && mm_field(line, "Type=\"", type, sizeof(type)))
+				is_mm = !strcmp(type, "MicroDownload");
+			if (!e.name[0]) mm_field(line, "Name=\"", e.name, sizeof(e.name));
+			/* ProductID is written unquoted, so it is read off the line
+			 * rather than through mm_field(). */
+			if (!strncmp(line, "ProductID=", 10)) {
+				snprintf(prod, sizeof(prod), "%s", line + 10);
+				prod[strcspn(prod, " \t\r\n")] = 0;
+				mine = !strcasecmp(prod, g_mm_product);
+			}
+		}
+		fclose(f);
+		if (!is_mm || !mine) continue;
+		{
+			/* Split FAM-PRODUCT-SLOT. Anything shaped differently is left
+			 * alone rather than guessed at. */
+			const char *a = strchr(de->d_name, '-');
+			const char *b = a ? strchr(a + 1, '-') : NULL;
+			char fam[16];
+			int k, found = -1;
+			if (!a || !b || (size_t)(a - de->d_name) >= sizeof(fam)) continue;
+			memcpy(fam, de->d_name, (size_t)(a - de->d_name));
+			fam[a - de->d_name] = 0;
+			if (g_mm_family[0] && strcmp(fam, g_mm_family)) continue;
+			snprintf(e.slot, sizeof(e.slot), "%.7s", b + 1);
+
+			for (k = 0; k < g_mm_n; k++)
+				if (!strcmp(g_mm[k].slot, e.slot)) { found = k; break; }
+			if (found < 0) {
+				if (g_mm_n >= MM_MAX) continue;
+				g_mm[g_mm_n++] = e;
+			} else if (e.name[0]) {
+				/* A real package's name beats the placeholder a slot sweep
+				 * writes. Only reachable if a family somehow appears twice,
+				 * which it should not — kept because losing a real name to a
+				 * placeholder would be silent and confusing. */
+				struct mm_entry *g = &g_mm[found];
+				if (!g->name[0] || !strncmp(g->name, "MICROMOD_", 9))
+					snprintf(g->name, sizeof(g->name), "%s", e.name);
+			}
+		}
+	}
+	closedir(d);
+	{
+		int i, j;
+		for (i = 1; i < g_mm_n; i++) {
+			struct mm_entry t = g_mm[i];
+			for (j = i - 1; j >= 0 && strcmp(g_mm[j].slot, t.slot) > 0; j--)
+				g_mm[j + 1] = g_mm[j];
+			g_mm[j + 1] = t;
+		}
+	}
+}
+
+void ui_debug_apps(int *n, int *top, int *sel, int *rows)
+{
+	if (n)    *n    = g_ap_n;
+	if (top)  *top  = g_ap_top;
+	if (sel)  *sel  = g_ap_sel;
+	if (rows) *rows = g_ap_rows;
 }
 
 /* One decode attempt per entry, however it goes: a package with a missing or
@@ -1643,6 +2461,7 @@ void ui_shutdown(void)
 {
 	if (g_font) SDL_DestroyTexture(g_font);
 	if (g_logo) SDL_DestroyTexture(g_logo);
+	glass_free();                 /* the cached backdrop behind the panels */
 	games_free();                 /* one texture per icon we ever drew */
 	free(g_fb_list);
 	free(g_logo_px);
@@ -1906,12 +2725,32 @@ static struct dlg dlg_fit(int lw, int lh, int w, int h)
 	return dlg_rect(lw, lh, w, h);
 }
 
+/* THE ANIMATED RECT, used by the draw AND the hit test.
+ *
+ * A modal rises the last few pixels into place as it fades in. Both the
+ * drawing and dialog_click() read their geometry from here, so the two agree
+ * on every frame of that: a click during the entrance lands on the panel
+ * where it currently looks, not where it is about to be. Offsetting only the
+ * draw would have made the panel briefly lie about its own buttons. */
+static struct dlg cur_dlg_settled(int lw, int lh);
+
 static struct dlg cur_dlg(int lw, int lh)
+{
+	struct dlg d = cur_dlg_settled(lw, lh);
+	d.y += (int)((1.0f - anim_t(g_modal_at, 150)) * 10.0f);
+	return d;
+}
+
+static struct dlg cur_dlg_settled(int lw, int lh)
 {
 	switch (g_modal) {
 	case M_ABOUT: return dlg_fit(lw, lh, 210, 144);
 	/* Room for icons and two lines per row. */
-	case M_APPS:  return dlg_fit(lw, lh, 340, 232);
+	/* As wide as the library, and as tall as a 272px panel allows. It is a
+	 * list of four hundred things; the extra row and the room for a package
+	 * ID beside each name are worth more here than a tidy small box. */
+	case M_APPS:  return dlg_fit(lw, lh, 420, 252);
+	case M_MICROMODS: return dlg_fit(lw, lh, 380, 214);
 	/* Wide and tall: this is a changelog, and a release body wrapped
 	 * into 30 columns would be unreadable. */
 	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
@@ -1933,11 +2772,60 @@ static struct dlg cur_dlg(int lw, int lh)
 	}
 }
 
+/* ---- app launcher geometry ----------------------------------------------
+ * ONE SET OF NUMBERS FOR THE DRAW AND THE HIT TEST. Both used to compute the
+ * row height and visible count inline, in two places, from the same three
+ * magic numbers — which is how the clickable width came to disagree with the
+ * drawn width once a scrollbar appeared beside it.
+ */
+#define AP_ROW_H 28
+/* THE LIST STARTS DIRECTLY UNDER THE TITLE STRIP. An earlier version kept a
+ * header line of its own for the hint and the count, which cost eleven pixels
+ * at the top and pushed the well down onto the footer — the "Enter launches"
+ * line ended up drawn along the well's bottom border in both orientations.
+ * The count moved into the title strip, which had room going spare, and the
+ * hint moved down beside the footer. */
+static int ap_list_y(const struct dlg *d) { return d->y + 18; }
+static int ap_list_h(const struct dlg *d) { return d->h - 18 - 26; }
+static int ap_rows_fit(const struct dlg *d)
+{
+	int v = ap_list_h(d) / AP_ROW_H;
+	return v < 1 ? 1 : v;
+}
+/* The scrollbar takes its width out of the rows, so a click near the right
+ * edge lands on the row rather than in a gap. */
+static int ap_row_w(const struct dlg *d, int vis)
+{
+	/* Wide enough to clear the scrollbar AND the gap either side of it, so
+	 * the row highlight stops short of the bar rather than running under it. */
+	return d->w - 16 - (g_ap_n > vis ? 10 : 0);
+}
+
 /* Does the library have room for the preview panel on the right? In portrait
  * it does not, and the list gets the whole width instead. */
 #define GM_PANEL_W 104
 #define GM_ROW_H   15
 static int gm_panel(const struct dlg *d) { return d->w >= 300 ? GM_PANEL_W : 0; }
+
+/* THE MICROMODS BUTTON, WHEN THERE IS ROOM FOR IT. -> 0 when there is not.
+ *
+ * It sits between the Rescan/Folder pair on the left and Install/Close on the
+ * right, and in portrait the dialog clamps to 264 logical pixels, at which
+ * width those two groups already meet. Drawn unconditionally it printed
+ * "MicroInstall 2" over the top of the install button — and, because its hit
+ * test ran first, ate the clicks meant for it. Games stopped installing.
+ *
+ * Both the draw and the hit test come through here so they cannot disagree
+ * again, and the dialog degrades the way it already does elsewhere: the
+ * preview panel disappears under 300px too. */
+static int gm_micro_rect(const struct dlg *d, SDL_Rect *out)
+{
+	int x = d->x + 110, w = 76;
+	int install_x = d->x + d->w - 8 - 48 - 62;
+	if (x + w + 6 > install_x) return 0;
+	out->x = x; out->y = d->y + d->h - 18; out->w = w; out->h = 13;
+	return 1;
+}
 static int gm_list_w(const struct dlg *d) { return d->w - 12 - gm_panel(d); }
 static int gm_list_h(const struct dlg *d) { return d->h - 26 - 22; }
 
@@ -1956,7 +2844,7 @@ static void row_check(SDL_Renderer *r, const struct dlg *d, int i,
                       const char *label, int on, int hot)
 {
 	int y = row_y(d, i);
-	if (hot) fill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI);
+	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 178);
 	text(r, d->x + 10, y, on ? GL_CHECK_1 : GL_CHECK_0, on ? C_ACCENT : C_TEXT_DIM);
 	text(r, d->x + 22, y, label, C_TEXT);
 }
@@ -1978,7 +2866,7 @@ static void row_value(SDL_Renderer *r, const struct dlg *d, int i,
                       const char *label, const char *val, int hot)
 {
 	int y = row_y(d, i);
-	if (hot) fill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI);
+	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 178);
 	text(r, d->x + 10, y, label, C_TEXT);
 	text(r, d->x + d->w - 12 - text_w(val), y, val, C_ACCENT);
 }
@@ -2022,13 +2910,27 @@ static void draw_bar(SDL_Renderer *r, int lw)
 	int i;
 	char buf[32];
 
-	fill(r, 0, 0, lw, UI_BAR_H, C_BAR);
+	/* The bar is lit from above like everything else: a gradient body and a
+	 * hairline of light along the very top edge, closed off underneath by the
+	 * dark rule that was always there.
+	 *
+	 * EVERY PIXEL OF THIS STAYS ABOVE UI_BAR_H. A soft shadow falling from the
+	 * bar onto the picture below would look better and is not ours to draw —
+	 * everything from UI_BAR_H down belongs to the guest, and an emulator that
+	 * dims the top rows of the display it is emulating is lying about what the
+	 * hardware drew. The tempting version of this cost three rows.
+	 *
+	 * Drawn 1px oversize left, right and top so the antialiased feather falls
+	 * outside the window rather than leaving a dim seam along its edges. */
+	rr_geom(r, NULL, NULL, -1.0f, -1.0f, (float)lw + 2.0f, (float)UI_BAR_H,
+	       0, 0, 0, 0, C_BAR_HI, 255, C_BAR, 255);
+	fill(r, 0, 0, lw, 1, C_EDGE_LT);
 	fill(r, 0, UI_BAR_H - 1, lw, 1, C_EDGE_DK);
 
 	for (i = 0; i < NMENUS; i++) {
 		int hot = (g_open_menu == i) ||
 		          (g_open_menu < 0 && inside(g_mx, g_my, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1));
-		if (hot) fill(r, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1, C_BAR_HI);
+		if (hot) rfill(r, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1, C_BAR_HI, 178);
 		text(r, MENUS[i].x + 5, 3, MENUS[i].title, hot ? C_ACCENT : C_TEXT);
 	}
 
@@ -2037,8 +2939,7 @@ static void draw_bar(SDL_Renderer *r, int lw)
 	{
 		int x = rot_x(lw);
 		int hot = inside(g_mx, g_my, x, 1, ROT_W, UI_BAR_H - 3);
-		fill(r, x, 1, ROT_W, UI_BAR_H - 3, hot ? C_BAR_HI : C_PANEL);
-		bevel(r, x, 1, ROT_W, UI_BAR_H - 3, 1);
+		chip(r, x, 1, ROT_W, UI_BAR_H - 3, hot ? C_BAR_HI : C_PANEL, 1);
 		snprintf(buf, sizeof(buf), "ROT %d", g_cfg.rotate);
 		text_c(r, x, ROT_W, 3, buf, hot ? C_ACCENT : C_TEXT);
 	}
@@ -2053,14 +2954,24 @@ static void draw_bar(SDL_Renderer *r, int lw)
 
 static void draw_dropdown(SDL_Renderer *r)
 {
+	static int seen = -1;
 	const struct menu *m;
 	int w, h, x, y, i;
+	float t;
 
+	anim_watch(g_open_menu, &seen, &g_menu_at);
 	if (g_open_menu < 0) return;
 	m = &MENUS[g_open_menu];
 	w = menu_width(m);
 	h = m->n * 12 + 6;
 	x = m->x; y = UI_BAR_H;
+
+	/* Drops out from under the bar: short, because a menu is something you
+	 * are already reaching for and anything slower is in the way. */
+	t = anim_t(g_menu_at, 110);
+	g_alpha = (Uint8)(255.0f * t);
+	y -= (int)((1.0f - t) * 5.0f);
+
 	panel(r, x, y, w, h);
 
 	for (i = 0; i < m->n; i++) {
@@ -2071,15 +2982,20 @@ static void draw_dropdown(SDL_Renderer *r)
 			continue;
 		}
 		if (g_hot_item == i && item_enabled(it))
-			fill(r, x + 2, iy - 1, w - 4, 12, C_PANEL_HI);
+			rfill(r, x + 2, iy - 1, w - 4, 12, C_PANEL_HI, 178);
 		text(r, x + 8, iy + 1, it->label,
 		     item_enabled(it) ? (g_hot_item == i ? C_ACCENT : C_TEXT) : C_TEXT_DIM);
 	}
+	g_alpha = 255;
 }
 
 static const char *onoff(int v) { return v ? "ON" : "OFF"; }
 
-static void draw_dialog(SDL_Renderer *r, int lw, int lh)
+/* The body. Wrapped by draw_dialog() below, which owns the entrance fade —
+ * this function has an early return in it, and a fade that has to be undone
+ * on the way out is exactly the kind of thing that leaks through one branch
+ * and tints the rest of the frame. */
+static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 {
 	struct dlg d = cur_dlg(lw, lh);
 	SDL_Rect cb;
@@ -2101,66 +3017,201 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_MSG:   title = g_msg_title; break;
 	case M_UPDATE: title = "Update available"; break;
 	case M_APPS:  title = "Launch App"; break;
+	case M_MICROMODS: title = "Micromods"; break;
 	default: break;
 	}
 
-	/* dim the world behind the modal */
-	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
-	SDL_SetRenderDrawColor(r, 0, 8, 4, 160);
-	{ SDL_Rect all = { 0, UI_BAR_H, lw, lh - UI_BAR_H }; SDL_RenderFillRect(r, &all); }
-	SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+	/* CAPTURE BEFORE DIMMING, or the glass is made of the dimmed picture and
+	 * there is nothing left in it to see. The dim belongs to the world AROUND
+	 * the panel; the panel itself wants the backdrop as it really is. */
+	{
+		SDL_Texture *blur = glass_capture(r);
 
-	panel(r, d.x, d.y, d.w, d.h);
-	fill(r, d.x + 1, d.y + 1, d.w - 2, 11, C_BAR_HI);
+		/* Lighter than it was: the panel now has a shadow and a lit rim to
+		 * separate it from the backdrop, so the dim no longer has to do that
+		 * job on its own — and a heavy dim leaves the glass nothing to pick
+		 * up. */
+		SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_BLEND);
+		/* Comes up with the panel. Drawn straight rather than through fill(),
+		 * so it takes the entrance curve by hand. */
+		SDL_SetRenderDrawColor(r, 0, 8, 4,
+		                       (Uint8)(104 * anim_t(g_modal_at, 150)));
+		{ SDL_Rect all = { 0, UI_BAR_H, lw, lh - UI_BAR_H }; SDL_RenderFillRect(r, &all); }
+		SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
+
+		panel_glass(r, d.x, d.y, d.w, d.h, blur);
+	}
+	/* Rounded to match the panel's own top corners — a square strip inset by
+	 * one pixel hangs visibly outside a 10px radius. */
+	{
+		float hrad = rr_radius_panel(d.w, d.h) - 1.0f;
+		rr_geom(r, NULL, NULL, d.x + 1.0f, d.y + 1.0f, d.w - 2.0f, 11.0f,
+		       hrad, hrad, 0, 0, C_BAR_HI, 208, C_BAR_HI, 172);
+	}
 	text(r, d.x + 6, d.y + 3, title, C_ACCENT);
 
 	switch (g_modal) {
 	case M_APPS: {
-		int x = d.x + 10, y = d.y + 20, i, row = 30;
-		int listh = d.h - 30 - 22, vis = listh / row;
+		int x   = d.x + 8;
+		int y   = ap_list_y(&d);
+		int vis = ap_rows_fit(&d);
+		int rw  = ap_row_w(&d, vis);
+		int i;
 		char line[128];
 
-		if (vis < 1) vis = 1;
 		g_ap_rows = vis;
+		/* Keep the selected row on screen. Arrow keys move the selection and
+		 * the view follows it, which is the half of "scrolling" this list
+		 * never had — the wheel worked, and nothing else did. */
+		if (g_ap_sel < 0) g_ap_sel = 0;
+		if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;
+		if (g_ap_sel < g_ap_top) g_ap_top = g_ap_sel;
+		if (g_ap_sel >= g_ap_top + vis) g_ap_top = g_ap_sel - vis + 1;
 		if (g_ap_top > g_ap_n - vis) g_ap_top = g_ap_n - vis;
 		if (g_ap_top < 0) g_ap_top = 0;
 
 		if (!g_ap_n) {
-			text(r, x, y + 10, "No apps installed yet.", C_TEXT);
-			text(r, x, y + 26, "File > Game Library installs your", C_TEXT_DIM);
-			text(r, x, y + 36, "cartridge backups. Help > Setup", C_TEXT_DIM);
-			text(r, x, y + 46, "Wizard fetches the system files.", C_TEXT_DIM);
+			text(r, x + 2, y + 14, "No apps installed yet.", C_TEXT);
+			text(r, x + 2, y + 32, "File " GL_SUB " Game Library installs your", C_TEXT_DIM);
+			text(r, x + 2, y + 42, "cartridge backups.", C_TEXT_DIM);
+			text(r, x + 2, y + 58, "Help " GL_SUB " Setup Wizard fetches the", C_TEXT_DIM);
+			text(r, x + 2, y + 68, "system files they need.", C_TEXT_DIM);
 			break;
 		}
+
+		/* WHERE YOU ARE, ON THE TITLE STRIP. The range rather than the bare
+		 * total: the total never changes and stops being information after
+		 * the first glance, while "196-202 of 462" is the answer to the
+		 * question a long list actually raises. */
+		snprintf(line, sizeof(line), "%d-%d of %d", g_ap_top + 1,
+		         g_ap_top + vis < g_ap_n ? g_ap_top + vis : g_ap_n, g_ap_n);
+		text(r, d.x + d.w - 8 - text_w(line), d.y + 3, line, C_TEXT_DIM);
+
+		/* The well the rows sit in, so the list reads as one object rather
+		 * than as text floating on the panel. */
+		chip(r, x - 4, y - 4, d.w - 16, vis * AP_ROW_H + 6, C_VOID, 0);
+
 		for (i = 0; i < vis && g_ap_top + i < g_ap_n; i++) {
 			struct ap_entry *e = &g_ap[g_ap_top + i];
-			int yy = y + i * row;
-			int hot = inside(g_mx, g_my, x - 2, yy - 2, d.w - 16, row - 2);
+			int k   = g_ap_top + i;
+			int yy  = y + i * AP_ROW_H;
+			int hot = inside(g_mx, g_my, x - 2, yy, rw, AP_ROW_H - 2);
+			int sel = k == g_ap_sel;
+			int tx  = x + 32;
 
-			if (hot) fill(r, x - 2, yy - 2, d.w - 16, row - 2, C_BAR_HI);
+			/* Hover and selection are different things and have to look
+			 * different: the pointer is wherever it happens to be, the
+			 * selection is where Enter will act. The accent bar down the left
+			 * is the one that means "this one". */
+			if (hot || sel)
+				rfill(r, x - 2, yy, rw, AP_ROW_H - 2,
+				      hot ? C_BAR_HI : C_PANEL_HI, hot ? 178 : 190);
+			if (sel)
+				rfill(r, x - 2, yy, 2, AP_ROW_H - 2, C_ACCENT, 235);
+
+			/* EVERY ROW GETS A TILE, drawn before the artwork rather than
+			 * instead of it. Package icons are not all the same size and not
+			 * all present; without something behind them the rows with art
+			 * and the rows without looked like two different lists. */
+			chip(r, x + 3, yy + 2, 22, 22, C_PANEL, 0);
 			ap_icon(r, e);
 			if (e->tex) {
-				SDL_Rect dst = { x, yy, 26, 26 };
+				SDL_Rect dst = { x + 4, yy + 3, 20, 20 };
+				SDL_SetTextureAlphaMod(e->tex, g_alpha);
 				SDL_RenderCopy(r, e->tex, NULL, &dst);
-			} else {
-				fill(r, x, yy, 26, 26, C_PANEL);
-				bevel(r, x, yy, 26, 26, 0);
 			}
-			snprintf(line, sizeof(line), "%.40s", e->name);
-			text(r, x + 32, yy + 3, line, hot ? C_ACCENT : C_TEXT);
-			snprintf(line, sizeof(line), "%s%s%.28s",
-			         e->version[0] ? "v" : "", e->version,
-			         e->version[0] ? "" : e->pkg);
-			text(r, x + 32, yy + 15, line, C_TEXT_DIM);
+
+			/* The package ID, right-aligned and dim. Four hundred titles
+			 * include several genuine duplicate NAMES — two "Wheel Works",
+			 * two "Ben 10: Ultimate Alien" — and without this the list offers
+			 * you the same row twice with no way to tell which is which. */
+			{
+				int idw = text_w(e->pkg);
+				int room = rw - 40;
+				if (idw + text_w(e->name) + 24 < room)
+					text(r, x - 2 + rw - 6 - idw, yy + 12, e->pkg, C_DIMMEST);
+			}
+			snprintf(line, sizeof(line), "%.34s", e->name);
+			text(r, tx, yy + 3, line, sel || hot ? C_ACCENT : C_TEXT);
+			if (e->version[0]) {
+				snprintf(line, sizeof(line), "v%.20s", e->version);
+				text(r, tx, yy + 13, line, C_TEXT_DIM);
+			}
 		}
+
+		/* Scrollbar, for the same reason the game library has one: with four
+		 * hundred packages, "where am I and how much is left" is a real
+		 * question that six visible rows cannot answer. */
 		if (g_ap_n > vis) {
-			snprintf(line, sizeof(line), "%d-%d of %d", g_ap_top + 1,
-			         g_ap_top + vis < g_ap_n ? g_ap_top + vis : g_ap_n, g_ap_n);
-			text(r, d.x + d.w - 12 - text_w(line), d.y + d.h - 26, line, C_TEXT_DIM);
+			int track = vis * AP_ROW_H - 2;
+			int knob  = track * vis / g_ap_n;
+			int pos   = track * g_ap_top / g_ap_n;
+			int sx    = d.x + d.w - 18;   /* inside the well, clear of the rows */
+			if (knob < 10) knob = 10;
+			if (pos > track - knob) pos = track - knob;
+			if (pos < 0) pos = 0;
+			rfill(r, sx, y, 4, track, C_SHADOW, 170);
+			rfill(r, sx, y + pos, 4, knob, C_EDGE_LT, 210);
 		}
-		text(r, x, d.y + d.h - 26, "Install apps to see them here.", C_TEXT_DIM);
+
+		text(r, x + 2, d.y + d.h - 26,
+		     "Type a letter to jump " GL_DIAMOND " Enter launches", C_TEXT_DIM);
 		break;
 	}
+	case M_MICROMODS: {
+		/* +29, not +26: at +26 the header line and the well's rounded top
+		 * edge abutted exactly and the count was sliced along its baseline —
+		 * the same fault the app launcher had, for the same reason. The
+		 * count moved onto the title strip, which has room going spare. */
+		int x = d.x + 8, y = d.y + 29, i;
+		int vis = (d.h - 29 - 40) / 11;
+		char line[128];
+
+		if (vis < 1) vis = 1;
+		g_mm_rows = vis;
+		if (g_mm_top > g_mm_n - vis) g_mm_top = g_mm_n - vis;
+		if (g_mm_top < 0) g_mm_top = 0;
+
+		{
+			/* Say what the number counts. "60" was the file count, and it
+			 * read as sixty pieces of bonus content when the title has
+			 * fifteen slots built for four device families. */
+			snprintf(line, sizeof(line), "%d micromods", g_mm_n);
+			text(r, d.x + d.w - 8 - text_w(line), d.y + 3, line, C_TEXT_DIM);
+		}
+		text(r, x, d.y + 16, g_mm_title, C_ACCENT);
+		if (g_mm_family[0]) {
+			/* Which build, because the same ProductID can be two different
+			 * games on different hardware. */
+			snprintf(line, sizeof(line), "%s build", g_mm_family);
+			text(r, d.x + d.w - 8 - text_w(line), d.y + 16, line, C_DIMMEST);
+		}
+
+		if (!g_mm_n) {
+			text(r, x, y + 14, "None installed for this game.", C_TEXT);
+			text(r, x, y + 32, "Bonus content is earned on the device and", C_TEXT_DIM);
+			text(r, x, y + 42, "redeemed through LFConnect, which Tadpole", C_TEXT_DIM);
+			text(r, x, y + 52, "cannot reach. Unlock writes the packages", C_TEXT_DIM);
+			text(r, x, y + 62, "the game looks for.", C_TEXT_DIM);
+			break;
+		}
+		chip(r, x - 4, y - 4, d.w - 16, vis * 11 + 6, C_VOID, 0);
+		for (i = 0; i < vis && g_mm_top + i < g_mm_n; i++) {
+			struct mm_entry *e = &g_mm[g_mm_top + i];
+			int yy = y + i * 11;
+			/* The slot IS the micromod, so it leads. The families beside it
+			 * say which builds of the title can see it. */
+			text(r, x + 2, yy, e->slot, C_TEXT_DIM);
+			text(r, x + 48, yy, e->name[0] ? e->name : "(unnamed)", C_TEXT);
+		}
+		if (g_mm_n > vis) {
+			snprintf(line, sizeof(line), "%d-%d of %d", g_mm_top + 1,
+			         g_mm_top + vis < g_mm_n ? g_mm_top + vis : g_mm_n, g_mm_n);
+			text(r, d.x + d.w - 8 - text_w(line), d.y + d.h - 26, line, C_TEXT_DIM);
+		}
+		break;
+	}
+
 	case M_UPDATE: {
 		int x = d.x + 10, y = d.y + 20, i;
 		int listy, listh, row = FONT_H + 2, vis;
@@ -2179,8 +3230,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		listy = y + 24;
 		listh = d.y + d.h - 30 - listy;
 		vis = listh / row;
-		fill(r, x - 2, listy - 2, d.w - 16, listh + 2, C_EDGE_DK);
-		bevel(r, x - 2, listy - 2, d.w - 16, listh + 2, 0);
+		chip(r, x - 2, listy - 2, d.w - 16, listh + 2, C_EDGE_DK, 0);
 
 		/* Clamp here rather than at the scroll event: the visible count
 		 * depends on the dialog size, which depends on the window, which can
@@ -2214,8 +3264,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect b = up_btn(&d, i2);
 				int on = (i2 == 1) || g_up_asset[0] != 0;
 				int hot = on && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, L[i2],
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
@@ -2371,16 +3420,14 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		{
 			SDL_Rect b = { d.x + 10, row_y(&d, 3) + 2, 76, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-			bevel(r, b.x, b.y, b.w, b.h, 1);
+			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Game Library",
 			       hot ? C_ACCENT : C_TEXT);
 		}
 		{
 			SDL_Rect b = { d.x + 94, row_y(&d, 3) + 2, 96, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-			bevel(r, b.x, b.y, b.w, b.h, 1);
+			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Setup Wizard",
 			       hot ? C_ACCENT : C_TEXT);
 		}
@@ -2411,8 +3458,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		 * are wildly different and not knowable in advance — a fake percentage
 		 * would be a lie. This says "still working" honestly, and the log lines
 		 * below say what it is working on. */
-		fill(r, d.x + 8, ly, d.w - 16, 7, C_VOID);
-		bevel(r, d.x + 8, ly, d.w - 16, 7, 0);
+		chip(r, d.x + 8, ly, d.w - 16, 7, C_VOID, 0);
 		if (g_prog_running && g_prog_pct >= 0) {
 			/* A MEASURED bar, not a moving one: the downloader knows the
 			 * byte total before it starts, so this is the one step where a
@@ -2434,8 +3480,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			     g_prog_ok ? C_ACCENT : C_EDGE_LT);
 		}
 
-		fill(r, d.x + 8, ly + 12, d.w - 16, PROG_LINES * 9 + 4, C_VOID);
-		bevel(r, d.x + 8, ly + 12, d.w - 16, PROG_LINES * 9 + 4, 0);
+		chip(r, d.x + 8, ly + 12, d.w - 16, PROG_LINES * 9 + 4, C_VOID, 0);
 		for (i2 = first; i2 < g_prog_n; i2++)
 			text(r, d.x + 12, ly + 16 + (i2 - first) * 9,
 			     g_prog[i2 % PROG_LINES], C_TEXT_DIM);
@@ -2476,8 +3521,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		if (g_confirm) {
 			SDL_Rect b = { d.x + d.w - 96, d.y + d.h - 18, 44, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-			fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-			bevel(r, b.x, b.y, b.w, b.h, 1);
+			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Erase", hot ? C_ACCENT : C_TEXT);
 			/* Below the body, wherever it ended, rather than at a fixed offset
 			 * that a two-line body would collide with. */
@@ -2489,6 +3533,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	case M_WIZARD: {
 		struct prereq pq;
 		int bx = d.x + 62, by = d.y + 20, i2;
+		Uint8 wiz_alpha;
 		char welcome[48];
 		const char *TITLES[WIZ_PAGES] = {
 			welcome, "System files", "Didj support", "Who is playing?",
@@ -2497,8 +3542,23 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		snprintf(welcome, sizeof(welcome), "Welcome to %s", ui_brand_name());
 		prereq_check(&pq);
 
-		/* Banner down the left — the wizard's whole visual signature. */
-		fill(r, d.x + 1, d.y + 12, 56, d.h - 30, C_VOID);
+		/* Banner down the left — the wizard's whole visual signature. Its
+		 * bottom-left corner follows the panel's, so the sidebar sits inside
+		 * the glass rather than cutting across it; the two right-hand corners
+		 * stay square because that edge is a seam against the content, not an
+		 * outside edge. A faint glow behind the mark picks up the same light
+		 * the idle backdrop has. */
+		{
+			float brad = rr_radius_panel(d.w, d.h) - 1.0f;
+			/* Both stops stay in the green (or the blue). Fading to C_SHADOW
+			 * was tried and reads as a black slab bolted to the side of the
+			 * panel; letting the glass through towards the bottom keeps it a
+			 * dark column of the same material. */
+			rr_geom(r, NULL, NULL, d.x + 1.0f, (float)d.y + 12.0f, 56.0f,
+			       (float)d.h - 30.0f, 0, 0, 0, brad,
+			       C_VOID, 232, C_VOID, 172);
+			glow(r, d.x + 29, d.y + 44, 46, C_ACCENT, 34);
+		}
 		if (g_logo) {
 			SDL_Rect dst = { d.x + 8, d.y + 20, 40, 40 };
 			SDL_RenderCopy(r, g_logo, NULL, &dst);
@@ -2524,6 +3584,26 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		text(r, bx, by, TITLES[g_wiz_page], C_ACCENT);
 		fill(r, bx, by + 10, d.w - 70, 1, C_EDGE_DK);
 		by += 18;
+
+		/* PAGE TURN. Only the page's own content moves — the sidebar, the
+		 * step markers, the heading rule and the Back/Next row are the parts
+		 * that stay put between pages, and sliding them too would turn a step
+		 * forward into the whole dialog twitching.
+		 *
+		 * Nested inside the entrance fade rather than replacing it: opening
+		 * the wizard fades the panel in AND deals its first page, and one
+		 * multiplied by the other is what makes that read as a single motion.
+		 * `wiz_alpha` is restored right after the switch. */
+		{
+			static int wseen = -1;
+			anim_watch(g_wiz_page, &wseen, &g_wiz_at);
+		}
+		{
+			float wt = anim_t(g_wiz_at, 130);
+			wiz_alpha = g_alpha;
+			g_alpha = (Uint8)(wiz_alpha * wt);
+			bx += (int)((1.0f - wt) * 9.0f);
+		}
 
 		switch (g_wiz_page) {
 		case WIZ_WELCOME:
@@ -2591,8 +3671,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			{
 				SDL_Rect b = { bx, by + 54, 76, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
 			}
 			/* THE SYSROOT NEEDS ITS OWN BUTTON. Installing firmware builds it,
@@ -2602,8 +3681,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			if (pq.rootfs && !pq.sysroot) {
 				SDL_Rect b = { bx + 84, by + 54, 96, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Build sysroot",
 				       hot ? C_ACCENT : C_TEXT);
 			}
@@ -2627,8 +3705,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect b = { bx, by + 92, 132, 15 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				fill(r, b.x + 1, b.y + 1, b.w, b.h, C_SHADOW);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI, 1);
 				text_c(r, b.x, b.w, b.y + 4, "Online System Update",
 				       hot ? C_ACCENT : C_TEXT);
 				text(r, b.x + b.w + 8, b.y + 4, "124 MB", C_TEXT_DIM);
@@ -2704,11 +3781,9 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect g = { bx + 96, by + 69, 76, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				int hotg = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
-				fill(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL);
-				bevel(r, g.x, g.y, g.w, g.h, 1);
+				chip(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, g.x, g.w, g.y + 3, "Download", hotg ? C_ACCENT : C_TEXT);
 				if (pq.didj)
 					text(r, g.x + g.w + 10, g.y + 3, "installed", C_ACCENT);
@@ -2721,11 +3796,9 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect g = { bx + 96, by + 113, 76, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				int hotg = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
-				fill(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL);
-				bevel(r, g.x, g.y, g.w, g.h, 1);
+				chip(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, g.x, g.w, g.y + 3, "Download", hotg ? C_ACCENT : C_TEXT);
 				if (pq.didj_overlay)
 					text(r, g.x + g.w + 10, g.y + 3, "installed", C_ACCENT);
@@ -2744,8 +3817,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			{
 				SDL_Rect f = { bx + 40, fy + 4, 132, 14 };
 				int hot = inside(g_mx, g_my, f.x, f.y, f.w, f.h);
-				fill(r, f.x, f.y, f.w, f.h, C_VOID);
-				bevel(r, f.x, f.y, f.w, f.h, g_prof_focus ? 1 : 0);
+				chip(r, f.x, f.y, f.w, f.h, C_VOID, g_prof_focus ? 1 : 0);
 				text(r, f.x + 4, f.y + 4, g_prof_name, C_TEXT);
 				if (g_prof_focus && (SDL_GetTicks() / 450) % 2 == 0)
 					fill(r, f.x + 4 + text_w(g_prof_name), f.y + 3, 1, 8, C_ACCENT);
@@ -2759,8 +3831,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect g = { bx + 40, fy + 22, 60, 14 };
 				int hot = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
 				text(r, bx, fy + 26, "Grade", C_TEXT);
-				fill(r, g.x, g.y, g.w, g.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, g.x, g.y, g.w, g.h, 1);
+				chip(r, g.x, g.y, g.w, g.h, hot ? C_BAR_HI : C_PANEL, 1);
 				if (g_prof_grade <= 0) snprintf(gb, sizeof(gb), "Pre-K");
 				else                   snprintf(gb, sizeof(gb), "Grade %d", g_prof_grade);
 				text_c(r, g.x, g.w, g.y + 4, gb, hot ? C_ACCENT : C_TEXT);
@@ -2770,8 +3841,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect p2 = { bx + 40, fy + 40, 60, 14 };
 				int hot = inside(g_mx, g_my, p2.x, p2.y, p2.w, p2.h);
 				text(r, bx, fy + 44, "Photo", C_TEXT);
-				fill(r, p2.x, p2.y, p2.w, p2.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, p2.x, p2.y, p2.w, p2.h, 1);
+				chip(r, p2.x, p2.y, p2.w, p2.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, p2.x, p2.w, p2.y + 4, "Choose...",
 				       hot ? C_ACCENT : C_TEXT);
 				if (g_prof_pic[0]) {
@@ -2788,8 +3858,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				int on = g_prof_name[0] != 0;
 				int hot = on && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				fill(r, b.x + 1, b.y + 1, b.w, b.h, C_SHADOW);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL_HI, 1);
 				text_c(r, b.x, b.w, b.y + 4, "Create profile",
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 				if (g_prof_made)
@@ -2810,8 +3879,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			{
 				SDL_Rect b = { bx, by + 62, 96, 13 };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, "Open Library",
 				       hot ? C_ACCENT : C_TEXT);
 			}
@@ -2835,6 +3903,8 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			}
 			break;
 		}
+		g_alpha = wiz_alpha;      /* the page turn ends here; the frame's own
+		                           * entrance fade carries on below */
 
 		/* buttons */
 		{
@@ -2845,8 +3915,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				int hot = on && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				const char *lab = (i2 == 1 && g_wiz_page == WIZ_PAGES - 1)
 				                ? "Finish" : L[i2];
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, lab,
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
@@ -2861,17 +3930,26 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		g_gm_rows = lh2 / GM_ROW_H;
 		if (g_gm_rows < 1) g_gm_rows = 1;
 
-		/* Where these came from, and how many there are. */
+		/* Where these came from, and how many there are.
+		 *
+		 * THE PATH IS TRUNCATED TO THE ROOM LEFT BY THE COUNT, not to a fixed
+		 * 40 characters. In portrait the dialog is 264 logical pixels wide,
+		 * 40 glyphs is 240 of them, and the count was drawn straight over the
+		 * tail of the path — the header read "…/leappad-emu/games473". */
 		{
 			char shown[40];
-			path_tail(shown, sizeof(shown), g_gm_dir[0] ? g_gm_dir : "(no folder chosen)");
-			text(r, d.x + 6, d.y + 15, shown, C_TEXT_DIM);
+			int room;
 			snprintf(buf, sizeof(buf), "%d", g_gm_n);
+			room = (d.w - 14 - 6 - text_w(buf)) / GLYPH_ADV;
+			if (room < 8) room = 8;
+			if (room > (int)sizeof(shown) - 1) room = (int)sizeof(shown) - 1;
+			path_tail(shown, (size_t)room + 1,
+			          g_gm_dir[0] ? g_gm_dir : "(no folder chosen)");
+			text(r, d.x + 6, d.y + 15, shown, C_TEXT_DIM);
 			text(r, d.x + d.w - 8 - text_w(buf), d.y + 15, buf, C_TEXT_DIM);
 		}
 
-		fill(r, lx, ly, lw2, lh2, C_VOID);
-		bevel(r, lx, ly, lw2, lh2, 0);
+		chip(r, lx, ly, lw2, lh2, C_VOID, 0);
 
 		if (g_gm_n == 0) {
 			/* THREE DIFFERENT NOTHINGS, and they need different advice. */
@@ -2896,7 +3974,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			char nm[64];
 			unsigned col = C_TEXT;
 
-			if (k == g_gm_sel) fill(r, lx + 1, ry - 1, lw2 - 2, GM_ROW_H, C_PANEL_HI);
+			if (k == g_gm_sel) rfill(r, lx + 1, ry - 1, lw2 - 2, GM_ROW_H, C_PANEL_HI, 178);
 
 			/* tick box, so a batch install is one obvious gesture */
 			text(r, tx, ry + 3, e->checked ? GL_CHECK_1 : GL_CHECK_0,
@@ -2909,8 +3987,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				SDL_Rect dst = { tx, ry, 13, 13 };
 				SDL_RenderCopy(r, e->tex, NULL, &dst);
 			} else {
-				fill(r, tx, ry, 13, 13, C_PANEL);
-				bevel(r, tx, ry, 13, 13, 0);
+				chip(r, tx, ry, 13, 13, C_PANEL, 0);
 			}
 			tx += 17;
 
@@ -2943,8 +4020,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			int px = d.x + 6 + lw2 + 4, py = ly;
 			int side = pw - 10;
 			game_icon(r, e);
-			fill(r, px, py, pw - 4, lh2, C_VOID);
-			bevel(r, px, py, pw - 4, lh2, 0);
+			chip(r, px, py, pw - 4, lh2, C_VOID, 0);
 			if (e->tex) {
 				/* Fit, do not stretch: these are 83x91 and 90x77 and so on,
 				 * and a squashed icon looks like a decoding fault. */
@@ -2995,11 +4071,25 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 			static const char *L[4] = { "Folder...", "Rescan", "", "" };
 			int xs[2] = { d.x + 6, d.x + 6 + 56 };
 			int ws[2] = { 52, 44 };
+			/* MICROMODS BELONGS WITH THE LIBRARY, not with the launcher.
+			 * The launcher is a list of things to START; this is a question
+			 * about a title you OWN, which is what the library is a list of.
+			 * It reads the selected row's PackageID, so it works whether or
+			 * not that title is installed yet. */
+			{
+				SDL_Rect mb;
+				if (gm_micro_rect(&d, &mb)) {
+					int on = g_gm_n > 0;
+					int hot = on && inside(g_mx, g_my, mb.x, mb.y, mb.w, mb.h);
+					chip(r, mb.x, mb.y, mb.w, mb.h, hot ? C_BAR_HI : C_PANEL, 1);
+					text_c(r, mb.x, mb.w, mb.y + 3, "Micromods",
+					       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
+				}
+			}
 			for (i3 = 0; i3 < 2; i3++) {
 				int hot = inside(g_mx, g_my, xs[i3], by, ws[i3], 13);
 				int on = (i3 == 0) || g_gm_dir[0];
-				fill(r, xs[i3], by, ws[i3], 13, hot && on ? C_BAR_HI : C_PANEL);
-				bevel(r, xs[i3], by, ws[i3], 13, 1);
+				chip(r, xs[i3], by, ws[i3], 13, hot && on ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, xs[i3], ws[i3], by + 3, L[i3],
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
@@ -3009,8 +4099,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 				int hot = n && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				if (n) snprintf(buf, sizeof(buf), "Install %d", n);
 				else   snprintf(buf, sizeof(buf), "Install");
-				fill(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL);
-				bevel(r, b.x, b.y, b.w, b.h, 1);
+				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 				text_c(r, b.x, b.w, b.y + 3, buf,
 				       !n ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
@@ -3023,15 +4112,14 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		path_tail(shown, sizeof(shown), g_fb_dir);
 		text(r, d.x + 6, ly, shown, C_TEXT_DIM);
 
-		fill(r, d.x + 6, ly + 11, d.w - 12, FB_ROWS * 11 + 2, C_VOID);
-		bevel(r, d.x + 6, ly + 11, d.w - 12, FB_ROWS * 11 + 2, 0);
+		chip(r, d.x + 6, ly + 11, d.w - 12, FB_ROWS * 11 + 2, C_VOID, 0);
 		for (i2 = 0; i2 < FB_ROWS && g_fb_top + i2 < g_fb_n; i2++) {
 			int k = g_fb_top + i2;
 			int ry = ly + 13 + i2 * 11;
 			char nm[47];
 			unsigned col = g_fb_list[k].isdir ? C_ACCENT : C_TEXT;
 			if (k == g_fb_sel) {
-				fill(r, d.x + 8, ry - 1, d.w - 16, 11, C_PANEL_HI);
+				rfill(r, d.x + 8, ry - 1, d.w - 16, 11, C_PANEL_HI, 178);
 				col = C_TEXT;
 			}
 			nm[0] = g_fb_list[k].isdir ? GL_SUB[0] : ' ';
@@ -3055,17 +4143,28 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 	{
 		int busy = (g_modal == M_PROGRESS && g_prog_running);
 		int hot = !busy && inside(g_mx, g_my, cb.x, cb.y, cb.w, cb.h);
-		fill(r, cb.x, cb.y, cb.w, cb.h, hot ? C_BAR_HI : C_PANEL);
-		bevel(r, cb.x, cb.y, cb.w, cb.h, 1);
+		chip(r, cb.x, cb.y, cb.w, cb.h, hot ? C_BAR_HI : C_PANEL, 1);
 		text_c(r, cb.x, cb.w, cb.y + 3,
 		       g_modal == M_FILES ? "Cancel" : "Close",
 		       busy ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 	}
+	/* THE ONE ACTION THIS SCREEN HAS. Writes the packages the selected title
+	 * looks for; the child still turns each one on in the game's own menu,
+	 * because that choice is stored per profile in the save data. */
+	if (g_modal == M_MICROMODS) {
+		SDL_Rect ul = { cb.x - 62, cb.y, 58, 13 };
+		SDL_Rect ua = { cb.x - 62 - 76, cb.y, 72, 13 };
+		int hot = inside(g_mx, g_my, ul.x, ul.y, ul.w, ul.h);
+		int hot2 = inside(g_mx, g_my, ua.x, ua.y, ua.w, ua.h);
+		chip(r, ua.x, ua.y, ua.w, ua.h, hot2 ? C_BAR_HI : C_PANEL, 1);
+		text_c(r, ua.x, ua.w, ua.y + 3, "Unlock all", hot2 ? C_ACCENT : C_TEXT);
+		chip(r, ul.x, ul.y, ul.w, ul.h, hot ? C_BAR_HI : C_PANEL, 1);
+		text_c(r, ul.x, ul.w, ul.y + 3, "Unlock", hot ? C_ACCENT : C_TEXT);
+	}
 	if (g_modal == M_FILES) {
 		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
 		int hot = inside(g_mx, g_my, ok.x, ok.y, ok.w, ok.h);
-		fill(r, ok.x, ok.y, ok.w, ok.h, hot ? C_BAR_HI : C_PANEL);
-		bevel(r, ok.x, ok.y, ok.w, ok.h, 1);
+		chip(r, ok.x, ok.y, ok.w, ok.h, hot ? C_BAR_HI : C_PANEL, 1);
 		text_c(r, ok.x, ok.w, ok.y + 3, "Open", hot ? C_ACCENT : C_TEXT);
 		/* Some things ARE the folder: an LFC_Downloads directory of firmware
 		 * packages, or a folder of game backups. A browser that can only open
@@ -3079,8 +4178,7 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 		    g_fb_action == UI_ACT_SCAN_GAMES) {
 			SDL_Rect uf = { ok.x - 74, ok.y, 70, 13 };
 			int h2 = inside(g_mx, g_my, uf.x, uf.y, uf.w, uf.h);
-			fill(r, uf.x, uf.y, uf.w, uf.h, h2 ? C_BAR_HI : C_PANEL);
-			bevel(r, uf.x, uf.y, uf.w, uf.h, 1);
+			chip(r, uf.x, uf.y, uf.w, uf.h, h2 ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, uf.x, uf.w, uf.y + 3, "Use folder",
 			       h2 ? C_ACCENT : C_TEXT);
 		}
@@ -3089,8 +4187,35 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 
 void ui_draw_idle(SDL_Renderer *ren, int lw, int lh)
 {
-	int cy = UI_BAR_H + (lh - UI_BAR_H) / 2;
-	fill(ren, 0, UI_BAR_H, lw, lh - UI_BAR_H, C_VOID);
+	int ih = lh - UI_BAR_H;
+	int cy = UI_BAR_H + ih / 2;
+
+	/* NOT A FLAT VOID ANY MORE. This was one fill of C_VOID, which is very
+	 * nearly black — fine as a backdrop for a picture, but it is also what
+	 * the glass panels are made of, and frosted glass over nothing looks like
+	 * a hole. The bar is drawn after this and paints over the overspill at
+	 * the top.
+	 *
+	 * NO LAMP BEHIND THE LOGO. There were two glow fans centred on the mark,
+	 * and what they actually looked like was a torch pointed at the middle of
+	 * the window: a bright blob with the logo sitting in it, drawing the eye
+	 * to empty space rather than to the mark. Depth here comes from the
+	 * gradient and from the edges falling away instead — a vignette frames
+	 * the picture without ever becoming a thing you look at, and it still
+	 * gives the glass a tonal range to pick up.
+	 *
+	 * The gradient runs light-at-the-top to dark-at-the-bottom, which is the
+	 * direction every other lit thing in this UI agrees on: panel bodies,
+	 * their rims, and the chips all brighten upward. */
+	rr_geom(ren, NULL, NULL, -2.0f, (float)UI_BAR_H - 2.0f, (float)lw + 4.0f,
+	       (float)ih + 4.0f, 0, 0, 0, 0,
+	       C_BAR, 255, C_VOID, 255);
+	/* An ellipse through the four corners: with rx = w/2 and ry = h/2 scaled
+	 * by sqrt(2), (w/2)^2/rx^2 + (h/2)^2/ry^2 = 1 lands the rim exactly on
+	 * the corners, so the picture darkens evenly towards its own frame
+	 * instead of towards a circle drawn inside it. */
+	radial(ren, lw / 2, cy, 0.7071f * (float)lw, 0.7071f * (float)ih,
+	      C_SHADOW, 0, 138);
 	if (g_logo) {
 		SDL_Rect dst = { lw / 2 - 32, cy - 46, 64, 64 };
 		SDL_RenderCopy(ren, g_logo, NULL, &dst);
@@ -3103,6 +4228,22 @@ void ui_draw_idle(SDL_Renderer *ren, int lw, int lh)
 		text_c(ren, 0, lw, cy + 26, mark, C_ACCENT);
 	}
 	text_c(ren, 0, lw, cy + 40, "File " GL_SUB " Run System Menu", C_TEXT_DIM);
+}
+
+/* The entrance, and the guarantee that it is undone. A modal fades up and
+ * rises the last ten pixels into place; cur_dlg() carries the offset so the
+ * hit test follows. 150ms — long enough to read as motion, short enough that
+ * nobody waiting to click a Close button ever notices it. */
+static void draw_dialog(SDL_Renderer *r, int lw, int lh)
+{
+	static int seen = M_NONE;
+
+	anim_watch((int)g_modal, &seen, &g_modal_at);
+	if (g_modal == M_NONE) return;
+
+	g_alpha = (Uint8)(255.0f * anim_t(g_modal_at, 150));
+	draw_dialog_body(r, lw, lh);
+	g_alpha = 255;
 }
 
 void ui_draw(SDL_Renderer *r, int lw, int lh)
@@ -3147,7 +4288,71 @@ void ui_debug_state(const char *spec)
 	else if (!strcmp(name, "about"))   g_modal = M_ABOUT;
 	/* `apps@x,y` renders the launcher with the pointer at x,y, so a row can be
 	 * shown highlighted without anyone touching a mouse. */
-	else if (!strcmp(name, "apps"))    { ap_reload(); g_modal = M_APPS; }
+	/* `apps` opens the launcher at the top; `apps<N>` selects the Nth entry,
+	 * which is how a scrolled list gets captured — the view follows the
+	 * selection, so `apps400` proves the thing scrolls without anyone
+	 * touching a wheel. `appsend` goes to the last one. */
+	/* micromods<ProductID>: the launcher's Micromods screen for one title.
+	 * Bare `micromods` picks the first app, which is enough to see the
+	 * empty-state wording. */
+	else if (!strncmp(name, "micromods", 9)) {
+		ap_reload();
+		g_modal = M_MICROMODS;
+		if (name[9]) {
+			int i, best = -1;
+			/* A PRODUCTID IS NOT A TITLE. Two different games can share one:
+			 * 0x00180025 is SpongeBob's Clam Prix as LPAD/MULT and the French
+			 * "M. Crayon sauve Bourgribouille" as LST3, and taking the first
+			 * match alphabetically named this screen after the wrong game.
+			 * The real screen has no such problem — it is handed the row the
+			 * user selected — so this only has to pick sensibly: prefer the
+			 * LeapPad2 build, which is the one Tadpole runs. */
+			snprintf(g_mm_title, sizeof(g_mm_title), "%s", name + 9);
+			for (i = 0; i < g_ap_n; i++) {
+				if (!strstr(g_ap[i].pkg, name + 9)) continue;
+				if (best < 0) best = i;
+				if (!strncmp(g_ap[i].pkg, "MULT", 4)) { best = i; break; }
+			}
+			if (best >= 0) {
+				char fam[8];
+				const char *dash = strchr(g_ap[best].pkg, '-');
+				snprintf(g_mm_title, sizeof(g_mm_title), "%s", g_ap[best].name);
+				if (dash && (size_t)(dash - g_ap[best].pkg) < sizeof(fam)) {
+					memcpy(fam, g_ap[best].pkg, (size_t)(dash - g_ap[best].pkg));
+					fam[dash - g_ap[best].pkg] = 0;
+					mm_reload(name + 9, fam);
+				} else {
+					mm_reload(name + 9, NULL);
+				}
+			} else {
+				mm_reload(name + 9, NULL);
+			}
+		} else if (g_ap_n) {
+			const char *pkg = g_ap[0].pkg;
+			const char *a = strchr(pkg, '-'), *b = a ? strchr(a + 1, '-') : NULL;
+			if (a && b) {
+				char prod[16];
+				size_t n2 = (size_t)(b - a - 1);
+				if (n2 < sizeof(prod)) {
+					memcpy(prod, a + 1, n2); prod[n2] = 0;
+					char fam2[8];
+					size_t fl = (size_t)(a - pkg);
+					snprintf(g_mm_title, sizeof(g_mm_title), "%s", g_ap[0].name);
+					if (fl < sizeof(fam2)) { memcpy(fam2, pkg, fl); fam2[fl] = 0; }
+					else fam2[0] = 0;
+					mm_reload(prod, fam2[0] ? fam2 : NULL);
+				}
+			}
+		}
+	}
+	else if (!strncmp(name, "apps", 4)) {
+		ap_reload();
+		g_modal = M_APPS;
+		if (!strcmp(name + 4, "end")) g_ap_sel = g_ap_n - 1;
+		else if (name[4])             g_ap_sel = atoi(name + 4);
+		if (g_ap_sel < 0) g_ap_sel = 0;
+		if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;
+	}
 	else if (!strcmp(name, "games")) {
 		ui_games_reload();
 		if (!g_gm_dir[0] && g_cfg.games_dir[0])
@@ -3219,14 +4424,41 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	struct dlg d = cur_dlg(lw, lh);
 	SDL_Rect cb = close_rect(&d);
 
+	if (g_modal == M_MICROMODS) {
+		SDL_Rect ul = { cb.x - 62, cb.y, 58, 13 };
+		SDL_Rect ua = { cb.x - 62 - 76, cb.y, 72, 13 };
+		if (inside(mx, my, ul.x, ul.y, ul.w, ul.h)) {
+			snprintf(g_action_path, sizeof(g_action_path), "%s", g_mm_product);
+			g_action = UI_ACT_MICROMODS;
+			return 1;
+		}
+		/* Every title that has the code for them. The tool reports how many
+		 * packages that is; it is thousands, and they all land in one folder
+		 * that every game reads at startup. */
+		if (inside(mx, my, ua.x, ua.y, ua.w, ua.h)) {
+			snprintf(g_action_path, sizeof(g_action_path), "all");
+			g_action = UI_ACT_MICROMODS;
+			return 1;
+		}
+		if (inside(mx, my, cb.x, cb.y, cb.w, cb.h)) {
+			g_modal = M_GAMES;     /* back to the list you came from */
+			return 1;
+		}
+	}
+
 	if (g_modal == M_APPS && g_ap_n) {
-		int x = d.x + 10, y = d.y + 20, i, row = 30;
-		int listh = d.h - 30 - 22, vis = listh / row;
+		/* The same helpers the draw uses, so the clickable row and the drawn
+		 * row cannot drift apart — they did once already, when a scrollbar
+		 * appeared beside rows whose hit test still ran under it. */
+		int x = d.x + 8, y = ap_list_y(&d), i;
+		int vis = ap_rows_fit(&d);
+		int rw = ap_row_w(&d, vis);
 		for (i = 0; i < vis && g_ap_top + i < g_ap_n; i++) {
-			if (!inside(mx, my, x - 2, y + i * row - 2, d.w - 16, row - 2))
+			if (!inside(mx, my, x - 2, y + i * AP_ROW_H, rw, AP_ROW_H - 2))
 				continue;
+			g_ap_sel = g_ap_top + i;
 			snprintf(g_action_path, sizeof(g_action_path), "%s",
-			         g_ap[g_ap_top + i].pkg);
+			         g_ap[g_ap_sel].pkg);
 			g_action = UI_ACT_RUN_APP;
 			g_modal = M_NONE;
 			return 1;
@@ -3404,6 +4636,33 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			}
 			return 1;
 		}
+		{ SDL_Rect mb;
+		if (gm_micro_rect(&d, &mb) && inside(mx, my, mb.x, mb.y, mb.w, mb.h)) {
+			/* The ProductID is the middle field of the selected row's
+			 * PackageID — MULT-0x00180025-000000 — and it is the only part
+			 * of the name this needs: a title filters the Downloads folder
+			 * by exactly that when it looks for its bonus content. */
+			if (g_gm_n && g_gm_sel >= 0 && g_gm_sel < g_gm_n) {
+				const char *pid = g_gm[g_gm_sel].pid;
+				const char *a = strchr(pid, '-');
+				const char *b2 = a ? strchr(a + 1, '-') : NULL;
+				g_mm_title[0] = 0;
+				if (a && b2 && (size_t)(b2 - a - 1) < sizeof(g_mm_product)
+				    && (size_t)(a - pid) < sizeof(g_mm_family)) {
+					char prod[16], fam[8];
+					memcpy(prod, a + 1, (size_t)(b2 - a - 1));
+					prod[b2 - a - 1] = 0;
+					memcpy(fam, pid, (size_t)(a - pid));
+					fam[a - pid] = 0;
+					snprintf(g_mm_title, sizeof(g_mm_title), "%.60s",
+					         g_gm[g_gm_sel].name);
+					mm_reload(prod, fam);
+				}
+				g_modal = M_MICROMODS;
+			}
+			return 1;
+		}
+		}                       /* scope of the Micromods rect */
 		{                                               /* Install N */
 			SDL_Rect b = { d.x + d.w - 8 - 48 - 62, by, 62, 13 };
 			if (inside(mx, my, b.x, b.y, b.w, b.h)) {
@@ -3636,6 +4895,12 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 			if (g_gm_top < 0) g_gm_top = 0;
 			return 1;
 		}
+		if (g_modal == M_MICROMODS) {
+			g_mm_top -= e->wheel.y * 2;
+			if (g_mm_top > g_mm_n - g_mm_rows) g_mm_top = g_mm_n - g_mm_rows;
+			if (g_mm_top < 0) g_mm_top = 0;
+			return 1;
+		}
 		if (g_modal == M_APPS) {
 			g_ap_top -= e->wheel.y * 2;
 			if (g_ap_top > g_ap_n - g_ap_rows) g_ap_top = g_ap_n - g_ap_rows;
@@ -3685,6 +4950,64 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 				g_prof_focus = 0;
 				return 1;
 			}
+		}
+		/* THE LAUNCHER HAD NO KEYBOARD AT ALL. Every other list in this file
+		 * has arrows, paging and Home/End; this one fell through to the
+		 * generic "a modal is up" branch below, which swallows the key and
+		 * does nothing — so the only way to move through four hundred apps
+		 * was the wheel, and nothing on screen said even that would work. */
+		if (g_modal == M_APPS && g_ap_n &&
+		    e->key.keysym.sym != SDLK_ESCAPE) {   /* Escape closes, below */
+			switch (e->key.keysym.sym) {
+			case SDLK_RETURN:
+				if (g_ap_sel >= 0 && g_ap_sel < g_ap_n) {
+					snprintf(g_action_path, sizeof(g_action_path), "%s",
+					         g_ap[g_ap_sel].pkg);
+					g_action = UI_ACT_RUN_APP;
+					g_modal = M_NONE;
+				}
+				return 1;
+			case SDLK_UP:       g_ap_sel--; break;
+			case SDLK_DOWN:     g_ap_sel++; break;
+			case SDLK_PAGEUP:   g_ap_sel -= g_ap_rows; break;
+			case SDLK_PAGEDOWN: g_ap_sel += g_ap_rows; break;
+			case SDLK_HOME:     g_ap_sel = 0; break;
+			case SDLK_END:      g_ap_sel = g_ap_n - 1; break;
+			default:
+				/* TYPE A LETTER TO JUMP TO IT. Four hundred and sixty-two
+				 * titles is seventy-odd presses of PageDown end to end, and
+				 * the list is already sorted by name — the letter you want is
+				 * the one thing you reliably know about where you are going.
+				 *
+				 * The search starts one PAST the selection and wraps, so
+				 * pressing the same letter again walks the matches instead of
+				 * sticking on the first. That is what makes it usable for the
+				 * dozen titles here beginning with "L". */
+				{
+					SDL_Keycode k = e->key.keysym.sym;
+					int i, start;
+					char want;
+					if (k < SDLK_a || k > SDLK_z)
+						return 1;    /* not a letter: the modal swallows it */
+					want = (char)('a' + (k - SDLK_a));
+					start = g_ap_sel + 1;
+					for (i = 0; i < g_ap_n; i++) {
+						int j = (start + i) % g_ap_n;
+						char c = g_ap[j].name[0];
+						if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+						if (c == want) { g_ap_sel = j; break; }
+					}
+				}
+				break;
+			}
+			if (g_ap_sel < 0) g_ap_sel = 0;
+			if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;
+			/* The view follows the selection; the draw clamps g_ap_top
+			 * against the row count it actually has room for. */
+			if (g_ap_sel < g_ap_top) g_ap_top = g_ap_sel;
+			if (g_ap_sel >= g_ap_top + g_ap_rows)
+				g_ap_top = g_ap_sel - g_ap_rows + 1;
+			return 1;
 		}
 		if (g_modal == M_GAMES) {
 			switch (e->key.keysym.sym) {

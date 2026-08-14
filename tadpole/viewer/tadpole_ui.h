@@ -88,6 +88,9 @@ enum ui_action {
 	UI_ACT_INSTALL_GAMES,    /* path = file listing the archives to install */
 	UI_ACT_CHECK_UPDATE,     /* ask GitHub whether a newer release exists */
 	UI_ACT_DO_UPDATE,        /* download it; path = where to write */
+	/* path = a ProductID (0x........). Writes the micromod packages the
+	 * title looks for; see the note in tadpole_ui.c. */
+	UI_ACT_MICROMODS,
 	UI_ACT_STOP,
 	UI_ACT_QUIT,
 	UI_ACT_RELAYOUT          /* rotate/scale changed; viewer must resize */
@@ -177,6 +180,19 @@ void  ui_draw_idle(SDL_Renderer *ren, int lw, int lh);
 /* Put the UI into a named state without synthetic input — see the note in
  * tadpole_ui.c. Used by --ui-shot. */
 void  ui_debug_state(const char *spec);
+
+/* Render everything settled, with no entrance animations. A --ui-shot draws
+ * ONE frame; without this it would catch whatever fraction of a panel's fade
+ * that frame landed on, and every capture would differ from the last for no
+ * reason at all. Call before drawing a shot; there is no way back. */
+void  ui_anim_disable(void);
+
+/* The app launcher's list position, for --selftest-apps. Reading it from
+ * outside is the only way to check that a wheel or an arrow key actually
+ * moved the list: "the code looks right" is how it came to ship not
+ * scrolling in the first place. */
+void  ui_debug_apps(int *n, int *top, int *sel, int *rows);
+char  ui_debug_app_initial(int index);
 
 /* WHICH PRODUCT THIS IS PRESENTING ITSELF AS, and what is running the guest.
  * They are two different questions and they used to be one: the chrome was
