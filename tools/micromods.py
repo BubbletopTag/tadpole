@@ -243,6 +243,56 @@ def write_checksums(pkgdir):
                 f.write("%s  ./%s\n" % (md5_file(p), n))
 
 
+PROFILE_ACCESS = "ProfileAccess=0,1,2,3"
+
+
+def ensure_access(pkgdir):
+    """Give a package an access field if it has neither. -> True if written.
+
+    THE PACKAGE AS LEAPFROG SHIPS IT IS NOT YET INSTALLABLE. A micromod
+    downloaded from digitalcontent.leapfrog.com carries no DeviceAccess and no
+    ProfileAccess — LFConnect adds one when it assigns the content to a child,
+    the same way it adds ProfileAccess to an Application. Compare the raw
+    download with a copy that went through LFConnect:
+
+        MULT-0x00180002-000009.lf2   (CDN)   ...MDLType="background theme"
+        LPAD-0x00180002-000009       (real)  ...ProfileAccess=0,1,2  Size=28672
+
+    Without one of those two fields the package is DISCARDED BEFORE THE TITLE
+    EVER SEES IT. LTM::CMicroDownloads::get walks the Downloads folder and its
+    filter ends:
+
+        if (meta.GetDeviceAccess() == 1)          -> accept
+        n = meta.GetProfileAccess(&ids)
+        if (n == 0)                               -> reject
+        accept only if the current player is in ids
+
+    so "no access field" is the reject case. It is the same fault as the one
+    install-game.py fixes for the home screen — a package that installs
+    cleanly, reports success, and is then filtered out for want of the one
+    field nobody wrote.
+
+    0,1,2,3 is every profile slot the device has. LeapFrog's own micromods say
+    0,1,2; a fourth costs nothing and matches whichever profile is signed in.
+    """
+    meta = os.path.join(pkgdir, "meta.inf")
+    try:
+        with open(meta, "r", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return False
+    for line in text.splitlines():
+        if line.startswith("ProfileAccess=") or line.strip() == "DeviceAccess=1":
+            return False
+    # THE NEWLINE IS NOT OPTIONAL — see install-game.py. These files often end
+    # without one, and appending straight to the end welds two fields into
+    # `Size=20480ProfileAccess=0,1,2,3`, losing both.
+    with open(meta, "a", encoding="utf-8") as f:
+        f.write(("" if text.endswith(("\n", "\r")) else "\n") + PROFILE_ACCESS + "\n")
+    write_checksums(pkgdir)
+    return True
+
+
 def make_package(pkgid, product, name, mdltype, depends, dry):
     """Write one micromod. -> 'made' | 'exists' | 'would'."""
     dest = os.path.join(DOWNLOADS, pkgid)
@@ -564,10 +614,34 @@ def cmd_ingest(src, dry):
                     shutil.copy2(s, os.path.join(dest, fn))
         man["made"].append(pkgid)
         made += 1
-        print("  + %-28s %s" % (pkgid, fields.get("Name", "")))
+        access = " +access" if ensure_access(dest) else ""
+        print("  + %-28s %s%s" % (pkgid, fields.get("Name", ""), access))
     if not dry:
         save_manifest(man)
     print("installed %d" % made)
+
+
+def cmd_fix_access(dry):
+    """Repair micromods already installed without an access field.
+
+    Only ever ADDS the field, and only to a package that has neither — a
+    package that already names its profiles is left exactly as it is."""
+    fixed, ok = 0, 0
+    for pkgid, fields in sorted(installed_micromods().items()):
+        dest = os.path.join(DOWNLOADS, pkgid)
+        has = fields.get("ProfileAccess") or fields.get("DeviceAccess") == "1"
+        if has:
+            ok += 1
+            continue
+        print("  %s %-28s %s" % ("?" if dry else "+", pkgid, fields.get("Name", "")))
+        if not dry:
+            ensure_access(dest)
+        fixed += 1
+    print("%s %d, already had one %d"
+          % ("would fix" if dry else "fixed", fixed, ok))
+    if fixed and not dry:
+        print("These were being discarded by the firmware before the title "
+              "saw them.\nRun the game and look again.")
 
 
 def cmd_uninstall(dry):
@@ -601,6 +675,8 @@ def main():
     ap.add_argument("--discover", metavar="PRODUCTID")
     ap.add_argument("--ingest", metavar="DIR")
     ap.add_argument("--uninstall", action="store_true")
+    ap.add_argument("--fix-access", action="store_true",
+                    help="add ProfileAccess to installed micromods missing it")
     ap.add_argument("-n", "--dry-run", action="store_true")
     a = ap.parse_args()
 
@@ -612,6 +688,8 @@ def main():
 
     if a.uninstall:
         cmd_uninstall(a.dry_run)
+    elif a.fix_access:
+        cmd_fix_access(a.dry_run)
     elif a.ingest:
         cmd_ingest(a.ingest, a.dry_run)
     elif a.discover:
