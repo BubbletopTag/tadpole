@@ -273,6 +273,11 @@ static struct ui_settings g_cfg = {
 };
 static enum ui_action g_action;
 static char           g_action_path[PATHMAX];
+/* A SECOND FIELD, for the one action that needs two. Installing micromods
+ * takes the title AND which of its slots were ticked; everything else here
+ * has always been "one path", and widening ui_take_action() for a single
+ * caller would touch every one of them. */
+static char           g_action_arg[256];
 static char           g_status[128];
 static int            g_running;
 static int            g_mx, g_my;     /* last mouse position, logical */
@@ -691,9 +696,13 @@ static void rr_fill_ex(SDL_Renderer *r, SDL_Texture *tex, float x, float y,
  * The colour runs top-to-bottom like rr_geom's. A rim of ONE brightness all
  * the way round is what a drawn rectangle looks like; a rim that is bright
  * along the top and fades towards the bottom is what a lit sheet looks like,
- * and it is most of the difference between "rounded box" and "glass". */
+ * and it is most of the difference between "rounded box" and "glass".
+ *
+ * TOP AND BOTTOM RADII ARE SEPARATE because the dropdown's are: it hangs off
+ * the menu bar with square top corners, and a rim that rounds where the body
+ * does not is the one place the two shapes visibly disagree. */
 static void rr_stroke_grad(SDL_Renderer *r, float x, float y, float w, float h,
-                           float rad, unsigned ctop, Uint8 atop,
+                           float rtop, float rbot, unsigned ctop, Uint8 atop,
                            unsigned cbot, Uint8 abot, float thick)
 {
 	SDL_FPoint outer[RR_MAX_PTS], inner[RR_MAX_PTS], feather[RR_MAX_PTS];
@@ -701,21 +710,25 @@ static void rr_stroke_grad(SDL_Renderer *r, float x, float y, float w, float h,
 	int idx[RR_MAX_PTS * 12];
 	int n, i, ni = 0, nv = 0;
 	struct rgb ct = unpack(ctop), cb = unpack(cbot);
-	float irad;
+	float itop, ibot, ftop, fbot;
 
 	if (w <= 0 || h <= 0 || (atop == 0 && abot == 0)) return;
 	if (thick * 2 >= w) thick = w / 2 - 0.5f;
 	if (thick * 2 >= h) thick = h / 2 - 0.5f;
 	if (thick < 0.5f) thick = 0.5f;
-	irad = rad - thick; if (irad < 0) irad = 0;
+	itop = rtop - thick; if (itop < 0) itop = 0;
+	ibot = rbot - thick; if (ibot < 0) ibot = 0;
+	/* A square corner stays square as the outline grows outward — feathering
+	 * it into a rounded one puts a soft notch on a hard corner. */
+	ftop = rtop > 0 ? rtop + RR_FEATHER : 0;
+	fbot = rbot > 0 ? rbot + RR_FEATHER : 0;
 	memset(verts, 0, sizeof(verts));
 
-	n = rr_build(outer, x, y, w, h, rad, rad, rad, rad);
+	n = rr_build(outer, x, y, w, h, rtop, rtop, rbot, rbot);
 	rr_build(inner, x + thick, y + thick, w - 2 * thick, h - 2 * thick,
-	        irad, irad, irad, irad);
+	        itop, itop, ibot, ibot);
 	rr_build(feather, x - RR_FEATHER, y - RR_FEATHER, w + 2 * RR_FEATHER,
-	        h + 2 * RR_FEATHER, rad + RR_FEATHER, rad + RR_FEATHER,
-	        rad + RR_FEATHER, rad + RR_FEATHER);
+	        h + 2 * RR_FEATHER, ftop, ftop, fbot, fbot);
 
 #define RS_MIX(dst, py, a_scale) do {                                        \
 		float t_ = ((py) - y) / h;                                           \
@@ -879,12 +892,12 @@ static void chip(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
 	if (raised) {
 		rr_geom(r, NULL, NULL, fx, fy, fw, fh, rad, rad, rad, rad,
 		       col, 176, col, 202);
-		rr_stroke_grad(r, fx, fy, fw, fh, rad,
+		rr_stroke_grad(r, fx, fy, fw, fh, rad, rad,
 		              C_EDGE_LT, 185, C_EDGE_LT, 96, 1.0f);
 	} else {
 		rr_geom(r, NULL, NULL, fx, fy, fw, fh, rad, rad, rad, rad,
 		       col, 208, col, 176);
-		rr_stroke_grad(r, fx, fy, fw, fh, rad,
+		rr_stroke_grad(r, fx, fy, fw, fh, rad, rad,
 		              C_EDGE_DK, 165, C_EDGE_LT, 78, 1.0f);
 	}
 }
@@ -1040,13 +1053,36 @@ static SDL_FRect glass_uv(SDL_Renderer *r)
  * light. It is also the physically sensible one: glass adds the light that
  * passes through it to the light it reflects.
  *
+ * AND ADDITIVE IS ALSO WHY THE FIRST VERSION WAS UNREADABLE OVER A GAME.
+ * Added light is unbounded: the panel's brightness is the backdrop's, times a
+ * gain, plus a floor. Tuned against the idle void — near-black, so the added
+ * term is near-zero — a body at alpha 202 and a gain of 150 looked right.
+ * Over a title's box art the same numbers put the top of the File menu at
+ * 1.0:1 against its own disabled text, measured over a white backdrop with
+ * TADPOLE_SHOT_BG: the greyed items were not dim, they were GONE.
+ *
+ * The fix is both halves of that expression, because neither alone is enough.
+ * The body went nearly opaque, so the panel has a dark floor no backdrop can
+ * lift; and the gain came down by well over half, so bright content bleeds
+ * through as a glow rather than erasing what it is behind. The frost is
+ * quieter over the void than it was and that is the price — legibility over
+ * the bright case is worth more than glass over the dark one, and the dark
+ * one never needed the help.
+ *
+ * `rtop` rounds the top corners independently of the bottom ones: a dialog
+ * floats and rounds all four, a dropdown hangs off the menu bar and wants its
+ * top edge welded to it.
+ *
  * `blur` may be NULL, and is owned by glass_capture() — never destroyed here.
  */
 static void panel_glass(SDL_Renderer *r, int x, int y, int w, int h,
-                        SDL_Texture *blur)
+                        SDL_Texture *blur, float rtop)
 {
 	float rad = rr_radius_panel(w, h);
 	int i;
+
+	if (rtop > rad) rtop = rad;
+	if (rtop < 0) rtop = 0;
 
 	/* Widening rings rather than one hard offset rectangle: a shadow with an
 	 * edge is a second border, not a shadow. Six thin ones instead of three
@@ -1055,38 +1091,40 @@ static void panel_glass(SDL_Renderer *r, int x, int y, int w, int h,
 	 * The offset grows faster than the spread so the light stays overhead. */
 	for (i = 6; i >= 1; i--) {
 		float grow = (float)i * 2.2f;
+		float gtop = rtop > 0 ? rtop + grow : 0;
 		rr_fill_ex(r, NULL, x - grow, y - grow + 1.0f + grow * 0.55f,
 		          w + 2 * grow, h + 2 * grow,
-		          rad + grow, rad + grow, rad + grow, rad + grow,
+		          gtop, gtop, rad + grow, rad + grow,
 		          C_SHADOW, (Uint8)(13 * (7 - i)));
 	}
 
 	rr_geom(r, NULL, NULL, (float)x, (float)y, (float)w, (float)h,
-	       rad, rad, rad, rad, C_PANEL_HI, 202, C_PANEL, 220);
+	       rtop, rtop, rad, rad, C_PANEL_HI, 246, C_PANEL, 252);
 
 	if (blur) {
 		SDL_FRect uv = glass_uv(r);
 		SDL_SetTextureBlendMode(blur, SDL_BLENDMODE_ADD);
 		SDL_SetTextureAlphaMod(blur, 255);
 		rr_geom(r, blur, &uv, (float)x, (float)y, (float)w, (float)h,
-		       rad, rad, rad, rad, 0x9FB4A8U, 150, 0x6F8478U, 96);
+		       rtop, rtop, rad, rad, 0x9FB4A8U, 34, 0x6F8478U, 22);
 	}
 
 	/* The light catching the top of the sheet, fading out before halfway. */
 	rr_geom(r, NULL, NULL, (float)x + 1, (float)y + 1, (float)w - 2, (float)h * 0.45f,
-	       rad - 1, rad - 1, 0, 0, C_EDGE_LT, 46, C_EDGE_LT, 0);
+	       rtop > 1 ? rtop - 1 : 0, rtop > 1 ? rtop - 1 : 0, 0, 0,
+	       C_EDGE_LT, 46, C_EDGE_LT, 0);
 
 	/* The rim, brightest along the top and falling to almost nothing at the
 	 * bottom. A rim of one brightness all the way round is a drawn outline;
 	 * this is an edge with a light above it, and it is the single change that
 	 * did most for making the panels read as sheets of something. */
-	rr_stroke_grad(r, (float)x, (float)y, (float)w, (float)h, rad,
+	rr_stroke_grad(r, (float)x, (float)y, (float)w, (float)h, rtop, rad,
 	              C_EDGE_LT, 190, C_EDGE_LT, 70, 1.2f);
 }
 
-static void panel(SDL_Renderer *r, int x, int y, int w, int h)
+static void panel(SDL_Renderer *r, int x, int y, int w, int h, float rtop)
 {
-	panel_glass(r, x, y, w, h, glass_capture(r));
+	panel_glass(r, x, y, w, h, glass_capture(r), rtop);
 }
 
 static int text_w(const char *s) { return (int)strlen(s) * GLYPH_ADV; }
@@ -1690,6 +1728,10 @@ char ui_debug_app_initial(int i)
 struct mm_entry {
 	char slot[8];            /* 000001, 100000, ... — the identity */
 	char name[72];
+	unsigned char installed; /* sitting in Downloads already */
+	unsigned char avail;     /* LeapFrog still serves it — a scan found it */
+	unsigned char dep;       /* the CartridgeData stub, not a micromod */
+	unsigned char pick;      /* ticked, to be installed */
 };
 static struct mm_entry g_mm[MM_MAX];
 static int g_mm_n, g_mm_top, g_mm_rows = 6;
@@ -1779,8 +1821,20 @@ static void mm_reload(const char *product, const char *family)
 			if (!a || !b || (size_t)(a - de->d_name) >= sizeof(fam)) continue;
 			memcpy(fam, de->d_name, (size_t)(a - de->d_name));
 			fam[a - de->d_name] = 0;
-			if (g_mm_family[0] && strcmp(fam, g_mm_family)) continue;
+			/* THE FAMILY IS NOT PART OF "IS THIS INSTALLED", and filtering
+			 * on it here said "on server" about packages sitting in the
+			 * folder. LTM::CMicroDownloads::get matches a package to the
+			 * running title on its ProductID and never looks at the family
+			 * — which is exactly why a MULT package works for the LST3 and
+			 * LPAD builds, and why LeapFrog serving only MULT is not a
+			 * problem. So any family's copy of a slot counts as installed.
+			 *
+			 * g_mm_family still names the build in the heading, because a
+			 * ProductID can be two different games and the user should see
+			 * which one this screen is about. */
+			(void)fam;
 			snprintf(e.slot, sizeof(e.slot), "%.7s", b + 1);
+			e.installed = 1;
 
 			for (k = 0; k < g_mm_n; k++)
 				if (!strcmp(g_mm[k].slot, e.slot)) { found = k; break; }
@@ -1799,6 +1853,54 @@ static void mm_reload(const char *product, const char *family)
 		}
 	}
 	closedir(d);
+
+	/* WHAT LEAPFROG STILL HAS, folded in beside what is already here.
+	 *
+	 * tools/micromods.py --scan writes runtime/micromods-cache/<ProductID>/
+	 * index.tsv — one line of `slot, mod|dep, name, has-preview` per package
+	 * the server answered for. Reading that is why this screen can list a
+	 * title's real micromods by name before any of them are installed; the
+	 * device itself enumerates nothing, and the title's own binary names them
+	 * in a form that differs per game engine.
+	 *
+	 * The index is not authoritative about what is INSTALLED — the loop above
+	 * is — so a slot already on disk keeps its row and merely gains a note
+	 * that it is also downloadable. */
+	{
+		char idx[PATHMAX + 64];
+		FILE *f;
+		snprintf(idx, sizeof(idx), "%s/runtime/micromods-cache/%s/index.tsv",
+		         g_proj, g_mm_product);
+		if ((f = fopen(idx, "r"))) {
+			while (fgets(line, sizeof(line), f) && g_mm_n < MM_MAX) {
+				char *slot = line, *kind, *name, *nl;
+				int k, found = -1;
+				if ((nl = strchr(line, '\n'))) *nl = 0;
+				if (!(kind = strchr(slot, '\t'))) continue;
+				*kind++ = 0;
+				if (!(name = strchr(kind, '\t'))) continue;
+				*name++ = 0;
+				if ((nl = strchr(name, '\t'))) *nl = 0;
+				for (k = 0; k < g_mm_n; k++)
+					if (!strcmp(g_mm[k].slot, slot)) { found = k; break; }
+				if (found < 0) {
+					struct mm_entry e;
+					memset(&e, 0, sizeof(e));
+					snprintf(e.slot, sizeof(e.slot), "%.7s", slot);
+					snprintf(e.name, sizeof(e.name), "%s", name);
+					e.avail = 1;
+					e.dep = !strcmp(kind, "dep");
+					g_mm[g_mm_n++] = e;
+				} else {
+					g_mm[found].avail = 1;
+					if (!g_mm[found].name[0])
+						snprintf(g_mm[found].name, sizeof(g_mm[found].name),
+						         "%s", name);
+				}
+			}
+			fclose(f);
+		}
+	}
 	{
 		int i, j;
 		for (i = 1; i < g_mm_n; i++) {
@@ -1808,6 +1910,28 @@ static void mm_reload(const char *product, const char *family)
 			g_mm[j + 1] = t;
 		}
 	}
+}
+
+/* Re-read after a scan or an install has changed what is on disk. The screen
+ * keeps whichever title it was already about. */
+void ui_micromods_reload(void)
+{
+	if (g_mm_product[0])
+		mm_reload(g_mm_product, g_mm_family[0] ? g_mm_family : NULL);
+}
+
+/* The ticked slots, comma-separated, for --install --only. -> 0 if none. */
+int ui_micromods_picked(char *out, size_t n)
+{
+	int i, k = 0;
+	if (n) out[0] = 0;
+	for (i = 0; i < g_mm_n; i++) {
+		if (!g_mm[i].pick || g_mm[i].installed) continue;
+		if (k && strlen(out) + 1 < n) strncat(out, ",", n - strlen(out) - 1);
+		strncat(out, g_mm[i].slot, n - strlen(out) - 1);
+		k++;
+	}
+	return k;
 }
 
 void ui_debug_apps(int *n, int *top, int *sel, int *rows)
@@ -2510,6 +2634,14 @@ enum ui_action ui_take_action(char *path, size_t n)
 	return a;
 }
 
+/* Valid until the next action is taken. Only UI_ACT_MICROMODS_INSTALL sets
+ * it; everything else leaves whatever was there, so read it in the same
+ * breath as the action it belongs to. */
+const char *ui_action_arg(void)
+{
+	return g_action_arg;
+}
+
 static void msg(const char *title, const char *body)
 {
 	snprintf(g_msg_title, sizeof(g_msg_title), "%s", title);
@@ -2972,7 +3104,11 @@ static void draw_dropdown(SDL_Renderer *r)
 	g_alpha = (Uint8)(255.0f * t);
 	y -= (int)((1.0f - t) * 5.0f);
 
-	panel(r, x, y, w, h);
+	/* SQUARE ALONG THE TOP. A dropdown is not a floating sheet — it is the
+	 * bar's own title continued downwards, and rounding the two corners that
+	 * meet the bar detaches it from the thing it belongs to. The bottom two
+	 * stay rounded, which is the edge that really is floating. */
+	panel(r, x, y, w, h, 0.0f);
 
 	for (i = 0; i < m->n; i++) {
 		int iy = y + 3 + i * 12;
@@ -3039,7 +3175,8 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		{ SDL_Rect all = { 0, UI_BAR_H, lw, lh - UI_BAR_H }; SDL_RenderFillRect(r, &all); }
 		SDL_SetRenderDrawBlendMode(r, SDL_BLENDMODE_NONE);
 
-		panel_glass(r, d.x, d.y, d.w, d.h, blur);
+		panel_glass(r, d.x, d.y, d.w, d.h, blur,
+		            rr_radius_panel(d.w, d.h));
 	}
 	/* Rounded to match the panel's own top corners — a square strip inset by
 	 * one pixel hangs visibly outside a 10px radius. */
@@ -3175,8 +3312,19 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		{
 			/* Say what the number counts. "60" was the file count, and it
 			 * read as sixty pieces of bonus content when the title has
-			 * fifteen slots built for four device families. */
-			snprintf(line, sizeof(line), "%d micromods", g_mm_n);
+			 * fifteen slots built for four device families. The
+			 * CartridgeData stub is in the list but is not one of them, so
+			 * it is not counted either. */
+			int nm = 0, ni = 0, q;
+			for (q = 0; q < g_mm_n; q++) {
+				if (g_mm[q].dep) continue;
+				nm++;
+				if (g_mm[q].installed) ni++;
+			}
+			if (ni && ni < nm)
+				snprintf(line, sizeof(line), "%d of %d installed", ni, nm);
+			else
+				snprintf(line, sizeof(line), "%d micromods", nm);
 			text(r, d.x + d.w - 8 - text_w(line), d.y + 3, line, C_TEXT_DIM);
 		}
 		text(r, x, d.y + 16, g_mm_title, C_ACCENT);
@@ -3189,20 +3337,38 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 
 		if (!g_mm_n) {
 			text(r, x, y + 14, "None installed for this game.", C_TEXT);
-			text(r, x, y + 32, "Bonus content is earned on the device and", C_TEXT_DIM);
-			text(r, x, y + 42, "redeemed through LFConnect, which Tadpole", C_TEXT_DIM);
-			text(r, x, y + 52, "cannot reach. Unlock writes the packages", C_TEXT_DIM);
-			text(r, x, y + 62, "the game looks for.", C_TEXT_DIM);
+			text(r, x, y + 32, "Bonus content was earned on the device and", C_TEXT_DIM);
+			text(r, x, y + 42, "redeemed through LFConnect. LeapFrog still", C_TEXT_DIM);
+			text(r, x, y + 52, "serves the packages, so Scan asks what this", C_TEXT_DIM);
+			text(r, x, y + 62, "game has and lists it here.", C_TEXT_DIM);
 			break;
 		}
 		chip(r, x - 4, y - 4, d.w - 16, vis * 11 + 6, C_VOID, 0);
 		for (i = 0; i < vis && g_mm_top + i < g_mm_n; i++) {
 			struct mm_entry *e = &g_mm[g_mm_top + i];
 			int yy = y + i * 11;
-			/* The slot IS the micromod, so it leads. The families beside it
-			 * say which builds of the title can see it. */
-			text(r, x + 2, yy, e->slot, C_TEXT_DIM);
-			text(r, x + 48, yy, e->name[0] ? e->name : "(unnamed)", C_TEXT);
+			int can = e->avail && !e->installed && !e->dep;
+			/* A TICK BOX ONLY WHERE TICKING MEANS SOMETHING. An installed slot
+			 * has nothing to fetch, and the CartridgeData stub is not a
+			 * micromod — it goes in alongside them because they name it in
+			 * Depends, not because anyone chooses it. */
+			if (can) {
+				chip(r, x + 1, yy - 1, 9, 9,
+				     e->pick ? C_ACCENT : C_PANEL, 1);
+				if (e->pick) text(r, x + 3, yy, "x", C_VOID);
+			}
+			/* The slot IS the micromod, so it leads. */
+			text(r, x + 14, yy, e->slot, C_TEXT_DIM);
+			text(r, x + 60, yy, e->name[0] ? e->name : "(unnamed)",
+			     e->installed ? C_TEXT : can ? C_TEXT : C_TEXT_DIM);
+			{
+				const char *tag = e->dep ? "cartridge"
+				                : e->installed ? "installed"
+				                : e->avail ? "on server" : "";
+				if (tag[0])
+					text(r, d.x + d.w - 16 - text_w(tag), yy, tag,
+					     e->installed ? C_DIMMEST : C_TEXT_DIM);
+			}
 		}
 		if (g_mm_n > vis) {
 			snprintf(line, sizeof(line), "%d-%d of %d", g_mm_top + 1,
@@ -4148,18 +4314,27 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		       g_modal == M_FILES ? "Cancel" : "Close",
 		       busy ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 	}
-	/* THE ONE ACTION THIS SCREEN HAS. Writes the packages the selected title
-	 * looks for; the child still turns each one on in the game's own menu,
+	/* TWO ACTIONS, IN THE ORDER THEY ARE USED. Scan asks LeapFrog what this
+	 * title's bonus content is and lists it by name; Install fetches the
+	 * ticked rows. The child still turns each one on in the game's own menu,
 	 * because that choice is stored per profile in the save data. */
 	if (g_modal == M_MICROMODS) {
-		SDL_Rect ul = { cb.x - 62, cb.y, 58, 13 };
-		SDL_Rect ua = { cb.x - 62 - 76, cb.y, 72, 13 };
-		int hot = inside(g_mx, g_my, ul.x, ul.y, ul.w, ul.h);
-		int hot2 = inside(g_mx, g_my, ua.x, ua.y, ua.w, ua.h);
-		chip(r, ua.x, ua.y, ua.w, ua.h, hot2 ? C_BAR_HI : C_PANEL, 1);
-		text_c(r, ua.x, ua.w, ua.y + 3, "Unlock all", hot2 ? C_ACCENT : C_TEXT);
-		chip(r, ul.x, ul.y, ul.w, ul.h, hot ? C_BAR_HI : C_PANEL, 1);
-		text_c(r, ul.x, ul.w, ul.y + 3, "Unlock", hot ? C_ACCENT : C_TEXT);
+		SDL_Rect in = { cb.x - 62, cb.y, 58, 13 };
+		SDL_Rect sc = { cb.x - 62 - 62, cb.y, 58, 13 };
+		char picked[256];
+		int npick = ui_micromods_picked(picked, sizeof(picked));
+		int hot = npick && inside(g_mx, g_my, in.x, in.y, in.w, in.h);
+		int hot2 = inside(g_mx, g_my, sc.x, sc.y, sc.w, sc.h);
+		chip(r, sc.x, sc.y, sc.w, sc.h, hot2 ? C_BAR_HI : C_PANEL, 1);
+		text_c(r, sc.x, sc.w, sc.y + 3, "Scan", hot2 ? C_ACCENT : C_TEXT);
+		chip(r, in.x, in.y, in.w, in.h, hot ? C_BAR_HI : C_PANEL, 1);
+		if (npick) {
+			char lab[24];
+			snprintf(lab, sizeof(lab), "Install %d", npick);
+			text_c(r, in.x, in.w, in.y + 3, lab, hot ? C_ACCENT : C_TEXT);
+		} else {
+			text_c(r, in.x, in.w, in.y + 3, "Install", C_TEXT_DIM);
+		}
 	}
 	if (g_modal == M_FILES) {
 		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
@@ -4425,24 +4600,44 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	SDL_Rect cb = close_rect(&d);
 
 	if (g_modal == M_MICROMODS) {
-		SDL_Rect ul = { cb.x - 62, cb.y, 58, 13 };
-		SDL_Rect ua = { cb.x - 62 - 76, cb.y, 72, 13 };
-		if (inside(mx, my, ul.x, ul.y, ul.w, ul.h)) {
+		SDL_Rect in = { cb.x - 62, cb.y, 58, 13 };
+		SDL_Rect sc = { cb.x - 62 - 62, cb.y, 58, 13 };
+		char picked[256];
+		/* Ask LeapFrog what this title has. Read-only: it downloads into the
+		 * cache and writes the index this screen lists from, and installs
+		 * nothing until something is ticked. */
+		if (inside(mx, my, sc.x, sc.y, sc.w, sc.h)) {
 			snprintf(g_action_path, sizeof(g_action_path), "%s", g_mm_product);
-			g_action = UI_ACT_MICROMODS;
+			g_action = UI_ACT_MICROMODS_SCAN;
 			return 1;
 		}
-		/* Every title that has the code for them. The tool reports how many
-		 * packages that is; it is thousands, and they all land in one folder
-		 * that every game reads at startup. */
-		if (inside(mx, my, ua.x, ua.y, ua.w, ua.h)) {
-			snprintf(g_action_path, sizeof(g_action_path), "all");
-			g_action = UI_ACT_MICROMODS;
+		if (inside(mx, my, in.x, in.y, in.w, in.h) &&
+		    ui_micromods_picked(picked, sizeof(picked))) {
+			/* PRODUCTID AND SLOTS, because the tool takes the choice as
+			 * --only and there is no sense installing what was not asked
+			 * for. */
+			snprintf(g_action_path, sizeof(g_action_path), "%s",
+			         g_mm_product);
+			snprintf(g_action_arg, sizeof(g_action_arg), "%s", picked);
+			g_action = UI_ACT_MICROMODS_INSTALL;
 			return 1;
 		}
 		if (inside(mx, my, cb.x, cb.y, cb.w, cb.h)) {
 			g_modal = M_GAMES;     /* back to the list you came from */
 			return 1;
+		}
+		/* A row toggles its tick. Same geometry the draw uses. */
+		{
+			struct dlg dd = cur_dlg(lw, lh);
+			int x = dd.x + 8, y = dd.y + 29, i;
+			for (i = 0; i < g_mm_rows && g_mm_top + i < g_mm_n; i++) {
+				struct mm_entry *e = &g_mm[g_mm_top + i];
+				if (!e->avail || e->installed || e->dep) continue;
+				if (inside(mx, my, x - 4, y + i * 11 - 1, dd.w - 16, 11)) {
+					e->pick = !e->pick;
+					return 1;
+				}
+			}
 		}
 	}
 

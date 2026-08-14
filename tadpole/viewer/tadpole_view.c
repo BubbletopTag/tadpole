@@ -1211,7 +1211,27 @@ static int ui_shot(SDL_Renderer *ren, SDL_Window *win, const char *state,
 	ui_debug_state(state);
 	SDL_SetRenderDrawColor(ren, 12, 30, 20, 255);
 	SDL_RenderClear(ren);
-	ui_draw_idle(ren, lw, lh + UI_BAR_H);
+	/* TADPOLE_SHOT_BG=RRGGBB SWAPS THE IDLE SCREEN FOR A FLAT COLOUR, and it
+	 * exists because the idle screen is the one backdrop the glass panels are
+	 * never in trouble over. They are translucent and they ADD the blurred
+	 * backdrop to their own body, so how readable a menu is depends entirely
+	 * on what is behind it — and the idle void is near-black, which adds
+	 * nothing. A panel that looks perfect in every shot in shots/ can still be
+	 * unreadable over a title's box art, which is exactly how the washed-out
+	 * File menu got shipped. Setting this to FFFFFF renders the worst case the
+	 * UI can ever be asked to sit on, so the contrast can be measured instead
+	 * of guessed at. */
+	{
+		const char *bg = getenv("TADPOLE_SHOT_BG");
+		unsigned v;
+		if (bg && sscanf(bg, "%x", &v) == 1) {
+			SDL_SetRenderDrawColor(ren, (Uint8)(v >> 16), (Uint8)(v >> 8),
+			                       (Uint8)v, 255);
+			SDL_RenderClear(ren);
+		} else {
+			ui_draw_idle(ren, lw, lh + UI_BAR_H);
+		}
+	}
 	ui_draw(ren, lw, lh + UI_BAR_H);
 
 	SDL_GetRendererOutputSize(ren, &ow, &oh);
@@ -2640,6 +2660,11 @@ static void tool_poll(void)
 	/* A scan writes a new index, and an install changes which titles are
 	 * marked as already there — both are what the library is looking at. */
 	ui_games_reload();
+	/* The Micromods screen reads that index and the Downloads folder, and a
+	 * scan or an install has just changed one of them. Reloading here is what
+	 * makes the list appear when the scan finishes, rather than the next time
+	 * the screen is opened. */
+	ui_micromods_reload();
 	ui_progress_done(ok);
 	g_tool = 0;
 }
@@ -3619,13 +3644,32 @@ int main(int argc, char **argv)
 			tool_runv("converting cartridge", "tools/cart2tar.py", av);
 			break;
 		}
-		/* One title's bonus content. --enable-slots writes the slots rather
-		 * than named packages, because nothing on the device enumerates what
-		 * a title's micromods are called — see tools/micromods.py. */
-		case UI_ACT_MICROMODS:
-			tool_run2("micromods", "tools/micromods.py",
-			          "--enable-slots", actpath);
+		/* ONE TITLE'S BONUS CONTENT, ASKED FOR RATHER THAN INVENTED.
+		 *
+		 * Nothing on the device enumerates what a title's micromods are
+		 * called, and the titles do not agree on how they recognise one —
+		 * Clam Prix matches the meta.inf Name against a table in its own
+		 * binary, Ni Hao Kai-lan ignores the name and reads a marker file
+		 * inside the package. So the packages are fetched from LeapFrog,
+		 * which serves the real ones with the real names. See
+		 * tools/micromods.py. */
+		case UI_ACT_MICROMODS_SCAN:
+			tool_run2("scanning micromods", "tools/micromods.py",
+			          "--scan", actpath);
 			break;
+		case UI_ACT_MICROMODS_INSTALL: {
+			char *av[7];
+			int n = 0;
+			av[n++] = (char *)"tools/micromods.py";
+			av[n++] = (char *)"--scan";
+			av[n++] = actpath;
+			av[n++] = (char *)"--install";
+			av[n++] = (char *)"--only";
+			av[n++] = (char *)ui_action_arg();
+			av[n]   = NULL;
+			tool_runv("installing micromods", "tools/micromods.py", av);
+			break;
+		}
 		case UI_ACT_SCAN_GAMES:
 			tool_run("reading games", "tools/scan-games.sh", actpath);
 			break;

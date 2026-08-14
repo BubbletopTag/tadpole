@@ -88,9 +88,13 @@ enum ui_action {
 	UI_ACT_INSTALL_GAMES,    /* path = file listing the archives to install */
 	UI_ACT_CHECK_UPDATE,     /* ask GitHub whether a newer release exists */
 	UI_ACT_DO_UPDATE,        /* download it; path = where to write */
-	/* path = a ProductID (0x........). Writes the micromod packages the
-	 * title looks for; see the note in tadpole_ui.c. */
-	UI_ACT_MICROMODS,
+	/* path = a ProductID (0x........). Ask LeapFrog which micromods that
+	 * title has; downloads them to the cache and lists them, installs
+	 * nothing. See the note in tadpole_ui.c. */
+	UI_ACT_MICROMODS_SCAN,
+	/* path = a ProductID, ui_action_arg() = the ticked slots, comma
+	 * separated. Installs exactly those. */
+	UI_ACT_MICROMODS_INSTALL,
 	UI_ACT_STOP,
 	UI_ACT_QUIT,
 	UI_ACT_RELAYOUT          /* rotate/scale changed; viewer must resize */
@@ -109,6 +113,15 @@ void  ui_draw(SDL_Renderer *ren, int lw, int lh);
 /* Pops the pending action, if any. `path` receives the argument when the
  * action carries one. */
 enum ui_action ui_take_action(char *path, size_t pathsz);
+
+/* The second argument of the action just taken. Only the micromod install
+ * sets it; read it together with the action. */
+const char *ui_action_arg(void);
+
+/* Re-read the Micromods screen after a scan or install changed what is on
+ * disk, and the ticked slots as a comma-separated list. */
+void  ui_micromods_reload(void);
+int   ui_micromods_picked(char *out, size_t n);
 
 struct ui_settings *ui_cfg(void);
 void  ui_cfg_save(void);
