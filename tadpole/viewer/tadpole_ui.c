@@ -2738,6 +2738,26 @@ static int ap_row_w(const struct dlg *d, int vis)
 #define GM_PANEL_W 104
 #define GM_ROW_H   15
 static int gm_panel(const struct dlg *d) { return d->w >= 300 ? GM_PANEL_W : 0; }
+
+/* THE MICROMODS BUTTON, WHEN THERE IS ROOM FOR IT. -> 0 when there is not.
+ *
+ * It sits between the Rescan/Folder pair on the left and Install/Close on the
+ * right, and in portrait the dialog clamps to 264 logical pixels, at which
+ * width those two groups already meet. Drawn unconditionally it printed
+ * "MicroInstall 2" over the top of the install button — and, because its hit
+ * test ran first, ate the clicks meant for it. Games stopped installing.
+ *
+ * Both the draw and the hit test come through here so they cannot disagree
+ * again, and the dialog degrades the way it already does elsewhere: the
+ * preview panel disappears under 300px too. */
+static int gm_micro_rect(const struct dlg *d, SDL_Rect *out)
+{
+	int x = d->x + 110, w = 76;
+	int install_x = d->x + d->w - 8 - 48 - 62;
+	if (x + w + 6 > install_x) return 0;
+	out->x = x; out->y = d->y + d->h - 18; out->w = w; out->h = 13;
+	return 1;
+}
 static int gm_list_w(const struct dlg *d) { return d->w - 12 - gm_panel(d); }
 static int gm_list_h(const struct dlg *d) { return d->h - 26 - 22; }
 
@@ -3974,12 +3994,14 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			 * It reads the selected row's PackageID, so it works whether or
 			 * not that title is installed yet. */
 			{
-				SDL_Rect mb = { d.x + 6 + 56 + 48, by, 76, 13 };
-				int on = g_gm_n > 0;
-				int hot = on && inside(g_mx, g_my, mb.x, mb.y, mb.w, mb.h);
-				chip(r, mb.x, mb.y, mb.w, mb.h, hot ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, mb.x, mb.w, mb.y + 3, "Micromods",
-				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
+				SDL_Rect mb;
+				if (gm_micro_rect(&d, &mb)) {
+					int on = g_gm_n > 0;
+					int hot = on && inside(g_mx, g_my, mb.x, mb.y, mb.w, mb.h);
+					chip(r, mb.x, mb.y, mb.w, mb.h, hot ? C_BAR_HI : C_PANEL, 1);
+					text_c(r, mb.x, mb.w, mb.y + 3, "Micromods",
+					       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
+				}
 			}
 			for (i3 = 0; i3 < 2; i3++) {
 				int hot = inside(g_mx, g_my, xs[i3], by, ws[i3], 13);
@@ -4531,7 +4553,8 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			}
 			return 1;
 		}
-		if (inside(mx, my, d.x + 110, by, 76, 13)) {    /* Micromods */
+		{ SDL_Rect mb;
+		if (gm_micro_rect(&d, &mb) && inside(mx, my, mb.x, mb.y, mb.w, mb.h)) {
 			/* The ProductID is the middle field of the selected row's
 			 * PackageID — MULT-0x00180025-000000 — and it is the only part
 			 * of the name this needs: a title filters the Downloads folder
@@ -4556,6 +4579,7 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			}
 			return 1;
 		}
+		}                       /* scope of the Micromods rect */
 		{                                               /* Install N */
 			SDL_Rect b = { d.x + d.w - 8 - 48 - 62, by, 62, 13 };
 			if (inside(mx, my, b.x, b.y, b.w, b.h)) {
