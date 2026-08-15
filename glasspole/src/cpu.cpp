@@ -78,9 +78,18 @@ public:
      * work across threads, since the monitor is shared between processor ids. */
     template <typename T>
     bool WriteExclusive(uint32_t addr, T value, T expected) {
-        std::atomic_ref<T> ref(*reinterpret_cast<T *>(m->Ptr(addr)));
+        /* __atomic_compare_exchange_n RATHER THAN std::atomic_ref, which is
+         * C++20 and which the NDK's libc++ has not got — r27 reports "no member
+         * named 'atomic_ref' in namespace 'std'". The builtin is the same
+         * operation with the same ordering on the same address, it is what
+         * atomic_ref compiles down to anyway, and it is available on every
+         * compiler this is built with. `weak` is false because the caller is
+         * implementing strex, which reports its own failure to the guest and
+         * must not fail spuriously. */
         T exp = expected;
-        return ref.compare_exchange_strong(exp, value, std::memory_order_seq_cst);
+        return __atomic_compare_exchange_n(reinterpret_cast<T *>(m->Ptr(addr)),
+                                           &exp, value, false,
+                                           __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     }
 
     bool MemoryWriteExclusive8 (uint32_t a, uint8_t  v, uint8_t  e) override { return WriteExclusive(a, v, e); }

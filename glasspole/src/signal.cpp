@@ -42,7 +42,24 @@
 
 namespace {
 
-/* ---- the kernel's sa_flags ---------------------------------------------- */
+/* ---- the kernel's sa_flags ----------------------------------------------
+ *
+ * THESE ARE THE GUEST'S NUMBERS AND MUST NOT BECOME THE HOST'S. bionic exposes
+ * SA_SIGINFO and friends to this translation unit as MACROS, out of the NDK's
+ * asm-generic/signal-defs.h, where glibc does not — so on Android the four
+ * declarations below expanded into their own values and the compiler reported
+ * `error: expected unqualified-id`, which names neither the macro nor the
+ * header it came from.
+ *
+ * Undefining them is right rather than merely expedient: what follows is a
+ * decoder for the ARM guest's sigaction flags, and the host's happen to agree
+ * today only because both are Linux. Taking the host's definition would be
+ * borrowing a constant from the wrong kernel. */
+#undef SA_SIGINFO
+#undef SA_RESTORER
+#undef SA_NODEFER
+#undef SA_RESETHAND
+
 constexpr uint32_t SA_SIGINFO   = 0x00000004;
 constexpr uint32_t SA_RESTORER  = 0x04000000;
 constexpr uint32_t SA_NODEFER   = 0x40000000;
