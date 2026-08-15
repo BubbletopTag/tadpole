@@ -410,8 +410,13 @@ may behave differently this way than they do from the home screen.
 | Home | Menu |
 | Esc | Back |
 | Mouse | stylus |
+| - / = | volume down / up |
 | Ctrl+R | rotate |
 | Ctrl+Q | quit |
+
+**Parent Settings** is behind the device's own chord: hold a volume key and
+press **Home** from the home screen. That is what `-` and `=` are for — the
+device has volume buttons and nothing else here needs them.
 
 The D-pad rotates with the display. A Leapster title is landscape on a portrait
 device, so its axes sit a quarter turn from the hardware's; Tadpole corrects for
@@ -436,6 +441,16 @@ library); those are listed in the viewer and turn the right way. For anything
 else drawn the other way up, **Ctrl+R** still works, and your choice stands
 until the guest moves to another screen. Untick **Options → Graphics → Turn
 with the app** to go back to a fixed orientation.
+
+### The Connect reminder is off
+
+The device asks you to connect it to LeapFrog Connect on the way to the home
+screen, every boot. The service it wants is gone, so Tadpole answers the way
+the device does: Parent Settings' own **connection nag** switch writes
+`ConnectionReminders` into the all-profiles `UIData.json`, and Tadpole writes
+that same field before each launch. **Options → System Settings → Show the
+LeapFrog Connect reminder** puts it back if you want the device's behaviour
+exactly.
 
 ### Settings
 

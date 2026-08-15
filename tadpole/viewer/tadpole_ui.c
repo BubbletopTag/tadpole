@@ -273,6 +273,7 @@ static struct ui_settings g_cfg = {
 	.io_delay_us      = 0,
 	.tslib            = 0,
 	.boot_on_start    = 0,
+	.connect_nag      = 0,      /* no LFConnect to connect to; see tadpole.sh */
 	.fast_boot        = 1,
 	.games_dir        = "",
 };
@@ -2232,7 +2233,7 @@ void ui_cfg_save(void)
 	           "audio_on %d\naudio_latency_ms %d\naudio_pace %d\n"
 	           "frame_cap %d\nhle_strict %d\nmsaa %d\nrender_scale %d\n"
 	           "io_delay_us %d\ntslib %d\n"
-	           "boot_on_start %d\nfast_boot %d\n",
+	           "boot_on_start %d\nfast_boot %d\nconnect_nag %d\n",
 	        g_cfg.gl, g_cfg.gl_hle, g_cfg.debug_level, g_cfg.log_to_file,
 	        g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
 	        g_cfg.rotate, g_cfg.auto_rotate, g_cfg.scale, g_cfg.touch_debug,
@@ -2240,7 +2241,7 @@ void ui_cfg_save(void)
 	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.msaa, g_cfg.render_scale,
 	        g_cfg.io_delay_us,
 	        g_cfg.tslib,
-	        g_cfg.boot_on_start, g_cfg.fast_boot);
+	        g_cfg.boot_on_start, g_cfg.fast_boot, g_cfg.connect_nag);
 	/* Last, and only if set: it is the one value that can contain spaces. */
 	if (g_cfg.games_dir[0])
 		fprintf(f, "games_dir %s\n", g_cfg.games_dir);
@@ -2297,6 +2298,7 @@ static void cfg_load(void)
 			else if (!strcmp(k, "tslib"))            g_cfg.tslib = val;
 			else if (!strcmp(k, "boot_on_start"))    g_cfg.boot_on_start = val;
 			else if (!strcmp(k, "fast_boot"))        g_cfg.fast_boot = val;
+			else if (!strcmp(k, "connect_nag"))      g_cfg.connect_nag = val;
 			/* Older files carried these two; the debug level replaced them.
 			 * Honour them once so an existing install does not silently lose
 			 * the logging it was set up with. */
@@ -2909,9 +2911,9 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
 	case M_GFX:   return dlg_fit(lw, lh, 250, 200);
 	case M_AUDIO: return dlg_fit(lw, lh, 230, 122);
-	case M_PAD:   return dlg_fit(lw, lh, 240, 140);
+	case M_PAD:   return dlg_fit(lw, lh, 240, 150);
 	case M_DEBUG: return dlg_fit(lw, lh, 268, 200);
-	case M_SYSTEM: return dlg_fit(lw, lh, 268, 164);
+	case M_SYSTEM: return dlg_fit(lw, lh, 268, 178);
 	case M_FILES: return dlg_fit(lw, lh, 300, 172);
 	case M_WIZARD: return dlg_fit(lw, lh, 348, 210);
 	case M_PROGRESS: return dlg_fit(lw, lh, 350, 150);
@@ -3628,20 +3630,26 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		 * as the plain choice rather than as a feature being withheld. */
 		row_check(r, &d, 1, "Fast Boot - skip the logo and video",
 		          g_cfg.fast_boot, row_hit(&d, 1, g_mx, g_my));
-		text(r, d.x + 10, row_y(&d, 2) + 2, "Games folder:", C_TEXT);
+		/* UNTICKED BY DEFAULT, and named for the thing rather than for the
+		 * switch: what the device shows is a reminder to connect to a service
+		 * that no longer exists, in the way of the home screen every boot.
+		 * tadpole.sh writes the same field Parent Settings writes. */
+		row_check(r, &d, 2, "Show the LeapFrog Connect reminder",
+		          g_cfg.connect_nag, row_hit(&d, 2, g_mx, g_my));
+		text(r, d.x + 10, row_y(&d, 3) + 2, "Games folder:", C_TEXT);
 		path_tail(buf, sizeof(buf),
 		          g_cfg.games_dir[0] ? g_cfg.games_dir : "(not chosen yet)");
-		text(r, d.x + 14, row_y(&d, 2) + 12, buf,
+		text(r, d.x + 14, row_y(&d, 3) + 12, buf,
 		     g_cfg.games_dir[0] ? C_ACCENT : C_TEXT_DIM);
 		{
-			SDL_Rect b = { d.x + 10, row_y(&d, 4) + 2, 76, 13 };
+			SDL_Rect b = { d.x + 10, row_y(&d, 5) + 2, 76, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Game Library",
 			       hot ? C_ACCENT : C_TEXT);
 		}
 		{
-			SDL_Rect b = { d.x + 94, row_y(&d, 4) + 2, 96, 13 };
+			SDL_Rect b = { d.x + 94, row_y(&d, 5) + 2, 96, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Setup Wizard",
@@ -3657,6 +3665,11 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			"Home        Menu",
 			"Esc         Back",
 			"Mouse       Stylus",
+			/* THE VOLUME KEYS WERE BOUND AND UNDOCUMENTED, which is the same
+			 * as not having them: Parent Settings is reached by holding a
+			 * volume button and pressing Home, and with nothing saying which
+			 * host keys those are, that door was shut. */
+			"- / =       Volume",
 			"Ctrl+R      Rotate",
 			"Ctrl+Q      Quit",
 		};
@@ -5077,12 +5090,13 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	if (g_modal == M_SYSTEM) {
 		if (row_hit(&d, 0, mx, my)) g_cfg.boot_on_start = !g_cfg.boot_on_start;
 		else if (row_hit(&d, 1, mx, my)) g_cfg.fast_boot = !g_cfg.fast_boot;
-		else if (inside(mx, my, d.x + 10, row_y(&d, 4) + 2, 76, 13)) {
+		else if (row_hit(&d, 2, mx, my)) g_cfg.connect_nag = !g_cfg.connect_nag;
+		else if (inside(mx, my, d.x + 10, row_y(&d, 5) + 2, 76, 13)) {
 			ui_cfg_save();
 			games_open();
 			return 1;
 		}
-		else if (inside(mx, my, d.x + 94, row_y(&d, 4) + 2, 96, 13)) {
+		else if (inside(mx, my, d.x + 94, row_y(&d, 5) + 2, 96, 13)) {
 			ui_cfg_save();
 			g_wiz_page = 0;
 			g_modal = M_WIZARD;

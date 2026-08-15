@@ -430,6 +430,58 @@ if [ "$use_viewer" = 1 ] && [ -x "$VIEWER" ]; then
     sleep 0.5
 fi
 
+# THE CONNECT NAG, ANSWERED THE WAY THE DEVICE ANSWERS IT.
+#
+# "Connect to LeapFrog Connect to get the most out of your LeapPad" goes up on
+# the way to the home screen, every boot, and there is nothing behind it here:
+# the service it wants closed years ago, and it is one more tap between a user
+# and their games. The device's own switch for it lives in Parent Settings ->
+# connection nag, and all that switch does is
+#
+#     _global._uiData._allProfileUIData.ConnectionReminders = <bool>
+#
+# which lands in the ALL-profiles UIData.json. HomePickerState::CheckForConnectNag
+# reads it and, when it is false, returns without pushing ConnectNag.swf —
+# measured, headless, by booting with the field set and finding the trace line
+# for the check present and the push absent.
+#
+# So Tadpole writes the same field the device would, at every launch, from the
+# front end's setting. Default off; Options -> System Settings turns it back on
+# for anyone who wants the device's behaviour exactly.
+#
+# THE PACKAGE DIRECTORY IS READ, NOT GUESSED: the LPAD UI names itself in
+# /LF/Base/LPAD/meta.inf (PackageID="PAD2-0x1F1E0002-100000" on a LeapPad2),
+# and that is the directory its UI data sits in. On a device that has never
+# booted there is no such file yet, so it is created — and if this ever met a
+# system whose id we read wrongly, AppManager would simply make its own and the
+# nag would show once more before the next launch caught it.
+connect_nag="$(awk '$1=="connect_nag"{print $2}' "$UICFG" 2>/dev/null | tail -1)"
+: "${connect_nag:=0}"
+[ "$connect_nag" = 0 ] && want_reminders=false || want_reminders=true
+set_connect_reminders() {
+    local dir f pkg
+    dir="$SYSROOT/LF/Bulk/Data/Local/All"
+    [ -d "$SYSROOT/LF/Base/LPAD" ] || return 0     # no firmware installed yet
+    for f in "$dir"/*/UIData.json; do
+        [ -f "$f" ] || continue
+        if grep -q '"ConnectionReminders"' "$f"; then
+            sed -i "s/\"ConnectionReminders\"[[:space:]]*:[[:space:]]*[a-z]*/\"ConnectionReminders\": $want_reminders/" "$f"
+        elif grep -q '^[[:space:]]*{[[:space:]]*}[[:space:]]*$' "$f"; then
+            printf '{"ConnectionReminders": %s}\n' "$want_reminders" > "$f"
+        else
+            sed -i "s/}[[:space:]]*$/,\"ConnectionReminders\": $want_reminders}/" "$f"
+        fi
+        found=1
+    done
+    [ -n "${found:-}" ] && return 0
+    pkg="$(grep -oE 'PackageID="[^"]*"' "$SYSROOT/LF/Base/LPAD/meta.inf" 2>/dev/null |
+           head -1 | cut -d\" -f2)"
+    [ -n "$pkg" ] || return 0
+    mkdir -p "$dir/$pkg" 2>/dev/null || return 0
+    printf '{"ConnectionReminders": %s}\n' "$want_reminders" > "$dir/$pkg/UIData.json"
+}
+set_connect_reminders
+
 PF="$SYSROOT/LF/Bulk/ProgramFiles"
 
 # Each package's meta.inf names its entry point in AppSo. It is NOT always

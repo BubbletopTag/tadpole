@@ -6048,3 +6048,58 @@ about ninety seconds a run:
 grep -a "guest exited with status 139" run.log                 # died
 grep -a "onLoadInit( _level0.mcContent.SignIn_mc )" run.log    # lived
 ```
+
+---
+
+## 2026-08-15 — The Connect nag, and the door to Parent Settings
+
+Two things, and the second is the reason the first was hard to reach.
+
+### Parent Settings needs the volume keys, which were bound and undocumented
+
+The device opens Parent Settings on a chord: hold a volume button, press Home.
+`map_key()` has mapped `-` and `=` to `KEY_VOLUMEDOWN`/`KEY_VOLUMEUP` for a
+long time and **nothing said so** — not the README table, not the Controller
+panel — which is the same as not having them: the owner concluded the emulator
+could not send volume at all, because the device has no other use for those
+buttons and so nothing else ever revealed them. Both now list `- / =`.
+
+(Noted in passing: the volume SLIDER inside Parent Settings does not move. The
+audio path is a shim, so there is nothing behind it to set. Not investigated.)
+
+### What the nag actually reads
+
+`ConnectNag.swf` goes up on the way to the home screen, every boot, asking you
+to connect to a service that no longer exists. Parent Settings has the switch —
+its label key is `@ConnectionReminders`, the button is drawn "connection nag" —
+and the whole of what it does is one assignment:
+
+```
+_global._uiData._allProfileUIData.ConnectionReminders = <bool>
+```
+
+`_allProfileUIData` is the **all-profiles** UI data, which lands in
+
+```
+/LF/Bulk/Data/Local/All/<LPAD PackageID>/UIData.json
+```
+
+`HomePickerState::CheckForConnectNag` reads it and returns without pushing the
+nag when it is false. Measured headlessly, both ways: with the field absent the
+boot log has `PushState ConnectNag.swf` and the picker waits behind it; with
+`"ConnectionReminders": false` the `CheckForConnectNag` trace line is there,
+the push is not, and `UIPetLPAD::EnableButtons` follows immediately.
+
+So `tadpole.sh` writes that field before every launch, from
+`connect_nag` in `ui.cfg` — default 0, i.e. no nag — and **Options → System
+Settings → Show the LeapFrog Connect reminder** puts it back. Written at launch
+rather than at install time because the guest rewrites the file itself; the
+edit preserves the other keys (`BadgeNumber`, `_connectAlreadyPlayed` and the
+rest) and is idempotent.
+
+**The package directory is read, not guessed.** `/LF/Base/LPAD/meta.inf` names
+the UI's own package — `PackageID="PAD2-0x1F1E0002-100000"` on a LeapPad2 — and
+that is the directory its UI data sits in. On a system that has never booted
+there is no file yet, so one is created there; if that id were ever wrong for
+some other device, AppManager would make its own and the nag would show once
+more before the next launch caught it.

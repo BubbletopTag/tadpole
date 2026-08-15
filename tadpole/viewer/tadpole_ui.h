@@ -70,6 +70,10 @@ struct ui_settings {
 	int io_delay_us;         /* TADPOLE_IO_DELAY_US — pretend to be NAND */
 	int tslib;               /* TADPOLE_TSLIB — the device's own touch library */
 	int boot_on_start;       /* run the system menu as soon as Tadpole opens */
+	/* Let the device nag you to connect to LeapFrog Connect. OFF: the service
+	 * is gone, and it is a tap between the user and their games every boot.
+	 * tadpole.sh writes the field Parent Settings writes — see the note there. */
+	int connect_nag;
 	/* Skip the logo and the startup animation. TICKED BY DEFAULT: the device's
 	 * boot sequence is something to opt into, not something to sit through, and
 	 * an emulator that made everyone watch four seconds of branding to reach a
