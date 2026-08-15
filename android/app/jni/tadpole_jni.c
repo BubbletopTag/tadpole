@@ -43,6 +43,7 @@
  * four lines here.
  */
 #include <jni.h>
+#include "tadpole_ui.h"   /* ui_cfg(), for nativeRotate below */
 #include <android/log.h>
 #include <pthread.h>
 #include <stdio.h>
@@ -127,6 +128,31 @@ static void tadpole_log_redirect(void)
 	pthread_detach(g_thread);
 	__android_log_write(ANDROID_LOG_INFO, TAG,
 	                    "stdout/stderr redirected to logcat tag \"" TAG "\"");
+}
+
+/* WHICH WAY THE VIEWER THINKS IT IS POINTING, so the ACTIVITY can turn to
+ * match. The ROT chip in the menu bar has always rotated the picture inside the
+ * window; on a phone the window is the whole screen, so rotating the picture
+ * without rotating the screen leaves a portrait title letterboxed inside a
+ * landscape display with black down both sides.
+ *
+ * READ, NOT PUSHED, and that is the whole reason this is three lines. Making
+ * the viewer notify us would mean a callback in tadpole_ui.c, which is shared
+ * with the desktop build and would then carry an Android-shaped hook for no
+ * desktop reason. ui_cfg() is already public — it is how the viewer's own
+ * settings are read — and the value it returns is a plain int written by the
+ * UI thread and read by the UI thread's poller. The Java side asks four times
+ * a second and turns the activity when the answer changes.
+ *
+ * Safe to call at any point after libmain.so is mapped: g_cfg is a static with
+ * a compile-time initialiser, so it holds the default rotation before main()
+ * runs and the saved one afterwards.
+ */
+JNIEXPORT jint JNICALL
+Java_org_tadpole_view_TadpoleActivity_nativeRotate(JNIEnv *env, jclass cls)
+{
+	(void)env; (void)cls;
+	return (jint)ui_cfg()->rotate;
 }
 
 JNIEXPORT void JNICALL

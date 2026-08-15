@@ -15,9 +15,15 @@
                  android:allowBackup="false"
                  android:extractNativeLibs="true"
                  android:debuggable="true">
+        <!-- NO TITLE BAR, and it has to come from the theme rather than from
+             code: the decor view is inflated before onCreate() gets a chance to
+             ask for anything, so requestWindowFeature() after the fact either
+             throws or leaves a gap where the bar was. The status and navigation
+             bars are a separate matter and are hidden in goFullscreen(). -->
         <activity android:name=".TadpoleActivity"
                   android:exported="true"
                   android:label="Tadpole"
+                  android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
                   android:launchMode="singleInstance"
                   android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
                   android:preferMinimalPostProcessing="true">

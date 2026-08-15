@@ -11,6 +11,31 @@ Everything new is in this directory.
 
 ---
 
+## On screen
+
+**Fullscreen.** No title bar (the manifest's theme), no status or navigation
+bars (`goFullscreen()` in TadpoleActivity), and the surface runs into the
+camera cutout rather than stopping short of it. A swipe from the edge shows the
+bars transiently and they go away again on their own.
+
+**ROT turns the phone.** The chip in the menu bar has always rotated the
+picture inside the window; on a phone the window is the whole screen, so it now
+turns the activity to match — landscape at 0 and 180, portrait at 90 and 270,
+so four presses walk through all four ways of holding the device. The activity
+watches the viewer's rotation rather than being told about it, because being
+told would mean an Android-shaped hook in `tadpole_ui.c`, which is shared with
+the desktop build.
+
+**No soft keyboard.** The viewer enables SDL text input once at startup and
+leaves it on, which on Android means the IME sits over the bottom half of the
+screen for ever. `SDL_ENABLE_SCREEN_KEYBOARD=0` turns it off. The cost is that
+the Setup Wizard's profile-name field cannot be filled in without a hardware
+keyboard; fixing that properly means making `SDL_StartTextInput` conditional in
+the viewer, which is a shared file and waits for a merge.
+
+The black bands to left and right in landscape are not a bug: the LeapPad2's
+panel is 480x272 and a modern phone is far wider than that.
+
 ## From nothing to a running app
 
 ```sh
