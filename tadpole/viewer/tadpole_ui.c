@@ -270,6 +270,10 @@ static struct ui_settings g_cfg = {
 	.tslib            = 0,
 	.boot_on_start    = 0,
 	.fast_boot        = 1,
+	.pad_on           = 1,
+	.pad_size         = 100,
+	.pad_opacity      = 70,
+	.pad_left         = 1,
 	.games_dir        = "",
 };
 static enum ui_action g_action;
@@ -1155,6 +1159,65 @@ static void text_c(SDL_Renderer *r, int x, int w, int y, const char *s, unsigned
 static int inside(int px, int py, int x, int y, int w, int h)
 {
 	return px >= x && py >= y && px < x + w && py < y + h;
+}
+
+/* ---- lent to the overlay controls ----------------------------------------
+ *
+ * viewer/tadpole_pad.c draws the on-screen D-pad and Home button. They are
+ * over the guest's picture rather than up in the bar, but they are the same
+ * interface and have to be made of the same material — so they borrow the
+ * shapes rather than growing a second, subtly different idea of what a corner
+ * radius, a rim or a glow is. That divergence is the whole reason these are
+ * exported instead of copied: two sets of rounded-rect routines drift, and the
+ * drift shows up as one control that does not look like the others.
+ *
+ * The palette goes with them for the same reason. TADPOLE_THEME=green has to
+ * repaint the D-pad too, and it cannot if the D-pad has its own colours.
+ */
+void ui_rr_fill(SDL_Renderer *r, float x, float y, float w, float h,
+                float radius, unsigned col, Uint8 alpha)
+{
+	rr_fill_ex(r, NULL, x, y, w, h, radius, radius, radius, radius, col, alpha);
+}
+
+void ui_rr_grad(SDL_Renderer *r, float x, float y, float w, float h,
+                float radius, unsigned ctop, Uint8 atop,
+                unsigned cbot, Uint8 abot)
+{
+	rr_geom(r, NULL, NULL, x, y, w, h, radius, radius, radius, radius,
+	        ctop, atop, cbot, abot);
+}
+
+void ui_rr_stroke(SDL_Renderer *r, float x, float y, float w, float h,
+                  float radius, unsigned ctop, Uint8 atop,
+                  unsigned cbot, Uint8 abot, float thick)
+{
+	rr_stroke_grad(r, x, y, w, h, radius, radius, ctop, atop, cbot, abot, thick);
+}
+
+void ui_glow(SDL_Renderer *r, int cx, int cy, int radius, unsigned col,
+             Uint8 alpha)
+{
+	glow(r, cx, cy, radius, col, alpha);
+}
+
+void ui_text_at(SDL_Renderer *r, int x, int y, const char *s, unsigned col)
+{
+	text(r, x, y, s, col);
+}
+
+int ui_text_w(const char *s) { return text_w(s); }
+
+void ui_colors(struct ui_colors *out)
+{
+	out->accent   = C_ACCENT;
+	out->text     = C_TEXT;
+	out->text_dim = C_TEXT_DIM;
+	out->panel    = C_PANEL;
+	out->panel_hi = C_PANEL_HI;
+	out->edge     = C_EDGE_LT;
+	out->shadow   = C_SHADOW;
+	out->bg       = C_VOID;
 }
 
 /* mkdir -p. The directories we create live under XDG paths that are NOT
@@ -2228,7 +2291,8 @@ void ui_cfg_save(void)
 	           "audio_on %d\naudio_latency_ms %d\naudio_pace %d\n"
 	           "frame_cap %d\nhle_strict %d\nmsaa %d\nrender_scale %d\n"
 	           "io_delay_us %d\ntslib %d\n"
-	           "boot_on_start %d\nfast_boot %d\n",
+	           "boot_on_start %d\nfast_boot %d\n"
+	           "pad_on %d\npad_size %d\npad_opacity %d\npad_left %d\n",
 	        g_cfg.gl, g_cfg.gl_hle, g_cfg.debug_level, g_cfg.log_to_file,
 	        g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
 	        g_cfg.rotate, g_cfg.scale, g_cfg.touch_debug,
@@ -2236,7 +2300,8 @@ void ui_cfg_save(void)
 	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.msaa, g_cfg.render_scale,
 	        g_cfg.io_delay_us,
 	        g_cfg.tslib,
-	        g_cfg.boot_on_start, g_cfg.fast_boot);
+	        g_cfg.boot_on_start, g_cfg.fast_boot,
+	        g_cfg.pad_on, g_cfg.pad_size, g_cfg.pad_opacity, g_cfg.pad_left);
 	/* Last, and only if set: it is the one value that can contain spaces. */
 	if (g_cfg.games_dir[0])
 		fprintf(f, "games_dir %s\n", g_cfg.games_dir);
@@ -2292,6 +2357,10 @@ static void cfg_load(void)
 			else if (!strcmp(k, "tslib"))            g_cfg.tslib = val;
 			else if (!strcmp(k, "boot_on_start"))    g_cfg.boot_on_start = val;
 			else if (!strcmp(k, "fast_boot"))        g_cfg.fast_boot = val;
+			else if (!strcmp(k, "pad_on"))          g_cfg.pad_on = val;
+			else if (!strcmp(k, "pad_size"))        g_cfg.pad_size = val;
+			else if (!strcmp(k, "pad_opacity"))     g_cfg.pad_opacity = val;
+			else if (!strcmp(k, "pad_left"))        g_cfg.pad_left = val;
 			/* Older files carried these two; the debug level replaced them.
 			 * Honour them once so an existing install does not silently lose
 			 * the logging it was set up with. */
@@ -2904,7 +2973,7 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
 	case M_GFX:   return dlg_fit(lw, lh, 250, 200);
 	case M_AUDIO: return dlg_fit(lw, lh, 230, 122);
-	case M_PAD:   return dlg_fit(lw, lh, 240, 140);
+	case M_PAD:   return dlg_fit(lw, lh, 240, 222);
 	case M_DEBUG: return dlg_fit(lw, lh, 268, 200);
 	case M_SYSTEM: return dlg_fit(lw, lh, 268, 164);
 	case M_FILES: return dlg_fit(lw, lh, 300, 172);
@@ -3641,6 +3710,9 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		break;
 	}
 	case M_PAD: {
+		/* THE ON-SCREEN CONTROLS COME FIRST, and the keyboard list that used to
+		 * be the whole dialog is underneath. This is the build for a
+		 * touchscreen: the keys are the fallback here, not the subject. */
 		static const char *rows[] = {
 			"Arrows      D-pad",
 			"X / Z       A / B",
@@ -3651,9 +3723,28 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			"Ctrl+R      Rotate",
 			"Ctrl+Q      Quit",
 		};
+		char buf[16];
+		int ky;
+
+		row_check(r, &d, 0, "On-screen D-pad and Home",
+		          g_cfg.pad_on, row_hit(&d, 0, g_mx, g_my));
+		snprintf(buf, sizeof(buf), "%d%%", g_cfg.pad_size);
+		row_value(r, &d, 1, "Size", buf, row_hit(&d, 1, g_mx, g_my));
+		snprintf(buf, sizeof(buf), "%d%%", g_cfg.pad_opacity);
+		row_value(r, &d, 2, "Opacity", buf, row_hit(&d, 2, g_mx, g_my));
+		row_value(r, &d, 3, "D-pad corner", g_cfg.pad_left ? "LEFT" : "RIGHT",
+		          row_hit(&d, 3, g_mx, g_my));
+		/* A and B are missing from this list on purpose — see the note at the
+		 * top of tadpole_pad.h. Saying so here is cheaper than answering it. */
+		text(r, d.x + 10, row_y(&d, 4) + 1,
+		     "A and B: the title draws its own.", C_DIMMEST);
+
+		ky = row_y(&d, 5) + 4;
+		fill(r, d.x + 8, ky - 4, d.w - 16, 1, C_EDGE_DK);
+		text(r, d.x + 10, ky + 2, "KEYBOARD", C_TEXT_DIM);
 		for (i = 0; i < (int)(sizeof rows / sizeof *rows); i++)
-			text(r, d.x + 10, d.y + 20 + i * 10, rows[i], C_TEXT);
-		text(r, d.x + 10, d.y + d.h - 30, "Remapping: not yet.", C_TEXT_DIM);
+			text(r, d.x + 10, ky + 14 + i * 10, rows[i], C_TEXT);
+		text(r, d.x + 10, d.y + d.h - 14, "Remapping: not yet.", C_DIMMEST);
 		break;
 	}
 	case M_PROGRESS: {
@@ -5044,6 +5135,28 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			g_cfg.audio_latency_ms = steps[k];
 		}
 		else if (row_hit(&d, 2, mx, my)) g_cfg.audio_pace = !g_cfg.audio_pace;
+		ui_cfg_save();
+		return 1;
+	}
+	if (g_modal == M_PAD) {
+		if (row_hit(&d, 0, mx, my)) g_cfg.pad_on = !g_cfg.pad_on;
+		else if (row_hit(&d, 1, mx, my)) {
+			static const int steps[] = { 75, 100, 125, 150 };
+			int i, k = 0;
+			for (i = 0; i < 4; i++)
+				if (steps[i] == g_cfg.pad_size) k = (i + 1) % 4;
+			g_cfg.pad_size = steps[k];
+		}
+		else if (row_hit(&d, 2, mx, my)) {
+			static const int steps[] = { 40, 55, 70, 85, 100 };
+			int i, k = 0;
+			for (i = 0; i < 5; i++)
+				if (steps[i] == g_cfg.pad_opacity) k = (i + 1) % 5;
+			g_cfg.pad_opacity = steps[k];
+		}
+		else if (row_hit(&d, 3, mx, my)) g_cfg.pad_left = !g_cfg.pad_left;
+		else return 1;          /* the key list is not clickable */
+		/* The viewer re-reads these on the next frame; nothing to notify. */
 		ui_cfg_save();
 		return 1;
 	}

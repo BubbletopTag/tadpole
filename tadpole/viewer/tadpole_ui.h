@@ -70,6 +70,16 @@ struct ui_settings {
 	 * an emulator that made everyone watch four seconds of branding to reach a
 	 * menu would have got that backwards. See viewer/tadpole_boot.c. */
 	int fast_boot;
+	/* ---- the on-screen controls, see viewer/tadpole_pad.c ----------------
+	 * ON BY DEFAULT HERE, which is the one place this build disagrees with the
+	 * desktop one on purpose: a touchscreen has no keyboard to borrow the
+	 * D-pad from, so a default of "off" would mean the emulator arrives
+	 * unplayable and the fix is three menus deep. Anyone driving it with a
+	 * keyboard turns them off in Controller Settings and is not asked again. */
+	int pad_on;
+	int pad_size;            /* percent of the natural size, 50..200 */
+	int pad_opacity;         /* percent, 15..100 */
+	int pad_left;            /* D-pad bottom-left (1) or bottom-right (0) */
 	char games_dir[UI_GAMESDIR_MAX];   /* the folder the library was read from */
 };
 
@@ -79,6 +89,35 @@ struct ui_settings {
  * hands the caller the pixels to own. */
 SDL_Texture *ui_png_texture(SDL_Renderer *ren, const char *path,
                             int *out_w, int *out_h, Uint32 **out_px);
+
+/* ---- the chrome's own shapes and palette, lent out ----------------------
+ *
+ * For viewer/tadpole_pad.c, which draws the on-screen D-pad and Home button
+ * over the guest's picture. They are the same interface as the bar and the
+ * dialogs and have to be made of the same material; a second set of
+ * rounded-rect routines would drift from these, and the drift would show up as
+ * one control that does not look like the others. See the note above the
+ * definitions in tadpole_ui.c.
+ */
+struct ui_colors {
+	unsigned accent, text, text_dim, panel, panel_hi, edge, shadow, bg;
+};
+void ui_colors(struct ui_colors *out);
+
+void ui_rr_fill(SDL_Renderer *r, float x, float y, float w, float h,
+                float radius, unsigned col, Uint8 alpha);
+/* Body colour and alpha both run top-to-bottom, so one call draws either a
+ * flat chip or a lit sheet depending on how far apart the two ends are. */
+void ui_rr_grad(SDL_Renderer *r, float x, float y, float w, float h,
+                float radius, unsigned ctop, Uint8 atop,
+                unsigned cbot, Uint8 abot);
+void ui_rr_stroke(SDL_Renderer *r, float x, float y, float w, float h,
+                  float radius, unsigned ctop, Uint8 atop,
+                  unsigned cbot, Uint8 abot, float thick);
+void ui_glow(SDL_Renderer *r, int cx, int cy, int radius, unsigned col,
+             Uint8 alpha);
+void ui_text_at(SDL_Renderer *r, int x, int y, const char *s, unsigned col);
+int  ui_text_w(const char *s);
 
 enum ui_action {
 	UI_ACT_NONE = 0,

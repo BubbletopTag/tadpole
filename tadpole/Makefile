@@ -85,9 +85,9 @@ TONE_SRC := shim/tone_test.c
 TONE_OUT := ../runtime/tone
 
 VIEW_SRC := viewer/tadpole_view.c viewer/tadpole_ui.c viewer/tadpole_hle.c \
-            viewer/tadpole_boot.c
+            viewer/tadpole_boot.c viewer/tadpole_pad.c
 VIEW_HDR := viewer/tadpole_ui.h viewer/tadpole_font.h viewer/tadpole_hle.h \
-            viewer/tadpole_boot.h shim/tadpole_glcmd.h
+            viewer/tadpole_boot.h viewer/tadpole_pad.h shim/tadpole_glcmd.h
 VIEW_OUT := viewer/tadpole-view
 
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)

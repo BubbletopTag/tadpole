@@ -53,7 +53,7 @@ find_package(ZLIB REQUIRED)   # ui screenshots and the games index
 pkg_check_modules(THEORA ogg theoradec vorbis)
 
 add_executable(tadpole-view tadpole_view.c tadpole_ui.c tadpole_hle.c
-                            tadpole_boot.c)
+                            tadpole_boot.c tadpole_pad.c)
 add_executable(hle-probe hle_probe.c)
 
 foreach(t tadpole-view hle-probe)
