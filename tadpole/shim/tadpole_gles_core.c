@@ -67,6 +67,7 @@ extern void *malloc(u32 n);
 extern void  free(void *p);
 extern int   close(int fd);
 extern void *memcpy(void *d, const void *s, u32 n);
+extern void *memset(void *d, int c, u32 n);
 extern long  write(int fd, const void *buf, u32 n);
 extern char *getenv(const char *name);
 extern int   snprintf(char *s, u32 n, const char *fmt, ...);
@@ -390,15 +391,30 @@ static int depth_passes(float z, float ref)
 
 /* Texture-name capacity. glGenTextures names a texture after its slot index and
  * fails once every slot is taken, returning name 0 — and a title that draws
- * with name 0 renders untextured. Clam Prix alone loads ~11.8 MB of textures,
- * so 192 was not obviously enough for a single title, never mind that nothing
+ * with name 0 renders untextured, which is to say WHITE: the sampler falls
+ * through to the vertex colour. Clam Prix alone loads ~11.8 MB of textures, so
+ * 192 was not obviously enough for a single title, never mind that nothing
  * used to free them between titles (see tad_gl_context_reset).
  *
- * The table costs 16 bytes a slot; the pixel copies are allocated per texture
- * either way, so raising this buys headroom for almost nothing. tadpole_hle.c's
- * MAX_TEX indexes by guest name and MUST stay larger than this. If the
- * "glGenTextures EXHAUSTED" warning still appears, raise it again. */
-#define MAX_TEXS 512          /* hoisted: the frame counters below index by it */
+ * 512 WAS NOT ENOUGH EITHER. Sonic (Didj) draws its level in tiles and runs
+ * out partway down the screen: the tiles that got a name are correct and the
+ * ones that did not are solid white rectangles, which is this failure's exact
+ * signature. So the ceiling is now high enough to stop being a ceiling.
+ *
+ * WHAT RAISING IT COSTS, since the number looks alarming:
+ *   - 32 bytes a slot, so about 1 MB of BSS in the guest. The pixel copies are
+ *     allocated per texture either way; this table is only names.
+ *   - Nothing per draw. tex_find() is O(1) because name == slot + 1.
+ *   - Nothing per frame. The one loop that walked every slot each frame is a
+ *     memset now (see the frame counters below).
+ *   - glGenTextures scans for the lowest free slot, so it is O(live names) in
+ *     practice and unchanged for a title that only holds a few hundred.
+ *
+ * tadpole_hle.c's MAX_TEX indexes by guest name and MUST stay larger than this.
+ * If the "glGenTextures EXHAUSTED" warning ever appears again, the title is
+ * leaking names rather than needing them, and THAT is the bug to fix — the
+ * warning carries a running count for exactly that reason. */
+#define MAX_TEXS 32767        /* hoisted: the frame counters below index by it */
 static int g_f_draws, g_f_tris_in, g_f_tris_out, g_f_pixels;
 static u8  g_f_texused[MAX_TEXS + 1];
 static int g_f_untex_tris;      /* triangles drawn with no texture at all */
@@ -653,7 +669,9 @@ void tadpole_gl_present(void)
 		if (n2 > 0) { u32 k = 0; while (b2[k]) k++; write(2, b2, k); }
 	}
 	g_f_flat_area = 0;
-	for (i = 0; i <= MAX_TEXS; i++) g_f_texused[i] = 0;
+	/* memset, not a loop: this runs every frame INSIDE THE GUEST, where every
+	 * iteration is emulated, and the table is now 32 KB. */
+	memset(g_f_texused, 0, sizeof g_f_texused);
 	g_f_untex_tris = 0;
 	if (tad_gl_level())
 		tr2("FRAME draws/tris-in", g_f_draws, g_f_tris_in);

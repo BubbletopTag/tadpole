@@ -145,10 +145,15 @@ static int gl_resolve(void)
 #define GLES_FIXED  0x140C
 
 /* Indexed by GUEST texture name, so this MUST stay larger than the guest's
- * MAX_TEXS in tadpole_gles_core.c (512). A name at or above this is dropped,
- * and a dropped texture draws black while raising no GL error — silent, and
- * indistinguishable from a texture that simply never arrived. */
-#define MAX_TEX  576
+ * MAX_TEXS in tadpole_gles_core.c — names run 1..MAX_TEXS, and the guard here
+ * is `name >= MAX_TEX`. A name at or above this is dropped, and a dropped
+ * texture draws black while raising no GL error — silent, and
+ * indistinguishable from a texture that simply never arrived.
+ *
+ * Raised with MAX_TEXS (32767) when Sonic ran out of texture names and drew
+ * white tiles. Costs 5 bytes a name here — a host name and a have-flag — so
+ * about 160 KB, and only the once-per-context-teardown reset walks all of it. */
+#define MAX_TEX  32768
 /* Indexed by GUEST buffer name, so it must exceed both the guest's MAX_BUFS
  * (2048) and the reserved client-array names HLE_CLIENT_* (4000..4003). A name
  * at or above this is dropped, and a dropped ELEMENT buffer makes the host skip
