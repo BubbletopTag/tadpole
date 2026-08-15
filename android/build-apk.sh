@@ -35,6 +35,8 @@ do_build() {
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI="$abi" \
             -DANDROID_PLATFORM="android-$TADPOLE_ANDROID_API" \
+            -DCMAKE_SHARED_LINKER_FLAGS="$TADPOLE_ANDROID_LDFLAGS" \
+            -DCMAKE_EXE_LINKER_FLAGS="$TADPOLE_ANDROID_LDFLAGS" \
             -DCMAKE_BUILD_TYPE=Release >/dev/null
         cmake --build "$b"
     done
@@ -89,9 +91,18 @@ PY
         -keyalg RSA -keysize 2048 -validity 10000 \
         -dname "CN=Tadpole Debug,O=Tadpole,C=GB" 2>/dev/null
 
-    # -p 4 page-aligns the STORED .so entries, which is what makes mapping
-    # them in place legal.
-    "$BUILD_TOOLS/zipalign" -f -p 4 "$out/unsigned.apk" "$out/aligned.apk"
+    # -P 16 page-aligns the STORED .so entries to 16 KB, which is what makes
+    # mapping them in place legal on an Android 15 device. The segments inside
+    # each .so are aligned to match by TADPOLE_ANDROID_LDFLAGS; see the note in
+    # env.sh for why both halves are needed and how the omission announced
+    # itself. -p is the old 4 KB form and is what this used to pass.
+    # THE 4 IS POSITIONAL AND IS NOT THE PAGE SIZE. zipalign's argument order is
+    # [-f] [-p] [-P <kb>] <align> in out — <align> is the ordinary entry
+    # alignment in BYTES and has always been 4. -p (4 KB pages) and -P (an
+    # explicit page size) are mutually exclusive, so -P 16 replaces -p, and the
+    # trailing 4 stays exactly where it was. Dropping it makes zipalign read
+    # "unsigned.apk" as the alignment and print its usage.
+    "$BUILD_TOOLS/zipalign" -f -P 16 4 "$out/unsigned.apk" "$out/aligned.apk"
     "$BUILD_TOOLS/apksigner" sign --ks "$ks" --ks-pass pass:android \
         --key-pass pass:android --out "$out/tadpole.apk" "$out/aligned.apk"
     echo "built $out/tadpole.apk"

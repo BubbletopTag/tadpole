@@ -33,6 +33,8 @@ for abi in $TADPOLE_ANDROID_ABIS; do
         -DANDROID_PLATFORM="android-$TADPOLE_ANDROID_API" \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX="$prefix/$abi" \
+        -DCMAKE_SHARED_LINKER_FLAGS="$TADPOLE_ANDROID_LDFLAGS" \
+        -DCMAKE_EXE_LINKER_FLAGS="$TADPOLE_ANDROID_LDFLAGS" \
         -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TEST=OFF
     cmake --build "$b" --parallel
     cmake --install "$b" >/dev/null
