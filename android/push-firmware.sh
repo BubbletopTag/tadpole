@@ -70,8 +70,13 @@ mkdir -p "$STAGE"
 trap 'rm -rf "$STAGE"' EXIT
 
 echo "=== packing (no -h: the symlinks INSIDE the tree are meaningful) ==="
+# libs/ TOO: it is the last entry on the guest's LD_LIBRARY_PATH, holding the
+# real uClibc loader and the vendor .so files the shim variants sit in front
+# of. Left out at first because the shim directories look like the interesting
+# ones — but LD_LIBRARY_PATH names four directories and a guest that cannot
+# find libuClibc gets nowhere at all.
 tar cf "$STAGE/tp.tar" -C "$SRC/runtime" \
-    sysroot shimlibs shimlibs-gl shimlibs-z
+    sysroot shimlibs shimlibs-gl shimlibs-z libs
 tar cf "$STAGE/rootfs.tar" -C "$SRC" rootfs
 ls -lh "$STAGE"/*.tar
 
@@ -85,11 +90,18 @@ echo "=== unpacking into $FILES ==="
 "$ADB" shell "rm -f /data/local/tmp/tp.tar /data/local/tmp/rootfs.tar"
 
 echo "=== re-pointing the sysroot's absolute links at this device ==="
-# ALL OF THEM, NOT JUST THE TOP LEVEL. There are 208, and only eight are the
-# obvious ones in the sysroot's root — the rest are deeper: every entry of
-# var/, and LF/Base, which is the one prereq_check tests for. Fixing only the
-# top level leaves a sysroot that looks populated, boots nothing, and reports
-# "runtime sysroot missing" while bin/ and lib/ resolve perfectly.
+# ALL OF THEM, ACROSS THE WHOLE OF runtime/. This was got wrong twice in the
+# same way. First it walked only the sysroot's top level — eight links — and
+# missed the deeper ones, including LF/Base, which is the path prereq_check
+# tests: bin/ and lib/ resolved, busybox ran, and the front end still correctly
+# said the system files were missing. Then it walked all of the sysroot and
+# missed runtime/libs, which is a link farm of its own, 168 entries deep — and
+# AppManager got as far as its own dynamic loader before dying on
+#
+#     /LF/Base/bin/AppManager: can't load library 'libVideoMPI.so'
+#
+# which is the error the note above find_project_dir warns is the ONLY clue a
+# broken LD_LIBRARY_PATH gives you.
 #
 # One rule covers all of them because they share a prefix: they point into the
 # checkout they were built in, either at rootfs/ or at runtime/shimlibs/. So
@@ -101,13 +113,13 @@ F=$FILES
 OLD=$SRC
 cd \$F || exit 1
 n=0
-for l in \$(find runtime/sysroot -type l); do
+for l in \$(find runtime -type l); do
   t=\$(readlink \"\$l\")
   case \"\$t\" in
     \$OLD/*) rm -f \"\$l\"; ln -s \"\$F/\${t#\$OLD/}\" \"\$l\"; n=\$((n+1));;
   esac
 done
-echo \"re-pointed \$n of \$(find runtime/sysroot -type l | wc -l) symlinks\"
+echo \"re-pointed \$n of \$(find runtime -type l | wc -l) symlinks\"
 '"
 
 echo "=== proving it: ARM32 guest code, on this phone ==="

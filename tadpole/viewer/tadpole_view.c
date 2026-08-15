@@ -2922,6 +2922,108 @@ static void guest_stop(void)
  * stderr. Installing firmware takes minutes, and without its output the UI has
  * nothing to show but a spinner — the progress panel exists to display exactly
  * these lines. */
+#ifdef __ANDROID__
+/* ---- launching a guest with no shell to do it -----------------------------
+ *
+ * Everywhere else the viewer starts a guest by running tadpole.sh, which
+ * assembles a long qemu-arm or glasspole command line and execs it. Android has
+ * no shell to run that script with, and could not exec it if it had one: the
+ * script would live in the app's own directory and an app may not execute a
+ * file it wrote. The symptom is not an error, it is the status line going
+ * straight from "booting..." to "stopped" — execv fails, the child _exit(127)s,
+ * and the next poll finds it gone.
+ *
+ * So this builds the same command line the script would have, and execs the
+ * engine directly. It is the POSIX twin of the native path Windows has had for
+ * the same reason, and the environment below is tadpole.sh's guest() function
+ * translated one -E at a time:
+ *
+ *   LD_LIBRARY_PATH   the three shim directories, then runtime/libs. Order
+ *                     matters: the shims must be found BEFORE the real
+ *                     libraries they stand in front of.
+ *   TSLIB_CONFFILE    deliberately nonexistent, so tslib fails init cleanly and
+ *                     Brio uses its own touchscreen path — tslib's module chain
+ *                     has a null ops->read and crashes on the first tap.
+ *   TADPOLE_DIR       where the framebuffer arena and the input FIFOs live.
+ *   TADPOLE_SYSROOT   the shim prepends it to guest paths.
+ *
+ * --sysroot is absolute for the reason the Windows path records: relative made
+ * the lookup depend on the child's working directory, and when that assumption
+ * broke nothing said so — every guest path fell through to the literal branch
+ * and the rootfs looked empty.
+ *
+ * `--app` IS NOT HANDLED, the same as on Windows: resolving a package name to
+ * its entry point is work tadpole.sh does by reading meta.inf, and doing it
+ * here means porting that too. Titles launch from the home screen.
+ */
+/* 1100 is this file's own convention for a path buffer (see `path` below);
+ * PATHMAX is tadpole_ui.c's and is not visible here. */
+static char  g_gp_arg[10][1164];
+static char *g_gp_argv[24];
+
+static char *const *android_guest_argv(char *const argv[], char *path,
+                                       size_t pathsz)
+{
+	const char *prog = NULL;
+	int i, n = 0, e = 0, argstart = 0;
+
+	for (i = 1; argv[i]; i++) {
+		if (!strcmp(argv[i], "--boot")) {
+			prog = "/LF/Base/bin/AppManager";
+			break;
+		}
+		if (!strcmp(argv[i], "--run") && argv[i + 1]) {
+			prog = argv[i + 1];
+			argstart = i + 2;
+			break;
+		}
+		if (!strcmp(argv[i], "--app")) {
+			ui_status("launch titles from the home screen on Android");
+			return NULL;
+		}
+	}
+	if (!prog) { ui_status("nothing to launch"); return NULL; }
+
+	snprintf(path, pathsz, "%s/glasspole/build/glasspole", g_projdir);
+	if (access(path, X_OK) != 0) {
+		ui_status("no ARM engine — see linkEngine() in TadpoleActivity");
+		return NULL;
+	}
+
+	g_gp_argv[n++] = path;
+	g_gp_argv[n++] = (char *)"--sysroot";
+	snprintf(g_gp_arg[e], sizeof(g_gp_arg[e]), "%s/runtime/sysroot", g_projdir);
+	g_gp_argv[n++] = g_gp_arg[e++];
+
+#define GP_ENV(fmt, ...) do {                                              \
+		snprintf(g_gp_arg[e], sizeof(g_gp_arg[e]), fmt, __VA_ARGS__);      \
+		g_gp_argv[n++] = (char *)"-E";                                     \
+		g_gp_argv[n++] = g_gp_arg[e++];                                    \
+	} while (0)
+
+	GP_ENV("LD_LIBRARY_PATH=%s/runtime/shimlibs-gl:%s/runtime/shimlibs-z:"
+	       "%s/runtime/shimlibs:%s/runtime/libs",
+	       g_projdir, g_projdir, g_projdir, g_projdir);
+	GP_ENV("TADPOLE_DIR=%s", g_dir);
+	GP_ENV("TADPOLE_SYSROOT=%s/runtime/sysroot", g_projdir);
+	GP_ENV("%s", "TSLIB_CONFFILE=/nonexistent-ts.conf");
+	if (ui_cfg()->gl || ui_cfg()->gl_hle)
+		GP_ENV("%s", "TADPOLE_GL=1");
+	if (ui_cfg()->gl_hle)
+		GP_ENV("%s", "TADPOLE_GL_HLE=1");
+	if (ui_cfg()->debug_level >= 2)
+		GP_ENV("%s", "TADPOLE_DEBUG=1");
+#undef GP_ENV
+
+	g_gp_argv[n++] = (char *)prog;
+	if (argstart)
+		for (i = argstart; argv[i] && n < 22; i++)
+			g_gp_argv[n++] = argv[i];
+	g_gp_argv[n] = NULL;
+	return g_gp_argv;
+}
+#endif  /* __ANDROID__ */
+
 static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
                           int *outfd, int silent)
 {
@@ -2930,6 +3032,22 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 	int pfd[2] = { -1, -1 };
 
 	snprintf(path, sizeof(path), "%s/%s", g_projdir, script);
+#ifdef __ANDROID__
+	if (as_guest) {
+		char *const *gav = android_guest_argv(argv, path, sizeof path);
+		if (!gav) return -1;
+		argv = gav;
+	} else {
+		/* The tools are shell and Python, and there is neither. Said out loud
+		 * rather than left to fail as a silent "stopped": this is the whole of
+		 * what does not work on Android yet. */
+		fprintf(stderr, "tadpole-view: %s needs a shell or Python, and Android "
+		        "has neither — set up on a desktop and use "
+		        "android/push-firmware.sh\n", script);
+		ui_status("%s: not available on Android", script);
+		return -1;
+	}
+#endif
 	if (outfd && pipe(pfd) != 0) { *outfd = -1; outfd = NULL; }
 	pid = fork();
 	if (pid < 0) {
