@@ -2,7 +2,12 @@ package org.tadpole.view;
 
 import org.libsdl.app.SDLActivity;
 
+import android.content.Intent;
 import android.content.pm.ActivityInfo;
+import android.content.pm.PackageManager;
+import android.net.Uri;
+import android.os.Environment;
+import android.provider.Settings;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -13,6 +18,11 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 
 /* Tadpole's viewer, wrapped in the activity SDL needs.
  *
@@ -102,6 +112,24 @@ public class TadpoleActivity extends SDLActivity {
              * being smuggled in here. Half a screen of keyboard over
              * everything is the worse of the two. */
             nativeSetenv("SDL_ENABLE_SCREEN_KEYBOARD", "0");
+
+            /* THE PROJECT DIRECTORY, which on a desktop is the checkout and on
+             * Android has to be somewhere the app can actually write.
+             *
+             * g_proj is the anchor for nearly everything the front end looks
+             * for: the logo, runtime/sysroot, the games folder, the installed
+             * app list, micromod caches. find_project_dir() derives it from
+             * argv[0] by walking up looking for tadpole.sh, which under an
+             * Android app finds nothing and settles on "." — the filesystem
+             * root, where none of those exist. That is why the wizard's panel
+             * had no Tadpole in it.
+             *
+             * TADPOLE_PROJECT is checked before any of that guessing and wins
+             * outright, so pointing it at the app's own directory gives the
+             * viewer a project it can both read and write. Everything else
+             * then falls into place underneath it. */
+            nativeSetenv("TADPOLE_PROJECT", dir);
+            extractAssets(dir);
             nativeProbe(dir, getApplicationInfo().nativeLibraryDir);
         } catch (Throwable t) {
             Log.e(TAG, "could not set TADPOLE_DIR", t);
@@ -121,6 +149,84 @@ public class TadpoleActivity extends SDLActivity {
             getWindow().setAttributes(lp);
         }
         goFullscreen();
+        askForStorage();
+    }
+
+    /* ---- the assets the viewer reads as files ------------------------------
+     *
+     * ONCE, AND ONLY IF ABSENT OR STALE. Copying two PNGs on every launch is
+     * cheap but it is also the kind of thing that quietly overwrites a file
+     * someone has replaced on purpose, so a size comparison stands in for a
+     * proper version check: the assets are fixed at build time, so a file that
+     * is already the right length is already the right file.
+     */
+    private void extractAssets(String destDir) {
+        String[] names = { "tadpole.png", "glasspole.png" };
+        for (String name : names) {
+            File out = new File(destDir, name);
+            InputStream in = null;
+            OutputStream os = null;
+            try {
+                in = getAssets().open(name);
+                if (out.exists() && out.length() == in.available()) {
+                    in.close();
+                    continue;
+                }
+                os = new FileOutputStream(out);
+                byte[] buf = new byte[16384];
+                int n;
+                while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                Log.i(TAG, "unpacked asset " + name + " -> " + out);
+            } catch (Throwable t) {
+                Log.e(TAG, "could not unpack asset " + name, t);
+            } finally {
+                try { if (in != null) in.close(); } catch (Throwable ignored) {}
+                try { if (os != null) os.close(); } catch (Throwable ignored) {}
+            }
+        }
+    }
+
+    /* ---- storage -----------------------------------------------------------
+     *
+     * WHY ALL-FILES ACCESS AND NOT THE DOCUMENT PICKER. Tadpole has its own
+     * file browser — it walks directories itself and shows them in its own
+     * chrome — and the firmware and the game backups are ordinary files the
+     * user already has, in Downloads or on a card. The Storage Access
+     * Framework would hand back opaque content:// URIs that nothing in the
+     * viewer can open, and adopting it means replacing that browser with the
+     * system picker. MANAGE_EXTERNAL_STORAGE keeps real paths working, which
+     * is what the existing code is written against.
+     *
+     * It cannot be granted by a dialog: from API 30 the user has to be sent to
+     * a Settings page and toggle it there. Below 30 it is an ordinary runtime
+     * permission. Both are asked for once and the app runs either way — with
+     * no access the browser simply shows nothing outside the app's own folder,
+     * which is exactly what it did before this and is not a crash.
+     */
+    private static final int REQ_STORAGE = 4711;
+
+    private void askForStorage() {
+        try {
+            if (Build.VERSION.SDK_INT >= 30) {
+                if (Environment.isExternalStorageManager()) {
+                    Log.i(TAG, "storage: all-files access already granted");
+                    return;
+                }
+                Log.i(TAG, "storage: asking for all-files access");
+                Intent i = new Intent(
+                    Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    Uri.parse("package:" + getPackageName()));
+                startActivity(i);
+            } else {
+                String p = android.Manifest.permission.READ_EXTERNAL_STORAGE;
+                if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED)
+                    requestPermissions(new String[] { p }, REQ_STORAGE);
+            }
+        } catch (Throwable t) {
+            /* A device with no Settings activity for this, or a ROM that has
+             * removed it. Not fatal: see the note above. */
+            Log.e(TAG, "storage: could not ask", t);
+        }
     }
 
     /* ---- fullscreen --------------------------------------------------------

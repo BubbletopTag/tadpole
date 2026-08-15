@@ -51,8 +51,14 @@ do_package() {
 XML
 
     "$BUILD_TOOLS/aapt2" compile --dir "$out/res" -o "$out/res.zip"
+    # -A ships android/app/assets verbatim. The viewer reads its logo as a FILE
+    # off the project directory rather than as an Android resource, so the PNGs
+    # travel as assets and TadpoleActivity unpacks them into that directory on
+    # first run — see extractAssets(). Resources would mean teaching the viewer
+    # about AssetManager, which is a change to a shared file for a picture.
     "$BUILD_TOOLS/aapt2" link -o "$out/unsigned.apk" -I "$PLATFORM" \
         --manifest "$here/app/AndroidManifest.xml" --java "$out/gen" \
+        -A "$here/app/assets" \
         --min-sdk-version "$TADPOLE_ANDROID_API" \
         --target-sdk-version "$TADPOLE_ANDROID_SDK_TARGET" "$out/res.zip"
 
