@@ -64,7 +64,13 @@ boost=$root/build/android/boost-inc
 mkdir -p "$boost"
 [ -e "$boost/boost" ] || ln -s /usr/include/boost "$boost/boost"
 
-b=$root/build/android/glasspole-arm64
+# NAMED FOR THE ABI, like sdl-$abi and viewer-$abi beside it, because
+# build-apk.sh packages lib/<abi>/ from a directory it derives from the ABI.
+# When this was "glasspole-arm64" the packager looked for "glasspole-arm64-v8a",
+# found nothing, and skipped the engine without saying so — the app then
+# reported "no libglasspole.so in this APK", which reads as a build that never
+# happened rather than one filed under the wrong name.
+b=$root/build/android/glasspole-arm64-v8a
 cmake -S "$root/glasspole" -B "$b" -GNinja \
     -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a \
