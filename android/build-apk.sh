@@ -8,6 +8,7 @@
 #     android/build-apk.sh install         ... and install to the device
 #     android/build-apk.sh run             ... and launch it
 #     android/build-apk.sh logs            follow the app's output
+#     android/build-apk.sh device          what ABIs the attached device has
 #     android/build-apk.sh all             build, install, run, follow logs
 #
 # NO GRADLE. Not on principle — the SDL template's Gradle build works — but
@@ -112,12 +113,26 @@ do_logs() {
     "$ADB" logcat -v time -s tadpole:V SDL:V DEBUG:V AndroidRuntime:E libc:V
 }
 
+# The one-minute question this whole port turns on, asked without installing
+# anything. See android/NOTES-arm32.md: the property is the ROM's claim and the
+# file is whether the 32-bit loader is actually there, and they can disagree.
+do_device() {
+    "$ADB" devices -l
+    for p in ro.product.model ro.build.version.sdk ro.product.cpu.abilist \
+             ro.product.cpu.abilist32 ro.product.cpu.abilist64 ro.zygote; do
+        printf '%-28s ' "$p"; "$ADB" shell getprop "$p"
+    done
+    printf '%-28s ' /system/bin/linker
+    "$ADB" shell 'ls /system/bin/linker >/dev/null 2>&1 && echo "PRESENT (32-bit userspace)" || echo "ABSENT (64-bit only)"'
+}
+
 case "${1:-package}" in
     build)   do_build ;;
     package) do_build; do_package ;;
     install) do_build; do_package; do_install ;;
     run)     do_build; do_package; do_install; do_run ;;
     logs)    do_logs ;;
+    device)  do_device ;;
     all)     do_build; do_package; do_install; do_run; sleep 2; do_logs ;;
-    *) echo "usage: $0 {build|package|install|run|logs|all}" >&2; exit 2 ;;
+    *) echo "usage: $0 {build|package|install|run|logs|device|all}" >&2; exit 2 ;;
 esac
