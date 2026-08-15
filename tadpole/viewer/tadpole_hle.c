@@ -27,6 +27,11 @@
  */
 #include <SDL.h>
 #include <SDL_opengl.h>
+#ifdef __ANDROID__
+/* EGL DIRECTLY, because SDL will not give us a second window here and we never
+ * needed a window — only a context. See hle_host_init. */
+#include <EGL/egl.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,36 +112,84 @@ static struct {
 /* Fill the table against the CURRENT context. Zero on any miss, and every
  * miss is named: one absent entry point usually means a whole family is
  * absent, and the full list says which at a glance. */
+/* WHERE A GL FUNCTION COMES FROM, and on ES it may be spelled twice.
+ *
+ * Everything past OpenGL 1.1 in this file is resolved at run time rather than
+ * bound at link time, because Windows' opengl32.dll exports nothing newer. That
+ * decision is what makes ES work too — but ES 1.1 puts framebuffer objects in
+ * an EXTENSION, GL_OES_framebuffer_object, and an extension's entry points
+ * carry its suffix: glGenFramebuffersOES, not glGenFramebuffers. The ENUMS are
+ * the same numbers (GL_FRAMEBUFFER_OES is 0x8D40, exactly as GL_FRAMEBUFFER
+ * is), so only the names need a second try.
+ *
+ * SDL_GL_GetProcAddress needs SDL to have loaded a GL library, which on Android
+ * it has not: our context is EGL's, made without SDL's help. eglGetProcAddress
+ * is the right question to ask there and answers for core ES functions too.
+ */
+static void *gl_getproc(const char *name)
+{
+	char alt[64];
+	void *p;
+	int fits = strlen(name) + 4 < sizeof alt;
+
+	if (fits) snprintf(alt, sizeof alt, "%sOES", name);
+#ifdef __ANDROID__
+	/* THE SUFFIXED NAME IS TRIED FIRST HERE, AND THAT ORDER IS THE WHOLE
+	 * POINT. eglGetProcAddress is allowed to return a NON-NULL pointer for a
+	 * function the driver does not have — the spec lets it hand back an
+	 * address without promising anything is behind it, and Adreno does. So
+	 * asking for "glGenFramebuffers" on an ES 1.1 context succeeds, the OES
+	 * fallback never runs, and the very first call through the result is a
+	 * SIGSEGV inside make_plain with a perfectly clean resolve log above it.
+	 *
+	 * Asking for the name the extension really defines avoids the guess
+	 * entirely. The unsuffixed name stays as the fallback for an ES 3 context,
+	 * where it is the true spelling. */
+	p = fits ? (void *)eglGetProcAddress(alt) : NULL;
+	if (p) return p;
+	return (void *)eglGetProcAddress(name);
+#else
+	p = SDL_GL_GetProcAddress(name);
+	if (p) return p;
+	return fits ? SDL_GL_GetProcAddress(alt) : NULL;
+#endif
+}
+
 static int gl_resolve(void)
 {
-	const struct { const char *name; void **slot; } tab[] = {
-		{ "glActiveTexture",         (void **)&g_gl.ActiveTexture },
-		{ "glClientActiveTexture",   (void **)&g_gl.ClientActiveTexture },
-		{ "glGenFramebuffers",       (void **)&g_gl.GenFramebuffers },
-		{ "glBindFramebuffer",       (void **)&g_gl.BindFramebuffer },
-		{ "glDeleteFramebuffers",    (void **)&g_gl.DeleteFramebuffers },
-		{ "glGenRenderbuffers",      (void **)&g_gl.GenRenderbuffers },
-		{ "glBindRenderbuffer",      (void **)&g_gl.BindRenderbuffer },
-		{ "glDeleteRenderbuffers",   (void **)&g_gl.DeleteRenderbuffers },
-		{ "glRenderbufferStorage",   (void **)&g_gl.RenderbufferStorage },
+	/* `opt` marks the two that only multisampling uses. ES 1.1 has neither —
+	 * there is no glBlitFramebuffer before ES 3.0 — and demanding them would
+	 * refuse the whole replay on a device that can do everything except
+	 * anti-alias it. make_target() already turns MSAA off when it cannot have
+	 * it; this lets it get that far. */
+	const struct { const char *name; void **slot; int opt; } tab[] = {
+		{ "glActiveTexture",         (void **)&g_gl.ActiveTexture, 0 },
+		{ "glClientActiveTexture",   (void **)&g_gl.ClientActiveTexture, 0 },
+		{ "glGenFramebuffers",       (void **)&g_gl.GenFramebuffers, 0 },
+		{ "glBindFramebuffer",       (void **)&g_gl.BindFramebuffer, 0 },
+		{ "glDeleteFramebuffers",    (void **)&g_gl.DeleteFramebuffers, 0 },
+		{ "glGenRenderbuffers",      (void **)&g_gl.GenRenderbuffers, 0 },
+		{ "glBindRenderbuffer",      (void **)&g_gl.BindRenderbuffer, 0 },
+		{ "glDeleteRenderbuffers",   (void **)&g_gl.DeleteRenderbuffers, 0 },
+		{ "glRenderbufferStorage",   (void **)&g_gl.RenderbufferStorage, 0 },
 		{ "glRenderbufferStorageMultisample",
-		                             (void **)&g_gl.RenderbufferStorageMultisample },
-		{ "glFramebufferTexture2D",  (void **)&g_gl.FramebufferTexture2D },
+		                             (void **)&g_gl.RenderbufferStorageMultisample, 1 },
+		{ "glFramebufferTexture2D",  (void **)&g_gl.FramebufferTexture2D, 0 },
 		{ "glFramebufferRenderbuffer",
-		                             (void **)&g_gl.FramebufferRenderbuffer },
-		{ "glCheckFramebufferStatus",(void **)&g_gl.CheckFramebufferStatus },
-		{ "glBlitFramebuffer",       (void **)&g_gl.BlitFramebuffer },
+		                             (void **)&g_gl.FramebufferRenderbuffer, 0 },
+		{ "glCheckFramebufferStatus",(void **)&g_gl.CheckFramebufferStatus, 0 },
+		{ "glBlitFramebuffer",       (void **)&g_gl.BlitFramebuffer, 1 },
 	};
 	unsigned int i;
 	int missing = 0;
 
 	for (i = 0; i < sizeof tab / sizeof tab[0]; i++) {
-		*tab[i].slot = SDL_GL_GetProcAddress(tab[i].name);
-		if (!*tab[i].slot) {
-			fprintf(stderr, "hle: %s did not resolve — driver stops at"
-			        " OpenGL 1.1?\n", tab[i].name);
-			missing++;
-		}
+		*tab[i].slot = gl_getproc(tab[i].name);
+		if (*tab[i].slot || tab[i].opt)
+			continue;
+		fprintf(stderr, "hle: %s did not resolve — driver stops at"
+		        " OpenGL 1.1?\n", tab[i].name);
+		missing++;
 	}
 	return missing == 0;
 }
@@ -235,6 +288,97 @@ static int               g_ready;
 static SDL_Window   *g_prev_win;
 static SDL_GLContext g_prev_ctx;
 
+#ifdef __ANDROID__
+/* ANDROID HAS ONE WINDOW PER ACTIVITY and SDL enforces it, so the hidden
+ * window this used to make came back NULL and the whole replay switched itself
+ * off — "hle: no GL window: Android only supports one window", and every title
+ * ran on the deprecated software rasteriser at about a fifth of the speed.
+ *
+ * But a window was never what this wanted. It wanted a CONTEXT of its own, so
+ * that its FBO, its viewport and its scissor cannot leak into the one
+ * SDL_Renderer draws the interface with — and EGL will hand out a context with
+ * no window attached at all. A 1x1 pbuffer rather than a surfaceless context
+ * because EGL_KHR_surfaceless_context is an extension and a pbuffer is not;
+ * nothing is ever drawn to it, since every frame lands in the FBO.
+ *
+ * SDL is on EGL here too, so eglMakeCurrent saves and restores its context as
+ * well as ours, and ctx_enter/ctx_leave keep the promise they always made. */
+static EGLDisplay g_egl_dpy = EGL_NO_DISPLAY;
+static EGLContext g_egl_ctx = EGL_NO_CONTEXT;
+static EGLSurface g_egl_surf = EGL_NO_SURFACE;
+static EGLDisplay g_prev_dpy;
+static EGLContext g_prev_egl;
+static EGLSurface g_prev_draw, g_prev_read;
+
+static void ctx_enter(void)
+{
+	g_prev_egl  = eglGetCurrentContext();
+	g_prev_dpy  = eglGetCurrentDisplay();
+	g_prev_draw = eglGetCurrentSurface(EGL_DRAW);
+	g_prev_read = eglGetCurrentSurface(EGL_READ);
+	eglMakeCurrent(g_egl_dpy, g_egl_surf, g_egl_surf, g_egl_ctx);
+}
+
+static void ctx_leave(void)
+{
+	if (g_prev_egl != EGL_NO_CONTEXT && g_prev_dpy != EGL_NO_DISPLAY)
+		eglMakeCurrent(g_prev_dpy, g_prev_draw, g_prev_read, g_prev_egl);
+	else
+		eglMakeCurrent(g_egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
+		               EGL_NO_CONTEXT);
+}
+
+/* -> 1 on success. Leaves our context CURRENT, which is what init wants. */
+static int egl_context_make(void)
+{
+	static const EGLint cfg_attr[] = {
+		EGL_SURFACE_TYPE,    EGL_PBUFFER_BIT,
+		EGL_RENDERABLE_TYPE, EGL_OPENGL_ES_BIT,   /* ES 1.x: fixed function */
+		EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+		EGL_DEPTH_SIZE, 16,
+		EGL_NONE
+	};
+	static const EGLint surf_attr[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
+	static const EGLint ctx_attr[]  = { EGL_CONTEXT_CLIENT_VERSION, 1, EGL_NONE };
+	EGLConfig cfg;
+	EGLint n = 0;
+
+	g_egl_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+	if (g_egl_dpy == EGL_NO_DISPLAY) { fprintf(stderr, "hle: no EGL display\n"); return 0; }
+	if (!eglInitialize(g_egl_dpy, NULL, NULL)) {
+		fprintf(stderr, "hle: eglInitialize failed (0x%x)\n", eglGetError());
+		return 0;
+	}
+	if (!eglChooseConfig(g_egl_dpy, cfg_attr, &cfg, 1, &n) || n < 1) {
+		fprintf(stderr, "hle: no EGL config for an ES1 pbuffer (0x%x)\n",
+		        eglGetError());
+		return 0;
+	}
+	g_egl_surf = eglCreatePbufferSurface(g_egl_dpy, cfg, surf_attr);
+	if (g_egl_surf == EGL_NO_SURFACE) {
+		fprintf(stderr, "hle: no EGL pbuffer (0x%x)\n", eglGetError());
+		return 0;
+	}
+	/* EGL_NO_CONTEXT: deliberately NOT shared with SDL's. Nothing is handed
+	 * between them — the finished frame goes back through glReadPixels into
+	 * the arena, exactly as it does on the desktop. */
+	g_egl_ctx = eglCreateContext(g_egl_dpy, cfg, EGL_NO_CONTEXT, ctx_attr);
+	if (g_egl_ctx == EGL_NO_CONTEXT) {
+		fprintf(stderr, "hle: no EGL context (0x%x)\n", eglGetError());
+		return 0;
+	}
+	/* Remember SDL's before taking over, the same as ctx_enter does. */
+	g_prev_egl  = eglGetCurrentContext();
+	g_prev_dpy  = eglGetCurrentDisplay();
+	g_prev_draw = eglGetCurrentSurface(EGL_DRAW);
+	g_prev_read = eglGetCurrentSurface(EGL_READ);
+	if (!eglMakeCurrent(g_egl_dpy, g_egl_surf, g_egl_surf, g_egl_ctx)) {
+		fprintf(stderr, "hle: eglMakeCurrent failed (0x%x)\n", eglGetError());
+		return 0;
+	}
+	return 1;
+}
+#else
 static void ctx_enter(void)
 {
 	g_prev_ctx = SDL_GL_GetCurrentContext();
@@ -247,6 +391,7 @@ static void ctx_leave(void)
 	if (g_prev_ctx) SDL_GL_MakeCurrent(g_prev_win, g_prev_ctx);
 	else            SDL_GL_MakeCurrent(g_win, NULL);
 }
+#endif
 static unsigned long     g_frames, g_packets;
 static unsigned int      g_desync;
 static unsigned long     g_draws;      /* draws replayed in the current frame */
@@ -414,6 +559,32 @@ static void check_gl(const char *where)
 static float            *g_conv[TADGL_ARR_COUNT];
 static unsigned int      g_convn[TADGL_ARR_COUNT];
 
+/* WHAT TO PASS AS internalformat, and the two APIs disagree.
+ *
+ * Desktop GL takes a SIZED internal format — GL_RGBA8 — and is happy for the
+ * format describing the client data to be something else, GL_BGRA, doing the
+ * swap on the way in. OpenGL ES has no sized internal formats in 1.1 and
+ * requires internalformat to be EXACTLY the same token as format. Passing
+ * GL_RGBA8 with GL_BGRA there is not a slow path or a lossy one, it is
+ * GL_INVALID_OPERATION: the call is rejected, the texture never receives its
+ * image, and an incomplete texture samples as white.
+ *
+ * WHICH LOOKS EXACTLY LIKE THIS. Every polygon comes out white while blending,
+ * alpha and the fades between screens all behave perfectly — because none of
+ * those touch texel data. It reads as "textures are missing", and the cause is
+ * one argument in the call that uploads them.
+ *
+ * GL_BGRA and GL_BGRA_EXT are the same number, so on ES this only has to stop
+ * saying GL_RGBA8. The EXT_texture_format_BGRA8888 extension is what makes
+ * GL_BGRA legal as an ES internal format at all; hle_host_init warns when it is
+ * absent, because the alternative is swizzling every texture on the CPU and
+ * that is worth knowing about rather than discovering. */
+#ifdef __ANDROID__
+#define HLE_INTERNAL(fmt) (GLint)(fmt)
+#else
+#define HLE_INTERNAL(fmt) GL_RGBA8
+#endif
+
 /* ---- setup -------------------------------------------------------------- */
 
 /* The plain single-sample target: a texture for colour, a renderbuffer for
@@ -425,7 +596,7 @@ static int make_plain(int w, int h, int want_depth)
 	glBindFramebuffer(GL_FRAMEBUFFER, g_resolve);
 	glGenTextures(1, &g_colour);
 	glBindTexture(GL_TEXTURE_2D, g_colour);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
+	glTexImage2D(GL_TEXTURE_2D, 0, HLE_INTERNAL(GL_RGBA), w, h, 0, GL_RGBA,
 	             GL_UNSIGNED_BYTE, NULL);
 	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
 	                       GL_TEXTURE_2D, g_colour, 0);
@@ -476,7 +647,7 @@ static int make_final(int w, int h)
 	glBindFramebuffer(GL_FRAMEBUFFER, g_final);
 	glGenTextures(1, &g_final_tex);
 	glBindTexture(GL_TEXTURE_2D, g_final_tex);
-	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA,
+	glTexImage2D(GL_TEXTURE_2D, 0, HLE_INTERNAL(GL_RGBA), w, h, 0, GL_RGBA,
 	             GL_UNSIGNED_BYTE, NULL);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -748,6 +919,11 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	g_ring = m;
 	g_data = TADGL_DATA(g_ring);
 
+#ifdef __ANDROID__
+	/* No window at all — see egl_context_make(). */
+	if (!egl_context_make())
+		return 0;
+#else
 	/* A SEPARATE hidden window. The visible one belongs to SDL_Renderer, and
 	 * putting a GL context on it would fight with the 2D compositor. */
 	SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK,
@@ -762,6 +938,7 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	g_ctx = SDL_GL_CreateContext(g_win);
 	if (!g_ctx) { fprintf(stderr, "hle: no GL context: %s\n", SDL_GetError()); return 0; }
 	SDL_GL_SetSwapInterval(0);
+#endif
 
 	if (!gl_resolve()) {
 		fprintf(stderr, "hle: OpenGL past 1.1 unavailable on this driver\n");
@@ -787,6 +964,17 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	g_ring->version = TADGL_VERSION;
 	g_ring->magic = TADGL_MAGIC;
 
+	/* BGRA HAS TO BE LEGAL AS AN INTERNAL FORMAT, or every texture the guest
+	 * uploads is rejected and the whole scene draws white — see HLE_INTERNAL.
+	 * Adreno, Mali and PowerVR all ship EXT_texture_format_BGRA8888, so this is
+	 * a warning rather than a refusal, but it names the fault in advance rather
+	 * than leaving a white screen to be interpreted. */
+	{
+		const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+		if (ext && !strstr(ext, "texture_format_BGRA8888"))
+			fprintf(stderr, "hle: no EXT_texture_format_BGRA8888 — guest "
+			        "textures may upload white\n");
+	}
 	printf("tadpole-view: HLE replay on %s (%s)\n",
 	       (const char *)glGetString(GL_RENDERER),
 	       (const char *)glGetString(GL_VERSION));
@@ -1555,7 +1743,7 @@ texenv_dropped:
 			glBindTexture(GL_TEXTURE_2D, host_tex(hd[0]));
 			/* The guest already converted to ARGB8888, which on a
 			 * little-endian host is BGRA byte order. */
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)hd[1],
+			glTexImage2D(GL_TEXTURE_2D, 0, HLE_INTERNAL(GL_BGRA), (GLsizei)hd[1],
 			             (GLsizei)hd[2], 0, GL_BGRA, GL_UNSIGNED_BYTE, px);
 			if (hd[0] < MAX_TEX) g_tex_have[hd[0]] = 1;
 			if (g_verbose && g_ti_logged < 40) {
