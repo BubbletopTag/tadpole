@@ -44,18 +44,64 @@ Snapdragon 400/600-series phone, anything Android 8 to 11 — are overwhelmingly
 The dev device sits between the two. **OnePlus Nord N30 5G, Snapdragon 695
 (SM6375), 2×Cortex-A78 + 6×Cortex-A55.** Both cores implement AArch32 at EL0, so
 the silicon can. Whether LineageOS 23 (Android 16 QPR0) ships a 32-bit userspace
-on it is a separate question with a local answer, and **it has not been
-measured, because the device was not connected to this machine at any point
-during this work.** `adb devices` saw only the emulator; `lsusb` showed no phone.
+on it is a separate question with a local answer.
 
-**This is the single highest-value thing to run next, and it takes a minute:**
+### Measured, 2026-08-15, on the device itself
 
-```sh
-adb shell getprop ro.product.cpu.abilist32     # the ROM's claim
-adb shell ls -l /system/bin/linker             # whether the file is actually there
-adb install build/android/apk/tadpole.apk      # and the probe's own answer
-adb logcat -s tadpole | grep probe
+It does, and the CPU obliges. `CPH2513`, platform `holi`, kernel 5.4.302:
+
 ```
+ro.product.cpu.abilist    arm64-v8a,armeabi-v7a,armeabi
+ro.product.cpu.abilist32  armeabi-v7a,armeabi
+ro.zygote                 zygote64_32
+/system/bin/linker  ->  /apex/com.android.runtime/bin/linker      (both present)
+/system/lib/libc.so                                               (32-bit, present)
+```
+
+`zygote64_32` is the one that settles the ROM question — the platform starts a
+32-bit zygote as well as a 64-bit one, so 32-bit userspace is not vestigial
+here, it is live.
+
+**And the properties were not taken on trust.** A real ARM32 binary, built with
+the NDK at API 26 and run over adb:
+
+```
+$ adb shell /data/local/tmp/arm32dyn
+ARM32 EXECUTED. sizeof(void*)=4 machine=armv8l kernel=5.4.302-qgki-gc704f110e1f9
+```
+
+`armv8l` is what `uname` reports to a process running in AArch32 on ARMv8
+silicon, and a four-byte pointer is not something a 64-bit process can report.
+**This device executes AArch32 at EL0.**
+
+A GOTCHA WORTH THE THREE LINES. The same program built `-static` does not run:
+
+```
+error: "...": executable's TLS segment is underaligned:
+       alignment is 8 (skew 0), needs to be at least 32 for ARM Bionic
+```
+
+That is an NDK static-linking rule, not a statement about ARM32 — bionic wants
+a 32-byte-aligned TLS segment and the static startup files do not provide one.
+Build ARM32 test binaries dynamically or the measurement looks like a failure
+it is not.
+
+### What it does and does not change
+
+It does not change the verdict below. The blockers on the armeabi-v7a path were
+never that the CPU would refuse — they are that dynarmic has no 32-bit host
+backend, that `cpu.cpp` wants a 4 GiB reservation a 32-bit process has not got,
+and that **exec from app-writable files is denied** no matter what the CPU can
+do. Firmware arrives at runtime and can never live in the APK.
+
+What it does change is that this device can host the *other* experiment if it is
+ever worth running: an armeabi-v7a process is itself in AArch32, so the guest's
+code could in principle be mapped `PROT_EXEC` and branched to with no
+translation at all — not exec'd, so the SELinux rule above does not apply. That
+is a new execution engine to write, and dynarmic on arm64 already works, so it
+is an optimisation and not a route. Noted because on a **32-bit-only** tablet it
+stops being an optimisation and becomes the only path: arm64-v8a will not
+install there, and without it there is no JIT.
 
 The property and the file are not the same question, which is why the probe
 checks both. A ROM can advertise an ABI whose loader is absent.
