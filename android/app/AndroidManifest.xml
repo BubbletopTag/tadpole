@@ -12,7 +12,9 @@
     <application android:label="Tadpole"
                  android:icon="@android:drawable/sym_def_app_icon"
                  android:hardwareAccelerated="true"
-                 android:allowBackup="false">
+                 android:allowBackup="false"
+                 android:extractNativeLibs="true"
+                 android:debuggable="true">
         <activity android:name=".TadpoleActivity"
                   android:exported="true"
                   android:label="Tadpole"

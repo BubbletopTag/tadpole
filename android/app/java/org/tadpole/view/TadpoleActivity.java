@@ -39,6 +39,7 @@ public class TadpoleActivity extends SDLActivity {
     static final String TAG = "tadpole";
 
     public static native void nativeSetenv(String name, String value);
+    public static native void nativeProbe(String filesDir, String libDir);
 
     @Override protected String[] getLibraries() {
         return new String[] { "SDL2", "main" };
@@ -58,6 +59,7 @@ public class TadpoleActivity extends SDLActivity {
             String dir = getFilesDir().getAbsolutePath();
             nativeSetenv("TADPOLE_DIR", dir);
             Log.i(TAG, "TADPOLE_DIR=" + dir);
+            nativeProbe(dir, getApplicationInfo().nativeLibraryDir);
         } catch (Throwable t) {
             Log.e(TAG, "could not set TADPOLE_DIR", t);
         }

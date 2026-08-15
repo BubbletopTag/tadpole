@@ -27,6 +27,7 @@ add_library(main SHARED
     ${VIEWER}/tadpole_boot.c
     ${CMAKE_CURRENT_SOURCE_DIR}/tadpole_gles_compat.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../app/jni/tadpole_jni.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../app/jni/tadpole_probe.c
 )
 
 # Both, because the viewer spells it two ways: tadpole_view.c has
@@ -49,3 +50,11 @@ target_compile_definitions(main PRIVATE TADPOLE_VERSION="android-dev")
 target_link_libraries(main PRIVATE
     ${SDL_PREFIX}/lib/libSDL2.so
     GLESv1_CM EGL z log android m)
+
+# A real executable, shipped in the APK as lib/<abi>/libtadpoleexec.so. See the
+# long note in android/app/jni/tadpole_execprobe.c: an Android app may not
+# execute a file it wrote, but it MAY execute one the package installer put in
+# the native library directory, and that is the only route by which qemu-arm or
+# any guest binary could ever run. This proves the route works.
+add_executable(tadpoleexec ${CMAKE_CURRENT_SOURCE_DIR}/../app/jni/tadpole_execprobe.c)
+set_target_properties(tadpoleexec PROPERTIES OUTPUT_NAME tadpoleexec)

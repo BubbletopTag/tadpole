@@ -76,7 +76,8 @@ with zipfile.ZipFile(os.path.join(out, 'unsigned.apk'), 'a', zipfile.ZIP_DEFLATE
         # defaults to false and the app takes half the space on device.
         for name, path in (
             ('libSDL2.so', f'{root}/build/android/sdl-prefix/{abi}/lib/libSDL2.so'),
-            ('libmain.so', f'{root}/build/android/viewer-{abi}/libmain.so')):
+            ('libmain.so', f'{root}/build/android/viewer-{abi}/libmain.so'),
+            ('libtadpoleexec.so', f'{root}/build/android/viewer-{abi}/tadpoleexec')):
             z.write(path, f'lib/{abi}/{name}', compress_type=zipfile.ZIP_STORED)
 print('packaged ABIs:', ' '.join(abis))
 PY
