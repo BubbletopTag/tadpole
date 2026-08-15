@@ -428,7 +428,7 @@ sign-in and home screen, landscape the moment a title starts, and back again
 when you leave it.**
 
 It follows the guest rather than guessing: the shim reports which screen is up
-— the UI's own `/LF/Base/LPAD/*.swf`, or a package's entry point as named by
+— the UI's own `/LF/Base/LPAD/main.swf`, or a package's entry point as named by
 its `meta.inf` — and the viewer decides the rotation from that.
 
 A few LeapPad titles draw portrait (My Books and Notepad are the two in this

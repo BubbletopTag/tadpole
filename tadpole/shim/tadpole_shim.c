@@ -776,15 +776,6 @@ static int seg_eq(const char *a, const char *b)
 	return *a == *b;
 }
 
-static int ends_with_swf(const char *s)
-{
-	size_t n = s ? strlen(s) : 0;
-	return n > 4 && s[n-4] == '.' &&
-	       (s[n-3] == 's' || s[n-3] == 'S') &&
-	       (s[n-2] == 'w' || s[n-2] == 'W') &&
-	       (s[n-1] == 'f' || s[n-1] == 'F');
-}
-
 /* Match `pfx` against the front of `path`, treating a run of slashes as one
  * separator, and hand back what follows. Guest paths really do arrive with
  * doubled slashes — "/LF/Base//LpadAssets/Art/..." and
@@ -905,11 +896,28 @@ static void screen_note(const char *path)
 
 	if (!g_state || !path)
 		return;
-	/* Only .swf, and only the LPAD directory itself: the fonts and art in its
-	 * subdirectories are shared, and a title that loaded one would otherwise
-	 * read as the home screen coming back. */
+	/* main.swf AND NOTHING ELSE UNDER LPAD.
+	 *
+	 * THE UI KEEPS RUNNING UNDERNEATH A TITLE — AppManager draws the
+	 * ViewFrame chrome on fb0 while a Leapster game owns fb1 — and its Flash
+	 * side goes on loading states and sound effects the whole time. Both
+	 * LaunchApp.swf and HomePicker.swf are opened DURING a launch, after the
+	 * title has been handed over. Reading any LPAD file as "the UI is on top"
+	 * therefore turned the window straight back for native titles, because
+	 * the two kinds hand over at different moments:
+	 *
+	 *     Flash   LaunchApp.swf  HomePicker.swf  <pkg>/main.swf   <- title last
+	 *     native  LaunchApp.swf  dlopen App.so   HomePicker.swf   <- UI last
+	 *
+	 * which is exactly the reported symptom: Flash titles turned, native ones
+	 * turned for a split second and turned back.
+	 *
+	 * main.swf is the LPAD app ITSELF, and it is loaded on exactly the two
+	 * occasions the UI takes the screen: at boot, and on every pop back out of
+	 * a title (kPopApp -> PushApp LPAD/main.swf -> LoadNewApp). Both measured.
+	 */
 	if ((rest = path_after(path, "/LF/Base/LPAD/")) != 0) {
-		if (ends_with_swf(rest) && !has_slash(rest))
+		if (seg_eq(rest, "main.swf"))
 			screen_set(TAD_SCREEN_SYSTEM, 0);
 	} else if (title_entry(path, pkg, sizeof(pkg))) {
 		screen_set(TAD_SCREEN_TITLE, pkg);

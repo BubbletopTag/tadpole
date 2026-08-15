@@ -5953,13 +5953,34 @@ unambiguous. Both were read off a live session — boot, sign in, tap Pet Pad,
 press Home — not reasoned about:
 
 ```
-/LF/Base/LPAD/<state>.swf             the UI. Pushed at boot AND re-opened on
+/LF/Base/LPAD/main.swf                the UI app itself. Loaded at boot AND on
                                       every pop back out of a title, which is
                                       what makes LEAVING a game visible.
 /LF/Bulk/ProgramFiles/<pkg>/<AppSo>   a title's entry point: a .swf the Flash
                                       player opens, or an App.so that
                                       CAppManager dlopen()s.
 ```
+
+**`main.swf` and nothing else under LPAD** — this is the correction that made
+native titles work, and it is worth stating why the obvious wider rule fails.
+The UI keeps running underneath a title: AppManager draws the ViewFrame chrome
+on fb0 while a Leapster game owns fb1, and its Flash side goes on loading
+states and sound effects throughout. `LaunchApp.swf` and `HomePicker.swf` are
+both opened DURING a launch, *after* the title has been handed over — and the
+two kinds of title hand over at different moments:
+
+```
+Flash    LaunchApp.swf   HomePicker.swf   <pkg>/main.swf    <- the title is last
+native   LaunchApp.swf   dlopen App.so    HomePicker.swf    <- the UI is last
+```
+
+So "any LPAD .swf means the UI is on top" turned the window back the instant a
+native title started, which is precisely what was reported from the hand: Pet
+Pad and Alphabet Stew (both Flash) turned and stayed; Ni Hao, Kai-lan and Pet
+Pals (both native Leapster titles) "looked like they wanted to turn for a split
+second, then didn't", and leaving them did nothing because the state had never
+left the UI. `main.swf` is the LPAD app itself and is loaded on exactly the two
+occasions the UI takes the screen.
 
 `screen_note()` in `tadpole_shim.c` classifies those into
 `state.bin`: `screen` (system UI / title), `screen_seq` (bumped on every
