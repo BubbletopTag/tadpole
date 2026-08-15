@@ -66,6 +66,7 @@ static int tp_fifo_fd(const char *path, int want_read)
 #include "tadpole_ui.h"
 #include "tadpole_boot.h"
 #include "tadpole_hle.h"
+#include "tadpole_pad.h"
 #include "tadpole_port.h"
 #include <sys/stat.h>
 #include <sys/time.h>
@@ -575,6 +576,65 @@ static uint16_t map_key(SDL_Keycode k, int rotate)
 	case SDLK_EQUALS: return KEY_VOLUMEUP_;
 	case SDLK_MINUS:  return KEY_VOLUMEDOWN_;
 	default:          return 0;
+	}
+}
+
+/* Where the guest's picture goes in the logical space, and where it is
+ * actually seen.
+ *
+ * THOSE ARE TWO DIFFERENT RECTANGLES AT 90 AND 270. `dst` is what
+ * SDL_RenderCopyEx is handed; it spins the copy about dst's own centre, so the
+ * rectangle covered on screen is dst transposed about that centre. Everything
+ * that draws the picture wants the first; anything placed ON the picture — the
+ * overlay controls — wants the second, and using dst there puts a D-pad
+ * meant for the bottom-left corner off the side of a portrait window.
+ *
+ * One function because the two callers are forty lines apart, on opposite
+ * sides of the event loop: the overlay is placed before events are read so the
+ * first click of a session lands somewhere, and again before it is drawn.
+ */
+static void panel_rect(int rotate, int lw, int lh, int w, int h,
+                       SDL_Rect *dst, SDL_Rect *shown)
+{
+	dst->x = (lw - w) / 2;
+	dst->y = UI_BAR_H + (lh - h) / 2;
+	dst->w = w;
+	dst->h = h;
+	*shown = *dst;
+	if (rotate == 90 || rotate == 270) {
+		int cx = dst->x + dst->w / 2, cy = dst->y + dst->h / 2;
+		shown->w = dst->h; shown->h = dst->w;
+		shown->x = cx - shown->w / 2;
+		shown->y = cy - shown->h / 2;
+	}
+}
+
+/* The on-screen D-pad and Home button, turned into the same key events the
+ * keyboard produces.
+ *
+ * IT GOES THROUGH rotate_dpad() FOR EXACTLY THE REASON THE ARROW KEYS DO. The
+ * overlay is drawn in the logical space, so its "up" arm is up as the player
+ * sees it — the same claim SDLK_UP makes — and the whole business of turning a
+ * seen direction into the code this guest expects is already solved above.
+ * Sending DPAD_CW[0] straight from the overlay would work at rotate 0 and give
+ * a differently wrong answer at each of the other three, which is a bug that
+ * only appears when someone turns the window.
+ *
+ * Called once per frame rather than per event, so the two directions of a
+ * diagonal arrive as one pair of presses.
+ */
+static void pad_pump(int rotate)
+{
+	unsigned changed = pad_take_changed();
+	unsigned state = pad_state();
+	int i;
+
+	for (i = 0; i < PAD_N; i++) {
+		uint16_t code;
+		if (!(changed & PAD_BIT(i)))
+			continue;
+		code = (i < 4) ? rotate_dpad(i, rotate) : KEY_M_;
+		send_key(EV_GPIO_KEYS, code, (state & PAD_BIT(i)) != 0);
 	}
 }
 
@@ -1247,6 +1307,38 @@ static int ui_shot(SDL_Renderer *ren, SDL_Window *win, const char *state,
 			ui_draw_idle(ren, lw, lh + UI_BAR_H);
 		}
 	}
+	/* TADPOLE_SHOT_PAD PUTS THE OVERLAY CONTROLS IN THE SHOT. They are drawn
+	 * only while a guest is running, and a shot has no guest — so without this
+	 * the one part of the interface that sits ON the picture is the one part
+	 * that can never be captured, reviewed or diffed.
+	 *
+	 * Its value names the buttons to hold down, so the pressed look is
+	 * capturable too; "1" holds nothing. Combine it with TADPOLE_SHOT_BG to see
+	 * them against the worst backdrop they will ever meet:
+	 *
+	 *   TADPOLE_SHOT_PAD=1          TADPOLE_SHOT_BG=FFFFFF ...
+	 *   TADPOLE_SHOT_PAD=up,right   TADPOLE_SHOT_BG=FFFFFF ...
+	 */
+	{
+		const char *want = getenv("TADPOLE_SHOT_PAD");
+		if (want) {
+			static const char *names[PAD_N] = {
+				"up", "right", "down", "left", "home"
+			};
+			SDL_Rect dst, shown;
+			unsigned held = 0;
+			int b;
+			for (b = 0; b < PAD_N; b++)
+				if (strstr(want, names[b])) held |= PAD_BIT(b);
+			panel_rect(rotate, lw, lh, w, h, &dst, &shown);
+			pad_configure(1, ui_cfg()->pad_size, ui_cfg()->pad_opacity,
+			              ui_cfg()->pad_left);
+			pad_set_visible(1);
+			pad_place(&shown);
+			pad_debug_press(held);
+			pad_draw(ren);
+		}
+	}
 	ui_draw(ren, lw, lh + UI_BAR_H);
 
 	SDL_GetRendererOutputSize(ren, &ow, &oh);
@@ -1281,6 +1373,37 @@ static int st_check(const char *what, int got, int want, int *bad)
 	printf("  %-34s %4d  expected %4d  %s\n", what, got, want, ok ? "ok" : "FAIL");
 	if (!ok) (*bad)++;
 	return ok;
+}
+
+/* A press, some motion and a release, through the real ui_event(). `steps`
+ * splits the motion so the drag accumulates the way a finger's does — one
+ * jump of 140 pixels and fourteen of ten are the same gesture to a person and
+ * very different ones to code that keeps a remainder. */
+static void st_drag(int lw, int lh, int x0, int y0, int x1, int y1, int release)
+{
+	SDL_Event e;
+	int i, steps = 10;
+
+	memset(&e, 0, sizeof(e));
+	e.type = SDL_MOUSEBUTTONDOWN;
+	e.button.button = SDL_BUTTON_LEFT;
+	e.button.x = x0; e.button.y = y0;
+	ui_event(&e, lw, lh);
+
+	for (i = 1; i <= steps; i++) {
+		memset(&e, 0, sizeof(e));
+		e.type = SDL_MOUSEMOTION;
+		e.motion.x = x0 + (x1 - x0) * i / steps;
+		e.motion.y = y0 + (y1 - y0) * i / steps;
+		ui_event(&e, lw, lh);
+	}
+	if (!release) return;
+
+	memset(&e, 0, sizeof(e));
+	e.type = SDL_MOUSEBUTTONUP;
+	e.button.button = SDL_BUTTON_LEFT;
+	e.button.x = x1; e.button.y = y1;
+	ui_event(&e, lw, lh);
 }
 
 static void st_key(int lw, int lh, SDL_Keycode k)
@@ -1420,9 +1543,352 @@ static int selftest_apps(SDL_Renderer *ren, int rotate, int w, int h)
 		}
 	}
 
+	/* ---- and with a finger -----------------------------------------------
+	 *
+	 * The wheel and the arrow keys are what a desktop has. A touchscreen has
+	 * neither, so until the drag below existed a finger could reach the first
+	 * seven titles of four hundred and sixty-two and no others.
+	 *
+	 * The interesting case is not that dragging scrolls. It is that a drag
+	 * must NOT also choose the row it started on, and that a press which does
+	 * not move must still choose one — those two live either side of a four
+	 * pixel line, and getting the line wrong makes the list either unusable or
+	 * unscrollable, with nothing in between.
+	 */
+	printf("\ndragging\n");
+	{
+		int mid_x = lw / 2, mid_y = lh / 2;
+		int sel_before, top_before, moved_by_drag;
+		char path[512];
+
+		ui_debug_apps(NULL, &top_before, &sel_before, NULL);
+
+		/* A drag upwards: the content follows the finger, so the list moves
+		 * DOWN through the titles. */
+		st_drag(lw, lh, mid_x, mid_y, mid_x, mid_y - 5 * 28, 1);
+		ui_debug_apps(NULL, &top, &sel, NULL);
+		st_check("top after dragging up 5 rows", top, top_before + 5, &bad);
+		/* AND IT CHOSE NOTHING. A tap on a row in this list LAUNCHES the
+		 * title, so a drag that also counted as a tap would start a game
+		 * every time somebody scrolled. */
+		st_check("...and the selection is untouched", sel, sel_before, &bad);
+
+		st_drag(lw, lh, mid_x, mid_y, mid_x, mid_y + 3 * 28, 1);
+		ui_debug_apps(NULL, &top, NULL, NULL);
+		st_check("top after dragging back down 3", top, top_before + 2, &bad);
+
+		/* The flick keeps going after the finger has gone. Both ends stay
+		 * inside the list's own body: the well is seven rows tall and a press
+		 * outside it is not a drag at all. */
+		ui_debug_apps(NULL, &top_before, NULL, NULL);
+		st_drag(lw, lh, mid_x, mid_y + 60, mid_x, mid_y - 60, 1);
+		ui_debug_apps(NULL, &top, NULL, NULL);
+		moved_by_drag = top - top_before;
+		{
+			int i2;
+			for (i2 = 0; i2 < 8; i2++)
+				ui_draw(ren, lw, lh);        /* eight frames of coasting */
+		}
+		ui_debug_apps(NULL, &top, NULL, NULL);
+		if (top - top_before > moved_by_drag)
+			printf("  %-34s %4d  ok (dragged %d)\n",
+			       "flick coasts past the release", top - top_before,
+			       moved_by_drag);
+		else
+			printf("  %-34s %4d  stopped dead at %d  FAIL\n",
+			       "flick coasts past the release", top - top_before,
+			       moved_by_drag), bad++;
+
+		/* LAST, because it launches: a press that does not move is a press,
+		 * and in this list a press on a row starts the title and closes the
+		 * dialog. Nothing after this would have a launcher to talk to. */
+		ui_debug_apps(NULL, &top, NULL, NULL);
+		st_drag(lw, lh, mid_x, mid_y, mid_x, mid_y + 2, 1);
+		path[0] = 0;
+		if (ui_take_action(path, sizeof path) == UI_ACT_RUN_APP && path[0])
+			printf("  %-34s %s  ok\n", "tap launches the row under it", path);
+		else
+			printf("  %-34s a two-pixel wobble launched nothing  FAIL\n",
+			       "tap launches the row under it"), bad++;
+	}
+
 	printf("\n%s\n", bad
 	       ? "FAILED — the launcher does not scroll"
-	       : "PASS — wheel, arrows, paging, ends and type-to-jump all move the list");
+	       : "PASS — wheel, arrows, paging, ends, type-to-jump and dragging");
+	return bad ? 1 : 0;
+}
+
+/* ---- --selftest-pad: does the overlay answer where it is drawn? -----------
+ *
+ * Written because the launcher taught the lesson once already: code that
+ * "looks right" and a control that works are different claims, and the way a
+ * D-pad fails is not by disappearing — it is by having its dead zone in the
+ * wrong place, or by keeping a direction held after the thumb has moved off
+ * it, neither of which a screenshot can show.
+ *
+ * Everything here goes through the real pad_event() with real SDL_Event
+ * structs, which is the same rule --selftest-apps follows and the reason both
+ * are worth having.
+ */
+static void ev_open_missing(void);   /* defined with the input FIFOs below */
+
+static const char *PAD_NAME[PAD_N] = { "UP", "RIGHT", "DOWN", "LEFT", "HOME" };
+
+static void pad_names(unsigned m, char *out, size_t n)
+{
+	int i;
+	out[0] = 0;
+	if (!m) { snprintf(out, n, "(none)"); return; }
+	for (i = 0; i < PAD_N; i++) {
+		if (!(m & PAD_BIT(i))) continue;
+		if (out[0]) strncat(out, "+", n - strlen(out) - 1);
+		strncat(out, PAD_NAME[i], n - strlen(out) - 1);
+	}
+}
+
+static void st_pad_btn(int x, int y, int down, int *consumed)
+{
+	SDL_Event e;
+	memset(&e, 0, sizeof(e));
+	e.type = down ? SDL_MOUSEBUTTONDOWN : SDL_MOUSEBUTTONUP;
+	e.button.button = SDL_BUTTON_LEFT;
+	e.button.x = x;
+	e.button.y = y;
+	*consumed = pad_event(&e, NULL);
+}
+
+static void st_pad_move(int x, int y)
+{
+	SDL_Event e;
+	memset(&e, 0, sizeof(e));
+	e.type = SDL_MOUSEMOTION;
+	e.motion.x = x;
+	e.motion.y = y;
+	pad_event(&e, NULL);
+}
+
+static void st_pad_expect(const char *what, unsigned got, unsigned want, int *bad)
+{
+	char a[64], b[64];
+	pad_names(got, a, sizeof a);
+	pad_names(want, b, sizeof b);
+	if (got != want) (*bad)++;
+	printf("  %-42s %-16s %s\n", what, a, got == want ? "ok" : b);
+}
+
+/* Press at (x,y), read the state, let go. Every case below is a tap, because a
+ * tap is what leaves nothing behind for the next one to inherit. */
+static unsigned st_pad_tap(int x, int y, int *consumed)
+{
+	unsigned s;
+	st_pad_btn(x, y, 1, consumed);
+	s = pad_state();
+	{ int c2; st_pad_btn(x, y, 0, &c2); }
+	return s;
+}
+
+static int selftest_pad(int rotate)
+{
+	/* The panel's real size, hard-coded like --selftest's for the same reason:
+	 * this runs before try_map(), so the guest's dimensions are not known yet
+	 * and a test that read them would be measuring whatever happened to be in
+	 * the shared arena from the last session. */
+	const int w = 480, h = 272;
+	int lw = (rotate == 90 || rotate == 270) ? h : w;
+	int lh = (rotate == 90 || rotate == 270) ? w : h;
+	SDL_Rect dst, shown, plate, arm, home;
+	int bad = 0, consumed = 0, i;
+	unsigned s;
+
+	panel_rect(rotate, lw, lh, w, h, &dst, &shown);
+	pad_init();
+	pad_configure(1, 100, 70, 1);
+	pad_set_visible(1);
+	pad_place(&shown);
+
+	if (!pad_debug_rect(PAD_N, &plate) || !pad_debug_rect(PAD_HOME, &home)) {
+		printf("the overlay reports no geometry — nothing to test\n");
+		return 1;
+	}
+	printf("overlay over the %dx%d picture at %d,%d (rotate %d)\n",
+	       shown.w, shown.h, shown.x, shown.y, rotate);
+	printf("  D-pad %dx%d at %d,%d   Home %dx%d at %d,%d\n\n",
+	       plate.w, plate.h, plate.x, plate.y,
+	       home.w, home.h, home.x, home.y);
+
+	printf("one direction at a time — the middle of each arm\n");
+	for (i = 0; i < 4; i++) {
+		char label[48];
+		pad_debug_rect(i, &arm);
+		snprintf(label, sizeof label, "%s arm", PAD_NAME[i]);
+		s = st_pad_tap(arm.x + arm.w / 2, arm.y + arm.h / 2, &consumed);
+		st_pad_expect(label, s, PAD_BIT(i), &bad);
+		if (!consumed) {
+			printf("  %-42s NOT CONSUMED — the guest would be poked too\n",
+			       label);
+			bad++;
+		}
+	}
+
+	/* THE CORNERS ARE THE POINT OF THE SECTOR RULE. A thumb between two arms
+	 * means both, and a D-pad that cannot do that cannot walk diagonally. */
+	printf("\ndiagonals — the corners of the plate\n");
+	s = st_pad_tap(plate.x + plate.w - 3, plate.y + 2, &consumed);
+	st_pad_expect("top right corner", s, PAD_BIT(PAD_UP) | PAD_BIT(PAD_RIGHT), &bad);
+	s = st_pad_tap(plate.x + 2, plate.y + plate.h - 3, &consumed);
+	st_pad_expect("bottom left corner", s, PAD_BIT(PAD_DOWN) | PAD_BIT(PAD_LEFT), &bad);
+
+	printf("\nthe middle presses nothing, and is not ours to swallow\n");
+	s = st_pad_tap(plate.x + plate.w / 2, plate.y + plate.h / 2, &consumed);
+	st_pad_expect("dead centre", s, 0, &bad);
+	if (consumed) {
+		printf("  %-42s CONSUMED — a tap on the picture would be eaten\n",
+		       "dead centre");
+		bad++;
+	}
+
+	printf("\nHome\n");
+	s = st_pad_tap(home.x + home.w / 2, home.y + home.h / 2, &consumed);
+	st_pad_expect("middle of the button", s, PAD_BIT(PAD_HOME), &bad);
+	/* A circle, so its own bounding-box corner is outside it — but the slop
+	 * is generous enough to catch it, and that is deliberate. */
+	s = st_pad_tap(home.x + home.w / 2, home.y - home.h, &consumed);
+	st_pad_expect("a whole button above it", s, 0, &bad);
+
+	printf("\nnothing else on the picture belongs to us\n");
+	s = st_pad_tap(shown.x + shown.w / 2, shown.y + shown.h / 2, &consumed);
+	st_pad_expect("middle of the screen", s, 0, &bad);
+	if (consumed) { printf("  middle of the screen CONSUMED\n"); bad++; }
+
+	/* A THUMB THAT ROLLS FROM ONE ARM TO ANOTHER WITHOUT LIFTING. This is the
+	 * failure that leaves a direction held for ever: the press is remembered
+	 * and the move is not, so LEFT stays down while the player walks right. */
+	printf("\nsliding, without letting go\n");
+	pad_debug_rect(PAD_LEFT, &arm);
+	st_pad_btn(arm.x + arm.w / 2, arm.y + arm.h / 2, 1, &consumed);
+	st_pad_expect("press LEFT", pad_state(), PAD_BIT(PAD_LEFT), &bad);
+	pad_debug_rect(PAD_RIGHT, &arm);
+	st_pad_move(arm.x + arm.w / 2, arm.y + arm.h / 2);
+	st_pad_expect("slide to RIGHT", pad_state(), PAD_BIT(PAD_RIGHT), &bad);
+	st_pad_move(shown.x + shown.w / 2, shown.y + shown.h / 2);
+	st_pad_expect("slide off the control", pad_state(), 0, &bad);
+	st_pad_btn(shown.x + shown.w / 2, shown.y + shown.h / 2, 0, &consumed);
+	st_pad_expect("and let go", pad_state(), 0, &bad);
+
+	/* THE OVERLAY AND THE ARROW KEYS MUST AGREE, at every orientation. They
+	 * are the same claim about the same direction, made twice, and the whole
+	 * reason pad_pump() goes through rotate_dpad() rather than sending a
+	 * keycode of its own — see the note above it. */
+	printf("\nthe overlay sends what the arrow key sends, at every rotation\n");
+	{
+		static const SDL_Keycode arrows[4] = {
+			SDLK_UP, SDLK_RIGHT, SDLK_DOWN, SDLK_LEFT
+		};
+		int rot;
+		for (rot = 0; rot < 360; rot += 90) {
+			int wrong = 0;
+			for (i = 0; i < 4; i++)
+				if (rotate_dpad(i, rot) != map_key(arrows[i], rot))
+					wrong++;
+			printf("  rotate %-3d %s\n", rot,
+			       wrong ? "DISAGREES" : "ok");
+			bad += wrong;
+		}
+	}
+
+	/* ---- and the bytes the guest would actually read ---------------------
+	 *
+	 * Everything above stops one step short: it proves the overlay agrees with
+	 * the arrow keys about which KEYCODE a direction is, and says nothing
+	 * about whether pressing one puts that keycode on the wire. Those are the
+	 * eight lines of pad_pump(), and they are exactly the eight that would
+	 * leave a D-pad which lights up and does nothing.
+	 *
+	 * The evdev nodes are ordinary FILES here rather than FIFOs. The viewer
+	 * opens them O_RDWR either way and cannot tell the difference, and a plain
+	 * file can be read back afterwards with no guest on the other end to serve
+	 * it — which is the whole difficulty in testing a write-only path.
+	 */
+	printf("\nwhat reaches the guest's keypad node\n");
+	{
+		char dir[512], path[600];
+		const char *saved_dir = g_dir;
+		int fd, n, k, seen;
+		struct guest_input_event evs[16];
+		static const struct { const char *what; int btn; int down; } steps[] = {
+			{ "press UP",     PAD_UP,   1 },
+			{ "release UP",   PAD_UP,   0 },
+			{ "press HOME",   PAD_HOME, 1 },
+			{ "release HOME", PAD_HOME, 0 },
+		};
+
+		/* DRAIN FIRST. pad_take_changed() reports every transition since it was
+		 * last called, and nothing above this point calls it — so the taps in
+		 * the earlier sections are all still pending and the first pump would
+		 * flush the lot. Harmless in the viewer, which pumps every frame; here
+		 * it would be measuring the wrong presses. */
+		pad_take_changed();
+
+		snprintf(dir, sizeof dir, "/tmp/tadpole-selftest-pad-%d", (int)getpid());
+		mkdir(dir, 0755);
+		for (k = 0; k < NUM_EV; k++) {
+			snprintf(path, sizeof path, "%s/ev%d", dir, k);
+			fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+			if (fd >= 0) close(fd);
+			if (g_evfd[k] >= 0) close(g_evfd[k]);
+			g_evfd[k] = -1;
+		}
+		g_dir = dir;
+		ev_open_missing();
+
+		/* READ THE TAIL, DO NOT TRUNCATE BETWEEN STEPS. The writing fd stays
+		 * open across all four, and truncating a file out from under an open
+		 * descriptor does not rewind that descriptor — the next write lands at
+		 * its old offset and leaves a hole of zeros in front of itself, which
+		 * reads back as a growing pile of events with code 0. */
+		seen = 0;
+		for (k = 0; k < (int)(sizeof steps / sizeof *steps); k++) {
+			uint16_t want = steps[k].btn < 4
+			              ? rotate_dpad(steps[k].btn, rotate) : KEY_M_;
+			int ok, fresh;
+			pad_debug_press(steps[k].down ? PAD_BIT(steps[k].btn) : 0u);
+			pad_pump(rotate);
+			snprintf(path, sizeof path, "%s/ev%d", dir, EV_GPIO_KEYS);
+			fd = open(path, O_RDONLY);
+			n = fd >= 0 ? (int)read(fd, evs, sizeof evs) : 0;
+			if (fd >= 0) close(fd);
+			n /= (int)sizeof evs[0];
+			fresh = n - seen;
+			/* One EV_KEY then one EV_SYN — send_key()'s whole contract, and a
+			 * report with no SYN after it is one the guest's input layer is
+			 * entitled to sit on for ever. */
+			ok = (fresh == 2 &&
+			      evs[seen].type == EV_KEY && evs[seen].code == want &&
+			      evs[seen].value == steps[k].down &&
+			      evs[seen + 1].type == EV_SYN);
+			if (!ok) bad++;
+			printf("  %-42s %d event(s), code %u value %d  %s\n",
+			       steps[k].what, fresh,
+			       fresh > 0 ? evs[seen].code : 0,
+			       fresh > 0 ? evs[seen].value : -1,
+			       ok ? "ok" : "WRONG");
+			seen = n;
+		}
+		for (k = 0; k < NUM_EV; k++) {
+			if (g_evfd[k] >= 0) close(g_evfd[k]);
+			g_evfd[k] = -1;
+			snprintf(path, sizeof path, "%s/ev%d", dir, k);
+			unlink(path);
+		}
+		rmdir(dir);
+		g_dir = saved_dir;
+	}
+
+	pad_release_all();
+	printf("\n%s\n", bad
+	       ? "FAILED — the overlay does not answer where it is drawn"
+	       : "PASS — arms, diagonals, dead zone, slop, sliding, the key map "
+	         "and the bytes on the wire");
 	return bad ? 1 : 0;
 }
 
@@ -2880,6 +3346,7 @@ int main(int argc, char **argv)
 	int selftest_want = 0;
 	const char *shot_state = NULL, *shot_out = NULL;
 	int apps_test = 0;
+	int pad_test = 0;
 	int boot_now = 0, power_announced = 0;
 	const char *env;
 
@@ -2953,9 +3420,16 @@ int main(int argc, char **argv)
 		}
 		else if (!strcmp(argv[i], "--selftest-apps"))
 			apps_test = 1;
+		else if (!strcmp(argv[i], "--selftest-pad"))
+			pad_test = 1;
 	}
 	if (selftest_want)
 		return selftest(rotate, scale);
+	/* Before SDL_Init and before any window: the overlay's hit testing is
+	 * arithmetic on a rectangle and needs neither, so this runs on a machine
+	 * with no display at all. */
+	if (pad_test)
+		return selftest_pad(rotate);
 
 	/* NOT fatal any more. The front end has to come up with nothing running
 	 * so File -> Run System Menu is reachable; the shim creates these files
@@ -2992,6 +3466,7 @@ int main(int argc, char **argv)
 	ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 	set_logical(ren, rotate, w, h);
 	ui_init(ren, g_projdir);
+	pad_init();
 	{
 		SDL_Surface *ico = ui_icon_surface();
 		if (ico) { SDL_SetWindowIcon(win, ico); SDL_FreeSurface(ico); }
@@ -3061,6 +3536,31 @@ int main(int argc, char **argv)
 	while (running) {
 		SDL_Event e;
 
+		/* The overlay is hit-tested from here and drawn forty lines further
+		 * down, so it is placed at BOTH ends of the frame rather than only at
+		 * the one that draws it. Placing it only before the draw leaves the
+		 * first frame of a session — and the first frame after a rotation —
+		 * answering from the previous layout. */
+		{
+			int lw = (rotate == 90 || rotate == 270) ? h : w;
+			int lh = (rotate == 90 || rotate == 270) ? w : h;
+			SDL_Rect dst, shown;
+			panel_rect(rotate, lw, lh, w, h, &dst, &shown);
+			pad_configure(ui_cfg()->pad_on, ui_cfg()->pad_size,
+			              ui_cfg()->pad_opacity, ui_cfg()->pad_left);
+			/* IS THERE A PICTURE TO PUT THEM ON — not "did we launch the
+			 * guest". Those come apart under `tadpole.sh --app`, where the
+			 * script starts the guest and holds the lock itself, so
+			 * guest_external() is deliberately false (see the note in it) and
+			 * g_guest is zero. The controls were invisible for exactly the
+			 * launch people use most. g_state is the shared arena: it is
+			 * non-NULL when a guest has drawn, which is also the condition the
+			 * composite below draws under, so the controls appear with the
+			 * picture and go when it does. */
+			pad_set_visible(g_state != NULL);
+			pad_place(&shown);
+		}
+
 		while (SDL_PollEvent(&e)) {
 			/* Chrome first. A click on the bar, an open menu or any modal
 			 * belongs to the front end and must NOT also reach the guest. */
@@ -3077,6 +3577,14 @@ int main(int argc, char **argv)
 					continue;
 				}
 			}
+			/* Then the on-screen D-pad, which is over the guest's picture and
+			 * under the chrome — the same order they are drawn in, and for the
+			 * same reason: a press has to belong to exactly one of the three.
+			 * A press it takes is NOT also a stylus touch, which is what the
+			 * `continue` is for; without it, pressing LEFT would poke the
+			 * bottom-left corner of the touchscreen at the same time. */
+			if (pad_event(&e, ren))
+				continue;
 			switch (e.type) {
 			case SDL_WINDOWEVENT:
 				/* Re-assert the logical size whenever the window is
@@ -3183,6 +3691,15 @@ int main(int argc, char **argv)
 				break;
 			}
 		}
+
+		/* A DIALOG OPENING MUST NOT LEAVE A DIRECTION HELD. While a modal is
+		 * up, ui_event() takes every press before the overlay can see it — so
+		 * the release of whatever was held when it opened never arrives, and
+		 * the guest walks into a wall until something else happens to press
+		 * that key. */
+		if (ui_modal() && pad_state())
+			pad_release_all();
+		pad_pump(rotate);
 
 		/* Replay whatever the guest queued. The finished frame lands in the
 		 * SAME place the software rasteriser writes — fb1's page in the shared
@@ -3442,7 +3959,9 @@ int main(int argc, char **argv)
 		{
 			int lw = (rotate == 90 || rotate == 270) ? h : w;
 			int lh = (rotate == 90 || rotate == 270) ? w : h;
-			SDL_Rect dst = { (lw - w) / 2, UI_BAR_H + (lh - h) / 2, w, h };
+			SDL_Rect dst, shown;
+
+			panel_rect(rotate, lw, lh, w, h, &dst, &shown);
 
 			SDL_SetRenderDrawColor(ren, 6, 15, 10, 255);
 			SDL_RenderClear(ren);
@@ -3491,6 +4010,10 @@ int main(int argc, char **argv)
 			} else {
 				ui_draw_idle(ren, lw, lh + UI_BAR_H);
 			}
+			/* The overlay controls sit between the guest's picture and the
+			 * chrome, which is the order they are hit-tested in too. */
+			pad_place(&shown);
+			pad_draw(ren);
 			ui_draw(ren, lw, lh + UI_BAR_H);
 		}
 		SDL_RenderPresent(ren);

@@ -274,6 +274,11 @@ static struct ui_settings g_cfg = {
 	.tslib            = 0,
 	.boot_on_start    = 0,
 	.fast_boot        = 1,
+	.pad_on           = 1,
+	.pad_size         = 100,
+	.pad_opacity      = 70,
+	.pad_left         = 1,
+	.touch_ui         = 1,
 	.games_dir        = "",
 };
 static enum ui_action g_action;
@@ -334,7 +339,13 @@ static char  g_fb_title[64];
 struct fentry { char name[256]; int isdir; };
 static struct fentry *g_fb_list;
 static int   g_fb_n, g_fb_sel, g_fb_top;
-#define FB_ROWS 11
+/* HOW MANY ROWS THE BROWSER SHOWS, and it is no longer a constant: the row
+ * height changes with the touch setting, so the count that fits changes with
+ * it. Written down at draw time — the same trick g_gm_rows and g_mm_rows
+ * already use — because the paging keys and the wheel clamp run outside the
+ * draw and have no dialog rect to work it out from. */
+#define FB_ROWS (g_fb_rows)
+static int g_fb_rows = 11;
 
 /* ---- progress ------------------------------------------------------------ */
 
@@ -1132,6 +1143,48 @@ static void panel(SDL_Renderer *r, int x, int y, int w, int h, float rtop)
 	panel_glass(r, x, y, w, h, glass_capture(r), rtop);
 }
 
+/* ---- touch metrics -------------------------------------------------------
+ *
+ * See the note above ui_bar_h() in tadpole_ui.h for why only the heights move
+ * and the font does not. The pairs are written out rather than derived from
+ * one multiplier because they are not one multiplier: the bar gains 9 and a
+ * settings row gains 10, since a row has a tick box beside its label and wants
+ * a little more air than a title in a bar does. A single factor would have
+ * been tidier to read and worse to look at.
+ *
+ * 23 AND 24 ARE NOT ARBITRARY. A fingertip is about 9mm; on the panel-sized
+ * logical space of a typical fullscreen touch device that lands between 20 and
+ * 26 logical pixels, and below about 20 the rows start being missed.
+ */
+/* TADPOLE_TOUCH_UI OVERRIDES THE SETTING, so either look can be captured
+ * without going through a dialog to reach it — which is how the before and
+ * after of this change were compared at all. */
+static int m_touch(void)
+{
+	const char *e = getenv("TADPOLE_TOUCH_UI");
+	if (e) return atoi(e) != 0;
+	return g_cfg.touch_ui;
+}
+
+int ui_bar_h(void)      { return m_touch() ? 22 : 13; }
+int ui_row_h(void)      { return m_touch() ? 24 : 14; }
+int ui_menu_row_h(void) { return m_touch() ? 23 : 12; }
+int ui_btn_h(void)      { return m_touch() ? 22 : 13; }
+int ui_list_row_h(void) { return m_touch() ? 22 : 11; }
+int ui_touch_ui(void)   { return m_touch(); }
+
+/* A settings row, and where the first one starts: below the dialog's title,
+ * which it has to clear whatever the row height turned out to be. Up here with
+ * the other metrics because dlg_body_h() sizes a dialog from them, and that is
+ * a long way above the rows themselves. */
+#define ROW_H (ui_row_h())
+static int row_top(void) { return ui_touch_ui() ? 26 : 22; }
+
+/* Where the 7px font sits inside a box of height h, so a label is centred
+ * whatever the box turned out to be. Every one of these used to be written by
+ * hand as "+ 3", which is right at 13 and wrong at 22. */
+static int text_dy(int h) { return (h - FONT_H) / 2; }
+
 static int text_w(const char *s) { return (int)strlen(s) * GLYPH_ADV; }
 
 static void text(SDL_Renderer *r, int x, int y, const char *s, unsigned col)
@@ -1159,6 +1212,89 @@ static void text_c(SDL_Renderer *r, int x, int w, int y, const char *s, unsigned
 static int inside(int px, int py, int x, int y, int w, int h)
 {
 	return px >= x && py >= y && px < x + w && py < y + h;
+}
+
+/* ---- hover, and the fact that a touchscreen has none ---------------------
+ *
+ * Some sixty highlights in this file ask inside(g_mx, g_my, ...). Under a
+ * mouse that means "the pointer is over this", and it is continuously true or
+ * continuously false. Under a finger it means nothing of the kind: g_mx and
+ * g_my are only written when something is being touched, so the moment the
+ * finger lifts, the last place it was stays behind — and whatever is under
+ * that point keeps its highlight until the next tap moves it somewhere else.
+ *
+ * A row lit up that nobody is pointing at is worse than no highlight at all.
+ * It is a claim about where the next press will land, and it is wrong.
+ *
+ * The fix is one line rather than sixty: when a TOUCH lifts, the pointer is
+ * moved off the screen entirely, because that is where it now is. Every hover
+ * test then answers no on its own, without knowing anything about touch. While
+ * the finger is down the highlight follows it, which is press feedback and is
+ * the one thing a touchscreen genuinely wants from these.
+ *
+ * A real mouse button release does not do this: the mouse is still there.
+ */
+#define POINTER_GONE (-30000)
+
+static void pointer_left(void) { g_mx = g_my = POINTER_GONE; }
+
+/* ---- lent to the overlay controls ----------------------------------------
+ *
+ * viewer/tadpole_pad.c draws the on-screen D-pad and Home button. They are
+ * over the guest's picture rather than up in the bar, but they are the same
+ * interface and have to be made of the same material — so they borrow the
+ * shapes rather than growing a second, subtly different idea of what a corner
+ * radius, a rim or a glow is. That divergence is the whole reason these are
+ * exported instead of copied: two sets of rounded-rect routines drift, and the
+ * drift shows up as one control that does not look like the others.
+ *
+ * The palette goes with them for the same reason. TADPOLE_THEME=green has to
+ * repaint the D-pad too, and it cannot if the D-pad has its own colours.
+ */
+void ui_rr_fill(SDL_Renderer *r, float x, float y, float w, float h,
+                float radius, unsigned col, Uint8 alpha)
+{
+	rr_fill_ex(r, NULL, x, y, w, h, radius, radius, radius, radius, col, alpha);
+}
+
+void ui_rr_grad(SDL_Renderer *r, float x, float y, float w, float h,
+                float radius, unsigned ctop, Uint8 atop,
+                unsigned cbot, Uint8 abot)
+{
+	rr_geom(r, NULL, NULL, x, y, w, h, radius, radius, radius, radius,
+	        ctop, atop, cbot, abot);
+}
+
+void ui_rr_stroke(SDL_Renderer *r, float x, float y, float w, float h,
+                  float radius, unsigned ctop, Uint8 atop,
+                  unsigned cbot, Uint8 abot, float thick)
+{
+	rr_stroke_grad(r, x, y, w, h, radius, radius, ctop, atop, cbot, abot, thick);
+}
+
+void ui_glow(SDL_Renderer *r, int cx, int cy, int radius, unsigned col,
+             Uint8 alpha)
+{
+	glow(r, cx, cy, radius, col, alpha);
+}
+
+void ui_text_at(SDL_Renderer *r, int x, int y, const char *s, unsigned col)
+{
+	text(r, x, y, s, col);
+}
+
+int ui_text_w(const char *s) { return text_w(s); }
+
+void ui_colors(struct ui_colors *out)
+{
+	out->accent   = C_ACCENT;
+	out->text     = C_TEXT;
+	out->text_dim = C_TEXT_DIM;
+	out->panel    = C_PANEL;
+	out->panel_hi = C_PANEL_HI;
+	out->edge     = C_EDGE_LT;
+	out->shadow   = C_SHADOW;
+	out->bg       = C_VOID;
 }
 
 /* mkdir -p. The directories we create live under XDG paths that are NOT
@@ -1582,6 +1718,9 @@ struct ap_entry {
 };
 static struct ap_entry *g_ap;
 static int g_ap_n, g_ap_cap, g_ap_top, g_ap_sel, g_ap_rows = 6;
+/* The selection the view has already been scrolled to. -1 so the first draw
+ * centres on whatever is selected; see the note in the M_APPS draw. */
+static int g_ap_seen = -1;
 
 /* WHAT IS WORTH OFFERING TO LAUNCH.
  *
@@ -2232,7 +2371,9 @@ void ui_cfg_save(void)
 	           "audio_on %d\naudio_latency_ms %d\naudio_pace %d\n"
 	           "frame_cap %d\nhle_strict %d\nmsaa %d\nrender_scale %d\n"
 	           "io_delay_us %d\ntslib %d\n"
-	           "boot_on_start %d\nfast_boot %d\n",
+	           "boot_on_start %d\nfast_boot %d\n"
+	           "pad_on %d\npad_size %d\npad_opacity %d\npad_left %d\n"
+	           "touch_ui %d\n",
 	        g_cfg.gl, g_cfg.gl_hle, g_cfg.debug_level, g_cfg.log_to_file,
 	        g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
 	        g_cfg.rotate, g_cfg.auto_rotate, g_cfg.scale, g_cfg.touch_debug,
@@ -2240,7 +2381,9 @@ void ui_cfg_save(void)
 	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.msaa, g_cfg.render_scale,
 	        g_cfg.io_delay_us,
 	        g_cfg.tslib,
-	        g_cfg.boot_on_start, g_cfg.fast_boot);
+	        g_cfg.boot_on_start, g_cfg.fast_boot,
+	        g_cfg.pad_on, g_cfg.pad_size, g_cfg.pad_opacity, g_cfg.pad_left,
+	        g_cfg.touch_ui);
 	/* Last, and only if set: it is the one value that can contain spaces. */
 	if (g_cfg.games_dir[0])
 		fprintf(f, "games_dir %s\n", g_cfg.games_dir);
@@ -2297,6 +2440,11 @@ static void cfg_load(void)
 			else if (!strcmp(k, "tslib"))            g_cfg.tslib = val;
 			else if (!strcmp(k, "boot_on_start"))    g_cfg.boot_on_start = val;
 			else if (!strcmp(k, "fast_boot"))        g_cfg.fast_boot = val;
+			else if (!strcmp(k, "pad_on"))          g_cfg.pad_on = val;
+			else if (!strcmp(k, "pad_size"))        g_cfg.pad_size = val;
+			else if (!strcmp(k, "pad_opacity"))     g_cfg.pad_opacity = val;
+			else if (!strcmp(k, "pad_left"))        g_cfg.pad_left = val;
+			else if (!strcmp(k, "touch_ui"))        g_cfg.touch_ui = val;
 			/* Older files carried these two; the debug level replaced them.
 			 * Honour them once so an existing install does not silently lose
 			 * the logging it was set up with. */
@@ -2390,9 +2538,15 @@ static struct menu MENUS[] = {
 
 static void menu_layout(void)
 {
-	int i, x = 3;
+	/* WIDER TITLES WHEN THEY HAVE TO BE PRESSED. "File" is four glyphs, 24
+	 * pixels of text; with the old 10 pixels of padding the whole target was
+	 * 34 wide and 13 tall, which is a comfortable thing to click at and a
+	 * fiddly thing to hit with a thumb. The bar gained its height from
+	 * ui_bar_h(); this is the other half of the same target. */
+	int pad = ui_touch_ui() ? 20 : 10;
+	int i, x = ui_touch_ui() ? 4 : 3;
 	for (i = 0; i < NMENUS; i++) {
-		MENUS[i].w = text_w(MENUS[i].title) + 10;
+		MENUS[i].w = text_w(MENUS[i].title) + pad;
 		MENUS[i].x = x;
 		x += MENUS[i].w;
 	}
@@ -2406,6 +2560,38 @@ static int menu_width(const struct menu *m)
 		if (t > w) w = t;
 	}
 	return w;
+}
+
+/* WHERE THE Nth DROPDOWN ITEM IS. This was "UI_BAR_H + 3 + i * 12" written out
+ * at four call sites — the draw and three hit tests — with the row height as a
+ * bare 12 in each. They agreed only by everyone remembering to change all
+ * four, which is not a property of the code, it is a habit of the author.
+ *
+ * A SEPARATOR IS A RULE, NOT A ROW, so it is not given a row's height. At the
+ * old 12 that distinction was not worth drawing; at a touch-sized 23 a
+ * full-height separator is a fingertip of nothing in the middle of the menu,
+ * and the File menu has three of them. Summing the heights rather than
+ * multiplying one of them is what lets the two differ. */
+static int menu_item_h(const struct mitem *it)
+{
+	if (it->id) return ui_menu_row_h();
+	return ui_touch_ui() ? 9 : 12;
+}
+
+static int menu_item_y(const struct menu *m, int i)
+{
+	int k, y = UI_BAR_H + 3;
+	for (k = 0; k < i && k < m->n; k++)
+		y += menu_item_h(&m->items[k]);
+	return y;
+}
+
+static int menu_height(const struct menu *m)
+{
+	int k, h = 6;
+	for (k = 0; k < m->n; k++)
+		h += menu_item_h(&m->items[k]);
+	return h;
 }
 
 static int item_enabled(const struct mitem *it)
@@ -2864,6 +3050,21 @@ static struct dlg dlg_rect(int lw, int lh, int w, int h)
 	return d;
 }
 
+/* HOW TALL A SETTINGS DIALOG HAS TO BE, given what is in it.
+ *
+ * These used to be plain numbers — 200, 122, 164 — measured once by eye at a
+ * row height of 14. A touch-sized row is 24, and the plain numbers did not
+ * know that: the Graphics dialog quietly pushed its last two rows and its
+ * footnote out through its own floor and drew them over the Close button.
+ *
+ * `rows` is how many settings rows the body draws; `extra` is everything under
+ * them that is not one — a note, a separator, a block of key bindings.
+ */
+static int dlg_body_h(int rows, int extra)
+{
+	return row_top() + rows * ROW_H + extra + 6 + ui_btn_h() + 5;
+}
+
 /* A dialog that asks for a size but never wider or taller than the window.
  *
  * Rotating to portrait makes the logical space 272 wide, and the fixed sizes
@@ -2907,11 +3108,18 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	/* Wide and tall: this is a changelog, and a release body wrapped
 	 * into 30 columns would be unreadable. */
 	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
-	case M_GFX:   return dlg_fit(lw, lh, 250, 200);
-	case M_AUDIO: return dlg_fit(lw, lh, 230, 122);
-	case M_PAD:   return dlg_fit(lw, lh, 240, 140);
-	case M_DEBUG: return dlg_fit(lw, lh, 268, 200);
-	case M_SYSTEM: return dlg_fit(lw, lh, 268, 164);
+	/* NINE rows: the eight this had, plus "Turn with the app" from main. */
+	case M_GFX:   return dlg_fit(lw, lh, 250, dlg_body_h(9, 0));
+	case M_AUDIO: return dlg_fit(lw, lh, 230, dlg_body_h(3, 0));
+	/* Four settings, a note about A and B, then the key bindings — which are
+	 * one column at a mouse-sized row height and two at a touch-sized one, so
+	 * they still fit under rows that are ten pixels taller each. */
+	case M_PAD:   return dlg_fit(lw, lh, 240,
+	                             dlg_body_h(5, ui_touch_ui() ? 60 : 100));
+	case M_DEBUG: return dlg_fit(lw, lh, 268, dlg_body_h(8, 0));
+	/* Two settings, the games folder and its path, then a row of two buttons
+	 * sitting where a sixth row would be. */
+	case M_SYSTEM: return dlg_fit(lw, lh, 268, dlg_body_h(6, 6));
 	case M_FILES: return dlg_fit(lw, lh, 300, 172);
 	case M_WIZARD: return dlg_fit(lw, lh, 348, 210);
 	case M_PROGRESS: return dlg_fit(lw, lh, 350, 150);
@@ -2923,6 +3131,14 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	case M_GAMES: return dlg_fit(lw, lh, 460, 260);
 	default:      { struct dlg z = {0,0,0,0}; return z; }
 	}
+}
+
+/* HOW FAR THE BOTTOM ROW OF BUTTONS SITS FROM THE DIALOG'S FLOOR. One number,
+ * because four different helpers below each used to write their own and a
+ * taller button pushed each of them a different distance off the edge. */
+static int btn_row_y(const struct dlg *d)
+{
+	return d->y + d->h - ui_btn_h() - 5;
 }
 
 /* ---- app launcher geometry ----------------------------------------------
@@ -2957,7 +3173,9 @@ static int ap_row_w(const struct dlg *d, int vis)
 /* Does the library have room for the preview panel on the right? In portrait
  * it does not, and the list gets the whole width instead. */
 #define GM_PANEL_W 104
-#define GM_ROW_H   15
+/* Tall enough to put a finger on, which for a row with an icon in it is not
+ * much more than it already was. */
+#define GM_ROW_H   (ui_touch_ui() ? 24 : 15)
 static int gm_panel(const struct dlg *d) { return d->w >= 300 ? GM_PANEL_W : 0; }
 
 /* THE MICROMODS BUTTON, WHEN THERE IS ROOM FOR IT. -> 0 when there is not.
@@ -2976,28 +3194,110 @@ static int gm_micro_rect(const struct dlg *d, SDL_Rect *out)
 	int x = d->x + 110, w = 76;
 	int install_x = d->x + d->w - 8 - 48 - 62;
 	if (x + w + 6 > install_x) return 0;
-	out->x = x; out->y = d->y + d->h - 18; out->w = w; out->h = 13;
+	out->x = x; out->y = btn_row_y(d); out->w = w; out->h = ui_btn_h();
 	return 1;
 }
 static int gm_list_w(const struct dlg *d) { return d->w - 12 - gm_panel(d); }
-static int gm_list_h(const struct dlg *d) { return d->h - 26 - 22; }
+/* Stops above the footer, which is a button tall — it used to be told 22,
+ * which is a button tall only at the old height. */
+static int gm_list_h(const struct dlg *d) { return d->h - 26 - ui_btn_h() - 9; }
+
+/* ---- scrolling a list with a finger --------------------------------------
+ *
+ * EVERY LIST IN THIS FILE SCROLLED BY WHEEL AND BY KEYBOARD, and a touchscreen
+ * has neither. Four hundred titles in the launcher, three hundred in the
+ * library, a directory of any size in the browser: without this, a finger can
+ * reach the first seven of each and nothing else. That is not a rough edge,
+ * it is the interface not working.
+ *
+ * ONE DESCRIPTION OF "A LIST", filled in per modal, so the drag does not need
+ * to know which of the five it is dragging. Each of them already keeps its own
+ * first-visible index and its own row height; this collects the two, plus the
+ * rectangle the drag counts inside, and hands back a pointer so the drag can
+ * move the real thing.
+ */
+struct list_view {
+	SDL_Rect body;      /* where a press starts a drag */
+	int      row_h;
+	int     *top;       /* the list's own first-visible index */
+	int      n;         /* rows in total */
+	int      vis;       /* rows on screen */
+};
+
+static int list_view(const struct dlg *d, struct list_view *v);
+
+/* TAP OR DRAG, decided by how far it moved. Below this a press inside a list
+ * is still a press and selects the row under it; above it, the press was the
+ * beginning of a scroll and must not also choose something. Four pixels is
+ * about the wobble of a finger that believes it is holding still. */
+#define DRAG_SLOP 4
+
+static struct {
+	int    active;      /* a press landed inside a list body */
+	int    x0, y0;      /* and where it landed, for the tap that may follow */
+	int    last;        /* the last y seen, so motion is a delta */
+	int    moved;       /* the furthest it has been from the start */
+	int    rem;         /* pixels not yet worth a whole row */
+	float  vel;         /* pixels per frame, for the flick */
+} g_drag;
+
+static void list_clamp(struct list_view *v)
+{
+	if (*v->top > v->n - v->vis) *v->top = v->n - v->vis;
+	if (*v->top < 0) *v->top = 0;
+}
+
+/* Move a list by a pixel delta, keeping the remainder. Without the remainder a
+ * slow drag never accumulates a whole row and the list simply does not move,
+ * which reads as the list being stuck rather than as the drag being gentle. */
+static void list_scroll_px(struct list_view *v, int dy)
+{
+	int rows;
+	g_drag.rem += dy;
+	rows = g_drag.rem / v->row_h;
+	if (!rows) return;
+	g_drag.rem -= rows * v->row_h;
+	*v->top -= rows;                 /* content follows the finger */
+	list_clamp(v);
+}
+
+/* The flick. Called once a frame from ui_draw, because that is the only thing
+ * here that happens every frame. */
+static void list_fling(int lw, int lh)
+{
+	struct dlg d;
+	struct list_view v;
+	int dy;
+
+	if (g_drag.active || g_modal == M_NONE) return;
+	if (g_drag.vel > -0.6f && g_drag.vel < 0.6f) { g_drag.vel = 0; return; }
+	d = cur_dlg(lw, lh);
+	if (!list_view(&d, &v)) { g_drag.vel = 0; return; }
+	dy = (int)g_drag.vel;
+	list_scroll_px(&v, dy);
+	/* A list that has run out of room stops dead rather than coasting against
+	 * its own end for another half second. */
+	if (*v.top == 0 || *v.top == v.n - v.vis) { g_drag.vel = 0; return; }
+	g_drag.vel *= 0.90f;
+}
 
 /* Rows inside settings dialogs are uniform, so one helper does hit-testing
  * and drawing from the same numbers. */
-#define ROW_H 14
-static int row_y(const struct dlg *d, int i) { return d->y + 22 + i * ROW_H; }
+static int row_y(const struct dlg *d, int i) { return d->y + row_top() + i * ROW_H; }
 
 /* A settings row: checkbox or a cycling value. Returns 1 if (mx,my) hits it. */
 static int row_hit(const struct dlg *d, int i, int mx, int my)
 {
-	return inside(mx, my, d->x + 6, row_y(d, i) - 3, d->w - 12, ROW_H);
+	/* The box is centred on the label rather than hung three pixels above it:
+	 * "- 3" is the right offset at a row height of 14 and at no other. */
+	return inside(mx, my, d->x + 6, row_y(d, i) - text_dy(ROW_H), d->w - 12, ROW_H);
 }
 
 static void row_check(SDL_Renderer *r, const struct dlg *d, int i,
                       const char *label, int on, int hot)
 {
 	int y = row_y(d, i);
-	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 178);
+	if (hot) rfill(r, d->x + 6, y - text_dy(ROW_H), d->w - 12, ROW_H, C_PANEL_HI, 178);
 	text(r, d->x + 10, y, on ? GL_CHECK_1 : GL_CHECK_0, on ? C_ACCENT : C_TEXT_DIM);
 	text(r, d->x + 22, y, label, C_TEXT);
 }
@@ -3019,7 +3319,7 @@ static void row_value(SDL_Renderer *r, const struct dlg *d, int i,
                       const char *label, const char *val, int hot)
 {
 	int y = row_y(d, i);
-	if (hot) rfill(r, d->x + 6, y - 3, d->w - 12, ROW_H, C_PANEL_HI, 178);
+	if (hot) rfill(r, d->x + 6, y - text_dy(ROW_H), d->w - 12, ROW_H, C_PANEL_HI, 178);
 	text(r, d->x + 10, y, label, C_TEXT);
 	text(r, d->x + d->w - 12 - text_w(val), y, val, C_ACCENT);
 }
@@ -3028,14 +3328,29 @@ static void row_value(SDL_Renderer *r, const struct dlg *d, int i,
  * the arrangement every Windows installer has used for thirty years, because it
  * needs no explaining. */
 
+/* A button, drawn: the chip and its label, with the label centred vertically
+ * whatever the height turned out to be.
+ *
+ * THIS PATTERN APPEARED SEVENTEEN TIMES, always as a chip() and a text_c() with
+ * the vertical offset written out by hand as "+ 3" — correct at a height of 13
+ * and at no other height, which is the entire problem with making buttons
+ * bigger. Returns whether it is hot, since every caller wanted to know. */
+static int button(SDL_Renderer *r, SDL_Rect b, const char *label)
+{
+	int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
+	chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
+	text_c(r, b.x, b.w, b.y + text_dy(b.h), label, hot ? C_ACCENT : C_TEXT);
+	return hot;
+}
+
 /* Buttons for the update dialog: 0 = Download, 1 = Later. Derived from the
  * dialog rect rather than stored, so a clamped dialog on a small window still
  * has its buttons where they are drawn. */
 static SDL_Rect up_btn(const struct dlg *d, int which)
 {
 	SDL_Rect b;
-	b.w = 76; b.h = 14;
-	b.y = d->y + d->h - b.h - 8;
+	b.w = 76; b.h = ui_btn_h();
+	b.y = btn_row_y(d);
 	b.x = which == 0 ? d->x + d->w - 2 * b.w - 16 : d->x + d->w - b.w - 8;
 	return b;
 }
@@ -3043,8 +3358,8 @@ static SDL_Rect up_btn(const struct dlg *d, int which)
 static SDL_Rect wiz_btn(const struct dlg *d, int which)   /* 0 back 1 next 2 cancel */
 {
 	SDL_Rect r;
-	r.w = 44; r.h = 13;
-	r.y = d->y + d->h - 18;
+	r.w = 44; r.h = ui_btn_h();
+	r.y = btn_row_y(d);
 	r.x = d->x + d->w - 8 - (3 - which) * 47;
 	return r;
 }
@@ -3052,7 +3367,10 @@ static SDL_Rect wiz_btn(const struct dlg *d, int which)   /* 0 back 1 next 2 can
 /* Close button, bottom right of every dialog. */
 static SDL_Rect close_rect(const struct dlg *d)
 {
-	SDL_Rect rc = { d->x + d->w - 48, d->y + d->h - 18, 42, 13 };
+	SDL_Rect rc;
+	rc.w = 42; rc.h = ui_btn_h();
+	rc.x = d->x + d->w - 48;
+	rc.y = btn_row_y(d);
 	return rc;
 }
 
@@ -3082,26 +3400,32 @@ static void draw_bar(SDL_Renderer *r, int lw)
 
 	for (i = 0; i < NMENUS; i++) {
 		int hot = (g_open_menu == i) ||
-		          (g_open_menu < 0 && inside(g_mx, g_my, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1));
+		          (g_open_menu < 0 && inside(g_mx, g_my, MENUS[i].x, 0,
+		                                    MENUS[i].w, UI_BAR_H - 1));
 		if (hot) rfill(r, MENUS[i].x, 0, MENUS[i].w, UI_BAR_H - 1, C_BAR_HI, 178);
-		text(r, MENUS[i].x + 5, 3, MENUS[i].title, hot ? C_ACCENT : C_TEXT);
+		/* Centred in the bar's full height, which comes out at exactly the 3
+		 * this was written as before the height became a variable. */
+		text_c(r, MENUS[i].x, MENUS[i].w, text_dy(UI_BAR_H), MENUS[i].title,
+		       hot ? C_ACCENT : C_TEXT);
 	}
 
-	/* Orientation button — one click per 90 degrees, so a portrait title
+	/* Orientation button — one press per 90 degrees, so a portrait title
 	 * does not mean turning your head. */
 	{
 		int x = rot_x(lw);
-		int hot = inside(g_mx, g_my, x, 1, ROT_W, UI_BAR_H - 3);
-		chip(r, x, 1, ROT_W, UI_BAR_H - 3, hot ? C_BAR_HI : C_PANEL, 1);
+		int bh = UI_BAR_H - 3;
+		int hot = inside(g_mx, g_my, x, 1, ROT_W, bh);
+		chip(r, x, 1, ROT_W, bh, hot ? C_BAR_HI : C_PANEL, 1);
 		snprintf(buf, sizeof(buf), "ROT %d", g_cfg.rotate);
-		text_c(r, x, ROT_W, 3, buf, hot ? C_ACCENT : C_TEXT);
+		text_c(r, x, ROT_W, 1 + text_dy(bh), buf, hot ? C_ACCENT : C_TEXT);
 	}
 
 	/* status, right-aligned before the rotate button */
 	{
 		int sx = rot_x(lw) - 6 - text_w(g_status);
 		if (sx > MENUS[NMENUS-1].x + MENUS[NMENUS-1].w + 6)
-			text(r, sx, 3, g_status, g_running ? C_ACCENT : C_TEXT_DIM);
+			text(r, sx, text_dy(UI_BAR_H), g_status,
+			     g_running ? C_ACCENT : C_TEXT_DIM);
 	}
 }
 
@@ -3116,7 +3440,7 @@ static void draw_dropdown(SDL_Renderer *r)
 	if (g_open_menu < 0) return;
 	m = &MENUS[g_open_menu];
 	w = menu_width(m);
-	h = m->n * 12 + 6;
+	h = menu_height(m);
 	x = m->x; y = UI_BAR_H;
 
 	/* Drops out from under the bar: short, because a menu is something you
@@ -3132,15 +3456,19 @@ static void draw_dropdown(SDL_Renderer *r)
 	panel(r, x, y, w, h, 0.0f);
 
 	for (i = 0; i < m->n; i++) {
-		int iy = y + 3 + i * 12;
 		const struct mitem *it = &m->items[i];
+		int ih = menu_item_h(it);
+		/* The entrance slides the whole sheet up by a few pixels, so rows are
+		 * placed relative to the sheet's own top — menu_item_y() answers in
+		 * settled screen coordinates, which is what the hit tests want. */
+		int iy = y + (menu_item_y(m, i) - UI_BAR_H);
 		if (!it->id) {                       /* separator */
-			fill(r, x + 5, iy + 5, w - 10, 1, C_EDGE_DK);
+			fill(r, x + 5, iy + ih / 2, w - 10, 1, C_EDGE_DK);
 			continue;
 		}
 		if (g_hot_item == i && item_enabled(it))
-			rfill(r, x + 2, iy - 1, w - 4, 12, C_PANEL_HI, 178);
-		text(r, x + 8, iy + 1, it->label,
+			rfill(r, x + 2, iy, w - 4, ih, C_PANEL_HI, 178);
+		text(r, x + 8, iy + text_dy(ih), it->label,
 		     item_enabled(it) ? (g_hot_item == i ? C_ACCENT : C_TEXT) : C_TEXT_DIM);
 	}
 	g_alpha = 255;
@@ -3220,11 +3548,24 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		g_ap_rows = vis;
 		/* Keep the selected row on screen. Arrow keys move the selection and
 		 * the view follows it, which is the half of "scrolling" this list
-		 * never had — the wheel worked, and nothing else did. */
+		 * never had — the wheel worked, and nothing else did.
+		 *
+		 * ONLY WHEN THE SELECTION HAS ACTUALLY MOVED. This used to run on
+		 * every frame, and every frame it dragged the view back to wherever
+		 * the selection was. That was invisible for as long as the only ways
+		 * to scroll were the wheel and the arrow keys: the arrows move the
+		 * selection anyway, and the wheel's own clamp kept the two together by
+		 * accident. A finger does neither — it scrolls the VIEW and leaves the
+		 * selection where it was — so the next frame snapped straight back and
+		 * the list could not be dragged at all. Caught by --selftest-apps,
+		 * which now drags and then draws. */
 		if (g_ap_sel < 0) g_ap_sel = 0;
 		if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;
-		if (g_ap_sel < g_ap_top) g_ap_top = g_ap_sel;
-		if (g_ap_sel >= g_ap_top + vis) g_ap_top = g_ap_sel - vis + 1;
+		if (g_ap_sel != g_ap_seen) {
+			if (g_ap_sel < g_ap_top) g_ap_top = g_ap_sel;
+			if (g_ap_sel >= g_ap_top + vis) g_ap_top = g_ap_sel - vis + 1;
+			g_ap_seen = g_ap_sel;
+		}
 		if (g_ap_top > g_ap_n - vis) g_ap_top = g_ap_n - vis;
 		if (g_ap_top < 0) g_ap_top = 0;
 
@@ -3322,7 +3663,8 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		 * the same fault the app launcher had, for the same reason. The
 		 * count moved onto the title strip, which has room going spare. */
 		int x = d.x + 8, y = d.y + 29, i;
-		int vis = (d.h - 29 - 40) / 11;
+		int rh = ui_list_row_h();
+		int vis = (d.h - 29 - 40) / rh;
 		char line[128];
 
 		if (vis < 1) vis = 1;
@@ -3364,10 +3706,10 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			text(r, x, y + 62, "game has and lists it here.", C_TEXT_DIM);
 			break;
 		}
-		chip(r, x - 4, y - 4, d.w - 16, vis * 11 + 6, C_VOID, 0);
+		chip(r, x - 4, y - 4, d.w - 16, vis * rh + 6, C_VOID, 0);
 		for (i = 0; i < vis && g_mm_top + i < g_mm_n; i++) {
 			struct mm_entry *e = &g_mm[g_mm_top + i];
-			int yy = y + i * 11;
+			int yy = y + i * rh + text_dy(rh) - 2;
 			int can = e->avail && !e->installed && !e->dep;
 			/* A TICK BOX ONLY WHERE TICKING MEANS SOMETHING. An installed slot
 			 * has nothing to fetch, and the CartridgeData stub is not a
@@ -3471,7 +3813,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 				int on = (i2 == 1) || g_up_asset[0] != 0;
 				int hot = on && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, b.x, b.w, b.y + 3, L[i2],
+				text_c(r, b.x, b.w, b.y + text_dy(b.h), L[i2],
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
 		}
@@ -3553,10 +3895,15 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		row_check(r, &d, 6, "Turn with the app", g_cfg.auto_rotate,
 		          row_hit(&d, 6, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%dx", g_cfg.scale);
+		/* Rows 7 and 8, not 6 and 7: "Turn with the app" was added above them
+		 * on main while the touch metrics were being written here. */
 		row_value(r, &d, 7, "Window scale", buf, row_hit(&d, 7, g_mx, g_my));
 		row_check(r, &d, 8, "Touch debug overlay", g_cfg.touch_debug,
 		          row_hit(&d, 8, g_mx, g_my));
-		text(r, d.x + 10, d.y + d.h - 30,
+		/* On the button row, to the LEFT of Close. It used to be a fixed 30
+		 * pixels off the floor, which is above the button at a height of 13
+		 * and straight through it at 22. */
+		text(r, d.x + 10, btn_row_y(&d) + text_dy(ui_btn_h()),
 		     g_running ? "GL: reboot to apply."
 		               : "GL applies at next boot.",
 		     g_running ? C_ACCENT : C_TEXT_DIM);
@@ -3628,28 +3975,36 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		 * as the plain choice rather than as a feature being withheld. */
 		row_check(r, &d, 1, "Fast Boot - skip the logo and video",
 		          g_cfg.fast_boot, row_hit(&d, 1, g_mx, g_my));
-		text(r, d.x + 10, row_y(&d, 2) + 2, "Games folder:", C_TEXT);
+		/* The switch for everything ui_bar_h() and its neighbours decide. Off
+		 * restores the original metrics exactly, for anyone driving this with
+		 * a mouse who would rather have the rows back. */
+		row_check(r, &d, 2, "Touch-sized menus and buttons",
+		          g_cfg.touch_ui, row_hit(&d, 2, g_mx, g_my));
+		text(r, d.x + 10, row_y(&d, 3) + 2, "Games folder:", C_TEXT);
 		path_tail(buf, sizeof(buf),
 		          g_cfg.games_dir[0] ? g_cfg.games_dir : "(not chosen yet)");
-		text(r, d.x + 14, row_y(&d, 2) + 12, buf,
+		text(r, d.x + 14, row_y(&d, 3) + 12, buf,
 		     g_cfg.games_dir[0] ? C_ACCENT : C_TEXT_DIM);
 		{
-			SDL_Rect b = { d.x + 10, row_y(&d, 4) + 2, 76, 13 };
+			SDL_Rect b = { d.x + 10, row_y(&d, 5) + 2, 76, ui_btn_h() };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-			text_c(r, b.x, b.w, b.y + 3, "Game Library",
+			text_c(r, b.x, b.w, b.y + text_dy(b.h), "Game Library",
 			       hot ? C_ACCENT : C_TEXT);
 		}
 		{
-			SDL_Rect b = { d.x + 94, row_y(&d, 4) + 2, 96, 13 };
+			SDL_Rect b = { d.x + 94, row_y(&d, 5) + 2, 96, ui_btn_h() };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-			text_c(r, b.x, b.w, b.y + 3, "Setup Wizard",
+			text_c(r, b.x, b.w, b.y + text_dy(b.h), "Setup Wizard",
 			       hot ? C_ACCENT : C_TEXT);
 		}
 		break;
 	}
 	case M_PAD: {
+		/* THE ON-SCREEN CONTROLS COME FIRST, and the keyboard list that used to
+		 * be the whole dialog is underneath. This is the build for a
+		 * touchscreen: the keys are the fallback here, not the subject. */
 		static const char *rows[] = {
 			"Arrows      D-pad",
 			"X / Z       A / B",
@@ -3660,9 +4015,40 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			"Ctrl+R      Rotate",
 			"Ctrl+Q      Quit",
 		};
-		for (i = 0; i < (int)(sizeof rows / sizeof *rows); i++)
-			text(r, d.x + 10, d.y + 20 + i * 10, rows[i], C_TEXT);
-		text(r, d.x + 10, d.y + d.h - 30, "Remapping: not yet.", C_TEXT_DIM);
+		char buf[16];
+		int ky;
+
+		row_check(r, &d, 0, "On-screen D-pad and Home",
+		          g_cfg.pad_on, row_hit(&d, 0, g_mx, g_my));
+		snprintf(buf, sizeof(buf), "%d%%", g_cfg.pad_size);
+		row_value(r, &d, 1, "Size", buf, row_hit(&d, 1, g_mx, g_my));
+		snprintf(buf, sizeof(buf), "%d%%", g_cfg.pad_opacity);
+		row_value(r, &d, 2, "Opacity", buf, row_hit(&d, 2, g_mx, g_my));
+		row_value(r, &d, 3, "D-pad corner", g_cfg.pad_left ? "LEFT" : "RIGHT",
+		          row_hit(&d, 3, g_mx, g_my));
+		/* A and B are missing from this list on purpose — see the note at the
+		 * top of tadpole_pad.h. Saying so here is cheaper than answering it. */
+		text(r, d.x + 10, row_y(&d, 4) + 1,
+		     "A and B: the title draws its own.", C_DIMMEST);
+
+		ky = row_y(&d, 5) + 4;
+		fill(r, d.x + 8, ky - 4, d.w - 16, 1, C_EDGE_DK);
+		text(r, d.x + 10, ky + 2, "KEYBOARD", C_TEXT_DIM);
+		/* TWO COLUMNS WHEN THE ROWS ARE TALL. Eight bindings down one side is
+		 * eighty pixels the touch-sized rows above have already spent, and
+		 * this list is reference material — the last thing in the dialog that
+		 * should push a setting off the bottom. At 240 wide two columns of
+		 * seventeen glyphs fit with room to spare. */
+		{
+			int n = (int)(sizeof rows / sizeof *rows);
+			int cols = ui_touch_ui() ? 2 : 1;
+			int per = (n + cols - 1) / cols;
+			for (i = 0; i < n; i++)
+				text(r, d.x + 10 + (i / per) * (d.w / 2 - 6),
+				     ky + 14 + (i % per) * 10, rows[i], C_TEXT);
+			text(r, d.x + 10, ky + 18 + per * 10,
+			     "Remapping: not yet.", C_DIMMEST);
+		}
 		break;
 	}
 	case M_PROGRESS: {
@@ -3735,10 +4121,10 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			while (*p == ' ') p++;
 		}
 		if (g_confirm) {
-			SDL_Rect b = { d.x + d.w - 96, d.y + d.h - 18, 44, 13 };
+			SDL_Rect b = { d.x + d.w - 96, btn_row_y(&d), 44, ui_btn_h() };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-			text_c(r, b.x, b.w, b.y + 3, "Erase", hot ? C_ACCENT : C_TEXT);
+			text_c(r, b.x, b.w, b.y + text_dy(b.h), "Erase", hot ? C_ACCENT : C_TEXT);
 			/* Below the body, wherever it ended, rather than at a fixed offset
 			 * that a two-line body would collide with. */
 			text(r, d.x + 10, ly + 6, "Games and firmware downloads", C_TEXT_DIM);
@@ -3885,20 +4271,20 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			}
 			text(r, bx, by + 42, "From your own LFConnect downloads:", C_TEXT_DIM);
 			{
-				SDL_Rect b = { bx, by + 54, 76, 13 };
+				SDL_Rect b = { bx, by + 54, 76, ui_btn_h() };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
+				text_c(r, b.x, b.w, b.y + text_dy(b.h), "Browse...", hot ? C_ACCENT : C_TEXT);
 			}
 			/* THE SYSROOT NEEDS ITS OWN BUTTON. Installing firmware builds it,
 			 * but the two can get out of step — an interrupted install, or an
 			 * Erase that took the sysroot with it — and then the page reported
 			 * "Sysroot not built" with no way to act on it. */
 			if (pq.rootfs && !pq.sysroot) {
-				SDL_Rect b = { bx + 84, by + 54, 96, 13 };
+				SDL_Rect b = { bx + 84, by + 54, 96, ui_btn_h() };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, b.x, b.w, b.y + 3, "Build sysroot",
+				text_c(r, b.x, b.w, b.y + text_dy(b.h), "Build sysroot",
 				       hot ? C_ACCENT : C_TEXT);
 			}
 			/* ---- Online System Update ----
@@ -3993,31 +4379,31 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			text(r, bx + 12, by + 57, "the Leapster Explorer's Didj files",
 			     C_TEXT_DIM);
 			{
-				SDL_Rect b = { bx + 12, by + 69, 76, 13 };
-				SDL_Rect g = { bx + 96, by + 69, 76, 13 };
+				SDL_Rect b = { bx + 12, by + 69, 76, ui_btn_h() };
+				SDL_Rect g = { bx + 96, by + 69, 76, ui_btn_h() };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				int hotg = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
 				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
+				text_c(r, b.x, b.w, b.y + text_dy(b.h), "Browse...", hot ? C_ACCENT : C_TEXT);
 				chip(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, g.x, g.w, g.y + 3, "Download", hotg ? C_ACCENT : C_TEXT);
+				text_c(r, g.x, g.w, g.y + text_dy(g.h), "Download", hotg ? C_ACCENT : C_TEXT);
 				if (pq.didj)
-					text(r, g.x + g.w + 10, g.y + 3, "installed", C_ACCENT);
+					text(r, g.x + g.w + 10, g.y + text_dy(g.h), "installed", C_ACCENT);
 			}
 			text(r, bx, by + 90, "2. ControlOverlay.zip", C_TEXT);
 			text(r, bx + 12, by + 101, "on-screen buttons the LeapPad2 lacks",
 			     C_TEXT_DIM);
 			{
-				SDL_Rect b = { bx + 12, by + 113, 76, 13 };
-				SDL_Rect g = { bx + 96, by + 113, 76, 13 };
+				SDL_Rect b = { bx + 12, by + 113, 76, ui_btn_h() };
+				SDL_Rect g = { bx + 96, by + 113, 76, ui_btn_h() };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				int hotg = inside(g_mx, g_my, g.x, g.y, g.w, g.h);
 				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, b.x, b.w, b.y + 3, "Browse...", hot ? C_ACCENT : C_TEXT);
+				text_c(r, b.x, b.w, b.y + text_dy(b.h), "Browse...", hot ? C_ACCENT : C_TEXT);
 				chip(r, g.x, g.y, g.w, g.h, hotg ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, g.x, g.w, g.y + 3, "Download", hotg ? C_ACCENT : C_TEXT);
+				text_c(r, g.x, g.w, g.y + text_dy(g.h), "Download", hotg ? C_ACCENT : C_TEXT);
 				if (pq.didj_overlay)
-					text(r, g.x + g.w + 10, g.y + 3, "installed", C_ACCENT);
+					text(r, g.x + g.w + 10, g.y + text_dy(g.h), "installed", C_ACCENT);
 			}
 			break;
 		case WIZ_PROFILE: {
@@ -4093,10 +4479,10 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			text(r, bx, by + 36, "own cartridges, and pick from a", C_TEXT_DIM);
 			text(r, bx, by + 46, "list of covers and names.", C_TEXT_DIM);
 			{
-				SDL_Rect b = { bx, by + 62, 96, 13 };
+				SDL_Rect b = { bx, by + 62, 96, ui_btn_h() };
 				int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, b.x, b.w, b.y + 3, "Open Library",
+				text_c(r, b.x, b.w, b.y + text_dy(b.h), "Open Library",
 				       hot ? C_ACCENT : C_TEXT);
 			}
 			text(r, bx, by + 80, "Later: File " GL_SUB " Game Library.", C_TEXT_DIM);
@@ -4132,7 +4518,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 				const char *lab = (i2 == 1 && g_wiz_page == WIZ_PAGES - 1)
 				                ? "Finish" : L[i2];
 				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, b.x, b.w, b.y + 3, lab,
+				text_c(r, b.x, b.w, b.y + text_dy(b.h), lab,
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
 		}
@@ -4283,7 +4669,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 
 		/* ---- buttons ---- */
 		{
-			int by = d.y + d.h - 18, i3;
+			int by = btn_row_y(&d), i3;
 			static const char *L[4] = { "Folder...", "Rescan", "", "" };
 			int xs[2] = { d.x + 6, d.x + 6 + 56 };
 			int ws[2] = { 52, 44 };
@@ -4298,25 +4684,26 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 					int on = g_gm_n > 0;
 					int hot = on && inside(g_mx, g_my, mb.x, mb.y, mb.w, mb.h);
 					chip(r, mb.x, mb.y, mb.w, mb.h, hot ? C_BAR_HI : C_PANEL, 1);
-					text_c(r, mb.x, mb.w, mb.y + 3, "Micromods",
+					text_c(r, mb.x, mb.w, mb.y + text_dy(mb.h), "Micromods",
 					       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 				}
 			}
 			for (i3 = 0; i3 < 2; i3++) {
-				int hot = inside(g_mx, g_my, xs[i3], by, ws[i3], 13);
+				int hot = inside(g_mx, g_my, xs[i3], by, ws[i3], ui_btn_h());
 				int on = (i3 == 0) || g_gm_dir[0];
-				chip(r, xs[i3], by, ws[i3], 13, hot && on ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, xs[i3], ws[i3], by + 3, L[i3],
+				chip(r, xs[i3], by, ws[i3], ui_btn_h(),
+				     hot && on ? C_BAR_HI : C_PANEL, 1);
+				text_c(r, xs[i3], ws[i3], by + text_dy(ui_btn_h()), L[i3],
 				       !on ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
 			{
 				int n = games_checked();
-				SDL_Rect b = { d.x + d.w - 8 - 48 - 62, by, 62, 13 };
+				SDL_Rect b = { d.x + d.w - 8 - 48 - 62, by, 62, ui_btn_h() };
 				int hot = n && inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 				if (n) snprintf(buf, sizeof(buf), "Install %d", n);
 				else   snprintf(buf, sizeof(buf), "Install");
 				chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
-				text_c(r, b.x, b.w, b.y + 3, buf,
+				text_c(r, b.x, b.w, b.y + text_dy(b.h), buf,
 				       !n ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 			}
 		}
@@ -4324,18 +4711,25 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 	}
 	case M_FILES: {
 		int ly = d.y + 16, i2;
+		int rh = ui_list_row_h();
 		char shown[49];
 		path_tail(shown, sizeof(shown), g_fb_dir);
 		text(r, d.x + 6, ly, shown, C_TEXT_DIM);
 
-		chip(r, d.x + 6, ly + 11, d.w - 12, FB_ROWS * 11 + 2, C_VOID, 0);
+		g_fb_rows = (d.y + d.h - 20 - (ly + 13)) / rh;
+		if (g_fb_rows < 1) g_fb_rows = 1;
+		if (g_fb_top > g_fb_n - FB_ROWS) g_fb_top = g_fb_n - FB_ROWS;
+		if (g_fb_top < 0) g_fb_top = 0;
+
+		chip(r, d.x + 6, ly + 11, d.w - 12, FB_ROWS * rh + 2, C_VOID, 0);
 		for (i2 = 0; i2 < FB_ROWS && g_fb_top + i2 < g_fb_n; i2++) {
 			int k = g_fb_top + i2;
-			int ry = ly + 13 + i2 * 11;
+			int ry = ly + 13 + i2 * rh + text_dy(rh) - 2;
 			char nm[47];
 			unsigned col = g_fb_list[k].isdir ? C_ACCENT : C_TEXT;
 			if (k == g_fb_sel) {
-				rfill(r, d.x + 8, ry - 1, d.w - 16, 11, C_PANEL_HI, 178);
+				rfill(r, d.x + 8, ly + 12 + i2 * rh, d.w - 16, rh,
+				      C_PANEL_HI, 178);
 				col = C_TEXT;
 			}
 			nm[0] = g_fb_list[k].isdir ? GL_SUB[0] : ' ';
@@ -4360,7 +4754,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		int busy = (g_modal == M_PROGRESS && g_prog_running);
 		int hot = !busy && inside(g_mx, g_my, cb.x, cb.y, cb.w, cb.h);
 		chip(r, cb.x, cb.y, cb.w, cb.h, hot ? C_BAR_HI : C_PANEL, 1);
-		text_c(r, cb.x, cb.w, cb.y + 3,
+		text_c(r, cb.x, cb.w, cb.y + text_dy(cb.h),
 		       g_modal == M_FILES ? "Cancel" : "Close",
 		       busy ? C_TEXT_DIM : hot ? C_ACCENT : C_TEXT);
 	}
@@ -4369,28 +4763,28 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 	 * ticked rows. The child still turns each one on in the game's own menu,
 	 * because that choice is stored per profile in the save data. */
 	if (g_modal == M_MICROMODS) {
-		SDL_Rect in = { cb.x - 62, cb.y, 58, 13 };
-		SDL_Rect sc = { cb.x - 62 - 62, cb.y, 58, 13 };
+		SDL_Rect in = { cb.x - 62, cb.y, 58, ui_btn_h() };
+		SDL_Rect sc = { cb.x - 62 - 62, cb.y, 58, ui_btn_h() };
 		char picked[256];
 		int npick = ui_micromods_picked(picked, sizeof(picked));
 		int hot = npick && inside(g_mx, g_my, in.x, in.y, in.w, in.h);
 		int hot2 = inside(g_mx, g_my, sc.x, sc.y, sc.w, sc.h);
 		chip(r, sc.x, sc.y, sc.w, sc.h, hot2 ? C_BAR_HI : C_PANEL, 1);
-		text_c(r, sc.x, sc.w, sc.y + 3, "Scan", hot2 ? C_ACCENT : C_TEXT);
+		text_c(r, sc.x, sc.w, sc.y + text_dy(sc.h), "Scan", hot2 ? C_ACCENT : C_TEXT);
 		chip(r, in.x, in.y, in.w, in.h, hot ? C_BAR_HI : C_PANEL, 1);
 		if (npick) {
 			char lab[24];
 			snprintf(lab, sizeof(lab), "Install %d", npick);
-			text_c(r, in.x, in.w, in.y + 3, lab, hot ? C_ACCENT : C_TEXT);
+			text_c(r, in.x, in.w, in.y + text_dy(in.h), lab, hot ? C_ACCENT : C_TEXT);
 		} else {
-			text_c(r, in.x, in.w, in.y + 3, "Install", C_TEXT_DIM);
+			text_c(r, in.x, in.w, in.y + text_dy(in.h), "Install", C_TEXT_DIM);
 		}
 	}
 	if (g_modal == M_FILES) {
-		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
+		SDL_Rect ok = { cb.x - 46, cb.y, 42, ui_btn_h() };
 		int hot = inside(g_mx, g_my, ok.x, ok.y, ok.w, ok.h);
 		chip(r, ok.x, ok.y, ok.w, ok.h, hot ? C_BAR_HI : C_PANEL, 1);
-		text_c(r, ok.x, ok.w, ok.y + 3, "Open", hot ? C_ACCENT : C_TEXT);
+		text_c(r, ok.x, ok.w, ok.y + text_dy(ok.h), "Open", hot ? C_ACCENT : C_TEXT);
 		/* Some things ARE the folder: an LFC_Downloads directory of firmware
 		 * packages, or a folder of game backups. A browser that can only open
 		 * directories cannot express "I mean this one", so those two get a
@@ -4401,10 +4795,10 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		 * you are in the right place, and it needs this button most of all. */
 		if (g_fb_action == UI_ACT_SETUP_FIRMWARE ||
 		    g_fb_action == UI_ACT_SCAN_GAMES) {
-			SDL_Rect uf = { ok.x - 74, ok.y, 70, 13 };
+			SDL_Rect uf = { ok.x - 74, ok.y, 70, ui_btn_h() };
 			int h2 = inside(g_mx, g_my, uf.x, uf.y, uf.w, uf.h);
 			chip(r, uf.x, uf.y, uf.w, uf.h, h2 ? C_BAR_HI : C_PANEL, 1);
-			text_c(r, uf.x, uf.w, uf.y + 3, "Use folder",
+			text_c(r, uf.x, uf.w, uf.y + text_dy(uf.h), "Use folder",
 			       h2 ? C_ACCENT : C_TEXT);
 		}
 	}
@@ -4473,6 +4867,10 @@ static void draw_dialog(SDL_Renderer *r, int lw, int lh)
 
 void ui_draw(SDL_Renderer *r, int lw, int lh)
 {
+	/* The flick lives here because this is the only thing in the file that
+	 * happens every frame. It has to run before the draw rather than after, or
+	 * the list is painted one frame behind the position it has moved to. */
+	list_fling(lw, lh);
 	draw_bar(r, lw);
 	draw_dropdown(r);
 	draw_dialog(r, lw, lh);
@@ -4630,8 +5028,92 @@ void ui_debug_state(const char *spec)
 		const struct menu *m = &MENUS[g_open_menu];
 		int w = menu_width(m), i;
 		for (i = 0; i < m->n; i++)
-			if (inside(g_mx, g_my, m->x, UI_BAR_H + 3 + i * 12, w, 12))
+			if (inside(g_mx, g_my, m->x, menu_item_y(m, i), w,
+			           menu_item_h(&m->items[i])))
 				g_hot_item = i;
+	}
+}
+
+/* WHICH LIST IS ON SCREEN, and where it is. -> 0 when the modal has none.
+ *
+ * The rectangles are the same ones the draw uses, worked out from the same
+ * helpers, because a body that disagreed with the rows inside it would scroll
+ * when pressed just off a row and select when pressed just on one.
+ *
+ * The visible counts come from the globals the draw writes each frame rather
+ * than being recomputed here: for the library and the micromods list that is
+ * the only place they exist, and recomputing them would be a second opinion
+ * about a number that already has one.
+ */
+static int list_view(const struct dlg *d, struct list_view *v)
+{
+	switch (g_modal) {
+	case M_APPS: {
+		int vis = ap_rows_fit(d);
+		if (!g_ap_n) return 0;
+		v->body.x = d->x + 8;
+		v->body.y = ap_list_y(d);
+		v->body.w = ap_row_w(d, vis);
+		v->body.h = vis * AP_ROW_H;
+		v->row_h  = AP_ROW_H;
+		v->top    = &g_ap_top;
+		v->n      = g_ap_n;
+		v->vis    = vis;
+		return 1;
+	}
+	case M_GAMES:
+		if (!g_gm_n) return 0;
+		v->body.x = d->x + 6;
+		v->body.y = d->y + 26;
+		v->body.w = gm_list_w(d);
+		v->body.h = gm_list_h(d);
+		v->row_h  = GM_ROW_H;
+		v->top    = &g_gm_top;
+		v->n      = g_gm_n;
+		v->vis    = g_gm_rows;
+		return 1;
+	case M_MICROMODS:
+		if (!g_mm_n) return 0;
+		v->body.x = d->x + 4;
+		v->body.y = d->y + 25;
+		v->body.w = d->w - 16;
+		v->body.h = g_mm_rows * ui_list_row_h() + 6;
+		v->row_h  = ui_list_row_h();
+		v->top    = &g_mm_top;
+		v->n      = g_mm_n;
+		v->vis    = g_mm_rows;
+		return 1;
+	case M_FILES:
+		if (!g_fb_n) return 0;
+		v->body.x = d->x + 6;
+		v->body.y = d->y + 27;
+		v->body.w = d->w - 12;
+		v->body.h = FB_ROWS * ui_list_row_h() + 2;
+		v->row_h  = ui_list_row_h();
+		v->top    = &g_fb_top;
+		v->n      = g_fb_n;
+		v->vis    = FB_ROWS;
+		return 1;
+	case M_UPDATE: {
+		/* Release notes, which scroll by LINE rather than by row — the same
+		 * gesture over a different unit. The visible count is whatever the
+		 * body has room for; the draw clamps against its own idea of that
+		 * every frame, so a slightly generous number here costs nothing. */
+		int vis = (d->h - 60) / 9;
+		if (vis < 1) vis = 1;
+		if (g_up_nnote <= vis) return 0;
+		v->body.x = d->x + 6;
+		v->body.y = d->y + 40;
+		v->body.w = d->w - 12;
+		v->body.h = vis * 9;
+		v->row_h  = 9;
+		v->top    = &g_up_scroll;
+		v->n      = g_up_nnote;
+		v->vis    = vis;
+		return 1;
+	}
+	default:
+		return 0;
 	}
 }
 
@@ -4683,8 +5165,8 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	SDL_Rect cb = close_rect(&d);
 
 	if (g_modal == M_MICROMODS) {
-		SDL_Rect in = { cb.x - 62, cb.y, 58, 13 };
-		SDL_Rect sc = { cb.x - 62 - 62, cb.y, 58, 13 };
+		SDL_Rect in = { cb.x - 62, cb.y, 58, ui_btn_h() };
+		SDL_Rect sc = { cb.x - 62 - 62, cb.y, 58, ui_btn_h() };
 		char picked[256];
 		/* Ask LeapFrog what this title has. Read-only: it downloads into the
 		 * cache and writes the index this screen lists from, and installs
@@ -4722,7 +5204,8 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			for (i = 0; i < g_mm_rows && g_mm_top + i < g_mm_n; i++) {
 				struct mm_entry *e = &g_mm[g_mm_top + i];
 				if (!e->avail || e->installed || e->dep) continue;
-				if (inside(mx, my, x - 4, y + i * 11 - 1, dd.w - 16, 11)) {
+				if (inside(mx, my, x - 4, y + i * ui_list_row_h() - 1,
+				           dd.w - 16, ui_list_row_h())) {
 					e->pick = !e->pick;
 					return 1;
 				}
@@ -4780,12 +5263,12 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		}
 		/* the per-page Browse buttons */
 		if (g_wiz_page == WIZ_SYSTEM && pq.rootfs && !pq.sysroot &&
-		    inside(mx, my, d.x + 62 + 84, d.y + 92, 96, 13)) {
+		    inside(mx, my, d.x + 62 + 84, d.y + 92, 96, ui_btn_h())) {
 			g_action = UI_ACT_BUILD_SYSROOT;
 			return 1;
 		}
 		if (g_wiz_page == WIZ_SYSTEM &&
-		    inside(mx, my, d.x + 62, d.y + 92, 76, 13)) {
+		    inside(mx, my, d.x + 62, d.y + 92, 76, ui_btn_h())) {
 			path_join(start, sizeof(start), g_proj, "sources");
 			if (access(start, R_OK) != 0)
 				path_join(start, sizeof(start), g_proj, "");
@@ -4809,22 +5292,22 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			/* by = d.y + 38, and the two buttons are at by+69 and by+113,
 			 * indented 12px under their numbered headings. Kept in step with the
 			 * draw code by hand, as every other page here does. */
-			if (inside(mx, my, d.x + 74, d.y + 107, 76, 13)) {
+			if (inside(mx, my, d.x + 74, d.y + 107, 76, ui_btn_h())) {
 				fb_open("Didj compatibility files (DIDJ.zip)", dl, ".zip",
 				        UI_ACT_SETUP_DIDJ);
 				return 1;
 			}
-			if (inside(mx, my, d.x + 158, d.y + 107, 76, 13)) {
+			if (inside(mx, my, d.x + 158, d.y + 107, 76, ui_btn_h())) {
 				g_action = UI_ACT_FETCH_DIDJ;
 				g_fb_return = M_WIZARD;    /* back to setup when it finishes */
 				return 1;
 			}
-			if (inside(mx, my, d.x + 74, d.y + 151, 76, 13)) {
+			if (inside(mx, my, d.x + 74, d.y + 151, 76, ui_btn_h())) {
 				fb_open("Controller overlay (ControlOverlay.zip)", dl, ".zip",
 				        UI_ACT_SETUP_DIDJ_OVERLAY);
 				return 1;
 			}
-			if (inside(mx, my, d.x + 158, d.y + 151, 76, 13)) {
+			if (inside(mx, my, d.x + 158, d.y + 151, 76, ui_btn_h())) {
 				g_action = UI_ACT_FETCH_DIDJ_OVERLAY;
 				g_fb_return = M_WIZARD;
 				return 1;
@@ -4867,14 +5350,14 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			return 1;
 		}
 		if (g_wiz_page == WIZ_GAMES &&
-		    inside(mx, my, d.x + 62, d.y + 100, 96, 13)) {
+		    inside(mx, my, d.x + 62, d.y + 100, 96, ui_btn_h())) {
 			games_open();          /* remembers that it must come back here */
 			return 1;
 		}
 		return 1;
 	}
 	if (g_modal == M_MSG && g_confirm) {
-		SDL_Rect y = { d.x + d.w - 96, d.y + d.h - 18, 44, 13 };
+		SDL_Rect y = { d.x + d.w - 96, btn_row_y(&d), 44, ui_btn_h() };
 		if (inside(mx, my, y.x, y.y, y.w, y.h)) {
 			g_action = UI_ACT_ERASE_FW;
 			g_confirm = 0;
@@ -4893,14 +5376,14 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	if (g_modal == M_GAMES) {
 		int pw = gm_panel(&d), lw2 = gm_list_w(&d), lh2 = gm_list_h(&d);
 		int lx = d.x + 6, ly = d.y + 26, i;
-		int by = d.y + d.h - 18;
+		int by = btn_row_y(&d);
 		(void)pw;
 
-		if (inside(mx, my, d.x + 6, by, 52, 13)) {      /* Folder... */
+		if (inside(mx, my, d.x + 6, by, 52, ui_btn_h())) {      /* Folder... */
 			games_choose_folder();
 			return 1;
 		}
-		if (inside(mx, my, d.x + 62, by, 44, 13)) {     /* Rescan */
+		if (inside(mx, my, d.x + 62, by, 44, ui_btn_h())) {     /* Rescan */
 			if (g_gm_dir[0]) {
 				snprintf(g_action_path, sizeof(g_action_path), "%s", g_gm_dir);
 				g_action = UI_ACT_SCAN_GAMES;
@@ -4936,7 +5419,7 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		}
 		}                       /* scope of the Micromods rect */
 		{                                               /* Install N */
-			SDL_Rect b = { d.x + d.w - 8 - 48 - 62, by, 62, 13 };
+			SDL_Rect b = { d.x + d.w - 8 - 48 - 62, by, 62, ui_btn_h() };
 			if (inside(mx, my, b.x, b.y, b.w, b.h)) {
 				if (games_checked() &&
 				    games_write_list(g_action_path, sizeof(g_action_path))) {
@@ -4961,11 +5444,11 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		return 1;    /* inside the dialog, but not on anything */
 	}
 	if (g_modal == M_FILES) {
-		SDL_Rect ok = { cb.x - 46, cb.y, 42, 13 };
+		SDL_Rect ok = { cb.x - 46, cb.y, 42, ui_btn_h() };
 		int ly = d.y + 16, i;
 		if (g_fb_action == UI_ACT_SETUP_FIRMWARE ||
 		    g_fb_action == UI_ACT_SCAN_GAMES) {
-			SDL_Rect uf = { ok.x - 74, ok.y, 70, 13 };
+			SDL_Rect uf = { ok.x - 74, ok.y, 70, ui_btn_h() };
 			if (inside(mx, my, uf.x, uf.y, uf.w, uf.h)) {
 				path_join(g_action_path, sizeof(g_action_path), g_fb_dir, "");
 				g_action = g_fb_action;
@@ -4985,7 +5468,8 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		}
 		if (inside(mx, my, ok.x, ok.y, ok.w, ok.h)) { fb_enter(); return 1; }
 		for (i = 0; i < FB_ROWS && g_fb_top + i < g_fb_n; i++) {
-			if (inside(mx, my, d.x + 8, ly + 12 + i * 11, d.w - 16, 11)) {
+			if (inside(mx, my, d.x + 8, ly + 12 + i * ui_list_row_h(),
+			           d.w - 16, ui_list_row_h())) {
 				int k = g_fb_top + i;
 				if (k == g_fb_sel) fb_enter();      /* second click opens */
 				else g_fb_sel = k;
@@ -5057,6 +5541,28 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		ui_cfg_save();
 		return 1;
 	}
+	if (g_modal == M_PAD) {
+		if (row_hit(&d, 0, mx, my)) g_cfg.pad_on = !g_cfg.pad_on;
+		else if (row_hit(&d, 1, mx, my)) {
+			static const int steps[] = { 75, 100, 125, 150 };
+			int i, k = 0;
+			for (i = 0; i < 4; i++)
+				if (steps[i] == g_cfg.pad_size) k = (i + 1) % 4;
+			g_cfg.pad_size = steps[k];
+		}
+		else if (row_hit(&d, 2, mx, my)) {
+			static const int steps[] = { 40, 55, 70, 85, 100 };
+			int i, k = 0;
+			for (i = 0; i < 5; i++)
+				if (steps[i] == g_cfg.pad_opacity) k = (i + 1) % 5;
+			g_cfg.pad_opacity = steps[k];
+		}
+		else if (row_hit(&d, 3, mx, my)) g_cfg.pad_left = !g_cfg.pad_left;
+		else return 1;          /* the key list is not clickable */
+		/* The viewer re-reads these on the next frame; nothing to notify. */
+		ui_cfg_save();
+		return 1;
+	}
 	if (g_modal == M_DEBUG) {
 		if (row_hit(&d, 0, mx, my))
 			g_cfg.debug_level = (g_cfg.debug_level + 1) % 4;
@@ -5077,12 +5583,13 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	if (g_modal == M_SYSTEM) {
 		if (row_hit(&d, 0, mx, my)) g_cfg.boot_on_start = !g_cfg.boot_on_start;
 		else if (row_hit(&d, 1, mx, my)) g_cfg.fast_boot = !g_cfg.fast_boot;
-		else if (inside(mx, my, d.x + 10, row_y(&d, 4) + 2, 76, 13)) {
+		else if (row_hit(&d, 2, mx, my)) g_cfg.touch_ui = !g_cfg.touch_ui;
+		else if (inside(mx, my, d.x + 10, row_y(&d, 5) + 2, 76, ui_btn_h())) {
 			ui_cfg_save();
 			games_open();
 			return 1;
 		}
-		else if (inside(mx, my, d.x + 94, row_y(&d, 4) + 2, 96, 13)) {
+		else if (inside(mx, my, d.x + 94, row_y(&d, 5) + 2, 96, ui_btn_h())) {
 			ui_cfg_save();
 			g_wiz_page = 0;
 			g_modal = M_WIZARD;
@@ -5099,12 +5606,28 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 	switch (e->type) {
 	case SDL_MOUSEMOTION:
 		g_mx = e->motion.x; g_my = e->motion.y;
+		if (g_drag.active) {
+			struct dlg d = cur_dlg(lw, lh);
+			struct list_view v;
+			int dy = g_my - g_drag.last, far = g_my - g_drag.y0;
+			g_drag.last = g_my;
+			if (far < 0) far = -far;
+			if (far > g_drag.moved) g_drag.moved = far;
+			if (list_view(&d, &v))
+				list_scroll_px(&v, dy);
+			/* A running average rather than the last delta alone: one frame
+			 * can be a jitter, and a flick thrown by a jitter goes the wrong
+			 * way at speed. */
+			g_drag.vel = g_drag.vel * 0.6f + (float)dy * 0.4f;
+			return 1;
+		}
 		if (g_open_menu >= 0) {
 			const struct menu *m = &MENUS[g_open_menu];
 			int w = menu_width(m), i;
 			g_hot_item = -1;
 			for (i = 0; i < m->n; i++)
-				if (inside(g_mx, g_my, m->x, UI_BAR_H + 3 + i * 12, w, 12))
+				if (inside(g_mx, g_my, m->x, menu_item_y(m, i), w,
+				           menu_item_h(&m->items[i])))
 					g_hot_item = i;
 			/* slide between menus while one is open, like a real menu bar */
 			for (i = 0; i < NMENUS; i++)
@@ -5119,14 +5642,36 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 		int mx = e->button.x, my = e->button.y, i;
 		g_mx = mx; g_my = my;
 
-		if (g_modal != M_NONE)
+		if (g_modal != M_NONE) {
+			/* A PRESS INSIDE A LIST IS NOT YET A CHOICE. It might be the start
+			 * of a scroll, and there is no way to know until the finger either
+			 * moves or lifts — so the decision waits for the release, and the
+			 * press only arms the drag. Everything else in a dialog still acts
+			 * on the press, because nothing else in one can be dragged.
+			 *
+			 * This matters most in the file browser, where activating a row
+			 * ENTERS a directory: dispatching on the press would mean every
+			 * attempt to scroll navigated somewhere first. */
+			struct dlg d = cur_dlg(lw, lh);
+			struct list_view v;
+			if (list_view(&d, &v) &&
+			    inside(mx, my, v.body.x, v.body.y, v.body.w, v.body.h)) {
+				g_drag.active = 1;
+				g_drag.x0 = mx; g_drag.y0 = my; g_drag.last = my;
+				g_drag.moved = 0;
+				g_drag.rem = 0;
+				g_drag.vel = 0;
+				return 1;
+			}
 			return dialog_click(lw, lh, mx, my);
+		}
 
 		if (g_open_menu >= 0) {
 			const struct menu *m = &MENUS[g_open_menu];
 			int w = menu_width(m);
 			for (i = 0; i < m->n; i++) {
-				if (inside(mx, my, m->x, UI_BAR_H + 3 + i * 12, w, 12)) {
+				if (inside(mx, my, m->x, menu_item_y(m, i), w,
+				           menu_item_h(&m->items[i]))) {
 					if (item_enabled(&m->items[i]))
 						activate(m->items[i].id);
 					return 1;
@@ -5151,10 +5696,33 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 		return 0;
 	}
 
-	case SDL_MOUSEBUTTONUP:
+	case SDL_MOUSEBUTTONUP: {
+		/* SDL_TOUCH_MOUSEID marks the mouse event SDL synthesised from a
+		 * finger. That finger has just left the screen, so the pointer is no
+		 * longer anywhere — see pointer_left(). */
+		int was_touch = (e->button.which == SDL_TOUCH_MOUSEID);
+		int in_bar = e->button.y < UI_BAR_H;
+		if (g_drag.active) {
+			int tap = g_drag.moved <= DRAG_SLOP;
+			g_drag.active = 0;
+			if (tap) {
+				/* It never moved, so it was a press after all — dispatched
+				 * from where it STARTED, not from where the pointer happens
+				 * to be now. */
+				g_drag.vel = 0;
+				dialog_click(lw, lh, g_drag.x0, g_drag.y0);
+			}
+			if (was_touch) { pointer_left(); g_hot_item = -1; }
+			return 1;
+		}
+		if (was_touch) {
+			pointer_left();
+			g_hot_item = -1;
+		}
 		if (g_modal != M_NONE) return 1;
 		if (g_open_menu >= 0) return 1;
-		return e->button.y < UI_BAR_H;
+		return in_bar;
+	}
 
 	case SDL_MOUSEWHEEL:
 		if (g_modal == M_FILES) {

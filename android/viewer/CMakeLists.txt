@@ -25,6 +25,7 @@ add_library(main SHARED
     ${VIEWER}/tadpole_ui.c
     ${VIEWER}/tadpole_hle.c
     ${VIEWER}/tadpole_boot.c
+    ${VIEWER}/tadpole_pad.c
     ${CMAKE_CURRENT_SOURCE_DIR}/tadpole_gles_compat.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../app/jni/tadpole_jni.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../app/jni/tadpole_probe.c

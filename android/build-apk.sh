@@ -83,10 +83,27 @@ with zipfile.ZipFile(os.path.join(out, 'unsigned.apk'), 'a', zipfile.ZIP_DEFLATE
         # loader can map a .so straight out of an uncompressed, aligned APK
         # instead of copying it to /data first. android:extractNativeLibs then
         # defaults to false and the app takes half the space on device.
-        for name, path in (
+        entries = [
             ('libSDL2.so', f'{root}/build/android/sdl-prefix/{abi}/lib/libSDL2.so'),
             ('libmain.so', f'{root}/build/android/viewer-{abi}/libmain.so'),
-            ('libtadpoleexec.so', f'{root}/build/android/viewer-{abi}/tadpoleexec')):
+            ('libtadpoleexec.so', f'{root}/build/android/viewer-{abi}/tadpoleexec'),
+        ]
+        # THE ENGINE TRAVELS AS A LIBRARY BECAUSE THAT IS THE ONLY PLACE IT MAY
+        # BE EXECUTED FROM. glasspole is an ordinary PIE executable, but an
+        # Android app may not exec a file it wrote — the probe measures that
+        # every launch and reports "exec from app files DENIED". It MAY exec
+        # something the package installer put in the native library directory,
+        # which is the route libtadpoleexec.so was written to prove. So the
+        # engine is packaged under a .so name it does not deserve, and
+        # TadpoleActivity links the path the viewer looks for to it.
+        #
+        # arm64 only, and not for want of trying: dynarmic has no 32-bit host
+        # backend, so there is no armeabi-v7a engine to package. See
+        # android/NOTES-arm32.md.
+        gp = f'{root}/build/android/glasspole-{abi}/glasspole'
+        if os.path.exists(gp):
+            entries.append(('libglasspole.so', gp))
+        for name, path in entries:
             z.write(path, f'lib/{abi}/{name}', compress_type=zipfile.ZIP_STORED)
 print('packaged ABIs:', ' '.join(abis))
 PY

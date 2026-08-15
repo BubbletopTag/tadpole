@@ -130,6 +130,7 @@ public class TadpoleActivity extends SDLActivity {
              * then falls into place underneath it. */
             nativeSetenv("TADPOLE_PROJECT", dir);
             extractAssets(dir);
+            linkEngine(dir);
             nativeProbe(dir, getApplicationInfo().nativeLibraryDir);
         } catch (Throwable t) {
             Log.e(TAG, "could not set TADPOLE_DIR", t);
@@ -183,6 +184,47 @@ public class TadpoleActivity extends SDLActivity {
                 try { if (in != null) in.close(); } catch (Throwable ignored) {}
                 try { if (os != null) os.close(); } catch (Throwable ignored) {}
             }
+        }
+    }
+
+    /* ---- the engine, and where the viewer expects to find it ---------------
+     *
+     * prereq_check() looks for <project>/glasspole/build/glasspole and the app
+     * launcher runs whatever it finds there. On Android that path is inside the
+     * app's own files directory, and an app may not execute a file it wrote —
+     * the probe says so on every launch:
+     *
+     *     probe: exec from app files   DENIED (execve refused — SELinux/noexec)
+     *     probe: exec from APK lib     OK — a packaged binary CAN be executed
+     *
+     * So the engine ships as lib/arm64-v8a/libglasspole.so, which the package
+     * installer puts in the native library directory, and this makes the path
+     * the viewer looks for a SYMLINK to it. Exec follows the link and the
+     * kernel's check lands on the target, which is the file the installer
+     * placed — permitted. The viewer needs no change and does not need to know.
+     *
+     * A symlink rather than a copy for the same reason: a copy would be a file
+     * the app wrote, which is precisely the thing that may not be executed.
+     */
+    private void linkEngine(String projectDir) {
+        try {
+            File src = new File(getApplicationInfo().nativeLibraryDir,
+                                "libglasspole.so");
+            File dstDir = new File(projectDir, "glasspole/build");
+            File dst = new File(dstDir, "glasspole");
+            if (!src.exists()) {
+                Log.i(TAG, "engine: no libglasspole.so in this APK "
+                         + "(expected on a 32-bit-only device)");
+                return;
+            }
+            dstDir.mkdirs();
+            if (dst.exists()) dst.delete();
+            /* Os.symlink is API 21. The alternative is Runtime.exec("ln -s"),
+             * which needs a shell this process does not have. */
+            android.system.Os.symlink(src.getAbsolutePath(), dst.getAbsolutePath());
+            Log.i(TAG, "engine: " + dst + " -> " + src);
+        } catch (Throwable t) {
+            Log.e(TAG, "engine: could not link", t);
         }
     }
 

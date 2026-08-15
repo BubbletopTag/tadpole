@@ -23,7 +23,41 @@
 #include <SDL.h>
 #include <stddef.h>
 
-#define UI_BAR_H 13          /* logical pixels; 7px font + padding */
+/* ---- how big is a thing you touch --------------------------------------
+ *
+ * THE BAR'S HEIGHT USED TO BE A CONSTANT, and every other target in the chrome
+ * was sized to match it: 13 logical pixels, which is a 7px font with three
+ * either side. That is a comfortable mouse target and it is not a finger.
+ *
+ * There is no free way to fix that. The chrome is drawn in logical pixels and
+ * the logical space IS the panel, so a bigger target is a target that takes up
+ * more of a 480x272 screen — the space does not grow to accommodate it, and
+ * anything that made the space grow would shrink the chrome again by exactly
+ * the same factor. Something has to give, and what gives here is vertical
+ * room: rows get taller, so fewer of them fit and the lists that hold them
+ * scroll (which they now do under a finger — see the drag handling in
+ * ui_event).
+ *
+ * WIDTHS AND THE FONT ARE UNTOUCHED, deliberately. Nobody touches text; they
+ * touch the row it is in. Leaving the 5x7 font at 1:1 means no label anywhere
+ * has to be re-fitted, no dialog gets wider, and nothing reflows — the entire
+ * change is that things you can press are taller and the text sits in the
+ * middle of them. Doubling the font would have halved every dialog's column
+ * count and cost a rewrite of layouts that are perfectly readable already.
+ *
+ * ui_touch_ui() is the switch, from Options -> System Settings. Off restores
+ * the original metrics exactly.
+ */
+int ui_bar_h(void);          /* logical pixels; the menu bar */
+int ui_row_h(void);          /* a settings row in a dialog */
+int ui_menu_row_h(void);     /* an item in a dropdown */
+int ui_btn_h(void);          /* a button, and the bar's own chips */
+int ui_list_row_h(void);     /* a row in the file, game or app lists */
+int ui_touch_ui(void);
+
+/* Every existing use reads as it always did. This is a call now rather than a
+ * literal, so nothing may use it where a constant expression is required. */
+#define UI_BAR_H (ui_bar_h())
 
 /* Everything the front end can change. Persisted to ~/.config/tadpole/ui.cfg
  * and turned into environment variables when a guest is launched.
@@ -75,6 +109,19 @@ struct ui_settings {
 	 * an emulator that made everyone watch four seconds of branding to reach a
 	 * menu would have got that backwards. See viewer/tadpole_boot.c. */
 	int fast_boot;
+	/* ---- the on-screen controls, see viewer/tadpole_pad.c ----------------
+	 * ON BY DEFAULT HERE, which is the one place this build disagrees with the
+	 * desktop one on purpose: a touchscreen has no keyboard to borrow the
+	 * D-pad from, so a default of "off" would mean the emulator arrives
+	 * unplayable and the fix is three menus deep. Anyone driving it with a
+	 * keyboard turns them off in Controller Settings and is not asked again. */
+	int pad_on;
+	int pad_size;            /* percent of the natural size, 50..200 */
+	int pad_opacity;         /* percent, 15..100 */
+	int pad_left;            /* D-pad bottom-left (1) or bottom-right (0) */
+	/* Taller bar, menu items, rows and buttons — see the note above
+	 * ui_bar_h(). On by default in this build for the same reason pad_on is. */
+	int touch_ui;
 	char games_dir[UI_GAMESDIR_MAX];   /* the folder the library was read from */
 };
 
@@ -84,6 +131,35 @@ struct ui_settings {
  * hands the caller the pixels to own. */
 SDL_Texture *ui_png_texture(SDL_Renderer *ren, const char *path,
                             int *out_w, int *out_h, Uint32 **out_px);
+
+/* ---- the chrome's own shapes and palette, lent out ----------------------
+ *
+ * For viewer/tadpole_pad.c, which draws the on-screen D-pad and Home button
+ * over the guest's picture. They are the same interface as the bar and the
+ * dialogs and have to be made of the same material; a second set of
+ * rounded-rect routines would drift from these, and the drift would show up as
+ * one control that does not look like the others. See the note above the
+ * definitions in tadpole_ui.c.
+ */
+struct ui_colors {
+	unsigned accent, text, text_dim, panel, panel_hi, edge, shadow, bg;
+};
+void ui_colors(struct ui_colors *out);
+
+void ui_rr_fill(SDL_Renderer *r, float x, float y, float w, float h,
+                float radius, unsigned col, Uint8 alpha);
+/* Body colour and alpha both run top-to-bottom, so one call draws either a
+ * flat chip or a lit sheet depending on how far apart the two ends are. */
+void ui_rr_grad(SDL_Renderer *r, float x, float y, float w, float h,
+                float radius, unsigned ctop, Uint8 atop,
+                unsigned cbot, Uint8 abot);
+void ui_rr_stroke(SDL_Renderer *r, float x, float y, float w, float h,
+                  float radius, unsigned ctop, Uint8 atop,
+                  unsigned cbot, Uint8 abot, float thick);
+void ui_glow(SDL_Renderer *r, int cx, int cy, int radius, unsigned col,
+             Uint8 alpha);
+void ui_text_at(SDL_Renderer *r, int x, int y, const char *s, unsigned col);
+int  ui_text_w(const char *s);
 
 enum ui_action {
 	UI_ACT_NONE = 0,
