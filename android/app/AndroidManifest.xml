@@ -1,7 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           package="org.tadpole.view"
-          android:versionCode="1" android:versionName="0.1">
+          android:versionCode="2" android:versionName="0.1">
+    <!-- BUMP THIS WHEN SOMETHING THE PLATFORM CACHES ABOUT THE APP CHANGES.
+         Android evaluates 16 KB page compatibility once per package version and
+         remembers the verdict: after the libraries were re-linked aligned, the
+         same "not 16 KB compatible" dialog kept appearing over an APK whose
+         every LOAD segment was already 0x4000 and which zipalign -c -P 16
+         passed. It was answering about version 1. -->
 
     <!-- ES 1.1 and not 2.0, which is what SDL's own template declares. The
          viewer's GL is fixed-function because it is replaying the guest's

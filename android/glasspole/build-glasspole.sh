@@ -9,6 +9,14 @@
 #     ./android/glasspole/build-glasspole.sh dynarmic    # works
 #     ./android/glasspole/build-glasspole.sh             # 3 known errors, below
 #
+# ### 16 KB pages
+#
+# The engine ships INSIDE the APK, so it is subject to the same alignment rule
+# as libmain.so and libSDL2.so — see the note in android/env.sh. It was missed
+# here at first and the phone said so by name:
+#
+#     lib/arm64-v8a/libglasspole.so : LOAD segment not aligned
+#
 # ### Boost, and why it is fed in through a symlink farm
 #
 # dynarmic needs Boost headers (boost/variant.hpp, boost/icl) and an NDK sysroot
@@ -76,6 +84,8 @@ cmake -S "$root/glasspole" -B "$b" -GNinja \
     -DANDROID_ABI=arm64-v8a \
     -DANDROID_PLATFORM="android-$TADPOLE_ANDROID_API" \
     -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_EXE_LINKER_FLAGS="$TADPOLE_ANDROID_LDFLAGS" \
+    -DCMAKE_SHARED_LINKER_FLAGS="$TADPOLE_ANDROID_LDFLAGS" \
     -DBoost_INCLUDE_DIR="$boost" \
     -DCMAKE_CXX_FLAGS="-isystem $boost" \
     -DCMAKE_POLICY_DEFAULT_CMP0167=OLD

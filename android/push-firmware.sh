@@ -85,20 +85,29 @@ echo "=== unpacking into $FILES ==="
 "$ADB" shell "rm -f /data/local/tmp/tp.tar /data/local/tmp/rootfs.tar"
 
 echo "=== re-pointing the sysroot's absolute links at this device ==="
+# ALL OF THEM, NOT JUST THE TOP LEVEL. There are 208, and only eight are the
+# obvious ones in the sysroot's root — the rest are deeper: every entry of
+# var/, and LF/Base, which is the one prereq_check tests for. Fixing only the
+# top level leaves a sysroot that looks populated, boots nothing, and reports
+# "runtime sysroot missing" while bin/ and lib/ resolve perfectly.
+#
+# One rule covers all of them because they share a prefix: they point into the
+# checkout they were built in, either at rootfs/ or at runtime/shimlibs/. So
+# the desktop project path is replaced by the app's files directory and the
+# rest of the path is kept, which is exactly what setup-sysroot.sh would have
+# written had it run here.
 "$ADB" shell "run-as $PKG sh -c '
 F=$FILES
-cd \$F/runtime/sysroot || exit 1
+OLD=$SRC
+cd \$F || exit 1
 n=0
-for e in *; do
-  [ -L \"\$e\" ] || continue
-  t=\$(readlink \"\$e\")
+for l in \$(find runtime/sysroot -type l); do
+  t=\$(readlink \"\$l\")
   case \"\$t\" in
-    /*/runtime/../rootfs/*|/*rootfs/*)
-      rel=\${t#*/rootfs/}
-      rm -f \"\$e\"; ln -s \"\$F/rootfs/\$rel\" \"\$e\"; n=\$((n+1));;
+    \$OLD/*) rm -f \"\$l\"; ln -s \"\$F/\${t#\$OLD/}\" \"\$l\"; n=\$((n+1));;
   esac
 done
-echo \"re-pointed \$n\"
+echo \"re-pointed \$n of \$(find runtime/sysroot -type l | wc -l) symlinks\"
 '"
 
 echo "=== proving it: ARM32 guest code, on this phone ==="

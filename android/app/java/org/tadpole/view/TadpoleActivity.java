@@ -218,7 +218,14 @@ public class TadpoleActivity extends SDLActivity {
                 return;
             }
             dstDir.mkdirs();
-            if (dst.exists()) dst.delete();
+            /* UNCONDITIONALLY, because File.exists() FOLLOWS the link and a
+             * stale one points into the previous install's APK directory,
+             * whose name changes on every reinstall. So exists() answers false
+             * for a link that is very much there, delete() never runs, and
+             * Os.symlink fails with EEXIST — "engine: could not link" on the
+             * second install and every one after it, while the first worked.
+             * delete() unlinks a dangling symlink perfectly well. */
+            dst.delete();
             /* Os.symlink is API 21. The alternative is Runtime.exec("ln -s"),
              * which needs a shell this process does not have. */
             android.system.Os.symlink(src.getAbsolutePath(), dst.getAbsolutePath());
