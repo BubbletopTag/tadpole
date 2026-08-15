@@ -53,6 +53,11 @@ struct ui_settings {
 	int gl_dumpframe;        /* TADPOLE_GL_DUMPFRAME */
 	int gl_dumptex;          /* TADPOLE_GL_DUMPTEX */
 	int rotate;              /* 0/90/180/270, clockwise */
+	/* Turn with the guest: portrait for the LeapPad UI, landscape for a
+	 * title. `rotate` above then holds whatever is on screen NOW; what gets
+	 * saved is the last orientation chosen by hand. See rotate_for_screen()
+	 * in tadpole_view.c, which owns the policy. */
+	int auto_rotate;
 	int scale;               /* window scale, 1..4 */
 	int touch_debug;         /* TADPOLE_TOUCH_DEBUG */
 	int audio_on;

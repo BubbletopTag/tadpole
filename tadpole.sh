@@ -14,14 +14,19 @@
 #   ./tadpole.sh --debug         verbose shim logging
 #   ./tadpole.sh --touch-debug   red crosshair where the viewer thinks you tapped
 #   TADPOLE_GL=0 ./tadpole.sh    use the stock GPU stack (titles will assert)
-#   ./tadpole.sh -r 90 ...       rotate the display (portrait titles)
+#   ./tadpole.sh -r 270 ...      start at a fixed rotation. The window turns
+#                                with the guest on its own now — portrait for
+#                                the LeapPad UI, landscape for a title — so
+#                                this is a starting point, not a setting.
+#                                Untick Options -> Graphics -> Turn with the
+#                                app to make it stick.
 #
 # Runs on Glasspole, this project's own ARM JIT, whenever one is built or
 # bundled; qemu-arm is the fallback. TADPOLE_QEMU="$(command -v qemu-arm)"
 # puts a single run back on qemu.
 #
 # Viewer controls:  arrows = D-pad, Z/X = A/B, Home = menu, Esc = back,
-#                   mouse click/drag = stylus, Ctrl+Q = quit.
+#                   mouse click/drag = stylus, Ctrl+R = turn, Ctrl+Q = quit.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -137,7 +142,7 @@ export TADPOLE_DIR="${TADPOLE_DIR:-/tmp/tadpole}"
 # The command line as typed, kept before the parser shifts it away, so an error
 # message can hand back something that can actually be pasted.
 ORIG_ARGS=("$@")
-use_viewer=1; debug=0; mode=front; scale=2; rotate=0; prog=""; appname=""; declare -a progargs=()
+use_viewer=1; debug=0; mode=front; scale=2; rotate=""; prog=""; appname=""; declare -a progargs=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --boot)      mode=ui ;;          # start the system menu immediately
@@ -157,7 +162,7 @@ while [ $# -gt 0 ]; do
         # measure.
         --touch-debug) export TADPOLE_TOUCH_DEBUG=1 ;;
         -s)          shift; scale="${1:-2}" ;;
-        -r)          shift; rotate="${1:-0}" ;;   # 90 for portrait titles
+        -r)          shift; rotate="${1:-0}" ;;   # 270 = the portrait UI
         --)          shift; progargs=("$@"); break ;;
         *)           progargs+=("$1") ;;
     esac
@@ -415,7 +420,11 @@ guest() {
 
 viewer_pid=""
 if [ "$use_viewer" = 1 ] && [ -x "$VIEWER" ]; then
-    "$VIEWER" -s "$scale" -r "$rotate" -d "$TADPOLE_DIR" &
+    # -r ONLY IF ASKED FOR. It used to be passed always, defaulting to 0,
+    # which meant starting from this script silently overrode the orientation
+    # saved in ui.cfg — and now would also override the window's own idea of
+    # which way up the guest is drawing before the guest has said anything.
+    "$VIEWER" -s "$scale" ${rotate:+-r "$rotate"} -d "$TADPOLE_DIR" &
     viewer_pid=$!
     trap 'kill $viewer_pid 2>/dev/null' EXIT INT TERM
     sleep 0.5

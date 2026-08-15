@@ -29,12 +29,16 @@ LAYER_FIELDS = ("enabled", "xres", "yres", "bpp", "xoffset", "yoffset",
                 "nonstd", "alpha", "blank", "win_x", "win_y", "win_w", "win_h",
                 "vid_w", "vid_h")
 LAYER = 4 * len(LAYER_FIELDS)
+# The screen fields the shim publishes after the layers — screen, screen_seq
+# and a 64-byte PackageID. Nothing here reads them; they are counted so the
+# size check below still recognises a state.bin this script can read.
+TAIL = 4 + 4 + 64
 
 
 def read_state(d):
     with open(os.path.join(d, "state.bin"), "rb") as f:
         b = f.read()
-    want = HDR + NUM_FB * LAYER
+    want = HDR + NUM_FB * LAYER + TAIL
     if len(b) != want:
         sys.stderr.write("burst: state.bin is %d bytes, expected %d — "
                          "LAYER_FIELDS is out of date with tadpole_shim.c\n"

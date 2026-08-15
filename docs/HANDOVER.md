@@ -5921,3 +5921,109 @@ coefficients**, so the device's own in-title FMV — Sneak Peeks trailers, the
 transition animation — is washed out by the same 20. Same bug, different path.
 Not changed with this work because it would move every FMV capture in the
 compatibility sweep, and that deserves its own before/after.
+
+---
+
+## 2026-08-15 — The window turns with the app
+
+**The home screen is portrait and a game is not, on the same 480x272 buffer.**
+That has been true since the first boot and the emulator has never known it:
+the window opened landscape, the LeapPad UI arrived a quarter turn over, and
+the only fix was to notice and press Ctrl+R — then press it back on the way
+into a title. This wires the rotation to what the guest is actually drawing.
+
+### Which rotation, measured rather than assumed
+
+Take the raw framebuffer of each and rotate it both ways:
+
+| capture | 90 CW | 270 CW |
+|---|---|---|
+| `shots/24-home-with-apps.png` (sign-in) | upside down | **upright** |
+| `shots/32-clamprix-current.png` (a game) | — | — (correct at 0) |
+
+So the UI is **270** and a title is **0**. The stock boot art agrees by name —
+`Valencia-Boot-logoCW.png` is stored a quarter turn clockwise — and so do the
+UI's own SWF stage sizes: `LPAD/SignIn.swf` and `HomePicker.swf` declare
+272x480, while `LPAD/main.swf` (the shell around them) is 480x272.
+
+### How the guest is asked
+
+The shim already sees every `open()` and every `dlopen()`, and two of them are
+unambiguous. Both were read off a live session — boot, sign in, tap Pet Pad,
+press Home — not reasoned about:
+
+```
+/LF/Base/LPAD/<state>.swf             the UI. Pushed at boot AND re-opened on
+                                      every pop back out of a title, which is
+                                      what makes LEAVING a game visible.
+/LF/Bulk/ProgramFiles/<pkg>/<AppSo>   a title's entry point: a .swf the Flash
+                                      player opens, or an App.so that
+                                      CAppManager dlopen()s.
+```
+
+`screen_note()` in `tadpole_shim.c` classifies those into
+`state.bin`: `screen` (system UI / title), `screen_seq` (bumped on every
+change, so a viewer that was not looking still sees the transition) and
+`screen_pkg` (the PackageID). The viewer turns the window when that changes —
+and only when it changes, so a manual Ctrl+R stands until the guest moves to
+another screen.
+
+**The entry point is matched against the package's `meta.inf`, not guessed from
+the extension.** The home picker opens a `.swf` out of *every* installed
+package to draw its tile — `icon.swf`, `base_icon.swf` — so "a .swf under
+ProgramFiles" is true of a screen that is running nothing at all. Reading it
+that way spins the window once per icon.
+
+**A native title is only visible at `dlopen`.** `LoadNewApp` dlopen()s the
+package's `App.so` and the guest's own loader then opens the file with raw
+syscalls that never reach our `open()`.
+
+**This deliberately does NOT bring back the `PushApp` interposition** removed in
+08082026-0006. That hook read a `Glib::ustring` by guessing someone else's C++
+ABI; watching file opens needs none of that and sees the Flash player, the
+native loader and the pop back home with one rule.
+
+### Not every title is landscape, and nothing in the package says which
+
+My Books and Notepad draw portrait. Their SWF stage sizes (480x272), `Device`
+fields, `Hidden` flags and `GameInfo.json` are indistinguishable from the
+landscape ones — checked all four. So the rule is "a title is landscape" and
+the exceptions are a list in `tadpole_view.c`, each measured from a capture.
+`KeyboardWidget` is on it for a different reason: the UI pushes it as an app
+when you name a profile, and its own art says which way it goes —
+`Art/port-bg-up.png` is 327x272 with the buttons drawn sideways and
+`buttonMap.json` calls that config `Portrait-Single`. Rotating for it would
+turn the window over in the middle of typing.
+
+### The struct grew, and three other files know its layout
+
+`struct tadpole_state` gained the three screen fields **at the end**, because
+`tools/fbshot.py` and `tools/burst.py` decode the header and layers out of it
+by offset and `shim/tadpole_gles_core.c` keeps a field-for-field mirror whose
+*length* is checked at map time. That check is not decoration: a mismatch there
+silently takes the layer rectangle out and renders every 3D title to the full
+panel. All three were updated with the shim.
+
+### A startup crash that is NOT this
+
+Roughly half the windowed boots on this machine die before the sign-in screen:
+a `SIGSEGV` at `ld-uClibc+0x1a4c`, fault address `0x44`, with `libflashdidj.so`
+on the stack, immediately after `ts_config: No such file or directory`. It
+looked like this work, because the first two runs after the change both hit it.
+It is not. An interleaved A/B — one binary, the classifier switched off by an
+environment variable and back on between boots — failed on BOTH sides: 4 of 6
+boots reached sign-in with it off, 2 of 6 with it on, and an earlier
+uninterleaved batch went 6 for 6 with it on. Twelve runs cannot separate rates
+that close, and the rate moves with machine load; what they do settle is that
+the fault happens with the new code taken out. Related to the black-screen
+startup race in the same neighbourhood (tslib, and where `ts_config` lands
+relative to `LoadNewApp`), still not root-caused.
+
+The reproducer is cheap — boot with the window and wait for one of two markers,
+about ninety seconds a run:
+
+```sh
+./tadpole.sh --boot --debug > run.log 2>&1 &
+grep -a "guest exited with status 139" run.log                 # died
+grep -a "onLoadInit( _level0.mcContent.SignIn_mc )" run.log    # lived
+```

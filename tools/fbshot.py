@@ -22,12 +22,17 @@ LAYER_FIELDS = ("enabled", "xres", "yres", "bpp", "xoffset", "yoffset",
                 "vid_w", "vid_h")
 LAYER_SIZE = 4 * len(LAYER_FIELDS)
 HDR_SIZE = 20                      # magic, version, width, height, vsync_count
+# What follows the layers: screen (u32), screen_seq (u32) and a 64-byte
+# PackageID — the shim's account of WHICH SCREEN the guest is showing, which
+# the viewer turns the window with. Nothing here needs it; it is counted so the
+# size check below still recognises a state.bin this script can read.
+TAIL_SIZE = 4 + 4 + 64
 
 
 def check_size(nbytes):
-    """state.bin is exactly the header plus NUM_FB layers. Anything else means
-    this script and the shim disagree about the struct."""
-    want = HDR_SIZE + NUM_FB * LAYER_SIZE
+    """state.bin is the header, NUM_FB layers, and the screen tail. Anything
+    else means this script and the shim disagree about the struct."""
+    want = HDR_SIZE + NUM_FB * LAYER_SIZE + TAIL_SIZE
     if nbytes != want:
         sys.stderr.write(
             "fbshot: state.bin is %d bytes, expected %d — LAYER_FIELDS is out "

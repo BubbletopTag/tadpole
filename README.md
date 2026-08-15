@@ -418,6 +418,25 @@ device, so its axes sit a quarter turn from the hardware's; Tadpole corrects for
 that automatically. If the directions still feel wrong in your orientation, set
 `TADPOLE_DPAD_SHIFT=0..3`.
 
+### The window turns with the app
+
+The home screen is portrait and a game is not — on the same 480x272 panel. The
+LeapPad UI draws a quarter turn from how the device is held, which is why the
+stock boot art is named `...logoCW.png`; titles draw landscape into the same
+buffer. So Tadpole turns the window to match: **portrait for the system menu,
+sign-in and home screen, landscape the moment a title starts, and back again
+when you leave it.**
+
+It follows the guest rather than guessing: the shim reports which screen is up
+— the UI's own `/LF/Base/LPAD/*.swf`, or a package's entry point as named by
+its `meta.inf` — and the viewer decides the rotation from that.
+
+A few LeapPad titles draw portrait (My Books and Notepad are the two in this
+library); those are listed in the viewer and turn the right way. For anything
+else drawn the other way up, **Ctrl+R** still works, and your choice stands
+until the guest moves to another screen. Untick **Options → Graphics → Turn
+with the app** to go back to a fixed orientation.
+
 ### Settings
 
 Everything in **Options** is saved to `~/.config/tadpole/ui.cfg` and applied to

@@ -132,6 +132,17 @@ struct fb_fix_screeninfo {
 #define NUM_FB          3
 #define NUM_EV          6
 
+/* WHAT THE GUEST IS SHOWING. The panel is portrait and its software is not:
+ * the LeapPad UI draws a quarter turn from how the device is held — the same
+ * reason the stock boot art is named "...CW.png" — while nearly every title
+ * draws landscape into the same buffer. So there is no one right rotation for
+ * the window; it depends on what is on screen, and only the guest knows.
+ * See screen_note() for how this is worked out and PKGID_MAX for the name. */
+#define TAD_SCREEN_UNKNOWN 0
+#define TAD_SCREEN_SYSTEM  1   /* the LeapPad UI — portrait */
+#define TAD_SCREEN_TITLE   2   /* an installed title — landscape, nearly always */
+#define PKGID_MAX          64
+
 struct layer_state {
 	u32 enabled, xres, yres, bpp, xoffset, yoffset;
 	u32 nonstd;      /* format/priority/planar bits, see lf1000fb.h */
@@ -179,6 +190,16 @@ struct tadpole_state {
 	u32 width, height;
 	u32 vsync_count;
 	struct layer_state layer[NUM_FB];
+
+	/* APPENDED AT THE END ON PURPOSE. tools/fbshot.py reads the header and
+	 * the layer array out of this same file by offset, so anything inserted
+	 * above would silently shift every layer it decodes and the capture would
+	 * come out of the wrong page. Grow this struct here, never in the middle.
+	 */
+	u32 screen;                 /* TAD_SCREEN_*: the UI, or a title */
+	u32 screen_seq;             /* bumped on every change, so a viewer that
+	                             * was not looking still sees the transition */
+	char screen_pkg[PKGID_MAX]; /* the PackageID when a title is up */
 };
 
 /* ---- geometry ---------------------------------------------------------- */
@@ -724,6 +745,177 @@ static int under_gdir(const char *path)
 	       (path[dlen] == '\0' || path[dlen] == '/');
 }
 
+/* ---- which way up: telling the viewer what is on screen ------------------
+ *
+ * THE GUEST SAYS SO BY OPENING FILES, and two openings are unambiguous. Both
+ * were measured off a live session (boot -> home -> Pet Pad -> Home button),
+ * not reasoned about:
+ *
+ *   /LF/Base/LPAD/<state>.swf            the UI. Opened when a screen is
+ *                                        pushed AND again on every pop back
+ *                                        out of a title, which is the whole
+ *                                        reason leaving a game is visible.
+ *   /LF/Bulk/ProgramFiles/<pkg>/<AppSo>  a title's entry point — a .swf that
+ *                                        the Flash player opens, or an App.so
+ *                                        that CAppManager dlopen()s.
+ *
+ * THE ENTRY POINT IS MATCHED AGAINST meta.inf, not guessed from the
+ * extension. The home picker opens a .swf out of EVERY installed package to
+ * draw its tile — icon.swf, base_icon.swf — so "a .swf under ProgramFiles" is
+ * true of a screen that is not running anything at all, and reading it that
+ * way would spin the window once per icon.
+ *
+ * WHAT IS NOT DONE HERE. This says which SCREEN is up; it does not say which
+ * way to hold the window. That is presentation, it belongs to the viewer's -r
+ * and nothing else's, and the viewer needs the package name to make its own
+ * exceptions — which is why the name is published rather than a rotation.
+ */
+static int seg_eq(const char *a, const char *b)
+{
+	while (*a && *a == *b) { a++; b++; }
+	return *a == *b;
+}
+
+static int ends_with_swf(const char *s)
+{
+	size_t n = s ? strlen(s) : 0;
+	return n > 4 && s[n-4] == '.' &&
+	       (s[n-3] == 's' || s[n-3] == 'S') &&
+	       (s[n-2] == 'w' || s[n-2] == 'W') &&
+	       (s[n-1] == 'f' || s[n-1] == 'F');
+}
+
+/* Match `pfx` against the front of `path`, treating a run of slashes as one
+ * separator, and hand back what follows. Guest paths really do arrive with
+ * doubled slashes — "/LF/Base//LpadAssets/Art/..." and
+ * ".../PAD2-0x001F0005-000000//GameInfo.json" are both from one boot log — so
+ * a plain strncmp would miss whichever spelling it was not written for. */
+static const char *path_after(const char *path, const char *pfx)
+{
+	if (!path) return 0;
+	for (;;) {
+		if (*pfx == '/') {
+			if (*path != '/') return 0;
+			while (*path == '/') path++;
+			while (*pfx  == '/') pfx++;
+			continue;
+		}
+		if (!*pfx) return path;
+		if (*path != *pfx) return 0;
+		path++; pfx++;
+	}
+}
+
+static int has_slash(const char *s)
+{
+	for (; *s; s++)
+		if (*s == '/') return 1;
+	return 0;
+}
+
+/* The AppSo= line of a package's meta.inf: the file the picker would launch.
+ * Read with real_open so it cannot recurse back into our own open(). */
+static void pkg_entry(const char *pkg, char *out, unsigned outsz)
+{
+	char path[512], buf[2048];
+	int fd;
+	long n;
+	unsigned i, j;
+
+	out[0] = 0;
+	if (!real_open || !real_read || !real_close)
+		return;
+	snprintf(path, sizeof(path), "%s/LF/Bulk/ProgramFiles/%s/meta.inf",
+	         g_sysroot, pkg);
+	fd = real_open(path, O_RDONLY, 0);
+	if (fd < 0) {
+		snprintf(path, sizeof(path), "/LF/Bulk/ProgramFiles/%s/meta.inf", pkg);
+		fd = real_open(path, O_RDONLY, 0);
+	}
+	if (fd < 0)
+		return;
+	n = real_read(fd, buf, sizeof(buf) - 1);
+	real_close(fd);
+	if (n <= 0)
+		return;
+	buf[n] = 0;
+	for (i = 0; (long)i + 7 < n; i++) {
+		if (strncmp(buf + i, "AppSo=\"", 7))
+			continue;
+		i += 7;
+		for (j = 0; j + 1 < outsz && buf[i] && buf[i] != '"'; )
+			out[j++] = buf[i++];
+		out[j] = 0;
+		return;
+	}
+}
+
+/* Is `path` the entry point of an installed package? Fills `pkg_out` if so.
+ * The meta.inf answer is cached for one package, because the picker opens
+ * dozens of files from a package directory and only one of them is this. */
+static int title_entry(const char *path, char *pkg_out, unsigned pkg_sz)
+{
+	static char last_pkg[PKGID_MAX], last_entry[PKGID_MAX];
+	const char *rest, *file;
+	unsigned i;
+
+	if (!(rest = path_after(path, "/LF/Bulk/ProgramFiles/")))
+		return 0;
+	for (i = 0; rest[i] && rest[i] != '/'; i++)
+		;
+	if (i == 0 || i >= sizeof(last_pkg) || rest[i] != '/')
+		return 0;
+	file = rest + i;
+	while (*file == '/') file++;
+	/* An entry point sits directly in the package directory; assets do not. */
+	if (!*file || has_slash(file))
+		return 0;
+
+	if (strncmp(rest, last_pkg, i) || last_pkg[i]) {
+		memcpy(last_pkg, rest, i);
+		last_pkg[i] = 0;
+		pkg_entry(last_pkg, last_entry, sizeof(last_entry));
+	}
+	if (!last_entry[0] || !seg_eq(file, last_entry))
+		return 0;
+	snprintf(pkg_out, pkg_sz, "%s", last_pkg);
+	return 1;
+}
+
+static void screen_set(u32 kind, const char *pkg)
+{
+	if (!g_state)
+		return;
+	if (g_state->screen == kind &&
+	    (kind != TAD_SCREEN_TITLE || seg_eq(g_state->screen_pkg, pkg ? pkg : "")))
+		return;
+	snprintf(g_state->screen_pkg, sizeof(g_state->screen_pkg), "%s",
+	         (kind == TAD_SCREEN_TITLE && pkg) ? pkg : "");
+	g_state->screen = kind;
+	g_state->screen_seq++;
+	dbg("[tadpole] screen -> ");
+	dbg(kind == TAD_SCREEN_TITLE ? g_state->screen_pkg : "system UI");
+	dbg("\n");
+}
+
+static void screen_note(const char *path)
+{
+	char pkg[PKGID_MAX];
+	const char *rest;
+
+	if (!g_state || !path)
+		return;
+	/* Only .swf, and only the LPAD directory itself: the fonts and art in its
+	 * subdirectories are shared, and a title that loaded one would otherwise
+	 * read as the home screen coming back. */
+	if ((rest = path_after(path, "/LF/Base/LPAD/")) != 0) {
+		if (ends_with_swf(rest) && !has_slash(rest))
+			screen_set(TAD_SCREEN_SYSTEM, 0);
+	} else if (title_entry(path, pkg, sizeof(pkg))) {
+		screen_set(TAD_SCREEN_TITLE, pkg);
+	}
+}
+
 static int open_common(const char *path, int flags, int mode)
 {
 	char real[320];
@@ -809,13 +1001,14 @@ static int open_common(const char *path, int flags, int mode)
 		fd = real_open(full, flags, mode);
 		if (fd >= 0) {
 			if (g_debug) { dbg("[tadpole] open(sysroot) "); dbg(path); dbg("\n"); }
+			screen_note(path);
 			io_pace(path);
 			return fd;
 		}
 	}
 	{
 		int fd = real_open(path, flags, mode);
-		if (fd >= 0) io_pace(path);
+		if (fd >= 0) { screen_note(path); io_pace(path); }
 		return fd;
 	}
 }
@@ -870,6 +1063,11 @@ void *dlopen(const char *path, int flags)
 	if (!real_dlopen)
 		return 0;
 	h = real_dlopen(path, flags);
+	/* A NATIVE TITLE ARRIVES HERE AND NOWHERE ELSE. CAppManager::LoadNewApp
+	 * dlopen()s the package's App.so, and the guest's own loader then opens
+	 * the file with raw syscalls that never reach our open() — so this is the
+	 * only place the start of a native title is visible. */
+	if (h) screen_note(path);
 	if (g_debug && !h) {
 		const char *e = real_dlerror ? real_dlerror() : 0;
 		dbg("[tadpole] dlopen FAILED ");

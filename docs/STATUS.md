@@ -38,6 +38,7 @@ video and host-GPU rendering.
 | FMV / the video plane | done |
 | Launching one title directly, with no home screen | done — `TADPOLE_LAUNCH` |
 | Firmware install, online update, setup wizard, AppImage | done |
+| The window turns with the guest — portrait UI, landscape titles | done |
 | 28 of 110 installed titles still fail to launch | **where the work is** |
 
 ## The old blocker is gone, and here is how to tell

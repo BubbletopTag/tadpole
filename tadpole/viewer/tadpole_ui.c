@@ -257,6 +257,10 @@ static struct ui_settings g_cfg = {
 	.gl_dumpframe     = 0,
 	.gl_dumptex       = 0,
 	.rotate           = 0,
+	/* ON. The panel's software is not all one way up — the LeapPad UI is
+	 * portrait, titles are landscape — and until now the only way to see
+	 * either of them upright was to notice and press Ctrl+R. */
+	.auto_rotate      = 1,
 	.scale            = 2,
 	.touch_debug      = 0,
 	.audio_on         = 1,
@@ -2224,14 +2228,14 @@ void ui_cfg_save(void)
 	fprintf(f, "update_check %d\n", g_cfg.update_check);
 	fprintf(f, "gl %d\ngl_hle %d\ndebug_level %d\nlog_to_file %d\n"
 	           "gl_dumpframe %d\ngl_dumptex %d\n"
-	           "rotate %d\nscale %d\ntouch_debug %d\n"
+	           "rotate %d\nauto_rotate %d\nscale %d\ntouch_debug %d\n"
 	           "audio_on %d\naudio_latency_ms %d\naudio_pace %d\n"
 	           "frame_cap %d\nhle_strict %d\nmsaa %d\nrender_scale %d\n"
 	           "io_delay_us %d\ntslib %d\n"
 	           "boot_on_start %d\nfast_boot %d\n",
 	        g_cfg.gl, g_cfg.gl_hle, g_cfg.debug_level, g_cfg.log_to_file,
 	        g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
-	        g_cfg.rotate, g_cfg.scale, g_cfg.touch_debug,
+	        g_cfg.rotate, g_cfg.auto_rotate, g_cfg.scale, g_cfg.touch_debug,
 	        g_cfg.audio_on, g_cfg.audio_latency_ms, g_cfg.audio_pace,
 	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.msaa, g_cfg.render_scale,
 	        g_cfg.io_delay_us,
@@ -2279,6 +2283,7 @@ static void cfg_load(void)
 			else if (!strcmp(k, "gl_dumpframe"))     g_cfg.gl_dumpframe = val;
 			else if (!strcmp(k, "gl_dumptex"))       g_cfg.gl_dumptex = val;
 			else if (!strcmp(k, "rotate"))           g_cfg.rotate = val;
+			else if (!strcmp(k, "auto_rotate"))      g_cfg.auto_rotate = val;
 			else if (!strcmp(k, "scale"))            g_cfg.scale = val;
 			else if (!strcmp(k, "touch_debug"))      g_cfg.touch_debug = val;
 			else if (!strcmp(k, "audio_on"))         g_cfg.audio_on = val;
@@ -3543,10 +3548,14 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		row_value(r, &d, 4, "Frame cap", buf, row_hit(&d, 4, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%d deg", g_cfg.rotate);
 		row_value(r, &d, 5, "Orientation", buf, row_hit(&d, 5, g_mx, g_my));
+		/* Directly under the orientation it overrides, because that is the
+		 * row someone is looking at when they wonder why the window turned. */
+		row_check(r, &d, 6, "Turn with the app", g_cfg.auto_rotate,
+		          row_hit(&d, 6, g_mx, g_my));
 		snprintf(buf, sizeof(buf), "%dx", g_cfg.scale);
-		row_value(r, &d, 6, "Window scale", buf, row_hit(&d, 6, g_mx, g_my));
-		row_check(r, &d, 7, "Touch debug overlay", g_cfg.touch_debug,
-		          row_hit(&d, 7, g_mx, g_my));
+		row_value(r, &d, 7, "Window scale", buf, row_hit(&d, 7, g_mx, g_my));
+		row_check(r, &d, 8, "Touch debug overlay", g_cfg.touch_debug,
+		          row_hit(&d, 8, g_mx, g_my));
 		text(r, d.x + 10, d.y + d.h - 30,
 		     g_running ? "GL: reboot to apply."
 		               : "GL applies at next boot.",
@@ -5026,11 +5035,12 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			g_cfg.frame_cap = hz[k];
 		}
 		else if (row_hit(&d, 5, mx, my)) cycle_rotate();
-		else if (row_hit(&d, 6, mx, my)) {
+		else if (row_hit(&d, 6, mx, my)) g_cfg.auto_rotate = !g_cfg.auto_rotate;
+		else if (row_hit(&d, 7, mx, my)) {
 			g_cfg.scale = g_cfg.scale % 4 + 1;
 			g_action = UI_ACT_RELAYOUT;
 		}
-		else if (row_hit(&d, 7, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
+		else if (row_hit(&d, 8, mx, my)) g_cfg.touch_debug = !g_cfg.touch_debug;
 		ui_cfg_save();
 		return 1;
 	}

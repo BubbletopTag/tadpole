@@ -102,11 +102,24 @@ struct layer_state {
 	uint32_t vid_w, vid_h;
 };
 
+/* What the guest is showing. The shim works this out from the files the guest
+ * opens — see the long note by screen_note() in tadpole_shim.c — and says so
+ * here; deciding which way up to hold the window from it is ours, below. */
+#define TAD_SCREEN_UNKNOWN 0
+#define TAD_SCREEN_SYSTEM  1
+#define TAD_SCREEN_TITLE   2
+#define PKGID_MAX          64
+
 struct tadpole_state {
 	uint32_t magic, version;
 	uint32_t width, height;
 	uint32_t vsync_count;
 	struct layer_state layer[NUM_FB];
+	/* Appended at the end, and it must stay at the end: tools/fbshot.py
+	 * decodes the header and the layers out of this file by offset. */
+	uint32_t screen;
+	uint32_t screen_seq;
+	char     screen_pkg[PKGID_MAX];
 };
 
 /* struct input_event as the 32-bit ARM guest sees it: 32-bit time_t. NOT the
@@ -193,6 +206,7 @@ static int   g_evfd[NUM_EV];
 static void *g_fb[NUM_FB];
 static size_t g_fbsz[NUM_FB];
 static struct tadpole_state *g_state;
+static size_t g_statesz;              /* bytes actually mapped at g_state */
 
 /* ---- audio -------------------------------------------------------------- *
  *
@@ -1450,6 +1464,86 @@ static void set_logical(SDL_Renderer *ren, int rotate, int w, int h)
 	SDL_RenderSetLogicalSize(ren, lw, lh + UI_BAR_H);
 }
 
+/* ---- following the guest's orientation -----------------------------------
+ *
+ * THE HOME SCREEN IS PORTRAIT AND A GAME IS NOT, on the same 480x272 buffer.
+ * The LeapPad UI draws a quarter turn from how the device is held — the same
+ * reason the stock boot art is named "...CW.png" — so reading it upright means
+ * turning the picture back, 270 degrees clockwise. Titles are drawn the way
+ * they are played: landscape, no rotation. Verified by taking the raw
+ * framebuffer of each and rotating it both ways (shots/24-home-with-apps.png
+ * against shots/32-clamprix-current.png): only 270 puts "Sign In" the right
+ * way up, and only 0 leaves Clam Prix alone.
+ *
+ * So the answer changes as the guest moves between the two, which is what
+ * this is for. The shim reports WHICH SCREEN; the rotation is ours.
+ *
+ * NOT EVERY TITLE IS LANDSCAPE, and nothing in the package says which is
+ * which. My Books and Notepad draw portrait, and their stage sizes, device
+ * fields and Hidden flags are indistinguishable from the landscape ones — the
+ * only honest source is looking at the thing. So the rule is "a title is
+ * landscape", and the exceptions are listed here, each one measured from a
+ * capture. Anything not listed and drawn the other way is one Ctrl+R away,
+ * and that manual choice then stands until the guest changes screen.
+ */
+static const char *const PORTRAIT_TITLES[] = {
+	/* PackageID           what it is, and where the measurement is */
+	"PAD2-0x001E0013-000000",  /* My Books  — compat sweep, late.png */
+	"PADS-0x0028000C-000000",  /* Notepad   — compat sweep, late.png */
+	/* The text-entry keyboard the UI pushes when you name a profile. It is a
+	 * package like any other, so it arrives here as a "title" — but it is
+	 * part of a portrait screen, and its own art says so: Art/port-bg-up.png
+	 * is 327x272 with the buttons drawn sideways, and buttonMap.json calls
+	 * that config "Portrait-Single". Rotating for it would turn the window
+	 * over in the middle of typing a name. */
+	"KeyboardWidget",
+};
+
+static int rotate_for_screen(unsigned screen, const char *pkg)
+{
+	char id[PKGID_MAX];
+	size_t i;
+
+	if (screen != TAD_SCREEN_TITLE)
+		return 270;                 /* the LeapPad UI, and the boot logo */
+	/* pkg points into shared memory a guest wrote and may have died in the
+	 * middle of writing, so terminate it here rather than trusting it. */
+	snprintf(id, sizeof(id), "%s", pkg ? pkg : "");
+	for (i = 0; i < sizeof PORTRAIT_TITLES / sizeof *PORTRAIT_TITLES; i++)
+		if (!strcmp(id, PORTRAIT_TITLES[i]))
+			return 270;
+	return 0;
+}
+
+/* A rotation the front end already knows is coming, before any guest has said
+ * so: launching the system menu means portrait, launching a title means
+ * whatever that title is. Without it, "Run System Menu" would play the boot
+ * logo — a portrait picture — sideways for the twenty seconds until
+ * AppManager opens its first screen. -1 = nothing pending. */
+static int g_rot_want = -1;
+
+/* Resize and re-letterbox for a new rotation or scale. Both the manual
+ * control and the automatic follow come through here.
+ *
+ * SDL_SetWindowSize blocks on a window-manager round trip — measured at 4.8
+ * seconds here. The guest is meanwhile waiting for us to replay its frame, so
+ * drain the ring on BOTH sides of the resize; otherwise rotating reliably
+ * starves it into falling back to software, which is exactly what was
+ * reported when only the manual path existed. */
+static void apply_layout(SDL_Renderer *ren, SDL_Window *win, int rotate,
+                         int scale, int w, int h)
+{
+	int lw = (rotate == 90 || rotate == 270) ? h : w;
+	int lh = (rotate == 90 || rotate == 270) ? w : h;
+
+	if (hle_host_ready() && g_state && g_fb[1])
+		hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
+	set_logical(ren, rotate, w, h);
+	SDL_SetWindowSize(win, lw * scale, (lh + UI_BAR_H) * scale);
+	if (hle_host_ready() && g_state && g_fb[1])
+		hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
+}
+
 static int try_map(void)
 {
 	char path[600];
@@ -1457,7 +1551,11 @@ static int try_map(void)
 
 	if (g_state) return 1;
 	snprintf(path, sizeof(path), "%s/state.bin", g_dir);
-	g_state = map_file(path, NULL);
+	/* THE SIZE MATTERS, not just the mapping. An arena left behind by an
+	 * older shim is short by the screen fields at the end, and reading them
+	 * out of it would be reading past the file. Recorded here, checked before
+	 * the orientation follow trusts them. */
+	g_state = map_file(path, &g_statesz);
 	if (!g_state) return 0;
 	if (g_state->magic != TADPOLE_MAGIC) {   /* half-written; try again later */
 		g_state = NULL;
@@ -2427,6 +2525,9 @@ static void guest_launch_ui(void)
 	g_guest = spawn_script("tadpole.sh", av, 1, quiet ? NULL : &g_glog_fd, quiet);
 	ui_set_running(g_guest > 0);
 	ui_status(g_guest > 0 ? "booting..." : "launch failed");
+	/* The system menu is portrait, and so is the boot logo drawn over it. */
+	if (g_guest > 0)
+		g_rot_want = rotate_for_screen(TAD_SCREEN_SYSTEM, "");
 	/* THE ONE PLACE THE BOOT SEQUENCE IS ARMED, and it stays the one place.
 	 * Launching a title — guest_launch_app(), guest_launch_swf() — must not
 	 * play it: a LeapPad does not show you its logo because you started a
@@ -2461,6 +2562,11 @@ static void guest_launch_app(const char *pkg)
 	g_guest = spawn_script("tadpole.sh", av, 1, &g_glog_fd, 0);
 	if (g_guest > 0) ui_status("%s", pkg);
 	else             ui_status("could not start %s", pkg);
+	/* Turn NOW rather than when the title's first file open reaches the shim:
+	 * a launch takes seconds, and the window flipping over halfway through
+	 * reads as a glitch where turning with the click reads as the answer. */
+	if (g_guest > 0)
+		g_rot_want = rotate_for_screen(TAD_SCREEN_TITLE, pkg);
 }
 
 static void guest_launch_swf(const char *hostpath)
@@ -2765,7 +2871,11 @@ int main(int argc, char **argv)
 	int gpu_lost_told = 0;            /* the replay-died dialog, once a session */
 	char path[512];
 	int scale = 2, w, h, i, running = 1, touching = 0;
-	int rotate = 0;   /* degrees CW; portrait apps need 90 */
+	int rotate = 0;   /* degrees CW; the LeapPad UI is drawn at 270 */
+	/* The last screen transition acted on — see rotate_for_screen(). Both,
+	 * because a fresh guest zeroes the shared state: the counter alone would
+	 * miss a new session whose first transition landed on the same number. */
+	unsigned screen_seq_seen = 0, screen_kind_seen = TAD_SCREEN_UNKNOWN;
 	char actpath[1024];
 	int selftest_want = 0;
 	const char *shot_state = NULL, *shot_out = NULL;
@@ -3492,6 +3602,43 @@ int main(int argc, char **argv)
 			if (try_map())
 				ui_status("running");
 		}
+
+		/* HOLD THE WINDOW THE WAY THE GUEST IS DRAWING.
+		 *
+		 * Only on a CHANGE of screen, which is what makes the manual control
+		 * still worth having: rotate a title that draws portrait and the
+		 * choice stands until the guest moves to another screen, rather than
+		 * being argued with a frame later. */
+		{
+			static int auto_was = -1;
+			int want = -1;
+			/* Ticking the setting acts NOW rather than at the next screen:
+			 * forgetting what we last saw makes the current screen a change
+			 * again, and the same code below does the work. */
+			if (auto_was != ui_cfg()->auto_rotate) {
+				auto_was = ui_cfg()->auto_rotate;
+				if (auto_was) screen_kind_seen = TAD_SCREEN_UNKNOWN;
+			}
+			if (g_rot_want >= 0) {
+				want = g_rot_want;
+				g_rot_want = -1;
+			} else if (g_state && g_statesz >= sizeof *g_state &&
+			           g_state->screen != TAD_SCREEN_UNKNOWN &&
+			           (g_state->screen_seq != screen_seq_seen ||
+			            g_state->screen != screen_kind_seen)) {
+				screen_seq_seen  = g_state->screen_seq;
+				screen_kind_seen = g_state->screen;
+				want = rotate_for_screen(g_state->screen,
+				                         g_state->screen_pkg);
+			}
+			/* NOT SAVED. ui_cfg()->rotate is what is on screen now, so the
+			 * bar's ROT chip and Ctrl+R both read from one place; the SAVED
+			 * setting stays whatever the user last chose by hand. */
+			if (want >= 0 && ui_cfg()->auto_rotate && want != rotate) {
+				rotate = ui_cfg()->rotate = want;
+				apply_layout(ren, win, rotate, scale, w, h);
+			}
+		}
 		ev_open_missing();
 		/* ANNOUNCE EXTERNAL POWER REPEATEDLY, NOT ONCE.
 		 *
@@ -3850,19 +3997,7 @@ int main(int argc, char **argv)
 		case UI_ACT_RELAYOUT:
 			rotate = ui_cfg()->rotate;
 			scale  = ui_cfg()->scale;
-			/* SDL_SetWindowSize blocks on a window-manager round trip — measured
-			 * at 4.8 seconds here. The guest is meanwhile waiting for us to
-			 * replay its frame, so drain the ring on BOTH sides of the resize;
-			 * otherwise rotating reliably starves it into falling back to
-			 * software, which is exactly what was reported. */
-			if (hle_host_ready() && g_state && g_fb[1])
-				hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
-			set_logical(ren, rotate, w, h);
-			SDL_SetWindowSize(win,
-			        ((rotate == 90 || rotate == 270) ? h : w) * scale,
-			        (((rotate == 90 || rotate == 270) ? w : h) + UI_BAR_H) * scale);
-			if (hle_host_ready() && g_state && g_fb[1])
-				hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
+			apply_layout(ren, win, rotate, scale, w, h);
 			break;
 		default: break;
 		}

@@ -729,6 +729,13 @@ struct tad_layer_state {
 struct tad_state {
 	u32 magic, version, width, height, vsync_count;
 	struct tad_layer_state layer[3];
+	/* The screen the guest is showing, published for the viewer to hold the
+	 * window the right way up. NOTHING HERE READS IT — it is mirrored because
+	 * the length check below pins the layout, and a struct that stopped
+	 * matching would take the layer rect out and render every 3D title to the
+	 * full panel with only a trace line to say so. */
+	u32 screen, screen_seq;
+	char screen_pkg[64];
 };
 
 static const struct tad_state *g_tstate;
