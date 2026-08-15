@@ -1,0 +1,14 @@
+# Build products of everything under android/.
+#
+# The repository's top-level .gitignore already excludes build/, which is where
+# the SDL2 source tree and the NDK's object files land; this covers the pieces
+# that sit next to their own scripts instead.
+out/
+debug.keystore
+*.apk
+*.apk.idsig
+*.dex
+libs/
+obj/
+.gradle/
+local.properties
