@@ -244,6 +244,16 @@ int gp_thread_detach(gp_thread *t) {
 void gp_thread_exit(void)  { pthread_exit(NULL); }
 void gp_thread_yield(void) { sched_yield(); }
 
+/* ---- process creation ---------------------------------------------------- */
+
+int gp_fork(void) {
+    /* fork(), not posix_spawn() or vfork(): the child has to go on executing
+     * our code with our memory, which is precisely what fork gives and the
+     * other two exist to avoid. See the note in host.h. */
+    pid_t p = fork();
+    return p < 0 ? err() : (int)p;
+}
+
 uint32_t gp_thread_id(void) { return (uint32_t)syscall(SYS_gettid); }
 
 /* ---- waiting ------------------------------------------------------------ */

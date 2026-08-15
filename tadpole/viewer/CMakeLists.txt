@@ -38,7 +38,22 @@ if(WIN32)
 endif()
 find_package(ZLIB REQUIRED)   # ui screenshots and the games index
 
-add_executable(tadpole-view tadpole_view.c tadpole_ui.c tadpole_hle.c)
+# THE STARTUP ANIMATION'S DECODER, OPTIONAL, AND STATIC HERE.
+#
+# The device's animations are Ogg Theora with Vorbis audio. Optional because
+# Fast Boot skips them by default and a viewer without the three libraries
+# still shows the boot logo; see the matching block in the GNU Makefile, which
+# this file has to stay in agreement with.
+#
+# NOTHING TO SHIP BESIDE THE EXE. The Windows viewer already links -static, so
+# these arrive as .a inside tadpole-view.exe rather than as three more DLLs to
+# copy — which is the same policy as SDL2 and zlib here and the reason this is
+# a one-file build at all. pkg-config --static is what makes that work: the
+# non-static --libs omits the transitive -logg that libtheoradec needs.
+pkg_check_modules(THEORA ogg theoradec vorbis)
+
+add_executable(tadpole-view tadpole_view.c tadpole_ui.c tadpole_hle.c
+                            tadpole_boot.c)
 add_executable(hle-probe hle_probe.c)
 
 foreach(t tadpole-view hle-probe)
@@ -54,6 +69,20 @@ endforeach()
 # not do from timestamps alone, and why it grew .tadpole-version.
 target_compile_definitions(tadpole-view PRIVATE
                            TADPOLE_VERSION="${TADPOLE_VERSION}")
+
+if(THEORA_FOUND)
+    target_compile_definitions(tadpole-view PRIVATE TADPOLE_THEORA)
+    target_include_directories(tadpole-view PRIVATE ${THEORA_INCLUDE_DIRS})
+    if(WIN32)
+        target_link_libraries(tadpole-view PRIVATE ${THEORA_STATIC_LDFLAGS})
+    else()
+        target_link_libraries(tadpole-view PRIVATE ${THEORA_LDFLAGS})
+    endif()
+else()
+    message(STATUS
+        "no ogg/theoradec/vorbis: the startup animation will be skipped and "
+        "Fast Boot off shows the logo alone")
+endif()
 
 if(WIN32)
     # The double-click: a tiny GUI-subsystem exe that finds the tree and

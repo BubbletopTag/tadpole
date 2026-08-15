@@ -88,6 +88,16 @@ fi
 : "${TADPOLE_GL:=1}"
 export TADPOLE_GL
 
+# WHICH LOGO. rcS picks by platform_family — Lucy-Boot-logo.png on a LeapsterGS,
+# Valencia-Boot-logoCW.png on everything else, this device included.
+#
+# "CW" READS AS SIDEWAYS AND IS CORRECT. The panel is portrait, so everything
+# the device draws is stored a quarter turn from how it is held — the home
+# screen and every title as much as this logo, which is why shots/01-boot-logo.png
+# has always looked like that. Presentation is the viewer's `-r` and nothing
+# else's, so this is drawn exactly as stored, same as the guest's own output.
+BOOTLOGO=/var/screens/Valencia-Boot-logoCW.png
+
 # HLE — HOST-GPU REPLAY — ON BY DEFAULT, read from the same config file.
 #
 # This used to be opt-in, and the only thing that set it was tools/probe-race.sh.
@@ -384,14 +394,24 @@ guest() {
            "$bin" "$@" )
 }
 
+# THIS USED TO DRAW THE BOOT LOGO HERE, and the only reason nobody minded is
+# that it never worked.
+#
 # The shim creates the framebuffer and state files on first open, and the
-# viewer must be able to map them before it starts. Draw the boot logo to do
-# it — the real device does exactly this from rcS, so it doubles as a splash.
-# (Must be a binary that loads a shim variant: imager-fb pulls in libz.)
-if [ ! -e "$TADPOLE_DIR/state.bin" ]; then
-    guest /usr/bin/imager-fb /dev/fb0 /var/screens/Valencia-Boot-logoCW.png \
-        >/dev/null 2>&1 || true
-fi
+# viewer once had to map them before it started — so this ran imager-fb on the
+# logo to bring them into being, and the picture was a bonus splash. Two things
+# have changed since. The viewer retries try_map() every frame until it
+# succeeds (see the note by that call), so nothing needs the arena to exist
+# before a guest does; and imager-fb could not resolve __aeabi_uidiv against
+# our shim's libz, so for as long as this line has existed it drew nothing,
+# created nothing, and was ignored by the `|| true`.
+#
+# Fixing the shim made it work — which meant the front end sat at rest showing
+# LeapFrog branding instead of its own idle screen, and a cold Run System Menu
+# flashed a logo at people who have Fast Boot ticked. Neither is something to
+# fix twice, so the vestigial step is gone: the first guest creates the arena,
+# the viewer maps it when it appears, and the boot logo is drawn by the one
+# thing that is supposed to draw it — viewer/tadpole_boot.c, when asked.
 
 viewer_pid=""
 if [ "$use_viewer" = 1 ] && [ -x "$VIEWER" ]; then
@@ -516,7 +536,7 @@ case "$mode" in
             guest /bin/busybox $line
         done ;;
     logo)
-        guest /usr/bin/imager-fb /dev/fb0 /var/screens/Valencia-Boot-logoCW.png
+        guest /usr/bin/imager-fb /dev/fb0 "$BOOTLOGO"
         echo "logo drawn to $TADPOLE_DIR/fb0.bin"
         [ -n "$viewer_pid" ] && { echo "viewer showing it; Ctrl+C to stop"; wait $viewer_pid; } ;;
     run)

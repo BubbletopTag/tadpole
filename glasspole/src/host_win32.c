@@ -1296,6 +1296,21 @@ void gp_thread_yield(void) { SwitchToThread(); }
 
 uint32_t gp_thread_id(void) { return (uint32_t)GetCurrentThreadId(); }
 
+/* ---- process creation ----------------------------------------------------
+ *
+ * There is no fork on Windows. Not "no convenient fork": NtCreateProcess can
+ * clone an address space, but nothing in the CRT, the loader or our own JIT
+ * survives being duplicated behind their backs, and the result is a child
+ * that runs until the first thing that notices. CreateProcess is the Windows
+ * way and it is a different operation — it starts a NEW program, and the
+ * guest asking to fork wants to continue THIS one.
+ *
+ * So: honestly not implemented. What it costs is /LF/Base/bin/VideoDaemon,
+ * which daemonises by forking — the startup, transition and shutdown videos
+ * are absent on Windows and present everywhere else. Everything the daemon is
+ * not responsible for, in-title FMV included, is unaffected. */
+int gp_fork(void) { return GP_ENOSYS; }
+
 /* ---- waiting -------------------------------------------------------------
  * The sixty lines host.h promised. An address hashes to a bucket holding an
  * SRWLOCK and a CONDITION_VARIABLE; gp_wait_on re-checks the word under the

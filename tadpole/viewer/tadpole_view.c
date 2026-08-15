@@ -64,6 +64,7 @@ static int tp_fifo_fd(const char *path, int want_read)
 }
 #endif
 #include "tadpole_ui.h"
+#include "tadpole_boot.h"
 #include "tadpole_hle.h"
 #include "tadpole_port.h"
 #include <sys/stat.h>
@@ -2117,6 +2118,10 @@ static int guest_alive(void)
 
 static void guest_stop(void)
 {
+	/* Before the early return, not after it: the presentation has to end even
+	 * when there is no guest handle to terminate, or a launch that failed
+	 * leaves the logo up over nothing. */
+	boot_stop();
 	if (!g_guest_h)
 		return;
 	/* TerminateProcess without ceremony: since the shared-view change there
@@ -2324,6 +2329,10 @@ static void guest_stop(void)
 {
 	int i, st, reaped = 0;
 
+	/* Nothing left to introduce. Stopping the guest without this leaves the
+	 * logo on screen over a dead system, which reads as a hang. */
+	boot_stop();
+
 	if (g_guest > 0) {
 		kill(-g_guest, SIGTERM);
 		for (i = 0; i < 40; i++) {             /* up to 2s to go quietly */
@@ -2418,6 +2427,12 @@ static void guest_launch_ui(void)
 	g_guest = spawn_script("tadpole.sh", av, 1, quiet ? NULL : &g_glog_fd, quiet);
 	ui_set_running(g_guest > 0);
 	ui_status(g_guest > 0 ? "booting..." : "launch failed");
+	/* THE ONE PLACE THE BOOT SEQUENCE IS ARMED, and it stays the one place.
+	 * Launching a title — guest_launch_app(), guest_launch_swf() — must not
+	 * play it: a LeapPad does not show you its logo because you started a
+	 * game, and neither does this. */
+	if (g_guest > 0 && !ui_cfg()->fast_boot)
+		boot_arm(g_projdir);
 }
 
 /* A .swf is run by the guest's Flash player, so the path has to be one the
@@ -3321,7 +3336,16 @@ int main(int argc, char **argv)
 
 			SDL_SetRenderDrawColor(ren, 6, 15, 10, 255);
 			SDL_RenderClear(ren);
-			if (g_state) {
+			/* THE BOOT PRESENTATION OWNS THE PANEL WHILE IT RUNS, and it runs
+			 * over a guest that is already booting — the same overlap the
+			 * device has, where VideoDaemon plays the animation while
+			 * AppManager starts behind it. So this replaces the composite
+			 * rather than waiting for it, and boot_draw() stops itself the
+			 * moment the guest raises /tmp/ui_ready. The chrome below is
+			 * still drawn: the menu bar is ours, not the device's. */
+			if (boot_active() && boot_draw(ren, &dst, rotate)) {
+				/* the panel is the animation's this frame */
+			} else if (g_state) {
 				/* Bottom: everything below the game layer. */
 				SDL_UpdateTexture(tex, NULL, pixels, w * 4);
 				if (rotate)

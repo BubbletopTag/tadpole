@@ -269,6 +269,7 @@ static struct ui_settings g_cfg = {
 	.io_delay_us      = 0,
 	.tslib            = 0,
 	.boot_on_start    = 0,
+	.fast_boot        = 1,
 	.games_dir        = "",
 };
 static enum ui_action g_action;
@@ -1430,8 +1431,16 @@ static void font_build(SDL_Renderer *ren)
 
 /* ---- the tadpole icon ----------------------------------------------------
  * Decoded by hand rather than through SDL2_image so the viewer keeps exactly
- * one library dependency. Only the subset of PNG that tadpole.png actually
- * uses is handled: 8-bit RGBA, non-interlaced, which is what `file` reports.
+ * one library dependency. Only the subset of PNG the files we open actually
+ * use is handled: 8 bits a channel, non-interlaced, colour type 6 (RGBA) or
+ * 2 (RGB).
+ *
+ * RGB WAS ADDED FOR THE BOOT LOGOS, not for the icon. LeapFrog's own screens
+ * are a mix — Valencia-Boot-logoCW.png is RGBA, Madrid-Boot-logo.png beside it
+ * is RGB — and a reader that silently returns NULL for half of them would make
+ * "this system has no boot logo" depend on which of the two a firmware
+ * shipped. Everything downstream of the row unpacking is already per-channel,
+ * so it costs an opacity and a stride.
  */
 static unsigned be32(const unsigned char *p)
 {
@@ -1451,8 +1460,8 @@ static int paeth(int a, int b, int c)
 extern int uncompress(unsigned char *dest, unsigned long *destLen,
                       const unsigned char *source, unsigned long sourceLen);
 
-static SDL_Texture *png_texture(SDL_Renderer *ren, const char *path,
-                                int *out_w, int *out_h, Uint32 **out_px)
+SDL_Texture *ui_png_texture(SDL_Renderer *ren, const char *path,
+                            int *out_w, int *out_h, Uint32 **out_px)
 {
 	FILE *f = fopen(path, "rb");
 	unsigned char *file = NULL, *idat = NULL, *raw = NULL;
@@ -1476,7 +1485,11 @@ static SDL_Texture *png_texture(SDL_Renderer *ren, const char *path,
 		const unsigned char *ty = file + pos + 4, *dat = file + pos + 8;
 		if (!memcmp(ty, "IHDR", 4)) {
 			w = be32(dat); h = be32(dat + 4);
-			if (dat[8] != 8 || dat[9] != 6 || dat[12] != 0) goto done;  /* RGBA8 only */
+			/* 8 bits a channel, not interlaced, and a colour type we unpack. */
+			if (dat[8] != 8 || dat[12] != 0) goto done;
+			if      (dat[9] == 6) bpp = 4;   /* RGBA */
+			else if (dat[9] == 2) bpp = 3;   /* RGB  */
+			else goto done;
 		} else if (!memcmp(ty, "IDAT", 4)) {
 			unsigned char *t = realloc(idat, idatn + n);
 			if (!t) goto done;
@@ -1513,8 +1526,10 @@ static SDL_Texture *png_texture(SDL_Renderer *ren, const char *path,
 			}
 			for (x = 0; x < w; x++)
 				px[(size_t)y * w + x] =
-					((Uint32)cur[x*4+3] << 24) | ((Uint32)cur[x*4] << 16) |
-					((Uint32)cur[x*4+1] << 8) | cur[x*4+2];
+					/* RGB has no alpha channel to read; it is opaque. */
+					((Uint32)(bpp == 4 ? cur[x*bpp+3] : 255) << 24) |
+					((Uint32)cur[x*bpp] << 16) |
+					((Uint32)cur[x*bpp+1] << 8) | cur[x*bpp+2];
 		}
 		tex = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888,
 		                        SDL_TEXTUREACCESS_STATIC, (int)w, (int)h);
@@ -1536,7 +1551,7 @@ done:
 /* The logo is simply the first user of the decoder above. */
 static void logo_load(SDL_Renderer *ren, const char *path)
 {
-	g_logo = png_texture(ren, path, &g_logo_w, &g_logo_h, &g_logo_px);
+	g_logo = ui_png_texture(ren, path, &g_logo_w, &g_logo_h, &g_logo_px);
 }
 
 /* ---- installed apps, for File -> Launch App -----------------------------
@@ -1948,7 +1963,7 @@ static void ap_icon(SDL_Renderer *r, struct ap_entry *e)
 {
 	if (e->tex || e->tried || !e->icon[0]) return;
 	e->tried = 1;
-	e->tex = png_texture(r, e->icon, &e->tw, &e->th, NULL);
+	e->tex = ui_png_texture(r, e->icon, &e->tw, &e->th, NULL);
 }
 
 /* ---- the game library ----------------------------------------------------
@@ -2213,7 +2228,7 @@ void ui_cfg_save(void)
 	           "audio_on %d\naudio_latency_ms %d\naudio_pace %d\n"
 	           "frame_cap %d\nhle_strict %d\nmsaa %d\nrender_scale %d\n"
 	           "io_delay_us %d\ntslib %d\n"
-	           "boot_on_start %d\n",
+	           "boot_on_start %d\nfast_boot %d\n",
 	        g_cfg.gl, g_cfg.gl_hle, g_cfg.debug_level, g_cfg.log_to_file,
 	        g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
 	        g_cfg.rotate, g_cfg.scale, g_cfg.touch_debug,
@@ -2221,7 +2236,7 @@ void ui_cfg_save(void)
 	        g_cfg.frame_cap, g_cfg.hle_strict, g_cfg.msaa, g_cfg.render_scale,
 	        g_cfg.io_delay_us,
 	        g_cfg.tslib,
-	        g_cfg.boot_on_start);
+	        g_cfg.boot_on_start, g_cfg.fast_boot);
 	/* Last, and only if set: it is the one value that can contain spaces. */
 	if (g_cfg.games_dir[0])
 		fprintf(f, "games_dir %s\n", g_cfg.games_dir);
@@ -2276,6 +2291,7 @@ static void cfg_load(void)
 			else if (!strcmp(k, "io_delay_us"))      g_cfg.io_delay_us = val;
 			else if (!strcmp(k, "tslib"))            g_cfg.tslib = val;
 			else if (!strcmp(k, "boot_on_start"))    g_cfg.boot_on_start = val;
+			else if (!strcmp(k, "fast_boot"))        g_cfg.fast_boot = val;
 			/* Older files carried these two; the debug level replaced them.
 			 * Honour them once so an existing install does not silently lose
 			 * the logging it was set up with. */
@@ -2890,7 +2906,7 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	case M_AUDIO: return dlg_fit(lw, lh, 230, 122);
 	case M_PAD:   return dlg_fit(lw, lh, 240, 140);
 	case M_DEBUG: return dlg_fit(lw, lh, 268, 200);
-	case M_SYSTEM: return dlg_fit(lw, lh, 268, 150);
+	case M_SYSTEM: return dlg_fit(lw, lh, 268, 164);
 	case M_FILES: return dlg_fit(lw, lh, 300, 172);
 	case M_WIZARD: return dlg_fit(lw, lh, 348, 210);
 	case M_PROGRESS: return dlg_fit(lw, lh, 350, 150);
@@ -3597,20 +3613,26 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		char buf[48];
 		row_check(r, &d, 0, "Boot the system menu at startup",
 		          g_cfg.boot_on_start, row_hit(&d, 0, g_mx, g_my));
-		text(r, d.x + 10, row_y(&d, 1) + 2, "Games folder:", C_TEXT);
+		/* Named for what it does rather than for what it skips. "Play the boot
+		 * animation" would have been the same switch the other way up, and the
+		 * wrong way up: the default is the fast one, and a default should read
+		 * as the plain choice rather than as a feature being withheld. */
+		row_check(r, &d, 1, "Fast Boot - skip the logo and video",
+		          g_cfg.fast_boot, row_hit(&d, 1, g_mx, g_my));
+		text(r, d.x + 10, row_y(&d, 2) + 2, "Games folder:", C_TEXT);
 		path_tail(buf, sizeof(buf),
 		          g_cfg.games_dir[0] ? g_cfg.games_dir : "(not chosen yet)");
-		text(r, d.x + 14, row_y(&d, 1) + 12, buf,
+		text(r, d.x + 14, row_y(&d, 2) + 12, buf,
 		     g_cfg.games_dir[0] ? C_ACCENT : C_TEXT_DIM);
 		{
-			SDL_Rect b = { d.x + 10, row_y(&d, 3) + 2, 76, 13 };
+			SDL_Rect b = { d.x + 10, row_y(&d, 4) + 2, 76, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Game Library",
 			       hot ? C_ACCENT : C_TEXT);
 		}
 		{
-			SDL_Rect b = { d.x + 94, row_y(&d, 3) + 2, 96, 13 };
+			SDL_Rect b = { d.x + 94, row_y(&d, 4) + 2, 96, 13 };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + 3, "Setup Wizard",
@@ -5044,12 +5066,13 @@ static int dialog_click(int lw, int lh, int mx, int my)
 	}
 	if (g_modal == M_SYSTEM) {
 		if (row_hit(&d, 0, mx, my)) g_cfg.boot_on_start = !g_cfg.boot_on_start;
-		else if (inside(mx, my, d.x + 10, row_y(&d, 3) + 2, 76, 13)) {
+		else if (row_hit(&d, 1, mx, my)) g_cfg.fast_boot = !g_cfg.fast_boot;
+		else if (inside(mx, my, d.x + 10, row_y(&d, 4) + 2, 76, 13)) {
 			ui_cfg_save();
 			games_open();
 			return 1;
 		}
-		else if (inside(mx, my, d.x + 94, row_y(&d, 3) + 2, 96, 13)) {
+		else if (inside(mx, my, d.x + 94, row_y(&d, 4) + 2, 96, 13)) {
 			ui_cfg_save();
 			g_wiz_page = 0;
 			g_modal = M_WIZARD;

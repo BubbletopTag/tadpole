@@ -56,10 +56,14 @@ have_pymod() {
 
 say() { [ "$QUIET" = 1 ] || printf '%b' "$*"; }
 
-report() {                      # $1=ok/bundled/no  $2=label  $3=why
+report() {                      # $1=ok/bundled/no/optional  $2=label  $3=why
     case "$1" in
         ok)      say "  \033[32m+\033[0m $(printf '%-22s' "$2") $3\n"; ok=$((ok+1)) ;;
         bundled) say "  \033[32m+\033[0m $(printf '%-22s' "$2") $3 \033[2m(bundled)\033[0m\n"; ok=$((ok+1)) ;;
+        # NOT COUNTED AS MISSING, because it is not. An optional dependency that
+        # inflates "3 missing" teaches people to ignore the number, and the
+        # number is the whole point of this script.
+        optional) say "  \033[2m.\033[0m $(printf '%-22s' "$2") $3 \033[2m(optional)\033[0m\n" ;;
         *)       say "  \033[31m-\033[0m $(printf '%-22s' "$2") $3\n"; bad=$((bad+1)) ;;
     esac
 }
@@ -111,6 +115,11 @@ if [ "$WHAT" = all ]; then
     need "$s" OpenGL "host-GPU rendering" mesa libgl1-mesa-dev
     have_pc zlib && s=ok || s=no
     need "$s" zlib "the viewer decodes its icon" zlib zlib1g-dev
+    # The startup animation, and nothing else, so its absence costs one
+    # cosmetic four-second clip that Fast Boot skips by default anyway.
+    if pkg-config --exists ogg theoradec vorbis 2>/dev/null; then s=ok
+    else s=optional; fi
+    report "$s" "theora/vorbis/ogg" "the boot startup animation"
     say "\n"
 
     # ONLY IN A SOURCE CHECKOUT. An installed AppImage has no compiler to run

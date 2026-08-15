@@ -533,18 +533,66 @@ int gp_spawn_thread(Thread &parent, uint32_t flags, uint32_t child_stack,
     /* Named GP_ because <sched.h> already defines CLONE_* as macros and gets
      * pulled in transitively by the C++ standard library. A macro wins against
      * a constexpr every time, and the error it produces names neither. */
+    constexpr uint32_t GP_CLONE_VM             = 0x00000100;
     constexpr uint32_t GP_CLONE_THREAD         = 0x00010000;
     constexpr uint32_t GP_CLONE_SETTLS         = 0x00080000;
     constexpr uint32_t GP_CLONE_PARENT_SETTID  = 0x00100000;
     constexpr uint32_t GP_CLONE_CHILD_CLEARTID = 0x00200000;
     constexpr uint32_t GP_CLONE_CHILD_SETTID   = 0x01000000;
 
-    /* CLONE_THREAD is what makes this a thread rather than a process. Every
-     * clone in the census had it, and a process would need a second address
-     * space that this design deliberately does not have. */
+    /* A PLAIN fork() — no CLONE_VM, no CLONE_THREAD — IS A PROCESS, and it is
+     * the one process creation the system software performs: VideoDaemon
+     * daemonising. uClibc's fork() arrives here as flags 0x01200011, which is
+     * CHILD_SETTID | CHILD_CLEARTID | SIGCHLD and nothing else.
+     *
+     * gp_fork() forks US, which forks the guest with it; see host.h for why
+     * that is the definition rather than an approximation. The return value is
+     * fork(2)'s and goes straight back as clone()'s: the parent is handed the
+     * child's pid, the child is handed 0 and carries on from the same svc.
+     *
+     * REFUSED FROM A MULTI-THREADED GUEST. fork() hands the child only the
+     * calling thread; the others simply are not there, and anything one of
+     * them held — a heap lock, most likely — is held for ever by nobody. A
+     * daemon forks before it has threads, so the check costs nothing real and
+     * turns a hang that would be blamed on the video into a refusal that says
+     * what happened. */
+    if (!(flags & (GP_CLONE_VM | GP_CLONE_THREAD))) {
+        size_t live;
+        {
+            std::lock_guard<std::mutex> g(m.lock);
+            live = m.threads.size();
+        }
+        if (live > 1) {
+            gp_log("fork (flags %08x) from a guest with %zu threads: refused, "
+                   "because the child would inherit only the calling one\n",
+                   flags, live);
+            return GP_ENOSYS;
+        }
+        int pid = gp_fork();
+        if (pid < 0) {
+            gp_log("fork failed (%d)\n", pid);
+            return pid;
+        }
+        if (pid == 0) {
+            /* The child. It IS this thread, so the tid it is told about is
+             * this one's — renumbered, because a fresh process is not the one
+             * it came from and CHILD_SETTID exists precisely to say so. */
+            parent.tid = m.next_tid.fetch_add(1, std::memory_order_relaxed);
+            if (flags & GP_CLONE_CHILD_SETTID)
+                std::memcpy(m.Ptr(child_tidptr), &parent.tid, 4);
+            if (flags & GP_CLONE_CHILD_CLEARTID)
+                parent.clear_child_tid = child_tidptr;
+        } else if (flags & GP_CLONE_PARENT_SETTID) {
+            std::memcpy(m.Ptr(parent_tidptr), &pid, 4);
+        }
+        return pid;
+    }
+
+    /* CLONE_THREAD is what makes this a thread rather than a process. */
     if (!(flags & GP_CLONE_THREAD)) {
-        gp_log("clone without CLONE_THREAD (flags %08x): process creation is not "
-               "implemented, and nothing in the measured workload asks for it\n", flags);
+        gp_log("clone with CLONE_VM but not CLONE_THREAD (flags %08x): a shared "
+               "address space without a shared thread group is not implemented\n",
+               flags);
         return GP_ENOSYS;
     }
 

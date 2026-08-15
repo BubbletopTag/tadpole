@@ -248,11 +248,11 @@ int   gp_dirclose(gp_dir *d);
 
 /* ---- threads ------------------------------------------------------------ */
 /*
- * Every clone() in the census was the standard NPTL set —
+ * Every clone() in the TITLE census was the standard NPTL set —
  * CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SETTLS —
- * i.e. "make a thread". No process creation anywhere, which is why this is a
- * thread interface and not a clone() emulation. If a title ever does fork(),
- * that is a design conversation, not a missing flag.
+ * i.e. "make a thread". That is why this is a thread interface and not a
+ * clone() emulation, and it stays one: gp_fork below is the whole of process
+ * creation, kept deliberately separate because it is a different operation.
  */
 typedef struct gp_thread gp_thread;
 
@@ -262,6 +262,34 @@ int   gp_thread_detach(gp_thread *t);
 void  gp_thread_exit(void);
 void  gp_thread_yield(void);
 uint32_t gp_thread_id(void);   /* stable per thread, used for the guest's tid */
+
+/* ---- process creation ---------------------------------------------------
+ *
+ * "No process creation anywhere" was true of the TITLES and false of the
+ * system: /LF/Base/bin/VideoDaemon daemonises the moment it starts —
+ * umask(0), fork(), parent exits — and so does nothing else in the census
+ * because nothing else in the census is a daemon. Returning ENOSYS to that
+ * fork killed the daemon at birth, and with it every video the system plays
+ * through it: the startup animation, the transition between titles, the
+ * shutdown animation. The symptom was not "fork failed"; it was that
+ * Glasspole silently had no system video at all while qemu-arm did.
+ *
+ * A guest fork is a HOST fork. That is not a shortcut, it is the definition:
+ * the guest's address space lives inside ours, so duplicating our process
+ * duplicates theirs, with copy-on-write and shared mappings behaving exactly
+ * as the guest expects — the shim's MAP_SHARED framebuffer arena included,
+ * which is the one that matters and the one a copy would have broken.
+ *
+ * Returns the child pid to the parent and 0 to the child, like fork(2), so
+ * the value can go straight back to the guest as clone()'s result.
+ *
+ * ONLY SAFE FROM A SINGLE-THREADED GUEST, because fork() gives the child only
+ * the calling thread: any other guest thread ceases to exist in the child,
+ * and any lock one of them held stays locked for ever. Daemonising is the
+ * first thing a daemon does, before it has threads, which is why this is
+ * sufficient — the caller checks, and refuses when it is not true.
+ */
+int   gp_fork(void);
 
 /* ---- waiting ------------------------------------------------------------ */
 /*

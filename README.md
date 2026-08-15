@@ -25,6 +25,7 @@ games — the ones from your own device. See
 | 3D (race tracks) | yes — Clam Prix races render and play |
 | Skinned player character | yes — the rider draws with the kart |
 | FMV / video layer | yes — Sneak Peeks trailers and the system videos play |
+| Boot logo and startup animation | yes — off by default, see Fast Boot |
 
 Frame rate on an AMD FirePro W4100: ~57 fps with GPU replay, against 11.5 fps
 software. Both are capped at the panel's real 60 Hz.
@@ -205,6 +206,7 @@ would actually be used import `ubireader.ubifs.misc`?*), and
 ```sh
 sudo pacman -S qemu-user sdl2-compat mesa zlib clang lld make python \
                base-devel curl unzip bzip2 zstd xz
+sudo pacman -S libogg libtheora libvorbis      # optional: startup animation
 ```
 
 ### Debian / Ubuntu
@@ -212,6 +214,7 @@ sudo pacman -S qemu-user sdl2-compat mesa zlib clang lld make python \
 ```sh
 sudo apt install qemu-user libsdl2-dev libgl1-mesa-dev zlib1g-dev \
                  clang lld make python3 pkg-config curl unzip bzip2 zstd xz-utils
+sudo apt install libogg-dev libtheora-dev libvorbis-dev   # optional: startup animation
 ```
 
 ### Fedora
@@ -219,6 +222,7 @@ sudo apt install qemu-user libsdl2-dev libgl1-mesa-dev zlib1g-dev \
 ```sh
 sudo dnf install qemu-user SDL2-devel mesa-libGL-devel zlib-ng-compat-devel \
                  clang lld make python3 pkgconf-pkg-config curl unzip bzip2 zstd xz
+sudo dnf install libogg-devel libtheora-devel libvorbis-devel  # optional: startup animation
 ```
 
 Then `./tools/fetch-deps.sh` for the rest. If you would rather not use it, add
@@ -435,8 +439,27 @@ With **Write a log file** on, the whole lot also goes to
 `tadpole.log.1`. That matters when Tadpole is launched from a desktop icon and
 there is no terminal to print to.
 
-**System Settings** holds "Boot the system menu at startup" and the remembered
-games folder.
+**System Settings** holds "Boot the system menu at startup", the remembered
+games folder, and:
+
+**Fast Boot** — ticked, which is why you have never seen a LeapPad2 boot in
+Tadpole. Turn it off and **File → Run System Menu** does what the device does
+when you switch it on: the LeapFrog logo, then the "LeapPad2 Explorer"
+animation with its chime, then the home screen. It costs no time — the
+animation plays over a guest that is already booting and stops the moment
+AppManager raises `/tmp/ui_ready`, exactly where VideoDaemon stops it on
+hardware — so on a fast boot you see less of it than on a slow one.
+
+It applies to **Run System Menu only**. Launching a title goes straight to the
+title, on the device and here.
+
+Both are your own files, read out of the firmware you installed:
+`/var/screens/Valencia-Boot-logoCW.png` and
+`/LF/Base/LpadAssets/Video/StartupVideo.ogg`. Tadpole ships neither. The
+animation needs libogg, libtheora and libvorbis at build time; without them the
+sequence is the logo alone (see Requirements).
+
+Suggested by Kat/ushka in the LFHacks community.
 
 ### Useful environment variables
 

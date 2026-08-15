@@ -170,6 +170,73 @@ fi
 Z_CFLAGS="-I$ZLIB"
 Z_LIBS="-L$ZLIB -lz"
 
+# ---- ogg, vorbis, theora --------------------------------------------------
+# The startup animation the boot sequence plays is Ogg Theora with Vorbis
+# audio. Fetched and cross-built here for the third time and the third reason
+# in a row: there is no mingw package for any of them worth relying on either.
+#
+# THEY GO INTO THE EXE, NOT BESIDE IT. Static archives only (--disable-shared),
+# so this adds nothing to the installer's file list — the Windows viewer is one
+# copyable binary and stays one. About 700 KB of object code between them.
+#
+# LINK ORDER MATTERS AND IS NOT ALPHABETICAL: theoradec calls into ogg, vorbis
+# calls into ogg, so ogg comes last. A static link resolves left to right and
+# would otherwise leave oggpack_read undefined with libogg.a sitting right
+# there on the command line.
+#
+# OPTIONAL, LIKE EVERYWHERE ELSE. If a build cannot get the sources — offline,
+# most likely — the viewer is compiled without TADPOLE_THEORA and shows the
+# boot logo alone, which is a smaller loss than a release that will not build.
+OGG_VER="${OGG_VER:-1.3.5}"
+VORBIS_VER="${VORBIS_VER:-1.3.7}"
+THEORA_VER="${THEORA_VER:-1.1.1}"
+AV="$OUT/av"
+# CPPFLAGS AND LDFLAGS, NOT --with-ogg. libvorbis and libtheora both take a
+# --with-ogg=PREFIX, and cross-compiling both ignore it far enough that the
+# compiler never sees $AV/root/include — every source failed with
+#
+#     sharedbook.c:21:10: fatal error: ogg/ogg.h: No such file or directory
+#
+# Naming the staging tree in the flags the compiler actually reads is the
+# reliable spelling, and --with-ogg is kept beside it for the configure checks
+# that do consult it.
+#
+# The log is kept rather than discarded. This is three source builds deep in a
+# release script; "could not build them" with nothing to read is a note that
+# wastes whoever sees it next.
+av_build() {                    # $1=name $2=version $3=url $4=extra configure
+    local d="$AV/$1-$2" log="$AV/$1.log"
+    [ -f "$d/.built" ] && return 0
+    mkdir -p "$AV"
+    curl -fsSL "$3" | tar xz -C "$AV" || return 1
+    ( cd "$d" \
+      && CPPFLAGS="-I$AV/root/include" LDFLAGS="-L$AV/root/lib" \
+         ./configure --host="$TRIPLE" --prefix="$AV/root" \
+           --disable-shared --enable-static --disable-oggtest $4 \
+      && make -j"$(nproc)" && make install ) >"$log" 2>&1 || {
+        echo "  $1 failed; see $log"
+        return 1
+    }
+    touch "$d/.built"
+}
+AV_CFLAGS=""; AV_LIBS=""
+if [ ! -f "$AV/root/lib/libtheoradec.a" ]; then
+    echo "==> fetching and building ogg/vorbis/theora for $TRIPLE"
+    av_build libogg "$OGG_VER" \
+        "https://downloads.xiph.org/releases/ogg/libogg-$OGG_VER.tar.gz" "" &&
+    av_build libvorbis "$VORBIS_VER" \
+        "https://downloads.xiph.org/releases/vorbis/libvorbis-$VORBIS_VER.tar.gz" \
+        "--with-ogg=$AV/root" &&
+    av_build libtheora "$THEORA_VER" \
+        "https://downloads.xiph.org/releases/theora/libtheora-$THEORA_VER.tar.gz" \
+        "--with-ogg=$AV/root --with-vorbis=$AV/root --disable-encode --disable-examples" ||
+        echo "  (the startup animation will be skipped)"
+fi
+if [ -f "$AV/root/lib/libtheoradec.a" ]; then
+    AV_CFLAGS="-DTADPOLE_THEORA -I$AV/root/include"
+    AV_LIBS="-L$AV/root/lib -ltheoradec -lvorbis -logg"
+fi
+
 # ---- glasspole ------------------------------------------------------------
 # The emulator. Needs dynarmic, which is a CMake project, so it gets a
 # toolchain file rather than a hand-written link line.
@@ -253,8 +320,10 @@ echo "==> tadpole-view.exe"
 # .tadpole-version to close. check_stamp confirms that rather than assuming it.
 "$TRIPLE-gcc" -O2 -std=gnu17 -DTADPOLE_VERSION="\"$VERSION\"" \
     -o "$OUT/tadpole-view.exe" \
-    "$V/tadpole_view.c" "$V/tadpole_ui.c" "$V/tadpole_hle.c" $ICON_OBJ \
-    $SDL_CFLAGS $Z_CFLAGS $SDL_LIBS -lopengl32 $Z_LIBS -lshlwapi -static -mconsole
+    "$V/tadpole_view.c" "$V/tadpole_ui.c" "$V/tadpole_hle.c" \
+    "$V/tadpole_boot.c" $ICON_OBJ \
+    $SDL_CFLAGS $Z_CFLAGS $AV_CFLAGS \
+    $SDL_LIBS -lopengl32 $Z_LIBS $AV_LIBS -lshlwapi -static -mconsole
 check_stamp "$OUT/tadpole-view.exe"
 
 echo "==> tadpole.exe (launcher)"

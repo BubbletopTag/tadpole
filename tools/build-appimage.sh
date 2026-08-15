@@ -146,13 +146,22 @@ cp "$PROJ/tadpole/viewer/tadpole-view" "$APPDIR/app/tadpole/viewer/"
 [ -f "$PROJ/README.md" ] && cp "$PROJ/README.md" "$APPDIR/app/"
 [ -f "$PROJ/LICENSE" ]   && cp "$PROJ/LICENSE"   "$APPDIR/app/"
 
-# ---- 3. bundle SDL2 and zlib ----------------------------------------------
+# ---- 3. bundle SDL2, zlib and the startup animation's codecs --------------
 # Version-sensitive and self-contained. GL and X11 stay on the host.
 # SDL2 COMES FROM build/deps, NOT FROM THIS MACHINE, when it is staged there.
 # See the note in tools/fetch-deps.sh: on a rolling distribution the host's
 # libSDL2-2.0.so.0 is sdl2-compat, which dlopens SDL3 by name at run time and
 # so takes an invisible dependency with it.
-for lib in libSDL2-2.0.so.0 libz.so.1; do
+#
+# THEORA/VORBIS/OGG ARE OPTIONAL AND BUNDLED ANYWAY. The viewer builds without
+# them (Fast Boot skips the animation, and with no decoder the boot sequence is
+# the logo alone), so this loop must not insist on finding them — the ldd
+# lookup below simply comes up empty and the image is one that shows a logo.
+# But an image built on a machine that HAD them and did not carry them would be
+# the worst of both: a viewer with a NEEDED entry nothing satisfies, which does
+# not start at all. Bundling what ldd actually reports keeps those in step.
+for lib in libSDL2-2.0.so.0 libz.so.1 \
+           libtheoradec.so.1 libtheoradec.so.2 libvorbis.so.0 libogg.so.0; do
     if [ "$lib" = libSDL2-2.0.so.0 ] && [ -f "$PROJ/build/deps/lib/$lib" ]; then
         cp -L "$PROJ/build/deps/lib/$lib" "$APPDIR/usr/lib/"
         echo "  bundled $lib (Ubuntu 22.04 build, from build/deps)"

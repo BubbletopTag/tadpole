@@ -65,8 +65,20 @@ struct ui_settings {
 	int io_delay_us;         /* TADPOLE_IO_DELAY_US — pretend to be NAND */
 	int tslib;               /* TADPOLE_TSLIB — the device's own touch library */
 	int boot_on_start;       /* run the system menu as soon as Tadpole opens */
+	/* Skip the logo and the startup animation. TICKED BY DEFAULT: the device's
+	 * boot sequence is something to opt into, not something to sit through, and
+	 * an emulator that made everyone watch four seconds of branding to reach a
+	 * menu would have got that backwards. See viewer/tadpole_boot.c. */
+	int fast_boot;
 	char games_dir[UI_GAMESDIR_MAX];   /* the folder the library was read from */
 };
+
+/* The viewer's own PNG decoder: 8-bit RGBA or RGB, non-interlaced. Shared
+ * because the boot logos are read by tadpole_boot.c and adding SDL2_image for
+ * them would undo the point of having written it. `out_px` is optional and
+ * hands the caller the pixels to own. */
+SDL_Texture *ui_png_texture(SDL_Renderer *ren, const char *path,
+                            int *out_w, int *out_h, Uint32 **out_px);
 
 enum ui_action {
 	UI_ACT_NONE = 0,

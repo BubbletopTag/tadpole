@@ -84,13 +84,34 @@ GLES_OUT  := $(SHIMLIBS_GL)/libGLESv1_CM.so
 TONE_SRC := shim/tone_test.c
 TONE_OUT := ../runtime/tone
 
-VIEW_SRC := viewer/tadpole_view.c viewer/tadpole_ui.c viewer/tadpole_hle.c
+VIEW_SRC := viewer/tadpole_view.c viewer/tadpole_ui.c viewer/tadpole_hle.c \
+            viewer/tadpole_boot.c
 VIEW_HDR := viewer/tadpole_ui.h viewer/tadpole_font.h viewer/tadpole_hle.h \
-            shim/tadpole_glcmd.h
+            viewer/tadpole_boot.h shim/tadpole_glcmd.h
 VIEW_OUT := viewer/tadpole-view
 
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell pkg-config --libs sdl2 2>/dev/null)
+
+# THE STARTUP ANIMATION'S DECODER, AND IT IS OPTIONAL ON PURPOSE.
+#
+# The device's animations are Ogg Theora with Vorbis audio, so playing one
+# needs libogg, libtheoradec and libvorbis. That is three more libraries than
+# this viewer has ever had, for one cosmetic four-second clip that Fast Boot
+# skips by default — so a checkout without them still builds, and builds a
+# viewer that shows the logo and goes straight on. Anyone who wants the
+# animation installs the three and rebuilds; check-deps.sh says which.
+#
+# theoradec, not theora: the encoder is a separate library and we only decode.
+THEORA_PC   := ogg theoradec vorbis
+THEORA_HAVE := $(shell pkg-config --exists $(THEORA_PC) 2>/dev/null && echo 1)
+ifeq ($(THEORA_HAVE),1)
+BOOT_CFLAGS := -DTADPOLE_THEORA $(shell pkg-config --cflags $(THEORA_PC))
+BOOT_LIBS   := $(shell pkg-config --libs $(THEORA_PC))
+else
+BOOT_CFLAGS :=
+BOOT_LIBS   :=
+endif
 
 .PHONY: all shim shimz asound gl tone viewer hle-probe hle-selftest clean check realdl realz
 
@@ -274,11 +295,27 @@ print('wrote', d, 'from', c[0].name)"
 
 shimz: $(SHIM_OUT_Z)
 
+# libgcc_s LAST, AND IT IS NOT OPTIONAL HERE — see the note above
+# check-undefined, which says __aeabi_uidiv "comes from the guest's libgcc at
+# runtime". True of every C++ guest, because libstdc++ names libgcc_s and drags
+# it in. NOT true of the display tools, which are the entire reason this libz
+# variant exists: imager-fb needs libz, libpng12, libjpeg and libc, none of
+# which mention libgcc, so our __aeabi_uidiv had nothing to resolve against and
+# the guest loader refused the whole program before main:
+#
+#     imager-fb: can't resolve symbol '__aeabi_uidiv'
+#
+# The visible symptom was not an error — `./tadpole.sh --logo` still said "logo
+# drawn" — it was that the boot logo never appeared and state.bin was never
+# created, on both engines, for as long as this variant has existed. Naming the
+# library we already depend on is the fix; the symbol does come from the guest's
+# libgcc, we simply never said so out loud.
 $(SHIM_OUT_Z): $(SHIM_SRC) $(SHIMLIBS_Z)/$(REAL_Z) | need-libs
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
 		-fuse-ld=lld -Wl,-soname,libz.so.1 -o $@ $(SHIM_SRC) \
-		$(SHIMLIBS_Z)/$(REAL_Z) $(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0
+		$(SHIMLIBS_Z)/$(REAL_Z) $(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0 \
+		$(GUESTLIBS)/libgcc_s.so.1
 	@echo "built $@"
 
 $(SHIMLIBS_Z)/$(REAL_Z): | need-rootfs
@@ -370,9 +407,13 @@ viewer: $(VIEW_OUT)
 
 $(VIEW_OUT): $(VIEW_SRC) $(VIEW_HDR) $(VERSION_STAMP)
 	$(CC) -O2 -Wall $(HOST_STD) -DTADPOLE_VERSION='"$(TADPOLE_VERSION)"' \
-	      -o $@ $(VIEW_SRC) $(SDL_CFLAGS_PORTABLE) \
-	      $(SDL_LIBS) -lz $(shell pkg-config --libs gl)
+	      -o $@ $(VIEW_SRC) $(SDL_CFLAGS_PORTABLE) $(BOOT_CFLAGS) \
+	      $(SDL_LIBS) -lz $(shell pkg-config --libs gl) $(BOOT_LIBS)
 	@echo "built $@"
+ifneq ($(THEORA_HAVE),1)
+	@echo "  no libtheoradec/libogg/libvorbis: the startup animation will be"
+	@echo "  skipped and Fast Boot off shows the logo alone."
+endif
 
 # The UI font is generated from ASCII art so the glyphs stay reviewable.
 viewer/tadpole_font.h: ../tools/genfont.py

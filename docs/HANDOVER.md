@@ -5830,3 +5830,94 @@ which is doing its second tslib probe — and the interleaving differs between a
 run that boots and one that does not.
 
 It is not new. It is simply that nobody had run the boot five times in a row.
+
+## 2026-08-13 — The boot sequence, and three bugs found by adding it
+
+Requested by Kat/ushka in the LFHacks community: turning on a LeapPad2 shows the
+LeapFrog logo, then the "LeapPad2 Explorer" animation, and Tadpole showed
+neither. **Options → System Settings → Fast Boot**, ticked by default, is the
+switch; untick it and File → Run System Menu plays both. Run System Menu only —
+launching a title goes straight to the title, on the device and here.
+
+### The device's own path exists, and we do not use it
+
+Not a design preference, a measured dead end, and worth writing down because
+the next person will think of it too:
+
+    rcS:  imager-fb /dev/fb0 /var/screens/Valencia-Boot-logoCW.png
+    rcS:  VideoDaemon 750 &
+    app:  vnotify 6      # "Send a signal to VideoDaemon to play the startup
+                         #  video" — /usr/bin/app's own comment
+
+All of it is in the firmware and all of it is runnable. Three things stop it:
+
+1. **VideoDaemon daemonises**, and Glasspole answered its `fork()` with ENOSYS —
+   so on the default engine there has never been any system video at all, the
+   transition animation between titles included. Fixed: `gp_fork()`, because a
+   guest fork is a host fork (the guest's address space is inside ours, so
+   duplicating our process duplicates theirs, with the shim's MAP_SHARED
+   framebuffer arena staying shared exactly as it must). Refused from a
+   multi-threaded guest, where the child would inherit only the calling thread.
+2. **Glasspole's AF_UNIX is in-process.** `m.bound` is per-Machine, so a second
+   guest — `vnotify` — cannot reach the daemon's `/tmp/video_events_socket`. It
+   works under qemu-arm, which hands the path to the host.
+3. Even under qemu-arm, with the request delivered, **fb2 never turned YUV**.
+   VideoDaemon redirects its own stdout to /dev/null when it daemonises, so
+   that is debugging blind inside a closed binary.
+
+So the front end plays the file itself: `viewer/tadpole_boot.c`, libogg +
+libtheoradec + libvorbis, optional at build time. It is an imitation, and the
+table at the top of that file is the shape of the admission — every system this
+is added to needs its own row, because nothing is discovered and all of it is
+declared.
+
+### `imager-fb` had never once run
+
+`--logo` is documented as the quick "is it alive" test. It printed "logo drawn"
+and drew nothing, on both engines, for as long as the libz shim variant has
+existed:
+
+    imager-fb: can't resolve symbol '__aeabi_uidiv'
+
+The note above `check-undefined` in tadpole/Makefile says `__aeabi_uidiv` "comes
+from the guest's libgcc at runtime", and that is true of every C++ guest —
+libstdc++ names libgcc_s and drags it in. It is false of the display tools,
+which are the entire reason that variant exists: imager-fb needs libz, libpng12,
+libjpeg and libc, and not one of them mentions libgcc. Naming
+`$(GUESTLIBS)/libgcc_s.so.1` in the link is the fix.
+
+Fixing it had a consequence worth keeping in mind: tadpole.sh drew the boot logo
+at startup to bring the framebuffer arena into being, and that step *started
+working*, so the front end sat at rest showing LeapFrog branding instead of its
+own idle screen. The step was vestigial anyway — the viewer retries `try_map()`
+every frame — so it is gone.
+
+### Two libtheora/libvorbis contracts, both inverted, both silent
+
+Worth stating plainly because each produced a plausible-looking result rather
+than an error:
+
+- `th_decode_headerin()` returns **0 to mean "that was NOT a header — it is your
+  first video packet, and I have not consumed it"**. A loop that exits on 0 has
+  already pulled the keyframe out of the stream and dropped it. Everything then
+  decodes onto libtheora's initial reference frame, which is mid-grey: blocks an
+  inter frame touched came out right, blocks it did not stayed grey. The picture
+  was legible and the background was wrong, which reads as a scaling bug.
+- `vorbis_synthesis_headerin()` returns **0 for success**, so the same loop
+  written the same way ran zero times, vorbis got one header of three, and there
+  was no audio at all.
+
+Both codecs have exactly three header packets. Count them.
+
+### The colour was 20 low, and still is on the guest's video plane
+
+Theora carries Y in [16,235]. Converting it with the full-range coefficients
+makes every pixel exactly 20 too dark — invisible by eye, obvious in a diff
+against ffmpeg's decode of the same file: mean |delta| 19.2 per channel before,
+under 1 after. `v_convert()` uses BT.601 studio swing.
+
+**`blit_layer_yuv420()` in tadpole_view.c still uses the full-range
+coefficients**, so the device's own in-title FMV — Sneak Peeks trailers, the
+transition animation — is washed out by the same 20. Same bug, different path.
+Not changed with this work because it would move every FMV capture in the
+compatibility sweep, and that deserves its own before/after.
