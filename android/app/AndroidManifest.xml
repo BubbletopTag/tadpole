@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+          package="org.tadpole.view"
+          android:versionCode="1" android:versionName="0.1">
+
+    <!-- ES 1.1 and not 2.0, which is what SDL's own template declares. The
+         viewer's GL is fixed-function because it is replaying the guest's
+         GLES1; asking for 2.0 would be asking for something we do not use. -->
+    <uses-feature android:glEsVersion="0x00010001" />
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+
+    <application android:label="Tadpole"
+                 android:icon="@android:drawable/sym_def_app_icon"
+                 android:hardwareAccelerated="true"
+                 android:allowBackup="false">
+        <activity android:name=".TadpoleActivity"
+                  android:exported="true"
+                  android:label="Tadpole"
+                  android:launchMode="singleInstance"
+                  android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+                  android:preferMinimalPostProcessing="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
