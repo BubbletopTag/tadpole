@@ -5921,3 +5921,106 @@ coefficients**, so the device's own in-title FMV — Sneak Peeks trailers, the
 transition animation — is washed out by the same 20. Same bug, different path.
 Not changed with this work because it would move every FMV capture in the
 compatibility sweep, and that deserves its own before/after.
+
+## 2026-08-15 — Touch: an on-screen D-pad, and chrome you can hit with a finger
+
+This is the `mobile` branch, in the worktree at
+`/home/bubbles/Documents/Projects/leappad-emu-mobile`, kept separate the same
+way and for the same reason as `ultra`.
+
+### The controls
+
+`viewer/tadpole_pad.c`. A four-armed D-pad in one bottom corner of the guest's
+picture and a Home button in the other, pressable with a mouse or a finger. Not
+A and B: the titles that need them run under LeapFrog's own Leapster emulator,
+which draws its own onto the touchscreen. What the guest cannot supply is the
+D-pad and Home, which on hardware are GPIO rather than panel.
+
+Three things in that file are worth knowing before changing it.
+
+**It goes through `rotate_dpad()`.** The overlay is drawn in the logical space,
+so its "up" arm is up as seen — the same claim `SDLK_UP` makes — and the seen
+direction to keycode problem was already solved for the arrow keys. Sending
+`DPAD_CW[0]` from the overlay would be correct at rotate 0 and differently
+wrong at each of the other three.
+
+**Where the picture is SEEN is not where it is SENT.** `SDL_RenderCopyEx` spins
+the copy about the destination rectangle's own centre, so at 90 and 270 the
+rectangle covered on screen is that one transposed. `panel_rect()` returns both
+and names the difference; placing the controls on `dst` puts a bottom-left
+D-pad off the side of a portrait window.
+
+**SDL synthesises a mouse from the first finger.** So that finger arrives
+twice, once as `SDL_FINGERDOWN` and once as `SDL_MOUSEBUTTONDOWN`, and acting
+on both presses a direction twice and leaves it held when only one copy lifts.
+The mouse copy is the one acted on — it is also what a real mouse sends — and
+every OTHER finger is handled directly, which is what makes holding a direction
+while tapping the guest's own on-screen buttons work. A finger's position is
+normalised to the WINDOW and is not rewritten by SDL's renderer event watch,
+unlike a mouse event's, so this is the one place in the viewer where converting
+window coordinates to logical ones is right rather than the classic mistake.
+
+`--selftest-pad` drives the real `pad_event()` and then reads back the bytes
+that reach the guest's keypad node, by pointing the viewer at ordinary files
+instead of FIFOs. Passes at all four rotations.
+
+### The chrome
+
+Only HEIGHTS moved. Nobody touches text, they touch the row it is in — so the
+5x7 font stays at 1:1, no label is re-fitted, no dialog gets wider and nothing
+reflows. Bar 13 → 22, dropdown rows 12 → 23, settings rows 14 → 24, buttons
+13 → 22, list rows 11 → 22.
+
+There is no free version of this. The chrome is drawn in logical pixels and the
+logical space IS the panel, so a bigger target takes up more of a 480x272
+screen; anything that grew the space to compensate would shrink the chrome by
+the same factor. What gives is vertical room, which is why the drag scrolling
+below is not a nicety but the other half of the same change.
+
+Dialog heights are now computed by `dlg_body_h(rows, extra)` rather than being
+numbers measured once at a row height of 14 — the Graphics dialog pushed its
+last two rows and its footnote out through its own floor otherwise. The
+dropdown's geometry moved into `menu_item_y()` / `menu_item_h()` / 
+`menu_height()`, which had been written out at four call sites that agreed only
+by habit; separators now get their own smaller height, worth 42 pixels in the
+File menu.
+
+### Two bugs the tests found
+
+**The launcher could not be dragged at all.** Its "keep the selected row on
+screen" ran on every frame, and every frame it dragged the view back to the
+selection. That was invisible while the only ways to scroll were the wheel and
+the arrow keys — the arrows move the selection anyway and the wheel's clamp kept
+the two together by accident. A finger scrolls the VIEW and leaves the
+selection alone, so the next frame snapped back. It now only re-centres when
+the selection has actually changed.
+
+**A press inside a list is not yet a choice.** It might be the start of a
+scroll, and nothing can tell until the finger moves or lifts — so in a list the
+decision waits for the release, four pixels deciding tap from drag. Everything
+else in a dialog still acts on the press. This matters most in the file
+browser, where activating a row ENTERS a directory, and in the launcher, where
+it LAUNCHES: dispatching on the press meant every attempt to scroll started
+something.
+
+`--selftest-apps` grew a dragging section that caught both.
+
+### Hover, on a device that has none
+
+Some sixty highlights ask `inside(g_mx, g_my, ...)`. Under a finger, g_mx/g_my
+are only written while something is touched, so the moment it lifts the last
+position stays behind and whatever is under it keeps its highlight — a claim
+about where the next press will land, and a wrong one. The fix is one line
+rather than sixty: when a TOUCH lifts, the pointer is moved off the screen,
+because that is where it now is. `SDL_TOUCH_MOUSEID` is how a synthesised
+release is told from a real mouse's.
+
+### What is not done
+
+- No on-screen keyboard. The profile name field is the only thing in Tadpole
+  that takes typing, and on a tablet with no hardware keyboard it cannot be
+  filled in. `SDL_StartTextInput()` raises the system keyboard on mobile
+  platforms and does nothing on desktop Linux, which is where this runs.
+- The chrome's logical space is still the panel's. Everything above works
+  within that; a UI whose coordinate system is the WINDOW rather than a 480x272
+  panel from 2012 would let the font scale too, and is a larger change.

@@ -1361,6 +1361,37 @@ static int st_check(const char *what, int got, int want, int *bad)
 	return ok;
 }
 
+/* A press, some motion and a release, through the real ui_event(). `steps`
+ * splits the motion so the drag accumulates the way a finger's does — one
+ * jump of 140 pixels and fourteen of ten are the same gesture to a person and
+ * very different ones to code that keeps a remainder. */
+static void st_drag(int lw, int lh, int x0, int y0, int x1, int y1, int release)
+{
+	SDL_Event e;
+	int i, steps = 10;
+
+	memset(&e, 0, sizeof(e));
+	e.type = SDL_MOUSEBUTTONDOWN;
+	e.button.button = SDL_BUTTON_LEFT;
+	e.button.x = x0; e.button.y = y0;
+	ui_event(&e, lw, lh);
+
+	for (i = 1; i <= steps; i++) {
+		memset(&e, 0, sizeof(e));
+		e.type = SDL_MOUSEMOTION;
+		e.motion.x = x0 + (x1 - x0) * i / steps;
+		e.motion.y = y0 + (y1 - y0) * i / steps;
+		ui_event(&e, lw, lh);
+	}
+	if (!release) return;
+
+	memset(&e, 0, sizeof(e));
+	e.type = SDL_MOUSEBUTTONUP;
+	e.button.button = SDL_BUTTON_LEFT;
+	e.button.x = x1; e.button.y = y1;
+	ui_event(&e, lw, lh);
+}
+
 static void st_key(int lw, int lh, SDL_Keycode k)
 {
 	SDL_Event e;
@@ -1498,9 +1529,78 @@ static int selftest_apps(SDL_Renderer *ren, int rotate, int w, int h)
 		}
 	}
 
+	/* ---- and with a finger -----------------------------------------------
+	 *
+	 * The wheel and the arrow keys are what a desktop has. A touchscreen has
+	 * neither, so until the drag below existed a finger could reach the first
+	 * seven titles of four hundred and sixty-two and no others.
+	 *
+	 * The interesting case is not that dragging scrolls. It is that a drag
+	 * must NOT also choose the row it started on, and that a press which does
+	 * not move must still choose one — those two live either side of a four
+	 * pixel line, and getting the line wrong makes the list either unusable or
+	 * unscrollable, with nothing in between.
+	 */
+	printf("\ndragging\n");
+	{
+		int mid_x = lw / 2, mid_y = lh / 2;
+		int sel_before, top_before, moved_by_drag;
+		char path[512];
+
+		ui_debug_apps(NULL, &top_before, &sel_before, NULL);
+
+		/* A drag upwards: the content follows the finger, so the list moves
+		 * DOWN through the titles. */
+		st_drag(lw, lh, mid_x, mid_y, mid_x, mid_y - 5 * 28, 1);
+		ui_debug_apps(NULL, &top, &sel, NULL);
+		st_check("top after dragging up 5 rows", top, top_before + 5, &bad);
+		/* AND IT CHOSE NOTHING. A tap on a row in this list LAUNCHES the
+		 * title, so a drag that also counted as a tap would start a game
+		 * every time somebody scrolled. */
+		st_check("...and the selection is untouched", sel, sel_before, &bad);
+
+		st_drag(lw, lh, mid_x, mid_y, mid_x, mid_y + 3 * 28, 1);
+		ui_debug_apps(NULL, &top, NULL, NULL);
+		st_check("top after dragging back down 3", top, top_before + 2, &bad);
+
+		/* The flick keeps going after the finger has gone. Both ends stay
+		 * inside the list's own body: the well is seven rows tall and a press
+		 * outside it is not a drag at all. */
+		ui_debug_apps(NULL, &top_before, NULL, NULL);
+		st_drag(lw, lh, mid_x, mid_y + 60, mid_x, mid_y - 60, 1);
+		ui_debug_apps(NULL, &top, NULL, NULL);
+		moved_by_drag = top - top_before;
+		{
+			int i2;
+			for (i2 = 0; i2 < 8; i2++)
+				ui_draw(ren, lw, lh);        /* eight frames of coasting */
+		}
+		ui_debug_apps(NULL, &top, NULL, NULL);
+		if (top - top_before > moved_by_drag)
+			printf("  %-34s %4d  ok (dragged %d)\n",
+			       "flick coasts past the release", top - top_before,
+			       moved_by_drag);
+		else
+			printf("  %-34s %4d  stopped dead at %d  FAIL\n",
+			       "flick coasts past the release", top - top_before,
+			       moved_by_drag), bad++;
+
+		/* LAST, because it launches: a press that does not move is a press,
+		 * and in this list a press on a row starts the title and closes the
+		 * dialog. Nothing after this would have a launcher to talk to. */
+		ui_debug_apps(NULL, &top, NULL, NULL);
+		st_drag(lw, lh, mid_x, mid_y, mid_x, mid_y + 2, 1);
+		path[0] = 0;
+		if (ui_take_action(path, sizeof path) == UI_ACT_RUN_APP && path[0])
+			printf("  %-34s %s  ok\n", "tap launches the row under it", path);
+		else
+			printf("  %-34s a two-pixel wobble launched nothing  FAIL\n",
+			       "tap launches the row under it"), bad++;
+	}
+
 	printf("\n%s\n", bad
 	       ? "FAILED — the launcher does not scroll"
-	       : "PASS — wheel, arrows, paging, ends and type-to-jump all move the list");
+	       : "PASS — wheel, arrows, paging, ends, type-to-jump and dragging");
 	return bad ? 1 : 0;
 }
 

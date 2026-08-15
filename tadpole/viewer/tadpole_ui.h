@@ -23,7 +23,41 @@
 #include <SDL.h>
 #include <stddef.h>
 
-#define UI_BAR_H 13          /* logical pixels; 7px font + padding */
+/* ---- how big is a thing you touch --------------------------------------
+ *
+ * THE BAR'S HEIGHT USED TO BE A CONSTANT, and every other target in the chrome
+ * was sized to match it: 13 logical pixels, which is a 7px font with three
+ * either side. That is a comfortable mouse target and it is not a finger.
+ *
+ * There is no free way to fix that. The chrome is drawn in logical pixels and
+ * the logical space IS the panel, so a bigger target is a target that takes up
+ * more of a 480x272 screen — the space does not grow to accommodate it, and
+ * anything that made the space grow would shrink the chrome again by exactly
+ * the same factor. Something has to give, and what gives here is vertical
+ * room: rows get taller, so fewer of them fit and the lists that hold them
+ * scroll (which they now do under a finger — see the drag handling in
+ * ui_event).
+ *
+ * WIDTHS AND THE FONT ARE UNTOUCHED, deliberately. Nobody touches text; they
+ * touch the row it is in. Leaving the 5x7 font at 1:1 means no label anywhere
+ * has to be re-fitted, no dialog gets wider, and nothing reflows — the entire
+ * change is that things you can press are taller and the text sits in the
+ * middle of them. Doubling the font would have halved every dialog's column
+ * count and cost a rewrite of layouts that are perfectly readable already.
+ *
+ * ui_touch_ui() is the switch, from Options -> System Settings. Off restores
+ * the original metrics exactly.
+ */
+int ui_bar_h(void);          /* logical pixels; the menu bar */
+int ui_row_h(void);          /* a settings row in a dialog */
+int ui_menu_row_h(void);     /* an item in a dropdown */
+int ui_btn_h(void);          /* a button, and the bar's own chips */
+int ui_list_row_h(void);     /* a row in the file, game or app lists */
+int ui_touch_ui(void);
+
+/* Every existing use reads as it always did. This is a call now rather than a
+ * literal, so nothing may use it where a constant expression is required. */
+#define UI_BAR_H (ui_bar_h())
 
 /* Everything the front end can change. Persisted to ~/.config/tadpole/ui.cfg
  * and turned into environment variables when a guest is launched.
@@ -80,6 +114,9 @@ struct ui_settings {
 	int pad_size;            /* percent of the natural size, 50..200 */
 	int pad_opacity;         /* percent, 15..100 */
 	int pad_left;            /* D-pad bottom-left (1) or bottom-right (0) */
+	/* Taller bar, menu items, rows and buttons — see the note above
+	 * ui_bar_h(). On by default in this build for the same reason pad_on is. */
+	int touch_ui;
 	char games_dir[UI_GAMESDIR_MAX];   /* the folder the library was read from */
 };
 

@@ -21,6 +21,7 @@ games — the ones from your own device. See
 | Native Brio titles (2D) | yes |
 | Audio | yes, paced to real time |
 | Touch and buttons | yes |
+| On-screen D-pad and Home button | yes — over the picture, see Controls |
 | Host-GPU rendering (HLE) | yes — about 5x the software renderer |
 | 3D (race tracks) | yes — Clam Prix races render and play |
 | Skinned player character | yes — the rider draws with the kart |
@@ -402,6 +403,24 @@ may behave differently this way than they do from the home screen.
 
 ### Controls
 
+**On screen.** A D-pad sits in one bottom corner of the picture and a Home
+button in the other, over whatever is running. Press them with a finger or
+click them with a mouse; a thumb can slide from one direction to another
+without letting go, and the corners give diagonals. They stand back to a
+low opacity when they have not been used for a couple of seconds, and come
+back the moment you reach for them.
+
+Size, opacity, which corner the D-pad takes, and whether they appear at all
+are in **Options → Controller Settings**.
+
+**A and B are not there, on purpose.** The titles that use them run under
+LeapFrog's own Leapster emulator, which draws its own A and B onto the
+touchscreen — the guest already gives you those. What it cannot give you is the
+D-pad or the Home key, because on the real device those are wired to GPIO
+rather than to the panel. That is exactly the gap these fill.
+
+**On a keyboard**, all of it, as before:
+
 | | |
 |---|---|
 | Arrow keys | D-pad |
@@ -413,10 +432,28 @@ may behave differently this way than they do from the home screen.
 | Ctrl+R | rotate |
 | Ctrl+Q | quit |
 
-The D-pad rotates with the display. A Leapster title is landscape on a portrait
+The D-pad rotates with the display — the on-screen one and the arrow keys
+alike, through the same code. A Leapster title is landscape on a portrait
 device, so its axes sit a quarter turn from the hardware's; Tadpole corrects for
 that automatically. If the directions still feel wrong in your orientation, set
 `TADPOLE_DPAD_SHIFT=0..3`.
+
+### Driving it with a finger
+
+The menu bar, the menus, the settings rows, the buttons and the list rows are
+all sized for a fingertip rather than a mouse pointer, and **every list scrolls
+by dragging it** — the launcher, the game library, the file browser, the
+micromod list and the release notes. Flick and it keeps going. A press that
+does not move still chooses the row under it; a press that moves is a scroll
+and chooses nothing, which is what stops a drag through the launcher from
+starting four games on the way past.
+
+Highlights follow a finger while it is down and disappear when it lifts, rather
+than being left behind under wherever it last was.
+
+**Options → System Settings → Touch-sized menus and buttons** turns the larger
+metrics off if you are driving this with a mouse and would rather have the
+compact ones back. `TADPOLE_TOUCH_UI=0` does the same for one run.
 
 ### Settings
 
