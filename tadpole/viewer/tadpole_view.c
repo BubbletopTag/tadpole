@@ -4107,11 +4107,34 @@ int main(int argc, char **argv)
 				 * so nothing moves — it simply arrives with more detail. */
 				if (gl_have && tex_gl) {
 					SDL_Rect g = { dst.x + gl_rx, dst.y + gl_ry, gl_rw, gl_rh };
+					/* ROTATE ABOUT THE PANEL'S CENTRE, NOT THE LAYER'S.
+					 *
+					 * SDL_RenderCopyEx spins the copy about `center`, which is
+					 * an offset from the DESTINATION rect's own top-left, and
+					 * NULL means "the middle of this rect". The layer below was
+					 * given NULL and turns about dst's centre; giving this one
+					 * NULL turns it about its own. Those are the same point
+					 * only when the layer is centred on the panel.
+					 *
+					 * A full-panel layer is centred on the panel, so every
+					 * title that draws at 480x272 came out right and this went
+					 * unnoticed. A LEAPSTER title does not: Mr. Pencil draws
+					 * 320x240 at 17,16 — the little box with the LeapPad's own
+					 * chrome around it — and at any rotation but 0 it was
+					 * pivoted about a different point from the chrome and slid
+					 * out of its frame. Clam Prix, at full panel, was fine, and
+					 * that difference is the whole reason this looked like a
+					 * per-title fault rather than a compositing one.
+					 *
+					 * The pivot has to be expressed relative to g, so subtract
+					 * g's origin from the panel centre. */
+					SDL_Point pivot = { dst.x + dst.w / 2 - g.x,
+					                    dst.y + dst.h / 2 - g.y };
 					if (getenv("TADPOLE_GL_TINT"))
 						SDL_SetTextureColorMod(tex_gl, 255, 80, 80);
 					if (rotate)
 						SDL_RenderCopyEx(ren, tex_gl, NULL, &g, (double)rotate,
-						                 NULL, SDL_FLIP_NONE);
+						                 &pivot, SDL_FLIP_NONE);
 					else
 						SDL_RenderCopy(ren, tex_gl, NULL, &g);
 				}
