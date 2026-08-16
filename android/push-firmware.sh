@@ -39,7 +39,17 @@
 set -e
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
-. "$here/env.sh"
+
+# THIS ONE RUNS ON A MACHINE WITH NO SDK, unlike everything else in this
+# directory. Whoever is testing a build needs to get their own firmware onto
+# their own phone, and asking them to install a 7 GB toolchain to copy files is
+# absurd — adb and tar are the whole requirement. env.sh is sourced when it is
+# useful and skipped when it is not.
+if [ -f "$here/env.sh" ] && [ -x "$HOME/Android/Sdk/platform-tools/adb" ]; then
+    . "$here/env.sh"
+fi
+: "${ADB:=$(command -v adb || true)}"
+[ -n "$ADB" ] || { echo "no adb on PATH — install your distribution's android-tools" >&2; exit 1; }
 
 PKG=${PKG:-org.tadpole.view}
 # The DESKTOP checkout to take the firmware from.
