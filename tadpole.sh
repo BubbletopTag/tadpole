@@ -923,6 +923,33 @@ XML
                     echo "tadpole: runtime/tadpole-connman is not built — the shell" >&2
                     echo "  will believe it is offline. Build it with: cd tadpole && make connman" >&2
                 fi
+                # wpa_supplicant, AND IT IS NOT ABOUT WIFI — IT IS WHY NO BRIO
+                # TITLE STARTS.
+                #
+                # Every Brio title is launched through BrioWrapper, and
+                # BrioWrapper links libWirelessMPI.so. That MPI loads Brio's
+                # /LF/Base/Brio/Module/libWireless.so, which is a D-Bus client
+                # for wpa_supplicant — its strings carry the whole generated
+                # proxy: fi.w1.wpa_supplicant1, .Interface, .Network,
+                # InterfaceUnknown, and the interface name wlan0.
+                #
+                # With no such service on the bus the proxy comes back null and
+                # the MPI dereferences it two seconds into the title:
+                #
+                #     signal SIGSEGV, fault 0x00000000
+                #     pc  libWirelessMPI.so+0x00002a28
+                #
+                # Measured identically with the fake ConnMan running and with it
+                # disabled, so this is not something the fake introduced.
+                #
+                # -u is the D-Bus control interface and needs NO hardware and no
+                # interface: the daemon owns the name and waits to be told about
+                # interfaces, which is exactly how connman drives it on the
+                # device. Nothing here touches a radio, because there is none.
+                if [ -x "$ROOTFS/usr/sbin/wpa_supplicant" ]; then
+                    guest /usr/sbin/wpa_supplicant -u 2>&1 | sed -u 's/^/[wpa] /' &
+                    sleep 1
+                fi
             }
             # THE PACKAGE MANAGER DAEMON — this is what puts icons on the home
             # screen, and nothing else does.

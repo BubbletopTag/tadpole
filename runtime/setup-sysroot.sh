@@ -463,6 +463,39 @@ for prof in 0 1 2 3 All; do
 done
 mkdir -p LF/Bulk/Data/Uploads/1 LF/Bulk/Data/Uploads/2 LF/Bulk/Data/Uploads/3
 
+# EVERY INSTALLED TITLE NEEDS A SAVE DIRECTORY, AND NOTHING CREATED IT.
+#
+# A title's save file goes to /LF/Bulk/Data/Local/<profile>/<ProductID>/, and
+# the name is the BARE ProductID — the middle field of the PackageID, not the
+# whole thing. Pet Pad Party is PADS-0x002B0012-000000 and writes to
+#
+#     /LF/Bulk/Data/Local/0/0x002B0012/SAVE.DAT
+#
+# The title does not create that directory; it assumes it. On hardware the
+# installer makes it. We install by untarring, so nothing did, and Brio's
+# atomic-write helper failed on a path whose parent does not exist:
+#
+#     fopenAtomic(/LF/Bulk/Data/Local/0/0x002B0012/SAVE.DAT): mkstemp failed us!
+#
+# after which the title drew "Missing:LOAD_ERROR_TEXT" — its own placeholder
+# for a load failure it had no string to describe, which reads like a missing
+# translation rather than a missing directory. With the directory present the
+# same call reports `returning 0x231bb0` and the title carries on past it.
+#
+# The ProductID is read from each package's own meta.inf rather than taken from
+# the directory name, because package directories are not consistently named
+# for their PackageID — several use the package Name instead (KeyboardWidget,
+# CameraWidget, LeapSearch ...).
+for pf in LF/Bulk/ProgramFiles/*/; do
+    [ -r "$pf/meta.inf" ] || continue
+    pkgid="$(sed -n 's/^PackageID="\([^"]*\)".*/\1/p' "$pf/meta.inf" | head -1)"
+    prodid="$(printf '%s' "$pkgid" | cut -d- -f2)"
+    case "$prodid" in 0x*) ;; *) continue ;; esac
+    for prof in 0 1 2 3 All; do
+        mkdir -p "LF/Bulk/Data/Local/$prof/$prodid"
+    done
+done
+
 # /LF/Bulk/endpointurls.json — WITHOUT THIS, GOING ONLINE KILLS THE HOME SCREEN.
 #
 # A latent abort that could not fire until the fake net.connman existed, and
