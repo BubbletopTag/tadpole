@@ -269,10 +269,33 @@ echo "==> /var/sounds video symlinks (rcS does this per-platform)"
 # below does.
 [ -L var ] && rm -f var
 mkdir -p var
+# /var/run IS A tmpfs ON THE DEVICE, so it must be REAL and WRITABLE here.
+#
+# fstab says so outright:
+#     /dev/ram0   /var/run   tmpfs   defaults,mode=755
+# and symlinking it at the rootfs makes it read-only, which stops the system
+# D-Bus daemon dead: it creates /var/run/dbus/system_bus_socket and a pidfile
+# there, and cannot. The symptom is a long way from the cause — the network
+# stack asks QDBusConnection::systemBus() for net.connman, gets nothing, logs
+# "Can't get: wifi technology is NULL", and the out-of-box WiFi page loops
+# because it can never resolve its own state.
+# /var/lib HAS TO BE REAL TOO, for the same reason one level along: connman
+# creates /var/lib/connman for its stored networks and cannot through a
+# symlink into a read-only rootfs. It says
+#     Failed to create storage directory: No such file or directory
+# and then runs anyway with nothing remembered, which is survivable but not
+# what the device does.
 for d in "$ROOTFS"/var/*; do
     b="$(basename "$d")"
-    [ "$b" = sounds ] || lns "$d" "var/$b"
+    case "$b" in sounds|run|lib) continue ;; esac
+    lns "$d" "var/$b"
 done
+mkdir -p var/lib
+for f in "$ROOTFS"/var/lib/*; do
+    [ -e "$f" ] || continue
+    lns "$f" "var/lib/$(basename "$f")" 2>/dev/null || true
+done
+mkdir -p var/run/dbus var/lib/dbus var/lib/connman
 mkdir -p var/sounds
 for f in "$ROOTFS"/var/sounds/*; do
     lns "$f" "var/sounds/$(basename "$f")" 2>/dev/null || true
@@ -358,6 +381,10 @@ echo "==> /LF/Bulk content"
 # BaseUtils::CreateFile recurses to create missing parents but only ever
 # retries mkdir("/LF"), so a missing deep path loops ~175k times until the
 # stack blows. On hardware these already exist. Create them.
+# connman will not start without its storage directory, and rcS makes it:
+#     mkdir -p /LF/Bulk/Data/var/lib/connman
+# Without it: "Failed to create storage directory: No such file or directory".
+mkdir -p LF/Bulk/Data/var/lib/connman
 mkdir -p LF/Bulk/Data/Uploads/0 LF/Bulk/Data/Downloads LF/Bulk/Data/Settings
 # Per-profile save area. Mirrors /LF/Bulk/Data on a live device: profiles 0-3
 # plus All. Flash titles write <profile>/saveGame.xml here and fail hard
@@ -439,6 +466,19 @@ printf '65536 0 0 0 65536 0 65536\n' > flags/pointercal
 # /flags/developer is what enables telnetd+vsftpd on real hardware; harmless
 # here and some code paths check it.
 : > flags/developer
+
+# /flags/skip_oobe — GO STRAIGHT TO SIGN-IN, PAST THE OUT-OF-BOX WIZARD.
+#
+# The firmware's own escape hatch: the name is in libQtAppServer's strings
+# beside FirmwareUpdateOobe, "complete" and "firmware-installed". Without it
+# AppServer starts InitialSetup, and the second step of that is WiFi — which
+# on a machine with no wireless hardware cannot be satisfied and cannot be
+# skipped, so setup loops there and the device can never be used at all.
+#
+# With it, AppServer launches SignIn: the profile picker, with the parent and
+# time-control buttons that were previously unreachable. Delete this file to
+# walk the real out-of-box flow.
+: > flags/skip_oobe
 
 # /flags/poweron STOPS THE DEVICE SWITCHING ITSELF OFF.
 #

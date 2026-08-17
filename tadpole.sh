@@ -769,6 +769,115 @@ case "$mode" in
             else
                 echo "tadpole: no d-bus session bus — the home screen will be empty" >&2
             fi
+            # A SYSTEM BUS AS WELL — rcS STARTS TWO, AND WE STARTED ONE.
+            #
+            # rcS runs `/etc/init.d/dbus-1 start` (system) AND
+            # `/etc/init.d/dbus-session start`. Only the session bus was ever
+            # started here, and for the package manager that was enough, so the
+            # gap went unnoticed.
+            #
+            # It is not enough for the network stack: libQtRioConnman.so.1 asks
+            # for QDBusConnection::systemBus() — the symbol is right there in
+            # its strings, next to net.connman.Manager/Service/Technology — so
+            # with no system bus at all, every ConnMan call fails before it
+            # reaches anything. What that looks like from the outside is
+            #
+            #     Can't get: wifi technology is NULL
+            #
+            # and an out-of-box WiFi page that cannot work out its own state, so
+            # Skip returns to it and the setup flow loops there for ever.
+            #
+            # AN ABSTRACT ADDRESS, AND NOT THE DEFAULT PATH — THE DEFAULT PATH
+            # IS THE DEVELOPER'S OWN SYSTEM BUS.
+            #
+            # The guest's dbus is configured to listen on
+            # /var/run/dbus/system_bus_socket. bind() is not one of the calls
+            # the shim translates, and qemu's -L only redirects paths that
+            # ALREADY EXIST — so a guest binding a NEW socket at that path hands
+            # it to the host kernel unchanged, where it names the HOST's system
+            # bus. It fails, loudly and luckily:
+            #
+            #     Failed to bind socket "/var/run/dbus/system_bus_socket":
+            #     Address already in use
+            #
+            # "Luckily" because the failure is the desktop's own bus being there
+            # already. On a machine without one running, that same call would
+            # have succeeded and put a guest's D-Bus where the host expects its
+            # own. Not a risk worth leaving open for the sake of a default.
+            #
+            # --address overrides the config's <listen>, and an abstract socket
+            # needs no path in the sysroot at all — exactly what the session bus
+            # above already does. DBUS_SYSTEM_BUS_ADDRESS is what Qt's
+            # systemBus() checks before falling back to the compiled-in path.
+            rm -rf "$SYSROOT/var/run/dbus"
+            mkdir -p "$SYSROOT/var/run/dbus"
+            # OUR OWN CONFIG, BECAUSE THE DEVICE'S CANNOT WORK HERE. Three
+            # things in /etc/dbus-1/system.conf stop it dead, and none of them
+            # can be turned off from the command line on a dbus this old
+            # (--nopidfile does not exist; it prints its usage and exits):
+            #
+            #   <pidfile>/var/run/dbus/pid</pidfile>
+            #       dbus-daemon links none of the shim's vectors, so it runs
+            #       UNSHIMMED — and an unshimmed guest cannot create files,
+            #       because qemu's -L only redirects paths that already exist.
+            #       The create falls through to the HOST's /var/run/dbus/pid:
+            #           Failed to open "/var/run/dbus/pid": Permission denied
+            #   <user>messagebus</user>
+            #       a user this guest has no business becoming, and we are not
+            #       root to do it with.
+            #   <listen>unix:path=/var/run/dbus/system_bus_socket</listen>
+            #       the host's own system bus — see above.
+            #
+            # The policy is permissive rather than the device's default-deny
+            # plus per-service holes. This is an emulator on a developer's
+            # desktop, on a private bus that exists for one guest; a denial here
+            # buys nothing and costs an afternoon.
+            cat > "$SYSROOT/var/run/dbus/tadpole-system.conf" <<XML
+<!DOCTYPE busconfig PUBLIC "-//freedesktop//DTD D-Bus Bus Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd">
+<busconfig>
+  <type>system</type>
+  <keep_umask/>
+  <listen>unix:abstract=tadpole-sysbus-$$</listen>
+  <standard_system_servicedirs/>
+  <policy context="default">
+    <allow own="*"/>
+    <allow send_destination="*" eavesdrop="true"/>
+    <allow receive_sender="*" eavesdrop="true"/>
+  </policy>
+</busconfig>
+XML
+            sys_addr="$(guest /usr/bin/dbus-daemon \
+                        --config-file=/var/run/dbus/tadpole-system.conf \
+                        --print-address --fork 2>/dev/null | grep '^unix:' | head -1)"
+            if [ -n "$sys_addr" ]; then
+                DEV_ENV_ARGS+=(-E "DBUS_SYSTEM_BUS_ADDRESS=$sys_addr")
+                echo "=== dbus system bus: $sys_addr"
+            else
+                echo "tadpole: no d-bus system bus — WiFi setup will loop" >&2
+            fi
+            # THE NETWORK STACK, RUN RATHER THAN FAKED.
+            #
+            # rcS runs /etc/init.d/connman, and the daemon it starts is in the
+            # rootfs — /usr/sbin/connmand, 575 KB of ARM. Writing a stand-in for
+            # net.connman was the obvious plan and is the wrong one: the shell
+            # talks to Manager, Technology, Service AND Agent, with signals, and
+            # every one of those would have to be reimplemented and then kept
+            # honest. The device already ships the real thing.
+            #
+            # WHAT IT SHOULD DO HERE IS REPORT NO WIFI HARDWARE, and that is a
+            # state the UI is built for — a tablet with wifi switched off. It is
+            # allowed to fail: connman with no technologies is the same answer
+            # as connman that would not start, except that the shell can ask it
+            # and get one.
+            #
+            # -n keeps it in the foreground of its own qemu (no daemonising to
+            # lose), and its chatter is prefixed so it does not read as the
+            # shell's.
+            [ "${DEV_HAS_WIFI:-0}" = 1 ] && [ -n "$sys_addr" ] && {
+                guest /usr/sbin/connmand -n 2>&1 | sed -u 's/^/[net] /' &
+                sleep 1
+            }
             # THE PACKAGE MANAGER DAEMON — this is what puts icons on the home
             # screen, and nothing else does.
             #
