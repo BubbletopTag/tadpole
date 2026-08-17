@@ -522,25 +522,40 @@ mkdir -p LF/Bulk/Data/Uploads/1 LF/Bulk/Data/Uploads/2 LF/Bulk/Data/Uploads/3
 # /flags/lfservers, and with no such file it is production — the value the
 # daemon already prints as "Using server environment".
 #
-# THE OTHER FOUR ARE THE BINARY'S OWN COMPILED-IN DEFAULTS, not invented ones.
-# Each gSOAP proxy in libWebServices carries http://localhost:8080/leapfrog/upca/
-# <x> as its endpoint until something overrides it, so writing those back is
-# exactly "no override" — with the difference that the file OPENS. Pointing them
-# at a leapfrog.com host would be a guess, and a guess that sends SOAP at
-# somebody else's servers; these go nowhere and are meant to.
+# THE OTHER FOUR GO NOWHERE, DELIBERATELY, AND NOT TO localhost.
 #
-# So the shell is online, App Center still cannot reach a live catalogue, and it
-# says so instead of taking the home screen down with it. Whether anything of
-# LeapFrog's web services survives to be pointed at is a separate question from
-# this one.
+# Each gSOAP proxy in libWebServices carries http://localhost:8080/leapfrog/upca/
+# <x> as its endpoint until something overrides it, so the tempting move is to
+# write those back: "no override", the binary's own values, nothing invented.
+# That was the first version of this file and it is subtly wrong HERE.
+#
+# qemu-user forwards connect() to the host, so localhost IN THE GUEST IS THE
+# DEVELOPER'S MACHINE. Nothing in this image ever served port 8080 — the string
+# is a LeapFrog build-machine placeholder, and grepping the rootfs for a local
+# UPCA server finds nothing — so on hardware it connected to nothing. Here it
+# would connect to whatever the developer happens to be running on 8080, and a
+# dev server on 8080 is not exactly rare. It would get SOAP from a LeapPad.
+# Very small next to what connmand was doing; the same shape of mistake, and
+# this file is not the place to reintroduce it.
+#
+# .invalid is reserved by RFC 2606 and can never resolve, so these fail at DNS
+# without a packet leaving the machine. What the shell shows is the same either
+# way: the Reward Store and App Center say "network connection error" because
+# their servers are gone, not because of which dead address we picked.
+#
+# THE REAL PRODUCTION URLS ARE NOT KNOWN, AND ARE NOT GUESSED AT. The one file
+# that listed them is the endpointurls.json whose disappearance is the reason
+# this block exists. Inventing a services.leapfrog.com path would be a guess
+# that fires SOAP at VTech; if a genuine copy of this file ever turns up, it
+# drops straight in here and the stores get a real answer for the first time.
 if [ ! -f LF/Bulk/endpointurls.json ]; then
     cat > LF/Bulk/endpointurls.json <<'JSON'
 {
     "LfConnectivityCheck":  { "production": "http://connman.leapfrog.com/online/status.html" },
-    "PackageManagement":    { "production": "http://localhost:8080/leapfrog/upca/package_management" },
-    "DeviceManagement":     { "production": "http://localhost:8080/leapfrog/upca/device_management" },
-    "DeviceLogUpload":      { "production": "http://localhost:8080/leapfrog/upca/device_log_upload" },
-    "DeviceProfileContent": { "production": "http://localhost:8080/leapfrog/upca/device_content" }
+    "PackageManagement":    { "production": "http://upca.tadpole.invalid/leapfrog/upca/package_management" },
+    "DeviceManagement":     { "production": "http://upca.tadpole.invalid/leapfrog/upca/device_management" },
+    "DeviceLogUpload":      { "production": "http://upca.tadpole.invalid/leapfrog/upca/device_log_upload" },
+    "DeviceProfileContent": { "production": "http://upca.tadpole.invalid/leapfrog/upca/device_content" }
 }
 JSON
 fi
