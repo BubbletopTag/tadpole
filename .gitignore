@@ -15,6 +15,7 @@ reference/
 
 # Build products
 tadpole/viewer/tadpole-view
+tadpole/viewer/cfg-selftest
 runtime/tone
 # what tools/micromods.py wrote into this checkout's Downloads, so it can
 # take exactly that back out again. Local state about a local sysroot.

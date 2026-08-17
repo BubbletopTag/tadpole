@@ -93,6 +93,28 @@ fi
 : "${TADPOLE_GL:=1}"
 export TADPOLE_GL
 
+# THE FRAME CAP, READ THE SAME WAY AND FOR EXACTLY THE SAME REASON.
+#
+# Reported against a Didj title: "the fps limit stopped working, it is stuck at
+# 60 no matter what, and restarting does not help". Sixty is not a coincidence —
+# it is the hardcoded fallback in BOTH pacers, tadpole_shim.c's VSYNC_HZ_DEFAULT
+# and pace_frame() in tadpole_gles_core.c — so an unset TADPOLE_HZ pins the guest
+# there and no amount of clicking the row in Graphics can move it. The viewer's
+# own spawn path has always exported this (guest_setenv, tadpole_view.c); a
+# guest launched by THIS script never got it, so which of the two started the
+# title decided whether the setting existed. Same trap as TADPOLE_GL above.
+#
+# NOT `: "${TADPOLE_HZ:=60}"`, and the value is exported only when the file
+# actually carries one. Zero is a REAL setting here — the shim reads the
+# variable's PRESENCE as "the user has an opinion" and 0 as "uncapped" — so
+# defaulting would quietly outlaw uncapped, and exporting an empty string for a
+# file that never mentioned a frame cap would override the guest's own default
+# with nothing at all.
+if [ -z "${TADPOLE_HZ:-}" ] && [ -r "$UICFG" ]; then
+    hz="$(awk '$1=="frame_cap"{print $2}' "$UICFG" | tail -1)"
+    [ -n "$hz" ] && export TADPOLE_HZ="$hz"
+fi
+
 # WHICH LOGO. rcS picks by platform_family — Lucy-Boot-logo.png on a LeapsterGS,
 # Valencia-Boot-logoCW.png on everything else, this device included.
 #
@@ -151,6 +173,10 @@ while [ $# -gt 0 ]; do
         --run)       mode=run; shift; prog="${1:-}" ;;
         --app)       mode=app; shift; appname="${1:-}" ;;
         --list)      mode=list; use_viewer=0 ;;
+        # What environment would the guest actually be handed? Print it and
+        # stop. Two settings have now been reported as "does nothing" because
+        # the answer was "not the one you saved" and there was no way to look.
+        --print-env) mode=printenv; use_viewer=0 ;;
         --no-viewer) use_viewer=0 ;;
         --debug)     debug=1 ;;
         # Draw a red crosshair at the framebuffer point the viewer computed
@@ -168,6 +194,15 @@ while [ $# -gt 0 ]; do
     esac
     shift || true
 done
+
+# BEFORE the --no-viewer refusal below and before any mode-specific setup: this
+# prints what has been resolved from your shell and from ui.cfg, which is the
+# exact layer both "my setting does nothing" reports lived in, and it must work
+# on a checkout that cannot boot anything at all.
+if [ "$mode" = printenv ]; then
+    env | grep '^TADPOLE_' | sort
+    exit 0
+fi
 
 # NO VIEWER MEANS NO HOST GPU, AND THEREFORE NO RENDERING WORTH TRUSTING.
 #

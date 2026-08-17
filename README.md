@@ -392,7 +392,12 @@ wizard opens instead of a wall of errors.
 ./tadpole.sh --list     # list installed titles
 ./tadpole.sh --app NAME # launch one title straight in, no home screen
 ./tadpole.sh --shell    # an ARM shell inside the guest
+./tadpole.sh --print-env # what settings the guest would actually be handed
 ```
+
+`--print-env` answers "is my setting reaching the emulator?" without booting
+anything. If a setting you changed in the front end appears to do nothing, look
+here first: what it prints is what the guest gets.
 
 `--app` takes a name or a Package ID and matches on either, so
 `--app 'Clam Prix'` is enough. It skips the menu, the sign-in and the tile —

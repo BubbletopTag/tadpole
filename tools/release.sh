@@ -142,6 +142,24 @@ if [ -f "$HERE/tests/link_resolve_test.py" ]; then
         || die "the rootfs symlink rules are wrong — refusing to ship an
   installer that would fail partway through building a sysroot"
 fi
+if [ -f "$HERE/tests/micromods_pacing_test.py" ]; then
+    python3 "$HERE/tests/micromods_pacing_test.py" \
+        || die "the micromod scanner is no longer pacing itself — refusing to
+  ship something that would hammer LeapFrog's servers"
+fi
+# THE ONE THAT WOULD HAVE CAUGHT THE FRAME CAP. A setting the front end saves
+# and the launcher never reads looks like a working build from every angle
+# except the user's, so it is checked before anything is tagged.
+if [ -f "$HERE/tests/launch_env_test.py" ]; then
+    python3 "$HERE/tests/launch_env_test.py" \
+        || die "saved settings are not reaching the guest — refusing to ship a
+  build whose Graphics panel does not decide anything"
+fi
+# Headless: the config path touches neither SDL nor GL.
+make -C "$PROJ/tadpole" cfg-selftest >/dev/null 2>&1 \
+    && { "$PROJ/tadpole/viewer/cfg-selftest" >/dev/null \
+        || die "the settings file is not being written correctly — refusing to
+  ship a build that tells the user \"Saved!\" without having saved"; }
 
 # ---- build both ------------------------------------------------------------
 # NOTHING IS TAGGED OR PUSHED UNTIL BOTH ASSETS EXIST AND BOTH CARRY $VERSION.

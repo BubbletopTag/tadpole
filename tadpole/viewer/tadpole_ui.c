@@ -2219,13 +2219,33 @@ static void cfg_path(char *out, size_t n)
 }
 
 /* tadpole.sh reads this file too (`awk '$1=="gl"{print $2}'`), so the format
- * stays "one key, a space, one value" — no sections, no quoting. */
-void ui_cfg_save(void)
+ * stays "one key, a space, one value" — no sections, no quoting.
+ *
+ * WRITTEN ASIDE AND RENAMED INTO PLACE, AND THE CALLER IS TOLD WHETHER IT
+ * WORKED. Two reasons, both new.
+ *
+ * This used to open ui.cfg with "w", which truncates before the first byte is
+ * written. Anything going wrong from there on — a full disk, a config
+ * directory that turned read-only, an error that only surfaces at fclose —
+ * left a HALF-WRITTEN settings file, and since tadpole.sh awk-reads this same
+ * file while the viewer is running, a reader could catch it with its tail
+ * missing and quietly launch a guest with half the settings. A rename is
+ * atomic: every reader sees either the whole old file or the whole new one.
+ *
+ * And Graphics now shows "Saving..." and then "Saved!". A cue like that has to
+ * be a report and not a timer — saying "Saved!" over a write that silently
+ * failed is worse than saying nothing, because it is believed. So every step
+ * is checked: ferror latches any failed fprintf, fflush and fsync put the
+ * bytes on the device rather than in a buffer, and the rename comes last.
+ * -> 1 only when the new file is genuinely in place.
+ */
+static int cfg_write(void)
 {
-	char p[PATHMAX];
+	char p[PATHMAX], tmp[PATHMAX + 8];
 	FILE *f;
 	cfg_path(p, sizeof(p));
-	if (!(f = fopen(p, "w"))) return;
+	snprintf(tmp, sizeof(tmp), "%s.tmp", p);
+	if (!(f = fopen(tmp, "w"))) return 0;
 	fprintf(f, "update_check %d\n", g_cfg.update_check);
 	fprintf(f, "gl %d\ngl_hle %d\ndebug_level %d\nlog_to_file %d\n"
 	           "gl_dumpframe %d\ngl_dumptex %d\n"
@@ -2245,7 +2265,67 @@ void ui_cfg_save(void)
 	/* Last, and only if set: it is the one value that can contain spaces. */
 	if (g_cfg.games_dir[0])
 		fprintf(f, "games_dir %s\n", g_cfg.games_dir);
-	fclose(f);
+
+	/* ONE CHECK COVERS EVERY fprintf ABOVE: the error flag latches, so it is
+	 * still set here no matter which write was the one that failed. */
+	if (ferror(f) || fflush(f) != 0) { fclose(f); remove(tmp); return 0; }
+#ifndef _WIN32
+	/* The rename below is only atomic with respect to what is ON THE DEVICE.
+	 * Without this the metadata can land before the data after a hard reset,
+	 * which is the one way to end up with a ui.cfg full of zero bytes. */
+	{ int fd = fileno(f); if (fd >= 0) fsync(fd); }
+#endif
+	if (fclose(f) != 0) { remove(tmp); return 0; }
+#ifdef _WIN32
+	/* rename() will not replace an existing file on Windows. Nothing else
+	 * reads this file there — tadpole.sh is the concurrent reader and it does
+	 * not run on Windows — so the brief gap this opens costs nothing. */
+	remove(p);
+#endif
+	if (rename(tmp, p) != 0) { remove(tmp); return 0; }
+	return 1;
+}
+
+/* ---- the save cue ------------------------------------------------------
+ *
+ * Every row in Graphics, Audio and Debug saves the moment it is clicked, and
+ * nothing on screen ever said so. A user who had just watched a resolution
+ * change take effect instantly had no way to tell whether the frame cap next
+ * to it had been written down at all — which is most of how the frame-cap bug
+ * came to be reported as "the setting does not stick".
+ *
+ * WHAT THE TIMER IS AND IS NOT. cfg_write() is a few hundred microseconds, so
+ * "Saving..." would flash past unreadably; SAVE_CUE_BUSY_MS holds it on screen
+ * long enough to be seen. That is a MINIMUM DISPLAY TIME on a result that has
+ * already been computed, not a fake progress bar — the save is finished and
+ * its outcome known before the cue is ever drawn, and "Saved!" appears only
+ * over a 1 from cfg_write(). A failure says so instead, and stays up far
+ * longer, because it is the case the user has to actually do something about.
+ */
+#define SAVE_CUE_BUSY_MS  100u
+#define SAVE_CUE_OK_MS   1500u
+#define SAVE_CUE_FAIL_MS 8000u
+
+static Uint32 g_save_at;     /* SDL_GetTicks() at the last save; 0 = never */
+static int    g_save_ok;
+
+/* What the cue should say, or NULL for nothing. A pure function of the only
+ * two things that decide it, deliberately kept out of the drawing: the viewer
+ * cannot be driven headlessly, so this is the part viewer/cfg_selftest.c can
+ * actually pin down — above all that a failed write NEVER reads "Saved!". */
+const char *ui_save_cue_text(Uint32 age, int ok)
+{
+	if (age < SAVE_CUE_BUSY_MS) return "Saving...";
+	if (!ok) return age <= SAVE_CUE_FAIL_MS ? "NOT saved!" : 0;
+	return age < SAVE_CUE_OK_MS ? "Saved!" : 0;
+}
+
+int ui_cfg_save(void)
+{
+	int ok = cfg_write();
+	g_save_at = SDL_GetTicks();
+	g_save_ok = ok;
+	return ok;
 }
 
 static void cfg_load(void)
@@ -3026,6 +3106,24 @@ static void row_value(SDL_Renderer *r, const struct dlg *d, int i,
 	text(r, d->x + d->w - 12 - text_w(val), y, val, C_ACCENT);
 }
 
+/* The save cue — see ui_cfg_save(). Bottom-right of a settings dialog, on the
+ * same baseline as its hint text and right-aligned the way row values are. */
+static void save_cue(SDL_Renderer *r, const struct dlg *d)
+{
+	Uint32 age;
+	const char *msg;
+	unsigned col;
+
+	if (!g_save_at) return;
+	age = SDL_GetTicks() - g_save_at;
+	if (!(msg = ui_save_cue_text(age, g_save_ok))) return;
+	/* Dim while it is still settling, accent once it has landed, and full
+	 * contrast for a failure: there is no red anywhere in this palette, so
+	 * brightness against the dim hint beside it is the loudest this gets. */
+	col = age < SAVE_CUE_BUSY_MS ? C_TEXT_DIM : g_save_ok ? C_ACCENT : C_TEXT;
+	text(r, d->x + d->w - 12 - text_w(msg), d->y + d->h - 30, msg, col);
+}
+
 /* Wizard buttons: Back / Next|Finish / Cancel, bottom right, in that order —
  * the arrangement every Windows installer has used for thirty years, because it
  * needs no explaining. */
@@ -3562,6 +3660,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		     g_running ? "GL: reboot to apply."
 		               : "GL applies at next boot.",
 		     g_running ? C_ACCENT : C_TEXT_DIM);
+		save_cue(r, &d);
 		break;
 	}
 	case M_AUDIO: {
@@ -3574,6 +3673,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		          row_hit(&d, 2, g_mx, g_my));
 		text(r, d.x + 10, d.y + 72, "Lower latency = tighter sync,", C_TEXT_DIM);
 		text(r, d.x + 10, d.y + 82, "higher = fewer dropouts.", C_TEXT_DIM);
+		save_cue(r, &d);
 		break;
 	}
 	case M_DEBUG: {
@@ -3618,6 +3718,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		text(r, d.x + 10, d.y + d.h - 30,
 		     g_cfg.log_to_file ? "Log: ~/.local/state/tadpole/" : "",
 		     C_TEXT_DIM);
+		save_cue(r, &d);
 		break;
 	}
 	case M_SYSTEM: {

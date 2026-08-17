@@ -145,7 +145,10 @@ void  ui_micromods_reload(void);
 int   ui_micromods_picked(char *out, size_t n);
 
 struct ui_settings *ui_cfg(void);
-void  ui_cfg_save(void);
+/* -> 1 if the settings are genuinely on disk, 0 if the write failed. The
+ * Graphics panel reports this back to the user, so it is a result and not a
+ * gesture — see ui_cfg_save() and viewer/cfg_selftest.c. */
+int   ui_cfg_save(void);
 
 /* A modal is up: the guest must not receive input, and the emulator can pause. */
 int   ui_modal(void);

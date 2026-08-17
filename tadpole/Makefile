@@ -113,7 +113,7 @@ BOOT_CFLAGS :=
 BOOT_LIBS   :=
 endif
 
-.PHONY: all shim shimz asound gl tone viewer hle-probe hle-selftest clean check realdl realz
+.PHONY: all shim shimz asound gl tone viewer hle-probe hle-selftest cfg-selftest clean check realdl realz
 
 all: shim shimz asound gl viewer
 
@@ -338,6 +338,14 @@ hle-selftest: viewer/hle_selftest.c viewer/tadpole_hle.c shim/tadpole_gles_hle.c
 	      viewer/tadpole_hle.c shim/tadpole_gles_hle.c \
 	      $(SDL_CFLAGS) $(SDL_LIBS) $(shell pkg-config --libs gl)
 	@echo "built viewer/hle-selftest"
+
+# Does a setting the user changed actually reach the disk? Headless — the
+# config path touches neither SDL nor GL, so unlike hle-selftest this one CAN
+# run in CI, and it is what stands behind the "Saved!" cue in Graphics.
+cfg-selftest: viewer/cfg_selftest.c viewer/tadpole_ui.c viewer/tadpole_ui.h
+	$(CC) -O2 -Wall -o viewer/cfg-selftest viewer/cfg_selftest.c \
+	      viewer/tadpole_ui.c $(SDL_CFLAGS) $(SDL_LIBS) -lz
+	@echo "built viewer/cfg-selftest"
 
 hle-probe: viewer/hle_probe.c
 	$(CC) -O2 -Wall -o viewer/hle-probe $< $(SDL_CFLAGS) $(SDL_LIBS) \
