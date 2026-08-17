@@ -256,6 +256,50 @@ pcm.!default   { type null }
 ctl.!default   { type hw card 0 }
 ASOUND
 
+# ROOT CERTIFICATES FROM 2016 CANNOT VERIFY THE WEB OF 2026.
+#
+# The guest ALREADY HAS WORKING INTERNET and this is easy to miss: qemu-user
+# passes socket calls to the host, so the guest shares the host's stack. DNS
+# resolves, TCP connects, and a fetch of a real CDN object returns HTTP 200 in
+# about a second — measured with `curl -k`.
+#
+# WITHOUT -k IT FAILS, and only at certificate verification. The image ships
+# 158 roots frozen on 2016-03-22, including DigiCert_Global_Root_CA — but not
+# DigiCert Global Root G2, which is what LeapFrog's own chain is rooted at
+# today. tools/netssl.py exists for exactly this problem on the HOST side (an
+# un-updated Windows 7 has the same gap); this is the guest's half of it.
+#
+# So overlay the bundle with the host's, which a maintained desktop keeps
+# current. The certificates a machine trusts are the machine's own business,
+# and copying them into the guest gives it the same view rather than a
+# hand-picked one — no cert is added that this host does not already trust.
+#
+# etc/ssl is a symlink at the rootfs, so the certs directory has to be shadowed
+# the same way /etc itself is: real directory, entries symlinked, the one file
+# we replace written on top.
+for hostbundle in /etc/ssl/certs/ca-certificates.crt \
+                  /etc/pki/tls/certs/ca-bundle.crt \
+                  /etc/ssl/cert.pem; do
+    [ -r "$hostbundle" ] && break
+    hostbundle=""
+done
+if [ -n "${hostbundle:-}" ] && [ -d "$ROOTFS/etc/ssl/certs" ]; then
+    rm -f etc/ssl
+    mkdir -p etc/ssl/certs
+    for f in "$ROOTFS"/etc/ssl/*; do
+        b="$(basename "$f")"
+        [ "$b" = certs ] || lns "$f" "etc/ssl/$b"
+    done
+    for f in "$ROOTFS"/etc/ssl/certs/*; do
+        b="$(basename "$f")"
+        [ "$b" = ca-certificates.crt ] || lns "$f" "etc/ssl/certs/$b"
+    done
+    cp -f "$hostbundle" etc/ssl/certs/ca-certificates.crt
+    echo "    CA bundle from $hostbundle (the image's own is from 2016)"
+else
+    echo "    note: no host CA bundle found — guest HTTPS will fail to verify" >&2
+fi
+
 echo "==> /var/sounds video symlinks (rcS does this per-platform)"
 # The shipped symlinks point at LucyAssets — a DIFFERENT board. rcS repoints
 # them at boot according to /sys/devices/system/board/platform, and for
