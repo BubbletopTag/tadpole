@@ -3011,9 +3011,59 @@ int main(int argc, char **argv)
 	{
 		int ww = (rotate == 90 || rotate == 270) ? h : w;
 		int wh = (rotate == 90 || rotate == 270) ? w : h;
+		/* WHICH MONITOR. SDL_WINDOWPOS_CENTERED means "centre of display 0",
+		 * so on a multi-head desk the window always lands on the primary one
+		 * whatever else is attached.
+		 *
+		 * TADPOLE_DISPLAY takes a display index, or the word "portrait" — the
+		 * first display taller than it is wide. The word is the useful form:
+		 * this emulator draws a handheld, and a pivoted monitor is where you
+		 * want it, but SDL's indices are not the same order as the desktop's
+		 * and are not stable across replugs, so naming the SHAPE beats
+		 * guessing the number.
+		 *
+		 * Under Wayland a client cannot place its own window at all and the
+		 * hint is ignored — SDL_VIDEODRIVER=x11 routes through XWayland, where
+		 * it works. Rather than fail silently, say which display was chosen
+		 * and how many there are. */
+		int nd = SDL_GetNumVideoDisplays();
+		int want = 0;
+		const char *dsp = getenv("TADPOLE_DISPLAY");
+		if (dsp && *dsp && nd > 0) {
+			if (!strcmp(dsp, "portrait")) {
+				int i;
+				want = -1;
+				for (i = 0; i < nd; i++) {
+					SDL_Rect r;
+					if (SDL_GetDisplayBounds(i, &r) == 0 && r.h > r.w) {
+						want = i;
+						break;
+					}
+				}
+				if (want < 0) {
+					fprintf(stderr, "tadpole-view: no portrait display among "
+					        "%d; using the primary\n", nd);
+					want = 0;
+				}
+			} else {
+				want = atoi(dsp);
+				if (want < 0 || want >= nd) {
+					fprintf(stderr, "tadpole-view: display %d does not exist "
+					        "(%d attached); using the primary\n", want, nd);
+					want = 0;
+				}
+			}
+			{
+				SDL_Rect r;
+				if (SDL_GetDisplayBounds(want, &r) == 0)
+					printf("tadpole-view: display %d of %d, %dx%d at %d,%d\n",
+					       want, nd, r.w, r.h, r.x, r.y);
+			}
+		}
 		ui_brand_apply();
-		win = SDL_CreateWindow(ui_brand_name(), SDL_WINDOWPOS_CENTERED,
-		                       SDL_WINDOWPOS_CENTERED,
+		win = SDL_CreateWindow(ui_brand_name(),
+		                       SDL_WINDOWPOS_CENTERED_DISPLAY(want),
+		                       SDL_WINDOWPOS_CENTERED_DISPLAY(want),
 		                       ww * scale, (wh + UI_BAR_H) * scale,
 		                       SDL_WINDOW_RESIZABLE);
 	}
