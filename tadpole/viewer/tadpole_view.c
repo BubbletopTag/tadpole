@@ -1499,13 +1499,41 @@ static const char *const PORTRAIT_TITLES[] = {
 	"KeyboardWidget",
 };
 
+/* HOW THE SYSTEM UI IS STORED, WHICH IS NOT THE SAME ON EVERY TABLET.
+ *
+ * 270 was a constant here, and it is right for the LeapPad2: its panel is
+ * portrait, so AppManager draws the home screen a quarter turn from the way
+ * the tablet is held, and the viewer turns it back. The LeapPad3 and the Ultra
+ * run a Qt shell that draws LANDSCAPE-NATIVE and upright, so turning it is
+ * wrong twice over — the picture is sideways, and event_to_fb() maps every
+ * click through the same quarter turn, so taps land somewhere else entirely.
+ * That reads as "touch is broken" rather than "the window is rotated", because
+ * the events arrive and are simply put in the wrong place.
+ *
+ * tadpole.sh passes the device's own answer (DEV_UI_ROTATE). Absent, it stays
+ * 270, which is what every caller got before this existed.
+ */
+static int ui_rotate(void)
+{
+	static int cached = -1;
+	const char *e;
+
+	if (cached < 0) {
+		e = getenv("TADPOLE_UI_ROTATE");
+		cached = (e && *e) ? atoi(e) : 270;
+		if (cached != 0 && cached != 90 && cached != 180 && cached != 270)
+			cached = 270;
+	}
+	return cached;
+}
+
 static int rotate_for_screen(unsigned screen, const char *pkg)
 {
 	char id[PKGID_MAX];
 	size_t i;
 
 	if (screen != TAD_SCREEN_TITLE)
-		return 270;                 /* the LeapPad UI, and the boot logo */
+		return ui_rotate();         /* the LeapPad UI, and the boot logo */
 	/* pkg points into shared memory a guest wrote and may have died in the
 	 * middle of writing, so terminate it here rather than trusting it. */
 	snprintf(id, sizeof(id), "%s", pkg ? pkg : "");

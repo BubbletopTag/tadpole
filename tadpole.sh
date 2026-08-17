@@ -533,6 +533,16 @@ guest() {
 # the viewer maps it when it appears, and the boot logo is drawn by the one
 # thing that is supposed to draw it — viewer/tadpole_boot.c, when asked.
 
+# WHICH WAY UP THE SYSTEM UI IS DRAWN — A PROPERTY OF THE DEVICE.
+#
+# The viewer turned every non-title screen by 270, which is right for the
+# LeapPad2 (portrait panel, so AppManager stores its home screen sideways) and
+# wrong for a Qt device, which draws landscape-native and upright. Getting it
+# wrong presents as BROKEN TOUCH rather than as a rotated window: event_to_fb()
+# maps the click through the same quarter turn, so every tap lands a quarter
+# turn from where it was aimed.
+export TADPOLE_UI_ROTATE="${DEV_UI_ROTATE:-270}"
+
 viewer_pid=""
 if [ "$use_viewer" = 1 ] && [ -x "$VIEWER" ]; then
     # -r ONLY IF ASKED FOR. It used to be passed always, defaulting to 0,
