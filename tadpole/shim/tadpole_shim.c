@@ -225,6 +225,43 @@ static struct tadpole_state *g_state;
 static signed char g_fb_of_fd[MAXFD];   /* -1 none, else layer index */
 static signed char g_ev_of_fd[MAXFD];
 
+/* AN EVDEV NODE IS A BROADCAST. A FIFO IS A QUEUE. THAT IS THE WHOLE BUG.
+ *
+ * Each evdev node here was a single FIFO, handed to the guest as-is. That is
+ * right for one reader and silently wrong for two, because the kernel and a
+ * FIFO differ exactly where it matters: open() on /dev/input/eventN gives you
+ * your OWN event queue and every event is copied into all of them, while a
+ * byte read from a FIFO is gone for everyone else.
+ *
+ * The touchscreen has three readers inside AppServer alone — Qt's tslib mouse
+ * handler, and both of Brio's ButtonPowerUSBTask tslib loads, which watch for
+ * activity to feed the idle timeout. Measured, on one tap:
+ *
+ *     93 fd=24        <- Brio
+ *     71 fd=8         <- Qt
+ *
+ * Neither reader saw a whole gesture. Each got an arbitrary subsequence: a
+ * BTN_TOUCH with no coordinates after it, coordinates with no SYN_REPORT to
+ * commit them, a release belonging to a press it never saw. tslib's dejitter
+ * and Qt's press/move/release state machine both need the run intact, so both
+ * produced nothing at all, and nothing anywhere reported an error.
+ *
+ * This is why the Ultra's notes could say "the events reach the guest and Qt
+ * does not act on them" and be entirely correct about both halves. The debug
+ * line printed the DEVICE index, not the fd, so three readers splitting one
+ * stream looked identical to one reader receiving it.
+ *
+ * The fix restores the kernel's semantics: the shared FIFO is opened ONCE per
+ * device and never handed out; every open() gets a private pipe; and a pump
+ * copies each complete event from the FIFO into every open pipe. Readers then
+ * see identical, complete streams, as they would on hardware.
+ */
+#define EV_MAX_READERS  8               /* three today; eight is plenty */
+static int g_ev_fifo[NUM_EV];           /* shared source, -1 until first open */
+static int g_ev_rd[NUM_EV][EV_MAX_READERS];   /* what the guest reads from */
+static int g_ev_wr[NUM_EV][EV_MAX_READERS];   /* what the pump writes into */
+static volatile int g_ev_pumping;       /* try-lock; see ev_pump() */
+
 /* Exact names, order and phys strings from a live LeapPad2's
  * /proc/bus/input/devices — see reference/device-capture/. Do not "tidy"
  * these: AppManager matches on them, and the real kernel names are
@@ -282,6 +319,12 @@ static const u32 g_ev_bits[NUM_EV] = {
 };
 
 /* real libc entry points */
+static int  (*real_pipe)(int *);
+static long (*real_write)(int, const void *, size_t);
+static int  (*real_fcntl)(int, int, ...);
+static int  (*real_poll)(void *, ulong, int);
+static int  (*real_pthread_create)(ulong *, const void *,
+                                   void *(*)(void *), void *);
 static int  (*real_open)(const char *, int, ...);
 static int  (*real_open64)(const char *, int, ...);
 static int  (*real_openat)(int, const char *, int, ...);
@@ -381,6 +424,11 @@ static void init(void)
 	real_close  = dlsym(RTLD_NEXT, "close");
 	real_mmap   = dlsym(RTLD_NEXT, "mmap");
 	real_read   = dlsym(RTLD_NEXT, "read");
+	real_pipe   = dlsym(RTLD_NEXT, "pipe");
+	real_write  = dlsym(RTLD_NEXT, "write");
+	real_fcntl  = dlsym(RTLD_NEXT, "fcntl");
+	real_poll   = dlsym(RTLD_NEXT, "poll");
+	real_pthread_create = dlsym(RTLD_NEXT, "pthread_create");
 	real_rename = dlsym(RTLD_NEXT, "rename");
 	real_mkstemp   = dlsym(RTLD_NEXT, "mkstemp");
 	real_mkstemp64 = dlsym(RTLD_NEXT, "mkstemp64");
@@ -477,6 +525,14 @@ static void init(void)
 	for (i = 0; i < MAXFD; i++) {
 		g_fb_of_fd[i] = -1;
 		g_ev_of_fd[i] = -1;
+	}
+	{
+		int d, s;
+		for (d = 0; d < NUM_EV; d++) {
+			g_ev_fifo[d] = -1;
+			for (s = 0; s < EV_MAX_READERS; s++)
+				g_ev_rd[d][s] = g_ev_wr[d][s] = -1;
+		}
 	}
 
 	{
@@ -653,6 +709,181 @@ static int ev_index(const char *path)
 	return n;
 }
 
+/* ---- evdev fan-out -------------------------------------------------------
+ *
+ * See the note beside g_ev_fifo. ev_open() hands out a private pipe per open;
+ * ev_pump() copies the shared FIFO into every one of them.
+ */
+
+/* Copy whatever is waiting on device idx's FIFO into every open reader.
+ *
+ * Called from read(), by whichever reader happens to ask first — so no thread
+ * is needed and no reader is privileged. Each pump fills EVERY pipe, including
+ * the caller's, so it does not matter which one runs it.
+ *
+ * The try-lock is not for correctness of the copy but to stop two guest
+ * threads splitting one FIFO read between them, which would reintroduce
+ * exactly the bug this exists to fix. A thread that loses the race skips the
+ * pump and reads its own pipe; the winner has already filled it.
+ */
+static void ev_pump(int idx)
+{
+	/* 64 events. The viewer sends a whole gesture in bursts of ~5. */
+	char buf[16 * 64];
+	long n;
+	int s;
+
+	if (idx < 0 || idx >= NUM_EV || g_ev_fifo[idx] < 0 || !real_read || !real_write)
+		return;
+	if (!__sync_bool_compare_and_swap(&g_ev_pumping, 0, 1))
+		return;
+
+	while ((n = real_read(g_ev_fifo[idx], buf, sizeof(buf))) > 0) {
+		/* Whole events only. Every writer emits one event per write() and
+		 * 16 bytes is far below PIPE_BUF, so the kernel keeps them atomic
+		 * and a short read cannot land mid-event. Truncate rather than
+		 * trust it. */
+		n -= n % 16;
+		if (n <= 0)
+			break;
+		for (s = 0; s < EV_MAX_READERS; s++)
+			if (g_ev_wr[idx][s] >= 0)
+				/* Non-blocking: a reader that has stopped draining its
+				 * pipe loses events rather than stalling the others. */
+				(void)real_write(g_ev_wr[idx][s], buf, (size_t)n);
+		if (n < (long)sizeof(buf))
+			break;
+	}
+	__sync_lock_release(&g_ev_pumping);
+}
+
+/* THE PUMP NEEDS ITS OWN THREAD, AND HERE IS WHY IT CANNOT BORROW ONE.
+ *
+ * Pumping from inside read() looks sufficient and deadlocks instantly. The
+ * readers do not spin on read(); they sleep in select()/poll() until their fd
+ * is readable. While each of them held the shared FIFO directly that worked —
+ * a write woke everybody. Once each holds a private pipe, the pipe only fills
+ * if somebody pumps, and nobody pumps until they wake: every reader sleeps
+ * forever with a full FIFO sitting in front of them. Measured exactly that
+ * way — the opens and the pipes were all correct and not one event arrived.
+ *
+ * So one thread per process blocks on the FIFOs and does nothing else. This is
+ * what the kernel's input core does for us on hardware, which is the reason
+ * none of this machinery is normally anyone's problem.
+ *
+ * pthread_create comes from the GUEST's libpthread by dlsym, so the thread is
+ * a guest thread and qemu-user schedules it like any other. If it is not there
+ * to be found — a guest that does not link libpthread — ev_open() falls back
+ * to handing out the shared FIFO, which is what this did before and is still
+ * correct for a single reader.
+ */
+static void *ev_pump_thread(void *arg)
+{
+	/* struct pollfd is {int fd; short events; short revents;} = 8 bytes. */
+	struct { int fd; short events; short revents; } pfds[NUM_EV];
+	int d, n;
+
+	(void)arg;
+	for (;;) {
+		n = 0;
+		for (d = 0; d < NUM_EV; d++)
+			if (g_ev_fifo[d] >= 0) {
+				pfds[n].fd = g_ev_fifo[d];
+				pfds[n].events = 1;          /* POLLIN */
+				pfds[n].revents = 0;
+				n++;
+			}
+		if (!n || !real_poll) {              /* nothing open yet */
+			struct tad_timespec nap;
+			nap.tv_sec = 0; nap.tv_nsec = 50L * 1000 * 1000;
+			nanosleep(&nap, 0);
+			continue;
+		}
+		if (real_poll(pfds, (ulong)n, 200) <= 0)
+			continue;
+		for (d = 0; d < NUM_EV; d++)
+			if (g_ev_fifo[d] >= 0)
+				ev_pump(d);
+	}
+	return 0;
+}
+
+static void ev_start_pump(void)
+{
+	static int started;
+	ulong tid;
+
+	if (started || !real_pthread_create)
+		return;
+	started = 1;
+	if (real_pthread_create(&tid, 0, ev_pump_thread, 0) != 0) {
+		started = 0;
+		dbg("[tadpole] evdev: no pump thread; readers will share one queue\n");
+	}
+}
+
+/* -> a read fd for device idx, with its own queue. */
+static int ev_open(int idx)
+{
+	char real[512];
+	int pfd[2], s;
+
+	if (!real_open || !real_pipe)
+		return -1;
+
+	/* NO THREAD, NO FAN-OUT. Handing out private pipes with nothing to fill
+	 * them is strictly worse than the old shared FIFO, so fall back to it
+	 * rather than deliver silence. */
+	ev_start_pump();
+	if (!real_pthread_create) {
+		snprintf(real, sizeof(real), "%s/ev%d", g_dir, idx);
+		return real_open(real, O_RDWR | O_NONBLOCK, 0666);
+	}
+
+	/* One shared reader of the FIFO for the whole process, opened O_RDWR so
+	 * it never blocks waiting for a writer and never sees EOF when the
+	 * viewer restarts. */
+	if (g_ev_fifo[idx] < 0) {
+		snprintf(real, sizeof(real), "%s/ev%d", g_dir, idx);
+		g_ev_fifo[idx] = real_open(real, O_RDWR | O_NONBLOCK, 0666);
+		if (g_ev_fifo[idx] < 0)
+			return -1;
+	}
+
+	for (s = 0; s < EV_MAX_READERS; s++)
+		if (g_ev_rd[idx][s] < 0)
+			break;
+	if (s == EV_MAX_READERS)
+		return -1;
+
+	if (real_pipe(pfd) != 0)
+		return -1;
+	/* The old code handed out an O_NONBLOCK fd and every reader here copes
+	 * with EAGAIN, so keep that contract exactly. */
+	if (real_fcntl) {
+		(void)real_fcntl(pfd[0], 4 /* F_SETFL */, O_NONBLOCK);
+		(void)real_fcntl(pfd[1], 4 /* F_SETFL */, O_NONBLOCK);
+	}
+	g_ev_rd[idx][s] = pfd[0];
+	g_ev_wr[idx][s] = pfd[1];
+	return pfd[0];
+}
+
+/* Drop a reader when the guest closes its fd. */
+static void ev_close(int fd)
+{
+	int d, s;
+
+	for (d = 0; d < NUM_EV; d++)
+		for (s = 0; s < EV_MAX_READERS; s++)
+			if (g_ev_rd[d][s] == fd) {
+				if (g_ev_wr[d][s] >= 0 && real_close)
+					real_close(g_ev_wr[d][s]);
+				g_ev_rd[d][s] = g_ev_wr[d][s] = -1;
+				return;
+			}
+}
+
 /* ---- the guest's clock ---------------------------------------------------
  *
  * FBIO_WAITFORVSYNC used to return IMMEDIATELY. On real hardware it blocks
@@ -799,9 +1030,10 @@ static int open_common(const char *path, int flags, int mode)
 	if ((idx = ev_index(path)) >= 0) {
 		if (idx >= NUM_EV)
 			return -1;                       /* no such device */
-		snprintf(real, sizeof(real), "%s/ev%d", g_dir, idx);
-		/* O_RDWR so the open doesn't block waiting for a writer */
-		fd = real_open(real, O_RDWR | O_NONBLOCK, 0666);
+		/* NOT the FIFO itself — a private pipe fed from it. Handing the
+		 * shared FIFO to each caller made concurrent readers steal each
+		 * other's events; see the note beside g_ev_fifo. */
+		fd = ev_open(idx);
 		if (fd >= 0 && fd < MAXFD)
 			g_ev_of_fd[fd] = (signed char)idx;
 		if (g_debug) { dbg("[tadpole] open "); dbg(path); dbg(" -> "); dbg(g_ev_names[idx]); dbg("\n"); }
@@ -1310,6 +1542,12 @@ long read(int fd, void *buf, size_t n)
 
 	if (!real_read)
 		return -1;
+	/* Refill every reader's queue from the shared FIFO before serving this
+	 * one. Cheap when there is nothing there (one non-blocking read), and it
+	 * is what removes the need for a pump thread: the readers keep each
+	 * other fed. */
+	if (fd >= 0 && fd < MAXFD && g_ev_of_fd[fd] >= 0)
+		ev_pump(g_ev_of_fd[fd]);
 	r = real_read(fd, buf, n);
 
 	/* Log what the GUEST actually receives, so a single click can be traced
@@ -1325,8 +1563,15 @@ long read(int fd, void *buf, size_t n)
 			char b[96];
 			const char *tn = type == 0 ? "SYN" : type == 1 ? "KEY" :
 			                 type == 3 ? "ABS" : "?";
-			snprintf(b, sizeof(b), "[tadpole] ev%d GUEST-GOT %s code=%u val=%d\n",
-			         g_ev_of_fd[fd], tn, code, val);
+			/* THE fd IS PART OF THE EVIDENCE, NOT DECORATION. One evdev
+			 * node gets opened by SEVERAL readers in a single process —
+			 * on a Qt device the touchscreen carries Qt's tslib mouse
+			 * handler and both of Brio's ButtonPowerUSBTask tslib loads
+			 * at once. Printing only the device index makes three
+			 * readers competing for one FIFO look exactly like one
+			 * reader working correctly, which is how this hid. */
+			snprintf(b, sizeof(b), "[tadpole] ev%d fd=%d GUEST-GOT %s code=%u val=%d\n",
+			         g_ev_of_fd[fd], fd, tn, code, val);
 			dbg(b);
 		}
 	}
@@ -1362,6 +1607,8 @@ int close(int fd)
 {
 	init();
 	if (fd >= 0 && fd < MAXFD) {
+		if (g_ev_of_fd[fd] >= 0)
+			ev_close(fd);            /* also closes our write end */
 		g_fb_of_fd[fd] = -1;
 		g_ev_of_fd[fd] = -1;
 	}

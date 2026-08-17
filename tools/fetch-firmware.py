@@ -141,12 +141,18 @@ def candidates(pid):
 
     Some early packages use the four-letter system name as the directory
     instead (packages/LPAD/LPAD-0x001F002D-000000.lf3), so that is tried too.
+
+    A DEVICE MAY HAVE NO DIRECTORY AT ALL, and an empty DEV_FW_DIR means
+    exactly that rather than "not filled in yet". The LeapPad3 is the case: its
+    firmware is served from the ordinary content layout, and every device name
+    that could plausibly have held it answers 404. Asking anyway would put a
+    `packages//PAD3-...` in front of the CDN once per package in the list.
     """
     mid = pid.split("-")[1]
     sysname = pid.split("-")[0]
     for ext in EXTS:
         yield f"{BASE}/{mid}/{pid}.{ext}"
-    for ext in ("lfp", "lf2", "lf3"):
+    for ext in ("lfp", "lf2", "lf3") if DEVICE_DIR else ():
         yield f"{BASE}/{DEVICE_DIR}/{pid}.{ext}"
     for ext in EXTS:
         yield f"{BASE}/{sysname}/{pid}.{ext}"

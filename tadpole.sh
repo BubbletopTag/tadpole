@@ -201,6 +201,31 @@ if [ -d "$SYSROOT/tmp" ]; then
     # as well as in setup-sysroot.sh.
     [ "${DEV_HAS_QT:-0}" = 1 ] && {
         mkdir -p "$SYSROOT/tmp/qtembedded-0"; chmod 700 "$SYSROOT/tmp/qtembedded-0"; }
+    # SYSFS IS VOLATILE TOO, AND ONE NODE IN IT IS A LOADED GUN.
+    #
+    # Same argument as /tmp, and it took a day to notice because the symptom
+    # arrives one boot LATER than the cause. /sys is a kernel filesystem: its
+    # attributes are re-created at every boot from whatever the driver
+    # defaults to, and writing to one is a COMMAND, not a record. Ours is a
+    # real directory, so a command the guest issued once is still sitting
+    # there being obeyed on the next twenty boots.
+    #
+    # lf2000-power/shutdown is the one that matters. Powering off — the idle
+    # timeout does it after four minutes, and it is meant to — writes 1 there.
+    # From then on the device read its own old instruction at startup and shut
+    # down again immediately: AppServer got as far as LockOrientation, played
+    # the shutdown movie and left, about a second in. It reads like the shell
+    # refusing to start, and every plausible cause (the theme, the installed
+    # packages, the idle timeout itself) can be ruled out one slow boot at a
+    # time without getting near it, because none of them is it.
+    #
+    # Reset the volatile ones by hand rather than wiping /sys: unlike /tmp,
+    # nearly everything under it is OUR fake hardware description from
+    # setup-sysroot.sh, and re-creating all of that here would duplicate the
+    # one place that is supposed to own it.
+    for node in "$SYSROOT/sys/devices/platform"/*-power/shutdown; do
+        [ -e "$node" ] && printf '0' > "$node"
+    done
     # Cartridge state. This file is written by /sbin/cnotify (format "%d, %s")
     # and read by Brio's CartridgeTask, which otherwise learns about carts over
     # /tmp/cart_events_socket from mdev. We have no mdev, so we set it here.

@@ -257,6 +257,12 @@ printf '%s' "${DEV_LCD%x*}"        > "sys/devices/platform/$DEV_DPC_DEV/xres"
 printf '%s' "${DEV_LCD#*x}"        > "sys/devices/platform/$DEV_DPC_DEV/yres"
 printf '0'                         > "sys/devices/platform/$DEV_GPIO_DEV/board_id"
 printf '1'                         > "sys/devices/platform/$DEV_POWER_DEV/status"  # 1 = EXTERNAL
+# A COMMAND NODE, NOT A STATE NODE. Writing 1 here is how the guest powers the
+# device off, and it does so every time the idle timeout expires. On hardware
+# that value dies with the kernel; here it is a file, and the next boot obeys
+# it. Created 0 so it exists, and reset to 0 by tadpole.sh on every boot —
+# see the note there, which is where the bug actually bites.
+printf '0'                         > "sys/devices/platform/$DEV_POWER_DEV/shutdown"
 printf '0'                         > sys/class/graphics/fb0/rotate
 
 echo "==> device nodes"
@@ -360,6 +366,43 @@ printf '0 65536 0 0 0 65536 65536\n' > flags/pointercal
 # /flags/developer is what enables telnetd+vsftpd on real hardware; harmless
 # here and some code paths check it.
 : > flags/developer
+
+# THE DEVICE POWERS ITSELF OFF AFTER FOUR MINUTES, AND SAYS SO IN PASSING.
+#
+#     [IdleTimeout] Timer intervals set to: 1st interval 120 seconds,
+#                                           2nd interval 120 seconds.
+#     [IdleTimeout] Second timeout happened... power off!
+#
+# Correct on a battery-powered tablet a child put down. Hostile in an emulator,
+# where a cold boot under qemu already spends about a minute of the first 120
+# seconds getting to the home screen — so the window for doing anything at all
+# is short, and a session that is being watched rather than touched dies on its
+# own. Worse, it dies through AppServer's shutdown path, which without
+# VideoDaemon segfaults on the way out and reads like a crash rather than a
+# deliberate power-off.
+#
+# This is not a patch: it is the firmware's own override, found in
+# libQtAppServer's strings beside the message above —
+#
+#     [IdleTimeout] GetAlternativeIntervalValues(), read %s      /flags/idle_timeouts
+#     [IdleTimeout] GetAlternativeIntervalValues() values: %d %d
+#     [IdleTimeout] GetAlternativeIntervalValues() Disabling based on 0 values
+#
+# ONE VALUE PER LINE, AND DO NOT ASK FOR ZERO. Both of those were measured
+# rather than read off the strings, and each looked like the obvious answer
+# first:
+#
+#   * `0 0` on ONE line logs `values: 0 60000` — the first field parsed, the
+#     second did not and kept an internal default. So it reads a line at a
+#     time, not two numbers from one line.
+#   * Zero does reach the branch that prints "Disabling", and then the device
+#     powers off IMMEDIATELY: disable() is followed by the shutdown movie in
+#     the next log line. Whatever that branch means, it is not "never time
+#     out", and asking for it turns a four-minute reprieve into none at all.
+#
+# So: a day, twice, which no session will reach. Delete this file to get the
+# hardware's own two minutes back.
+printf '86400\n86400\n'             > flags/idle_timeouts
 
 # Touchscreen tuning, mirroring /flags/set-ts.sh on the device.
 # The Ultra's rcS also reads $DEV_TOUCH_DEV/firmware_version and logs it as
