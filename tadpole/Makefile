@@ -405,13 +405,32 @@ shimegl: $(SHIMLIBS_EGL)/$(REAL_DL) shimegl-links
 # libGLESv1_CM is GL only — it does not contain tadpole_shim.c — so it cannot
 # become a second interceptor. shimlibs-gl ALSO holds a libEGL.so, and only
 # one libEGL may win, which is the whole reason that directory stays out.
+#
+# libasound.so.2 COMES ALONG FOR THE SAME REASON, and it is the whole of the
+# Qt devices' audio. Brio's libAudio.so is dlopened, so LD_LIBRARY_PATH decides
+# which libasound it binds to; with shimlibs/ off a Qt guest's path it found
+# runtime/libs/libasound.so.2 — LeapFrog's own — which read our /etc/asound.conf,
+# instantiated `pcm.!default { type null }` and discarded every sample. Measured
+# on a LeapPad3 boot, in the shim's own dlopen trace:
+#
+#     [tadpole] dlopen .../runtime/libs/libasound.so.2      <- the real one
+#     [0x1] set_hwparams: sample rate=32000                 <- and it succeeded
+#
+# Copying is safe on exactly the argument above: tadpole_asound.c is built
+# alone (see ASOUND_SRC/ASOUND_OUT), links nothing but libc, and defines no
+# open/ioctl/mmap — so it cannot become the second interceptor that costs a Qt
+# guest its stack. `readelf --dyn-syms runtime/shimlibs-egl/libasound.so.2`
+# lists snd_* and nothing else; that is the check, not this comment.
 .PHONY: shimegl-links
-shimegl-links: $(GLES_OUT)
+shimegl-links: $(GLES_OUT) $(ASOUND_OUT)
 	@mkdir -p $(SHIMLIBS_EGL)
 	@cp $(GLES_OUT) $(SHIMLIBS_EGL)/libGLESv1_CM.so
 	@# By SONAME, which is the filename the loader looks for.
 	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libGLESv1_CM.so.1
 	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libopengles_lite.so
+	@cp $(ASOUND_OUT) $(SHIMLIBS_EGL)/libasound.so.2
+	@# libAudio.so's DT_NEEDED says libasound.so.2, and so does the SONAME, so
+	@# no alias is needed here — unlike the GL pair above.
 
 # libdl.so.9 ALSO LIVES HERE, not only in shimlibs/.
 #

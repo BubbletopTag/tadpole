@@ -581,8 +581,16 @@ Dead ends recorded so they are not retried:
 * **`make-profile.sh` does not write the RIO profile shape** (see 8 above)
 * **VideoDaemon has no injection vector** — it links neither libdl, libz nor
   libEGL on this firmware, so nothing intercepts it yet
-* audio: `libasound.so.2` lives in `shimlibs`, which is off the path for a Qt
-  device now, so the Ultra has no audio shim
+* ~~audio: `libasound.so.2` lives in `shimlibs`, which is off the path for a Qt
+  device now, so the Ultra has no audio shim~~ — **fixed on `leappad-emu-3`.**
+  `make shimegl` now copies it into `shimlibs-egl` beside `libGLESv1_CM.so`, on
+  the same argument that makes that copy safe: `tadpole_asound.c` is built
+  alone and defines no `open`/`ioctl`/`mmap`, so it cannot become the second
+  interceptor. Note the Qt devices' `libAudio.so` also imports two symbols the
+  LeapPad2's does not (`snd_pcm_hw_params_get_{buffer,period}_time`) and the
+  shim had to grow them, or Brio's `dlopen` fails outright. Measured on a
+  LeapPad3; the Ultra shares the path and the shell but has not been booted
+  since, so treat it as untested there.
 * the GL path is untested — the home screen is QWS raster, not GL, so nothing
   has exercised `libEGL`'s actual EGL yet
 * touch input (`QWS_MOUSE_PROTO` / tslib)

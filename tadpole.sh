@@ -165,9 +165,16 @@ if [ "${DEV_HAS_QT:-0}" = 1 ]; then
     # gone. The shim now detects the condition at init and says so; this is
     # what stops it arising.
     #
-    # shimlibs-egl is self-contained (it carries its own libdl.so.9), so
-    # nothing else is needed. Note NO shimlibs-gl either: it holds a second
-    # libEGL.so, and only one may win.
+    # shimlibs-egl is self-contained (it carries its own libdl.so.9, its own
+    # libGLESv1_CM.so and its own libasound.so.2), so nothing else is needed.
+    # Note NO shimlibs-gl either: it holds a second libEGL.so, and only one may
+    # win. And note NO shimlibs, even though that is where libasound.so.2 is
+    # BUILT — putting the directory on the path would bring libdl.so.0 with it,
+    # which is the exact two-interceptor case above. The library is copied into
+    # shimlibs-egl by `make shimegl` instead, and that is what gives a Qt device
+    # sound: without it Brio's dlopen of libAudio.so bound to LeapFrog's real
+    # libasound in runtime/libs, which honoured our null sink and threw every
+    # sample away.
     # shimlibs-pkg is SAFE to have here alongside shimlibs-egl: it impersonates
     # libWebServices.so.1, which only package-manager links, so the two never
     # land in the same process. Checked, not assumed — see the Makefile.

@@ -204,8 +204,17 @@ echo "==> /etc overlay (ALSA null sink)"
 # qemu ("Invalid value for card"). CAudioMixer then RETRIES FOREVER, and the
 # resulting spin starves the UI thread so nothing ever renders.
 # Giving it a null sink makes the open succeed, the loop stop, and the UI draw.
-# This SILENCES audio rather than implementing it — real output should route
-# through the shim to SDL, the same way the framebuffer does.
+#
+# THIS IS NOW ONLY THE FALLBACK, AND IT IS WORTH KNOWING WHICH ONE YOU HAVE.
+# shim/tadpole_asound.c replaces libasound.so.2 outright and pipes the PCM to
+# the viewer, so when it is on the guest's path this file is never even parsed
+# — our snd_pcm_open ignores the device name it is handed. When it is NOT, the
+# real alsa-lib reads this, instantiates `type null`, and every sample is
+# discarded while every call still returns success. The two are impossible to
+# tell apart from the guest's own log, which says
+#     set_hwparams: sample rate=32000 ... CallbackThread: starting audio thread
+# either way. The thing that distinguishes them is $TADPOLE_DIR/audio.fmt: only
+# our shim writes it. That is the first thing to check when there is no sound.
 [ -L etc ] && rm -f etc
 mkdir -p etc
 for f in "$ROOTFS"/etc/*; do

@@ -1,4 +1,4 @@
-/* Tadpole — fake libasound.so.2 for the LeapPad2 guest.
+/* Tadpole — fake libasound.so.2 for the guest.
  *
  * WHY A FULL REPLACEMENT RATHER THAN PASSTHROUGH
  * ----------------------------------------------
@@ -13,8 +13,21 @@
  *
  * WHAT IT HAS TO IMPLEMENT
  * ------------------------
- * Exactly the 26 snd_* symbols LF/Base/Brio/Module/libAudio.so imports. Brio
- * uses the mmap_writei path, not snd_pcm_writei.
+ * The UNION of the snd_* symbols LF/Base/Brio/Module/libAudio.so imports on
+ * every device we boot — they are not the same list, see the note above
+ * snd_pcm_hw_params_get_buffer_time. Brio uses the mmap_writei path, not
+ * snd_pcm_writei.
+ *
+ * WHO REACHES IT, AND ON WHICH DEVICE
+ * -----------------------------------
+ * LeapPad2:  AppManager -> libAudioMPI.so -> dlopen(libAudio.so) -> here.
+ * LeapPad3 / Ultra (Qt): AppServer -> libQtAppServer.so.1 -> libAudioMPI.so ->
+ *   dlopen(libAudio.so) -> here. Confirmed from DT_NEEDED, not assumed: nothing
+ *   in the Qt shell's own dependency tree links libasound, and the three other
+ *   things in the image that do (libgstalsa.so, libQtMultimediaE, libsiimpl.so)
+ *   are not loaded by the shell. So the Brio module is the whole audio path on
+ *   both, and the module is dlopened — which is why LD_LIBRARY_PATH still
+ *   decides which libasound it gets.
  *
  * WHERE THE SAMPLES GO
  * --------------------
@@ -505,6 +518,49 @@ int snd_pcm_hw_params_set_period_time_near(snd_pcm_t *pcm, snd_pcm_hw_params_t *
 	if (dir) *dir = 0;
 	return 0;
 }
+
+/* THE TIME GETTERS ARE NOT OPTIONAL ON THE LEAPPAD3, and their absence is a
+ * load-time failure rather than a quiet one.
+ *
+ * The LeapPad2's libAudio.so imports 29 snd_* symbols; the LeapPad3's imports
+ * 29 too, but not the same 29. Diffing the two DT_SYMTABs:
+ *
+ *   only on the LeapPad2:  snd_pcm_drain  snd_pcm_hw_params_free
+ *                          snd_pcm_hw_params_get_sbits
+ *                          snd_pcm_hw_params_malloc  snd_pcm_writei
+ *   only on the LeapPad3:  snd_pcm_hw_params_get_buffer_time
+ *                          snd_pcm_hw_params_get_period_time
+ *
+ * A replacement libasound that is missing one of them does not degrade — the
+ * guest's loader refuses the whole module the moment Brio dlopens it:
+ *     libAudio.so: can't resolve symbol 'snd_pcm_hw_params_get_buffer_time'
+ * and the shell then runs on with no audio module at all, which looks exactly
+ * like the null sink it replaced. So both are defined here even though the
+ * device we know needs them is only one of the two.
+ *
+ * The value is a period/buffer expressed in MICROSECONDS. The device's own log
+ * line is the check on the arithmetic: at 32000 Hz it prints
+ *     set_hwparams: buffer time=128000, size=4096
+ *     set_hwparams: period time=32000, size=1024
+ * and 4096/32000 s is 128000 us, 1024/32000 s is 32000 us. 64-bit intermediate
+ * because 4096 * 1000000 is within a few percent of overflowing 32 bits and a
+ * larger buffer would wrap silently. */
+static int params_time(ulong frames, u32 rate, u32 *val, int *dir)
+{
+	if (!rate)
+		rate = 32000;
+	if (val)
+		*val = (u32)((unsigned long long)frames * 1000000ULL / rate);
+	if (dir)
+		*dir = 0;
+	return 0;
+}
+
+int snd_pcm_hw_params_get_buffer_time(const snd_pcm_hw_params_t *hw, u32 *val, int *dir)
+{ return params_time(hw ? hw->buffer_size : 4096, hw ? hw->rate : 0, val, dir); }
+
+int snd_pcm_hw_params_get_period_time(const snd_pcm_hw_params_t *hw, u32 *val, int *dir)
+{ return params_time(hw ? hw->period_size : 1024, hw ? hw->rate : 0, val, dir); }
 
 int snd_pcm_hw_params_get_buffer_size(const snd_pcm_hw_params_t *hw, ulong *val)
 { if (val) *val = hw ? hw->buffer_size : 4096; return 0; }
