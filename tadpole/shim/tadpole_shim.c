@@ -1560,6 +1560,35 @@ int execve(const char *path, char *const argv[], char *const envp[])
 	 * environment carries it and every generation re-adds the flag. */
 	if (getenv("TADPOLE_STRACE"))
 		newargv[n++] = (char *)"-strace";
+	/* TADPOLE_GDB_MATCH=<substring> TADPOLE_GDB_PORT=<port> — WAIT FOR gdb,
+	 * BUT ONLY FOR THE ONE BINARY BEING DEBUGGED.
+	 *
+	 * qemu's -g makes the guest stop before its first instruction and wait for
+	 * a debugger. Applying that to every re-entry would hang the first child
+	 * AppServer launches — MainPicker — and the home screen would never
+	 * appear, so the title under investigation could never be started. Match
+	 * on the path instead: only BrioWrapper waits, and everything around it
+	 * runs normally.
+	 *
+	 *     TADPOLE_GDB_MATCH=BrioWrapper TADPOLE_GDB_PORT=1234 ./tadpole.sh --boot
+	 *     gdb -ex 'set architecture arm' -ex 'target remote :1234'
+	 */
+	{
+		const char *m = getenv("TADPOLE_GDB_MATCH");
+		const char *p = getenv("TADPOLE_GDB_PORT");
+		if (m && *m && p && *p) {
+			const char *h = path;
+			size_t ml = strlen(m);
+			int hit = 0;
+			for (; *h; h++)
+				if (strncmp(h, m, ml) == 0) { hit = 1; break; }
+			if (hit) {
+				newargv[n++] = (char *)"-g";
+				newargv[n++] = (char *)p;
+				dbg("[tadpole] execve: waiting for gdb on this one\n");
+			}
+		}
+	}
 	newargv[n++] = (char *)"-L";
 	newargv[n++] = g_sysroot;
 	newargv[n++] = real;
