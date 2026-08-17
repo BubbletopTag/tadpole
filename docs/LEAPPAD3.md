@@ -291,6 +291,30 @@ is missing" was never the story. The likely candidate is dbus-c++'s dispatcher:
 a `DBus::Connection` whose `default_dispatcher` was never established cannot
 carry a blocking call, and throws exactly here.
 
+### The dispatcher is alive, so it is not that either
+
+libWireless runs its own dbus-c++ dispatcher — `CWirelessModule::`
+`DBusDispatcherTask(void*)`, `dispatcherMutex_`, its own `DBus_Bus_Dispatcher`
+subclass, and a reference to `DBus::default_dispatcher`. The obvious theory was
+that the thread never runs, so a blocking call has nothing to pump it.
+
+It runs. A breakpoint on `DBusDispatcherTask` hits on Thread 2 BEFORE the
+throw, and at the moment of the throw `info threads` shows four threads parked
+in `poll()` and two in `mq_timedreceive()` — a healthy Brio process with a
+live dispatcher loop.
+
+So: dispatcher running, bus names owned, connection inherited, no message ever
+sent, and `send_blocking` throws anyway. Whatever is wrong is between the proxy
+and the connection it was handed.
+
+**One caution for the next round.** `dbus-monitor` does not show the bus
+daemon's own replies to method calls addressed to the daemon (Hello, AddMatch,
+GetNameOwner). So an error reply to one of those is INVISIBLE in the capture
+above, and BrioWrapper's client `:1.7` does stop straight after a run of
+AddMatch calls. That is the gap to close first — run the daemon with
+`--print-address` logging, or break on `dbus_connection_send_with_reply_and_`
+`block` once libdbus is mapped, rather than trusting the monitor's silence.
+
 ### Where to pick it up
 
 `TADPOLE_GDB_MATCH=BrioWrapper TADPOLE_GDB_PORT=1234 ./tadpole.sh --boot`, then
