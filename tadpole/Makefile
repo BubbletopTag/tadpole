@@ -171,6 +171,15 @@ TONE_OUT := ../runtime/tone
 CONNMAN_SRC := shim/tadpole_connman.c
 CONNMAN_OUT := ../runtime/tadpole-connman
 
+# THE FAKE org.freedesktop.Avahi — same shape, and the one that decides whether
+# any Brio title starts at all. CWirelessModule's constructor opens an Avahi
+# ServiceBrowser; with nothing owning the name the bus tries to activate it, the
+# firmware's service file points activation at /bin/false on purpose, and the
+# resulting DBus::Error is thrown through a constructor with no handler. See the
+# header of tadpole_avahi.c.
+AVAHI_SRC := shim/tadpole_avahi.c
+AVAHI_OUT := ../runtime/tadpole-avahi
+
 VIEW_SRC := viewer/tadpole_view.c viewer/tadpole_ui.c viewer/tadpole_hle.c \
             viewer/tadpole_boot.c
 VIEW_HDR := viewer/tadpole_ui.h viewer/tadpole_font.h viewer/tadpole_hle.h \
@@ -200,9 +209,9 @@ BOOT_CFLAGS :=
 BOOT_LIBS   :=
 endif
 
-.PHONY: all shim shimz shimegl shimpkg asound gl tone connman viewer hle-probe hle-selftest clean check realdl realz
+.PHONY: all shim shimz shimegl shimpkg asound gl tone connman avahi viewer hle-probe hle-selftest clean check realdl realz
 
-all: shim shimz shimegl shimpkg asound gl connman viewer
+all: shim shimz shimegl shimpkg asound gl connman avahi viewer
 
 # THE SHIM CANNOT BE BUILT WITHOUT THE SYSTEM FILES, AND THAT SURPRISES PEOPLE.
 #
@@ -354,6 +363,17 @@ connman: $(CONNMAN_OUT)
 # dbus-arch-deps.h is generated for the host's word size and would give a
 # 32-bit ARM build a 32-bit dbus_int64_t.
 $(CONNMAN_OUT): $(CONNMAN_SRC) | need-libs
+	$(CLANG) $(ARMFLAGS) -O2 -Wall -nostdlib -fno-builtin \
+		-fno-stack-protector -fuse-ld=lld -o $@ $< \
+		-Wl,--dynamic-linker=/lib/ld-uClibc.so.0 \
+		-L$(GUESTLIBS) -l:libdbus-1.so.3 -l:libc.so.0
+	@echo "built $@"
+
+
+avahi: $(AVAHI_OUT)
+
+# Linked exactly as the fake connman is, and for the same reasons.
+$(AVAHI_OUT): $(AVAHI_SRC) | need-libs
 	$(CLANG) $(ARMFLAGS) -O2 -Wall -nostdlib -fno-builtin \
 		-fno-stack-protector -fuse-ld=lld -o $@ $< \
 		-Wl,--dynamic-linker=/lib/ld-uClibc.so.0 \

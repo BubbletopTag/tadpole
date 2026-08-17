@@ -923,32 +923,102 @@ XML
                     echo "tadpole: runtime/tadpole-connman is not built — the shell" >&2
                     echo "  will believe it is offline. Build it with: cd tadpole && make connman" >&2
                 fi
-                # wpa_supplicant, AND IT IS NOT ABOUT WIFI — IT IS WHY NO BRIO
-                # TITLE STARTS.
-                #
-                # Every Brio title is launched through BrioWrapper, and
-                # BrioWrapper links libWirelessMPI.so. That MPI loads Brio's
-                # /LF/Base/Brio/Module/libWireless.so, which is a D-Bus client
-                # for wpa_supplicant — its strings carry the whole generated
-                # proxy: fi.w1.wpa_supplicant1, .Interface, .Network,
-                # InterfaceUnknown, and the interface name wlan0.
-                #
-                # With no such service on the bus the proxy comes back null and
-                # the MPI dereferences it two seconds into the title:
-                #
-                #     signal SIGSEGV, fault 0x00000000
-                #     pc  libWirelessMPI.so+0x00002a28
-                #
-                # Measured identically with the fake ConnMan running and with it
-                # disabled, so this is not something the fake introduced.
+                # wpa_supplicant. Brio's libWireless is a D-Bus client for it —
+                # its strings carry the whole generated proxy:
+                # fi.w1.wpa_supplicant1, .Interface, .Network, InterfaceUnknown,
+                # and the interface name wlan0.
                 #
                 # -u is the D-Bus control interface and needs NO hardware and no
                 # interface: the daemon owns the name and waits to be told about
                 # interfaces, which is exactly how connman drives it on the
                 # device. Nothing here touches a radio, because there is none.
+                #
+                # THIS BLOCK ONCE CLAIMED TO BE WHY NO BRIO TITLE STARTS. It is
+                # not, and the claim survived several rounds because starting
+                # the daemon is obviously *necessary*. It is not sufficient:
+                # with wpa_supplicant running and fi.w1.wpa_supplicant1 owned on
+                # the bus, every title still died in CWirelessMPI's constructor.
+                # The real cause is avahi, below.
                 if [ -x "$ROOTFS/usr/sbin/wpa_supplicant" ]; then
                     guest /usr/sbin/wpa_supplicant -u 2>&1 | sed -u 's/^/[wpa] /' &
                     sleep 1
+                fi
+                # avahi, AND THIS IS THE ONE THAT DECIDES WHETHER ANY BRIO TITLE
+                # RUNS AT ALL.
+                #
+                # CWirelessModule's constructor makes a blocking D-Bus call to
+                # org.freedesktop.Avahi. Nothing owns that name unless the
+                # daemon is running, so the bus tries to ACTIVATE it — and the
+                # firmware's own service file exists purely to make that fail:
+                #
+                #     # This service should not be bus activated if systemd
+                #     # isn't running, so that activation won't conflict with
+                #     # the init script startup.
+                #     Exec=/bin/false
+                #
+                # /bin/false exits 1, the daemon returns
+                # org.freedesktop.DBus.Error.Spawn.ChildExited, dbus-c++ turns a
+                # non-reply into a thrown DBus::Error, and the constructor has
+                # no handler. The unwinder then runs a cleanup that stores
+                # through a pointer never assigned, so the process dies at
+                # `str r3, [r4]` with r4 = 0 — a NULL WRITE THAT IS A SYMPTOM OF
+                # AN UNCAUGHT EXCEPTION, NOT OF A MISSING WIRELESS DEVICE.
+                #
+                # That distinction cost most of a week. The faulting instruction
+                # is in wireless code, so every round of guessing looked for
+                # something wireless that was missing — and each fix (fake
+                # ConnMan, wpa_supplicant, P2P off, /LF/System/Wireless) was
+                # plausible, applied cleanly, and changed nothing. Reading the
+                # thrown object took one run and named the service outright.
+                # tools/gdb-dbus-error.py is that reader; keep it.
+                #
+                # dbus-monitor could never have shown this: it does not report
+                # the bus daemon's own replies to calls addressed to the daemon,
+                # and an activation failure is exactly such a reply. "No error
+                # on the bus" was evidence of nothing.
+                #
+                # rcS says why the device starts it, on line 246:
+                #     #Start avahi (needed for P2P gaming)
+                # LeapPads find each other over mDNS. So this is the Pet Chat /
+                # peer-to-peer stack, and EVERY title pays for it at startup
+                # whether or not it has multiplayer.
+                #
+                # THE REAL /usr/sbin/avahi-daemon IS IN THE ROOTFS AND IS NOT
+                # USED, for the same reason connmand is not: under qemu-user it
+                # is not sandboxed, and the paths it cares about are the
+                # DEVELOPER'S.
+                #
+                # It was tried. qemu's -L only redirects a path that ALREADY
+                # EXISTS in the sysroot, and /var/run/avahi-daemon/pid did not,
+                # so the daemon read the HOST's and found the developer's own:
+                #
+                #     [mdns] Daemon already running on PID 4806
+                #
+                # Pre-creating that file fixes that much. What cannot be fixed
+                # from here is the socket: the shim does not intercept bind(),
+                # so /var/run/avahi-daemon/socket resolves to the host's — and
+                # avahi unlink()s it before binding. On a machine where we had
+                # the rights, booting the emulator would quietly break the
+                # desktop's own mDNS. TADPOLE_REAL_AVAHI=1 is the way back for
+                # anyone who wants it on a machine with no avahi of its own.
+                if [ -n "${TADPOLE_REAL_AVAHI:-}" ] &&
+                   [ -x "$ROOTFS/usr/sbin/avahi-daemon" ]; then
+                    echo "tadpole: TADPOLE_REAL_AVAHI=1 — starting the REAL avahi-daemon." >&2
+                    echo "  It will use the HOST's /var/run/avahi-daemon. If this machine" >&2
+                    echo "  runs its own avahi, expect one of the two to lose." >&2
+                    mkdir -p "$SYSROOT/var/run/avahi-daemon"
+                    : > "$SYSROOT/var/run/avahi-daemon/pid"
+                    guest /usr/sbin/avahi-daemon \
+                          --no-rlimits --no-drop-root --no-chroot \
+                          2>&1 | sed -u 's/^/[mdns] /' &
+                    sleep 1
+                elif [ -x "$HERE/runtime/tadpole-avahi" ]; then
+                    guest "$HERE/runtime/tadpole-avahi" --address "$sys_addr" \
+                        2>&1 | sed -u 's/^/[mdns] /' &
+                    sleep 1
+                else
+                    echo "tadpole: runtime/tadpole-avahi is not built — NO BRIO TITLE" >&2
+                    echo "  WILL START. Build it with: cd tadpole && make avahi" >&2
                 fi
             }
             # THE PACKAGE MANAGER DAEMON — this is what puts icons on the home
