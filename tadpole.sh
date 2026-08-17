@@ -506,7 +506,7 @@ guest() {
       #
       # TADPOLE_CORES=1 restores them for anyone who does want to try.
       [ -n "${TADPOLE_CORES:-}" ] || ulimit -c 0 2>/dev/null || true
-      exec "$QEMU" -s 67108864 -L "$SYSROOT" ${TADPOLE_STRACE:+-strace} \
+      exec "$QEMU" -s 67108864 -L "$SYSROOT" ${TADPOLE_STRACE:+-strace} ${TADPOLE_STRACE:+-E TADPOLE_STRACE=1} \
            ${TSLIB_ARGS[@]+"${TSLIB_ARGS[@]}"} \
            -E LD_LIBRARY_PATH="$LIBS" \
            -E TADPOLE_DIR="$TADPOLE_DIR" \

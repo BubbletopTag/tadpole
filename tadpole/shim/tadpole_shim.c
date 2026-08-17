@@ -1544,6 +1544,22 @@ int execve(const char *path, char *const argv[], char *const envp[])
 	}
 
 	newargv[n++] = (char *)qemu;
+	/* -strace DOES NOT SURVIVE THE RE-ENTRY UNLESS WE CARRY IT.
+	 *
+	 * TADPOLE_STRACE=1 puts -strace on the qemu that tadpole.sh launches, and
+	 * that is the only one it reaches: everything AppServer starts as a child
+	 * comes back through here and gets a fresh, untraced qemu. So a trace of
+	 * "the guest" silently covers the shell and none of the titles.
+	 *
+	 * That is not a small gap. Chasing a null dereference inside BrioWrapper,
+	 * the trace showed no syscalls from it at all — which reads like a thread
+	 * that computes and never calls, and was really a process nobody was
+	 * watching.
+	 *
+	 * tadpole.sh passes the variable through as -E when tracing, so the guest
+	 * environment carries it and every generation re-adds the flag. */
+	if (getenv("TADPOLE_STRACE"))
+		newargv[n++] = (char *)"-strace";
 	newargv[n++] = (char *)"-L";
 	newargv[n++] = g_sysroot;
 	newargv[n++] = real;
