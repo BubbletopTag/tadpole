@@ -376,11 +376,30 @@ printf '7'                          > flags/volume
 printf '1357015435'                 > flags/lasttime
 # tslib calibration. The DEVICE's values map raw ADC readings to screen
 # coordinates: "39032 -162 -4245764 28 20690 -1583256 65536". Our viewer
-# already sends screen coordinates, so we want the IDENTITY transform
-# instead — tslib's linear module computes
-#     x' = (a0 + a1*x + a2*y) / a6
-# so a = 0,65536,0, 0,0,65536, 65536 passes input through unchanged.
-printf '0 65536 0 0 0 65536 65536\n' > flags/pointercal
+# already sends screen coordinates, so we want the IDENTITY transform instead.
+#
+# THE OFFSET IS THE THIRD FIELD, NOT THE FIRST, and getting that backwards is
+# not a small error — it sends every touch to the same place. tslib's linear
+# module computes
+#
+#     x' = (a[2] + a[0]*x + a[1]*y) / a[6]
+#     y' = (a[5] + a[3]*x + a[4]*y) / a[6]
+#
+# so the file reads (xx, xy, xoff, yx, yy, yoff, scale). This was written as
+# `0 65536 0 0 0 65536 65536` on a reading of the formula as
+# `x' = (a0 + a1*x + a2*y)/a6` — offset first — and that transform is
+#
+#     x' = (0 + 0*x + 65536*y)/65536 = y
+#     y' = (65536 + 0*x + 0*y)/65536 = 1
+#
+# Every tap anywhere on the screen arrived at y=1, with x carrying the tap's
+# Y coordinate: the top edge, always. It presents as "touch lands in the wrong
+# place", and every other part of the chain — the viewer's mapping, the shim,
+# the event stream, tslib's own filters — measures as CORRECT while it happens,
+# because they all are. The device's own numbers were the check that settles
+# it: 39032 is a scale and -4245764 an offset, and they sit in positions 0
+# and 2.
+printf '65536 0 0 0 65536 0 65536\n' > flags/pointercal
 # /flags/developer is what enables telnetd+vsftpd on real hardware; harmless
 # here and some code paths check it.
 : > flags/developer
