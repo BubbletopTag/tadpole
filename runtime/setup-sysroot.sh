@@ -284,7 +284,13 @@ for hostbundle in /etc/ssl/certs/ca-certificates.crt \
     hostbundle=""
 done
 if [ -n "${hostbundle:-}" ] && [ -d "$ROOTFS/etc/ssl/certs" ]; then
-    rm -f etc/ssl
+    # rm -rf, NOT rm -f: on the first run etc/ssl is the symlink inherited from
+    # the rootfs and -f is enough, but from the second run on it is the shadow
+    # directory this block just built, and `rm -f` on a directory fails. With
+    # set -e that ended the whole script four lines into the /etc section —
+    # so setup-sysroot.sh worked exactly once per checkout and then refused to
+    # run again with "rm: cannot remove 'etc/ssl': Is a directory".
+    rm -rf etc/ssl
     mkdir -p etc/ssl/certs
     for f in "$ROOTFS"/etc/ssl/*; do
         b="$(basename "$f")"
@@ -456,6 +462,94 @@ for prof in 0 1 2 3 All; do
     # copying the 8-entry base file over it is wrong.
 done
 mkdir -p LF/Bulk/Data/Uploads/1 LF/Bulk/Data/Uploads/2 LF/Bulk/Data/Uploads/3
+
+# /LF/Bulk/endpointurls.json — WITHOUT THIS, GOING ONLINE KILLS THE HOME SCREEN.
+#
+# A latent abort that could not fire until the fake net.connman existed, and
+# fired on the very first boot after it did. The moment package-manager's
+# NetworkWatcher sees the manager state go "online" it runs
+# PackageManager::InitializeWebServices(), whose first act is to fetch the file
+# that tells it where LeapFrog's SOAP services live:
+#
+#     Attempting to download endpoint url file from:
+#       "http://lfcdownload.leapfrog.com//endpointurls_leappad3explorer.json"
+#     Error code: 203 : "server replied: Not Found"
+#     F Could not open endpoint url file: /LF/Bulk/endpointurls.json
+#     qemu: uncaught target signal 6 (Aborted)
+#
+# That F is qFatal, so the daemon aborts — and package-manager is what tells
+# MainPicker which apps exist, so the home screen loses every icon and the
+# download indicator with it. The failing key really is gone: the CDN answers
+# both the doubled-slash URL the device builds and the tidy single-slash one
+# with S3's NoSuchKey. Checked once each, by exact name; nothing was enumerated.
+#
+# TWO PARTS, BOTH THE DEVICE'S OWN. /flags/keepurls is the firmware's escape
+# hatch — the string sits four bytes after "Attempting to download endpoint url
+# file from" in libWebServices — and it stops the download being attempted at
+# all. The file is what the fallback opens, and every key below is read out of
+# the same library rather than invented: PackageManagement, DeviceManagement,
+# DeviceLogUpload and DeviceProfileContent sit in a block immediately after the
+# fatal's format string, and LfConnectivityCheck sits beside the parse error's.
+#
+# LfConnectivityCheck IS THE ONE THAT STILL GOES SOMEWHERE, and leaving it out
+# is not neutral. It is the device's own reachability probe — the same idea as a
+# captive-portal check — and NetworkWatcher will not promote itself past
+# "Checking For Service" without it:
+#
+#     setupUrl: Reading from endpoints file URL= ""
+#     W NetworkWatcher::startCurlCheck: Endpoints file not read in yet
+#
+# which is what a first cut of this file produced. The URL is libWebServices'
+# own compiled-in default and it is still up: one GET returns HTTP 200 and 45
+# bytes of empty html, ten years on. That is the whole content — it is a "can
+# you reach us at all" beacon, so asking it is cheap for them and it is the
+# request the device was always going to make.
+#
+# EVERY VALUE IS AN OBJECT KEYED BY ENVIRONMENT, NOT A BARE URL, and that shape
+# is read off the code rather than guessed at. A flat {"LfConnectivityCheck":
+# "http://..."} parses without complaint and still yields nothing, which is a
+# horrible way to be wrong — no error anywhere, just an empty string. What
+# settles it is NetworkWatcher::setupUrl:
+#
+#     bl QString::fromAscii_helper      <- "LfConnectivityCheck"
+#     bl QMap<QString,QVariant>::mutableFindNode
+#     bl QVariant::toMap                <- A MAP. not toString.
+#     bl QMap<QString,QVariant>::mutableFindNode
+#     bl QVariant::toString
+#
+# and WebServices::InitializeEndpointURLs names the four possible inner keys in
+# one block: development, qa2, staging, production. Which one is used comes from
+# /flags/lfservers, and with no such file it is production — the value the
+# daemon already prints as "Using server environment".
+#
+# THE OTHER FOUR ARE THE BINARY'S OWN COMPILED-IN DEFAULTS, not invented ones.
+# Each gSOAP proxy in libWebServices carries http://localhost:8080/leapfrog/upca/
+# <x> as its endpoint until something overrides it, so writing those back is
+# exactly "no override" — with the difference that the file OPENS. Pointing them
+# at a leapfrog.com host would be a guess, and a guess that sends SOAP at
+# somebody else's servers; these go nowhere and are meant to.
+#
+# So the shell is online, App Center still cannot reach a live catalogue, and it
+# says so instead of taking the home screen down with it. Whether anything of
+# LeapFrog's web services survives to be pointed at is a separate question from
+# this one.
+if [ ! -f LF/Bulk/endpointurls.json ]; then
+    cat > LF/Bulk/endpointurls.json <<'JSON'
+{
+    "LfConnectivityCheck":  { "production": "http://connman.leapfrog.com/online/status.html" },
+    "PackageManagement":    { "production": "http://localhost:8080/leapfrog/upca/package_management" },
+    "DeviceManagement":     { "production": "http://localhost:8080/leapfrog/upca/device_management" },
+    "DeviceLogUpload":      { "production": "http://localhost:8080/leapfrog/upca/device_log_upload" },
+    "DeviceProfileContent": { "production": "http://localhost:8080/leapfrog/upca/device_content" }
+}
+JSON
+fi
+# The stale .new is the 404 body from a previous attempt — 326 bytes of S3 XML
+# that the parser trips over. Nothing reads it once keepurls is set, but leaving
+# a file called endpointurls.json.new full of an error message next to the real
+# one is a trap for the next person.
+rm -f LF/Bulk/endpointurls.json.new
+
 : > tmp/bulk_ready                 # rcS's "Bulk is mounted" flag
 
 # Qt Embedded's server socket directory. AppServer runs with -qws, which makes
@@ -536,6 +630,15 @@ printf '65536 0 0 0 65536 0 65536\n' > flags/pointercal
 # It is NOT the same mechanism as /flags/idle_timeouts below: this one is
 # Brio's, that one is the Qt shell's, and a Qt device needs both.
 : > flags/poweron
+
+# /flags/keepurls — DO NOT RE-FETCH THE WEB SERVICE ENDPOINTS ON EVERY BOOT.
+#
+# libWebServices checks for this immediately before "Attempting to download
+# endpoint url file from"; with it present the download is skipped and the
+# local /LF/Bulk/endpointurls.json is used as it stands. See the long note
+# beside that file for why the download can only fail now and why failing it
+# used to abort package-manager. Delete this to watch it try.
+: > flags/keepurls
 
 # THE DEVICE POWERS ITSELF OFF AFTER FOUR MINUTES, AND SAYS SO IN PASSING.
 #

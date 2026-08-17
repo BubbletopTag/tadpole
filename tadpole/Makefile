@@ -156,6 +156,21 @@ REAL_WS      := libWebServices.so.9
 TONE_SRC := shim/tone_test.c
 TONE_OUT := ../runtime/tone
 
+# THE FAKE net.connman — A GUEST-SIDE ARM DAEMON, NOT A SHIM.
+#
+# Nothing impersonates anything here: it is an ordinary executable that owns a
+# D-Bus name and answers questions. The reason it is ARM rather than a host
+# script is portability. The bus address is an ABSTRACT unix socket, which is a
+# Linux concept, and Tadpole runs on Windows through MSYS and on glasspole — a
+# guest binary reaches the bus by exactly the same route the shell does,
+# wherever that is, because the emulator is what runs it.
+#
+# It is the only thing in this Makefile that links a GUEST library other than
+# libc: /usr/lib/libdbus-1.so.3, which is in the image because dbus-daemon and
+# dbus-send are, and which setup-sysroot.sh already stages into runtime/libs.
+CONNMAN_SRC := shim/tadpole_connman.c
+CONNMAN_OUT := ../runtime/tadpole-connman
+
 VIEW_SRC := viewer/tadpole_view.c viewer/tadpole_ui.c viewer/tadpole_hle.c \
             viewer/tadpole_boot.c
 VIEW_HDR := viewer/tadpole_ui.h viewer/tadpole_font.h viewer/tadpole_hle.h \
@@ -185,9 +200,9 @@ BOOT_CFLAGS :=
 BOOT_LIBS   :=
 endif
 
-.PHONY: all shim shimz shimegl shimpkg asound gl tone viewer hle-probe hle-selftest clean check realdl realz
+.PHONY: all shim shimz shimegl shimpkg asound gl tone connman viewer hle-probe hle-selftest clean check realdl realz
 
-all: shim shimz shimegl shimpkg asound gl viewer
+all: shim shimz shimegl shimpkg asound gl connman viewer
 
 # THE SHIM CANNOT BE BUILT WITHOUT THE SYSTEM FILES, AND THAT SURPRISES PEOPLE.
 #
@@ -325,7 +340,25 @@ $(TONE_OUT): $(TONE_SRC) $(ASOUND_OUT) | need-libs
 		-fno-stack-protector -fuse-ld=lld -o $@ $< \
 		-Wl,--dynamic-linker=/lib/ld-uClibc.so.0 \
 		-L$(SHIMLIBS) -L$(GUESTLIBS) -l:libasound.so.2 -l:libc.so.0
-	@echo "built $@" 
+	@echo "built $@"
+
+
+connman: $(CONNMAN_OUT)
+
+# Linked exactly as `tone` is — freestanding, its own _start, the guest's
+# ld-uClibc as the interpreter — plus the guest's libdbus.
+#
+# -nostdlib IS WHY THE SOURCE DECLARES EVERYTHING BY HAND. There is no ARM
+# crt1.o and no sysroot of headers in this checkout, so the file cannot include
+# <dbus/dbus.h> even if the host has it — and should not: the host's
+# dbus-arch-deps.h is generated for the host's word size and would give a
+# 32-bit ARM build a 32-bit dbus_int64_t.
+$(CONNMAN_OUT): $(CONNMAN_SRC) | need-libs
+	$(CLANG) $(ARMFLAGS) -O2 -Wall -nostdlib -fno-builtin \
+		-fno-stack-protector -fuse-ld=lld -o $@ $< \
+		-Wl,--dynamic-linker=/lib/ld-uClibc.so.0 \
+		-L$(GUESTLIBS) -l:libdbus-1.so.3 -l:libc.so.0
+	@echo "built $@"
 
 
 $(ASOUND_OUT): $(ASOUND_SRC) | need-libs

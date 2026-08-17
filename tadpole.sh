@@ -856,27 +856,73 @@ XML
             else
                 echo "tadpole: no d-bus system bus — WiFi setup will loop" >&2
             fi
-            # THE NETWORK STACK, RUN RATHER THAN FAKED.
+            # THE NETWORK STACK, FAKED RATHER THAN RUN — AND THAT IS A REVERSAL.
             #
-            # rcS runs /etc/init.d/connman, and the daemon it starts is in the
-            # rootfs — /usr/sbin/connmand, 575 KB of ARM. Writing a stand-in for
-            # net.connman was the obvious plan and is the wrong one: the shell
-            # talks to Manager, Technology, Service AND Agent, with signals, and
-            # every one of those would have to be reimplemented and then kept
-            # honest. The device already ships the real thing.
+            # rcS runs /etc/init.d/connman and the daemon is in the rootfs, so
+            # this used to start the real /usr/sbin/connmand: the device ships
+            # the thing, it is guest ARM, and reimplementing Manager, Technology,
+            # Service and Agent looked like a lot of surface to keep honest.
             #
-            # WHAT IT SHOULD DO HERE IS REPORT NO WIFI HARDWARE, and that is a
-            # state the UI is built for — a tablet with wifi switched off. It is
-            # allowed to fail: connman with no technologies is the same answer
-            # as connman that would not start, except that the shell can ask it
-            # and get one.
+            # WHAT THAT ARGUMENT MISSED IS THAT connmand IS NOT SANDBOXED HERE.
+            # qemu-user forwards its netlink socket to the host kernel, so the
+            # "device" it manages is the DEVELOPER'S MACHINE. Straight off a
+            # boot of this branch, with nothing asked of it:
             #
-            # -n keeps it in the foreground of its own qemu (no daemonising to
-            # lose), and its chatter is prefixed so it does not read as the
-            # shell's.
+            #     connmand: Could not clear IPv4 address index 2
+            #     connmand: enp5s0 {newlink} index 2 address 00:E0:23:B3:70:09
+            #     connmand: Adding interface enp5s0 [ ethernet ]
+            #     connmand: enp5s0 {add} address 192.168.1.3/24 label enp5s0
+            #     connmand: virbr1 {add} route 10.0.2.0 gw 0.0.0.0 scope 253
+            #
+            # index 2 is the host's real NIC holding the host's real address,
+            # and the clear failed only because we are not root. Everything else
+            # it wants to do — DHCP, resolv.conf, routes — is aimed at the same
+            # place. Having done all that it STILL reported no wifi, because
+            # there is no wireless device to find, so the shell got nothing at
+            # all out of the risk. That is not a trade worth making for a status
+            # icon.
+            #
+            # So the fake now owns net.connman: runtime/tadpole-connman, built
+            # by tadpole/Makefile, guest-side ARM on the guest's own libdbus.
+            # THE TWO CANNOT COEXIST ANYWAY — one D-Bus name has one owner, and
+            # whichever lost the race would sit unusable — so this is a choice
+            # that had to be made either way, and it is made in favour of the
+            # one that cannot touch the host.
+            #
+            # It reports one wifi technology, powered and connected, and one
+            # open network in state "online". That is a description, not a
+            # connection: the guest's actual internet comes from qemu handing
+            # its sockets to the host, and has worked for as long as that has.
+            #
+            # TADPOLE_REAL_CONNMAN=1 puts the real daemon back for anyone
+            # investigating it. READ THE PARAGRAPH ABOVE FIRST — it will go
+            # looking at your interfaces, and running it as root would let it
+            # succeed.
             [ "${DEV_HAS_WIFI:-0}" = 1 ] && [ -n "$sys_addr" ] && {
-                guest /usr/sbin/connmand -n 2>&1 | sed -u 's/^/[net] /' &
-                sleep 1
+                if [ "${TADPOLE_REAL_CONNMAN:-0}" = 1 ]; then
+                    echo "tadpole: TADPOLE_REAL_CONNMAN=1 — starting the REAL connmand." >&2
+                    echo "  It is not sandboxed: it will enumerate and try to reconfigure" >&2
+                    echo "  this machine's own network interfaces. Never run it as root." >&2
+                    # -n keeps it in the foreground of its own qemu (no
+                    # daemonising to lose), and its chatter is prefixed so it
+                    # does not read as the shell's.
+                    guest /usr/sbin/connmand -n 2>&1 | sed -u 's/^/[net] /' &
+                    sleep 1
+                elif [ -x "$HERE/runtime/tadpole-connman" ]; then
+                    # THE ADDRESS IS PASSED, NOT INHERITED. The fake is linked
+                    # -nostdlib with its own _start, so uClibc's __environ is
+                    # never populated and a getenv() inside libdbus would come
+                    # back NULL — at which point libdbus falls back to its
+                    # compiled-in /var/run/dbus/system_bus_socket, which is the
+                    # HOST's system bus (same trap as the <listen> above). It
+                    # takes --address and refuses to start without one.
+                    guest "$HERE/runtime/tadpole-connman" --address "$sys_addr" \
+                        2>&1 | sed -u 's/^/[net] /' &
+                    sleep 1
+                else
+                    echo "tadpole: runtime/tadpole-connman is not built — the shell" >&2
+                    echo "  will believe it is offline. Build it with: cd tadpole && make connman" >&2
+                fi
             }
             # THE PACKAGE MANAGER DAEMON — this is what puts icons on the home
             # screen, and nothing else does.
