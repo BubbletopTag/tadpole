@@ -259,11 +259,46 @@ wpa_supplicant (`fi.w1.wpa_supplicant1`, interface `wlan0`).
    `DBUS_SYSTEM_BUS_ADDRESS` and `DBUS_SESSION_BUS_ADDRESS` correctly, read out
    of `/proc/<pid>/environ` while stopped
 
+### The throw site, symbolised
+
+gdb names the chain once `sharedlibrary dbus` has read the symbols (they are
+not loaded at the entry point, see below):
+
+```
+DBus::Connection::send_blocking(DBus::Message&, int) + 176      <- throws
+DBus::ObjectProxy::_invoke_method(DBus::CallMessage&) + 72
+virtual thunk to DBus::ObjectProxy::_invoke_method(...)
+```
+
+So it is a blocking method call through a dbus-c++ proxy — which throws on an
+error reply OR on a connection that cannot carry the message.
+
+**It is the second.** `dbus-monitor --system` run inside the guest, watching a
+whole title launch, shows:
+
+* **zero** messages to `fi.w1.wpa_supplicant1` — the module never asks for
+  `GetInterface`/`CreateInterface` at all
+* every `net.connman` call answered with a `method return`, no errors
+* BrioWrapper's own bus client (`:1.7`) connects, queries the fake ConnMan
+  fine, adds its four match rules, and stops
+* **no second `Hello`** — so libWireless never opens a connection of its own
+
+And the names are all there to be called: `fi.w1.wpa_supplicant1`,
+`fi.epitest.hostap.WPASupplicant` and `net.connman` are all owned on the bus.
+
+So the failure is at CONNECTION SETUP, before a byte is sent, and "the service
+is missing" was never the story. The likely candidate is dbus-c++'s dispatcher:
+a `DBus::Connection` whose `default_dispatcher` was never established cannot
+carry a blocking call, and throws exactly here.
+
 ### Where to pick it up
 
 `TADPOLE_GDB_MATCH=BrioWrapper TADPOLE_GDB_PORT=1234 ./tadpole.sh --boot`, then
 `gdb -ex 'set architecture arm' -ex 'target remote :1234'`. Only the matched
 binary waits, so the shell still boots and the title can be started by hand.
+
+`set sysroot` at the guest tree lets gdb resolve `/LF/Base/Brio/...` paths, and
+`sharedlibrary dbus` forces symbols gdb marks "No".
 
 **A trap that cost a round:** `libdbus-1` is **dlopened** by the wireless
 module, so it is not mapped when gdb attaches at the entry point. Breakpoints
