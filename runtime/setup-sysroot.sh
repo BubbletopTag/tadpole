@@ -15,8 +15,16 @@ PROJ="$(dirname "$HERE")"
 # written against: install-firmware.sh lays out rootfs/<version>/ubi_rfs, while
 # the original hand-extracted copy had an extra numeric level. Both are valid,
 # and the version depends on whichever device the firmware came from.
+#
+# emmc_rfs IS A THIRD LAYOUT, AND NOT COSMETIC. The LeapPad2 and the Ultra are
+# NAND devices: their Firmware-Base carries a UBI volume, which has to be
+# unpacked with ubireader. The LeapPad3 is eMMC — its package is
+# `Type="DiskImage"` and holds firmware/emmc/2ext4/3/RFS, which despite living
+# under a path naming a filesystem is a plain GNU tar of the root. So there is
+# no UBI step for it at all, and calling the result ubi_rfs would be a lie that
+# the next person has to disprove.
 ROOTFS=""
-for cand in "$PROJ"/rootfs/*/ubi_rfs "$PROJ"/rootfs/*/*/ubi_rfs; do
+for cand in "$PROJ"/rootfs/*/emmc_rfs "$PROJ"/rootfs/*/ubi_rfs "$PROJ"/rootfs/*/*/ubi_rfs; do
     [ -d "$cand" ] || continue
     ROOTFS="$cand"; break
 done
@@ -56,20 +64,64 @@ rootfs_target() {
     printf '%s' "$p"
 }
 
+# meta.inf IS NOT READ-ONLY, AND SYMLINKING IT CORRUPTS THE ROOTFS.
+#
+# Everything below assumes the stock image is read-only, so it is symlinked
+# rather than copied. That held until a device with a package-manager daemon:
+# its RebuildPackageDatabase walks every installed package, parses each
+# meta.inf — and WRITES EACH ONE BACK normalised. Through a symlink, that lands
+# in rootfs/, which is supposed to be pristine.
+#
+# The damage is quiet and it is not cosmetic. The rewrite drops fields the
+# daemon does not care about and appends its own:
+#
+#     -Device="LeapPad3"          +Device=""          +Size=0
+#
+# and `Device=` is exactly what runtime/device.sh matches to decide WHICH
+# DEVICE THIS IS. So the first boot of a LeapPad3 erased the evidence that it
+# was a LeapPad3, and the second one detected a LeapPad2, booted AppManager
+# against a Qt firmware, and failed in a way that had nothing to do with the
+# actual cause. 52 files on this image, 41 of them under Firmware/.
+#
+# Mirror the directory instead: a real directory wherever a meta.inf lives,
+# with a COPY of the meta.inf and a symlink for every other entry. That is 52
+# small files rather than the 93 MB copy of LF/Base that copying outright would
+# cost, and the guest's writes land in the sysroot where they belong.
+shadow_meta() {
+    local src="$1" dst="$2" e b
+    mkdir -p "$dst"
+    for e in "$src"/*; do
+        [ -e "$e" ] || continue
+        b="$(basename "$e")"
+        if [ "$b" = meta.inf ]; then
+            cp -f "$e" "$dst/$b"
+        elif [ -d "$e" ] && [ -n "$(find "$e" -name meta.inf -print -quit 2>/dev/null)" ]; then
+            [ -L "$dst/$b" ] && rm -f "$dst/$b"
+            shadow_meta "$e" "$dst/$b"
+        else
+            ln -sfn "$e" "$dst/$b"
+        fi
+    done
+}
+
 echo "==> sysroot skeleton"
 mkdir -p "$SYSROOT"
 cd "$SYSROOT"
 # read-only parts of the stock image
-for d in bin boot etc Firmware lib linuxrc mnt sbin erootfs.md5; do
+for d in bin boot etc lib linuxrc mnt sbin erootfs.md5; do
     ln -sfn "$ROOTFS/$d" "$d"
 done
+# Firmware/ is nothing BUT meta.inf files, and the daemon rewrites all of them.
+[ -L Firmware ] && rm -f Firmware
+shadow_meta "$ROOTFS/Firmware" Firmware
 # /LF must be real: Bulk and Cart are written to at runtime.
 # Only unlink if it is still the symlink from a previous layout — removing a
 # real directory here would wipe installed Bulk content, and `rm -f` on a
 # directory fails, which under `set -e` silently aborts the whole script.
 [ -L LF ] && rm -f LF
 mkdir -p LF/Bulk LF/Cart
-ln -sfn "$ROOTFS/LF/Base" LF/Base
+[ -L LF/Base ] && rm -f LF/Base
+shadow_meta "$ROOTFS/LF/Base" LF/Base
 mkdir -p dev/input sys proc tmp flags
 
 echo "==> /usr overlay (absolute-path library lookups)"

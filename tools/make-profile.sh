@@ -41,7 +41,7 @@ LOCAL="$SYSROOT/LF/Bulk/Data/Local"
 # from the device profile rather than hardcoding the LeapPad2's.
 if [ -r "$PROJ/runtime/device.sh" ]; then
     ROOTFS=""
-    for cand in "$PROJ"/rootfs/*/ubi_rfs "$PROJ"/rootfs/*/*/ubi_rfs; do
+    for cand in "$PROJ"/rootfs/*/emmc_rfs "$PROJ"/rootfs/*/ubi_rfs "$PROJ"/rootfs/*/*/ubi_rfs; do
         [ -d "$cand" ] && { ROOTFS="$cand"; break; }
     done
     . "$PROJ/runtime/device.sh"

@@ -52,12 +52,12 @@ OUT="$PROJ/runtime/glconform"
 # Same discovery tadpole.sh does — whatever install-firmware.sh extracted, under
 # whatever version the user's own device shipped.
 ROOTFS=""
-for cand in rootfs/*/ubi_rfs rootfs/*/*/ubi_rfs; do
+for cand in rootfs/*/emmc_rfs rootfs/*/ubi_rfs rootfs/*/*/ubi_rfs; do
 	[ -d "$cand" ] || continue
 	ROOTFS="$PROJ/$cand"; break
 done
 if [ -z "$ROOTFS" ]; then
-	echo "no rootfs/*/ubi_rfs found — run tools/install-firmware.sh first" >&2
+	echo "no rootfs/*/{ubi,emmc}_rfs found — run tools/install-firmware.sh first" >&2
 	exit 1
 fi
 

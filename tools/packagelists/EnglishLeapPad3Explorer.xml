@@ -1,0 +1,151 @@
+<PackageListCollection>
+	<PackageList device="LeapPad3Explorer" locale="en_us" mandatoryVersion="6.2.0.452">	
+	<!-- File Order Note: Files are ordered by group from small to large size with one exception. The Widgets group needs to be near the top right after the Language Packs.	-->
+	<!-- Firmware -->
+		<Package type="magic,update,repair,surgeon"	 id="PAD3-0x002A0003-000000" description="Surgeon"/>
+		
+		<!--pickers-->
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270008-200010" description="src json"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270008-212345" description= "Child Picker Order"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270008-212346" description= "Parent Picker Order"/>
+
+		<!-- Required for Repair/Reset and Update -->
+		<Package type="noSurgeon,update,repair"	id="PADS-0x001E000F-000000" description="Language Pack"/>
+		<Package type="noSurgeon,update,repair"	id="PADS-0x001E000F-000001" description="Language Pack EN"/>
+		<Package type="noSurgeon,update,repair"	id="PADS-0x001E000F-000002" description="Language Pack FR"/>
+		
+		<!-- Widgets -->
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000001" description="Keyboard Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000002" description="Camera and Video Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x001E0003-000003" description="Microphone Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000004" description="Welcome"/>		
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000031" description="Gallery Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000060" description="Profile Manager"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000061" description="Parent Account Manager"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000062" description="App Store"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000063" description="Content Manager"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000064" description="Profile Manager"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000065" description="Change Locale"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000070" description="Gallery Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270006-000071" description="Cabo User Agent"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x001B0008-000000" description="Movie Player Widget"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00280017-000000" description="LeapSearch Browser"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00280017-000604" description="LeapSearch Browser Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270007-000090" description="FirmwareUpdate"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270007-000091" description="Passcode App"/>
+		
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x002A0008-200000" description="Cabo Compatibility Data"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x00210008-210000" description="Valencia Games View Frames"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x00210008-210001" description="French Valencia Games View Frames"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x00270008-400000" description="LeapPad3Explorer Cart Icon Compatibility Data"/>
+		
+		<!-- Rewards Store Stuff -->
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x001E0003-030031" description="Rewards Store"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B0010-000000" description="Daily Play"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B0010-DA0000" description="Daily Play DA"/>
+		
+		<Package type="optional,repair,noSurgeon,hidden"	id="PADS-0x002B0013-000000" description="Pet Chat"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x002B0013-DA0000" description="Pet Chat DA"/>	
+
+		<!--Included Music-->
+		<Package type="update,repair,noSurgeon"	id="MULT-0x001B00B9-000000" description="Music Player"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x001B00B9-DA0000" description="Music Player DA"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="MULT-0x001B00E2-000000" description="LeapFrog Learning Songs"/>
+		<Package type="allowed"	id="MULT-0x001B00E2-777777" description="LeapFrog Learning Songs"/>
+
+		<Package type="optional,repair,noSurgeon"	id="MULT-0x0022000A-FONT00" description="Font Patch Libs"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x0022000A-OGL000" description="Open GL Font Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x0022000A-OGL001" description="Open GL Patch"/>
+
+		<!-- UI Themes -->
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200001" description="Green Theme"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200002" description="Default Pink Theme"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200003" description="Default Green Theme"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200011" description="BEACH"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200012" description="BLUE"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200013" description="CITY"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200014" description="FARM"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200015" description="FLOWERS"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200016" description="JUNGLE"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200017" description="MUSIC_DARK"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200018" description="MUSIC_WARM"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200019" description="OCEAN"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200020" description="RIPPLES_BRIGHT"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200021" description="RIPPLES_PASTEL"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200022" description="SNOW"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200023" description="SPACE"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-200024" description="WAVES"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x00270008-400002" description="Child Picker Icon Placement"/>
+		
+		<!-- Base Apps -->
+		<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x002B000D-000000" description="Photo Fun Ultra"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B000D-DA0000" description="Photo Fun Ultra Device Asset"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x002B000C-000000" description= "Voice Memo"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B000C-DA0000" description= "Voice Memo DA"/>		
+		<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x002B0008-000000" description= "Calculator"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B0008-DA0000" description= "Calculator DA"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x002B000B-000000" description= "Notepad"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B000B-DA0000" description= "Notepad DA"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x002B000A-000000" description= "Clock"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B000A-DA0000" description= "Clock DA"/>
+		<Package type="update,repair,noSurgeon,hidden"	id="PADS-0x002B0009-000000" description= "Calendar"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B0009-DA0000" description= "Calendar DA"/>
+		
+		<!-- Patch Files -->
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x002A0008-300000" description="Patch List"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x1F1E0002-300001" description="MIP Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x1F1E0002-300002" description="LBA4 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x1F1E0002-300003" description="LBA7 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300004" description="PXY Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300005" description="SDE Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300006" description="MOU Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300009" description="UEB4 Launcher Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300010" description="bUEB Launcher Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x1F1E0002-300011" description="UEB Launcher Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300012" description="PONY Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300013" description="LFE Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300015" description="HKT Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PAD3-0x1F1E0002-300016" description="fMIP Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300017" description="fTFM Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300018" description="TFM Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300019" description="DYOA Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300020" description="CTY2 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300021" description="bUEB2 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300025" description="fLAB7 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x1F1E0002-300026" description="DINO2 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x1F1E0002-300023" description="DOC Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="PHRS-0x1F1E0002-300024" description="fDOC Patch"/>
+		
+		<!-- Content Packages -->
+		<Package type="content,landing"			id="LFCC-0x001A0001-100010" description="Landing Page SWF"/>
+		<Package type="content,uploadData"		id="LFCC-0x001A0002-100002" description="Upload Data (Naming Manager)"/>
+		<Package type="content,expandables"		id="LFCC-0x001A0003-100005" description="Expandables"/>
+		<Package type="content"					id="LFCC-0x001A0002-100009" description="PackageList" />
+		<Package type="content,deviceManagement" id="LFCC-0x001A0007-100001" description="Device Management" />
+
+		<!-- Trailers -->
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B001E-000000" description="Sneak Peeks"/>
+		<Package type="update,repair,noSurgeon"	id="PADS-0x002B001E-DA0000" description="Sneak Peeks DA"/>
+
+
+		<!--Demos
+		<Package type="optional,repair,noSurgeon,hidden"	id="PADS-0x002F0004-000000" description="Cooking! Recipes on the Road Demo"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x002F0004-DA0000" description="Cooking! Recipes on the Road Demo DA"/>
+		<Package type="optional,repair,noSurgeon,hidden"	id="PADS-0x002F0005-000000" description="Scout and Friends and You! Demo"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x002F0005-DA0000" description="Scout and Friends and You! Demo DA"/>
+		-->
+		
+		<!--Marketing Movies-->
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270008-200100" description="Welcome Movie"/>
+		<Package type="update,repair,noSurgeon"	id="PAD3-0x00270008-200101" description="Marketing Movie"/>
+
+		<!-- Pet App -->
+		<Package type="optional,repair,noSurgeon,hidden"	id="PADS-0x002B0012-000000" description="Pet Pad Party App"/>
+		<Package type="optional,repair,noSurgeon"	id="PADS-0x002B0012-DA0000" description="Pet Pad Party App DA"/>
+		<Package type="optional,repair,noSurgeon,hidden"	id="PADS-0x002B0012-000019" description="Check Store Furniture"/>
+		<Package type="optional,repair,noSurgeon,hidden"	id="PADS-0x002B0012-000020" description="Check Store Toy"/>
+
+		<Package type="magic,update,repair,firmware" id="PAD3-0x002A0001-000000" description="Firmware Base"/>
+		<Package type="magic,repair,bulkEmpty"		 id="PAD3-0x002A0001-000002" description="Firmware Bulk Empty"/>
+	</PackageList>	
+</PackageListCollection>

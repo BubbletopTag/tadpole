@@ -34,9 +34,12 @@ if [ -z "$QEMU" ]; then
 fi
 # DISCOVER the rootfs rather than hardcoding one firmware version. Whatever
 # install-firmware.sh extracted lands under rootfs/<version>/…/ubi_rfs, and the
-# version is whatever the user's own device shipped with.
+# version is whatever the user's own device shipped with. emmc_rfs is the same
+# thing for an eMMC device (the LeapPad3), whose firmware carries a tar rather
+# than a UBI volume — see runtime/setup-sysroot.sh for why it is not called
+# ubi_rfs anyway.
 ROOTFS=""
-for cand in "$HERE"/rootfs/*/ubi_rfs "$HERE"/rootfs/*/*/ubi_rfs; do
+for cand in "$HERE"/rootfs/*/emmc_rfs "$HERE"/rootfs/*/ubi_rfs "$HERE"/rootfs/*/*/ubi_rfs; do
     [ -d "$cand" ] || continue
     ROOTFS="$cand"; break
 done

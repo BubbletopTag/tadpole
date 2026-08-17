@@ -41,8 +41,10 @@ GUESTLIBS := ../runtime/libs
 # with a Python traceback about a missing file.
 #
 # tadpole.sh, runtime/setup-sysroot.sh and tools/glconform/build.sh all glob for
-# it already; this is the same rule, spelled the same way.
-ROOTFS := $(firstword $(wildcard ../rootfs/*/ubi_rfs ../rootfs/*/*/ubi_rfs))
+# it already; this is the same rule, spelled the same way — INCLUDING emmc_rfs,
+# which is where an eMMC device's root lands (the LeapPad3 ships a tar, not a
+# UBI volume). Keep the four spellings in step.
+ROOTFS := $(firstword $(wildcard ../rootfs/*/emmc_rfs ../rootfs/*/ubi_rfs ../rootfs/*/*/ubi_rfs))
 ROOTFS_LIB := $(ROOTFS)/usr/lib
 
 SHIMLIBS  := ../runtime/shimlibs
@@ -205,7 +207,7 @@ need-libs:
 need-rootfs:
 	@if [ -z "$(ROOTFS)" ]; then \
 	  echo ""; \
-	  echo "  No rootfs/*/ubi_rfs found — the system files are not installed."; \
+	  echo "  No rootfs/*/{ubi,emmc}_rfs found — the system files are not installed."; \
 	  echo "  Run ./tools/online-update.sh (or tools/install-firmware.sh)."; \
 	  echo ""; \
 	  exit 1; \
@@ -399,17 +401,14 @@ $(SHIM_OUT_EGL): $(SHIM_SRC) $(EGL_SRC) $(GLES_OUT) $(SHIMLIBS)/$(REAL_DL) \
 	@echo -n "  SONAME: "; readelf -d $@ | grep SONAME | sed 's/.*\[\(.*\)\]/\1/'
 	@echo -n "  NEEDED: "; readelf -d $@ | grep NEEDED | sed 's/.*\[\(.*\)\]/\1/' | tr '\n' ' '; echo
 
-# The stock libEGL, renamed so it can coexist with our impersonator, and with
-# its libdl.so.0 dependency repointed at the real libdl. It has no SONAME, so
-# the copy is found by filename and needs no patching for that.
-$(SHIMLIBS_EGL)/$(REAL_EGL): | need-rootfs
+# The stock libEGL, renamed so it can coexist with our impersonator, with its
+# libdl.so.0 dependency repointed at the real libdl and — on the LeapPad3 —
+# its .dynsym sh_info corrected, without which lld will not link against the
+# file at all. It has no SONAME, so the copy is found by filename and needs no
+# patching for that. See tools/make-egl-real.py for both edits and why.
+$(SHIMLIBS_EGL)/$(REAL_EGL): ../tools/make-egl-real.py | need-rootfs
 	@mkdir -p $(SHIMLIBS_EGL)
-	@python3 -c "import pathlib,sys;\
-s=(pathlib.Path('$(ROOTFS_LIB)')/'libEGL.so').resolve();\
-sys.exit('no libEGL.so in $(ROOTFS_LIB)') if not s.exists() else None;\
-d=pathlib.Path('$(SHIMLIBS_EGL)/$(REAL_EGL)');\
-d.write_bytes(s.read_bytes().replace(b'libdl.so.0\x00', b'libdl.so.9\x00'));\
-print('wrote', d, 'from', s.name)"
+	@python3 ../tools/make-egl-real.py $(ROOTFS_LIB)/libEGL.so $@
 
 shimpkg: $(SHIM_OUT_PKG) $(SHIMLIBS_PKG)/$(REAL_DL)
 
