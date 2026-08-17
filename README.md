@@ -2,6 +2,35 @@
 
 A LeapPad2 and LeapPad Ultra emulator for Linux.
 
+**This is a testing branch for additional devices, and it is not the stable
+one.** The LeapPad Ultra and the LeapPad3 today; in time the whole range, from
+the Didj up to the LeapPad Ultimate. Everything further down this document was
+written around the LeapPad2 and still describes it.
+
+**A great many modifications were made to the shim to get there, and LeapPad2
+support may be completely broken. Who knows!** No LeapPad2 has been booted on
+this branch — there is no LeapPad2 rootfs in this worktree to boot one with.
+What changed underneath it:
+
+* The shim gained a fourth and a fifth identity — it answers to `libEGL.so`
+  for the Qt shell and to `libWebServices.so.1` for the package-manager
+  daemon — and it now detects itself being loaded twice into one process,
+  which on the Ultra chained two `open()` interceptors into each other until
+  the 64 MB guest stack was gone.
+* The evdev fake is a per-reader broadcast with a pump thread per process. It
+  used to hand every reader the same FIFO, which is right for one reader and
+  silently wrong for the three inside AppServer.
+* `execvp` walks `PATH` itself instead of leaving it to uClibc, whose internal
+  `execve` never goes through the PLT and so never reached our hook at all.
+* `setup-sysroot.sh` shadows a directory that holds a `meta.inf`, or that
+  contains an absolute symlink, instead of symlinking it whole.
+* The ALSA shim moved onto the Qt devices' library path, and answers two more
+  `snd_pcm_hw_params_*` calls than it used to.
+* The touchscreen's identity `pointercal` was not the identity — it sent every
+  tap to y=1 — and now is.
+
+`main` is untouched by all of it, and is still the branch to run.
+
 Tadpole runs the stock LeapFrog system software — AppManager, the Brio
 framework, Flash Lite, and native Leapster titles — on a desktop, by emulating
 the NXP3200 "VALENCIA" hardware they expect to find underneath.
