@@ -87,19 +87,46 @@ rootfs_target() {
 # with a COPY of the meta.inf and a symlink for every other entry. That is 52
 # small files rather than the 93 MB copy of LF/Base that copying outright would
 # cost, and the guest's writes land in the sysroot where they belong.
+# AN ABSOLUTE SYMLINK IS THE SECOND REASON A DIRECTORY CANNOT BE SYMLINKED.
+#
+# Same trap as rootfs_target() above, one level up: a link whose target starts
+# with / resolves against the HOST's root, so through a symlinked directory the
+# host sees it dangling and every stat() on it fails. For a library that is a
+# confusing error; for /LF/Base/Qt/bin it is fatal and silent.
+#
+# ALL EIGHT ENTRIES IN /LF/Base/Qt/bin ARE ABSOLUTE SYMLINKS — BrioWrapper,
+# SignIn, ParentPicker, InitialSetup, TimeLocked, FirmwareUpdateOobe,
+# MainPicker, AppServer — each pointing at /LF/Base/Qt/Modules/<n>/<n>. That
+# directory is on the guest's PATH, and AppServer launches its screens BY BARE
+# NAME through it. So with the directory symlinked, QProcess could not start a
+# single one, and it presented as three separate faults: no app would launch,
+# the sign-in screen never appeared, and parent settings were unreachable.
+# What it logs is "Application: 'BrioWrapper' crashed, exit=0, error=0" —
+# error=0 being QProcess::FailedToStart, i.e. it never ran at all.
+dir_has_abs_link() {
+    local l
+    while IFS= read -r l; do
+        case "$(readlink "$l")" in /*) return 0 ;; esac
+    done < <(find "$1" -type l 2>/dev/null)
+    return 1
+}
+
 shadow_meta() {
     local src="$1" dst="$2" e b
     mkdir -p "$dst"
     for e in "$src"/*; do
-        [ -e "$e" ] || continue
+        [ -e "$e" ] || [ -L "$e" ] || continue
         b="$(basename "$e")"
         if [ "$b" = meta.inf ]; then
             cp -f "$e" "$dst/$b"
-        elif [ -d "$e" ] && [ -n "$(find "$e" -name meta.inf -print -quit 2>/dev/null)" ]; then
+        elif [ -d "$e" ] && { [ -n "$(find "$e" -name meta.inf -print -quit 2>/dev/null)" ] ||
+                              dir_has_abs_link "$e"; }; then
             [ -L "$dst/$b" ] && rm -f "$dst/$b"
             shadow_meta "$e" "$dst/$b"
         else
-            lns "$e" "$dst/$b"
+            # rootfs_target re-roots an absolute link target under $ROOTFS;
+            # a relative one is already correct and passes through unchanged.
+            lns "$(rootfs_target "$e")" "$dst/$b"
         fi
     done
 }

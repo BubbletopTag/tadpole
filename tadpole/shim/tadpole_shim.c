@@ -1578,18 +1578,76 @@ int execv(const char *path, char *const argv[])
 	return execve(path, argv, environ);
 }
 
+/* PATH CONTAINS GUEST DIRECTORIES, SO THE SEARCH IS OURS TO DO.
+ *
+ * This used to hand a bare name straight to uClibc's execvp, on the reasoning
+ * that "anything to be found on PATH is a host command". True for a LeapPad2;
+ * false for a Qt device, where PATH is the guest's own —
+ * /LF/Base/Brio/bin:/LF/Base/bin:/LF/Base/Qt/bin:... — and /LF/Base/Qt/bin
+ * holds a symlink for every launchable module.
+ *
+ * Delegating loses it in a way that leaves no trace in our own log: uClibc's
+ * execvp walks PATH and calls its INTERNAL execve, which never goes through
+ * the PLT, so our hook is never entered and each attempt reaches the host
+ * kernel as a raw guest path. Only qemu's -strace shows it:
+ *
+ *     execve("/LF/Base/Qt/bin/BrioWrapper", {"BrioWrapper",NULL})
+ *     execve("/usr/bin/BrioWrapper", ...)  = -1 errno=2
+ *
+ * — the right directory IS searched, and the exec fails anyway. AppServer
+ * reports "Application: 'BrioWrapper' crashed, exit=0, error=0", where error=0
+ * is QProcess::FailedToStart, and that one line is the whole visible symptom
+ * of no app launching, no sign-in screen and no parent settings.
+ *
+ * So walk PATH here and hand each candidate to our own execve(), which
+ * re-roots it under the sysroot and re-enters qemu. Same order and same
+ * semantics as the C library's: the first candidate that execs wins, and we
+ * return only if none did.
+ */
 int execvp(const char *file, char *const argv[])
 {
-	/* Only absolute paths need us; anything to be found on PATH is a host
-	 * command and qemu's own handling is already right for it. */
-	if (file && file[0] == '/')
-		return execve(file, argv, environ);
+	const char *path, *p;
+	char cand[512];
+	size_t flen, n, i;
+
+	if (!file || !file[0])
+		return -1;
+	/* A name containing a slash is used as-is — no PATH search, as per the
+	 * C library. */
+	for (i = 0; file[i]; i++)
+		if (file[i] == '/')
+			return execve(file, argv, environ);
 	init();
-	{
-		int (*real_execvp)(const char *, char *const []) =
-			dlsym(RTLD_NEXT, "execvp");
-		if (real_execvp)
-			return real_execvp(file, argv);
+
+	path = getenv("PATH");
+	if (!path || !path[0])
+		path = "/bin:/usr/bin";
+	flen = strlen(file);
+
+	for (p = path; ; ) {
+		const char *q = p;
+		while (*q && *q != ':')
+			q++;
+		n = (size_t)(q - p);
+		if (n == 0) {                  /* empty element means "." */
+			cand[0] = '.';
+			n = 1;
+		} else if (n < sizeof(cand) - 2) {
+			for (i = 0; i < n; i++)
+				cand[i] = p[i];
+		} else {
+			n = 0;                     /* too long to try */
+		}
+		if (n && n + 1 + flen < sizeof(cand)) {
+			if (cand[n - 1] != '/')
+				cand[n++] = '/';
+			for (i = 0; i <= flen; i++)
+				cand[n + i] = file[i];
+			execve(cand, argv, environ);   /* returns only on failure */
+		}
+		if (!*q)
+			break;
+		p = q + 1;
 	}
 	return -1;
 }
