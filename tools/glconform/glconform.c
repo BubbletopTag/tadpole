@@ -109,6 +109,15 @@ extern void glFogfv(GLenum pname, const GLfloat *params);
 extern void glTexEnvi(GLenum target, GLenum pname, GLint param);
 extern void glGetTexEnviv(GLenum target, GLenum pname, GLint *params);
 
+/* blending */
+extern void glBlendFunc(GLenum sfactor, GLenum dfactor);
+
+/* client arrays — per-unit texcoord state (see t_multitex_arrays) */
+extern void glClientActiveTexture(GLenum texture);
+extern void glEnableClientState(GLenum array);
+extern void glDisableClientState(GLenum array);
+extern GLboolean glIsEnabled(GLenum cap);
+
 /* point/line/polygon/stencil/clipplane (23 of 108) */
 extern void glPointSize(GLfloat size);
 extern void glLineWidth(GLfloat width);
@@ -144,6 +153,10 @@ extern void glGetClipPlanef(GLenum plane, GLfloat *eqn);
 #define GL_TEXTURE_ENV                  0x2300
 #define GL_TEXTURE_ENV_MODE             0x2200
 #define GL_DECAL                        0x2101
+#define GL_BLEND_DST                    0x0BE0
+#define GL_BLEND_SRC                    0x0BE1
+#define GL_SRC_ALPHA                    0x0302
+#define GL_ONE_MINUS_SRC_ALPHA          0x0303
 #define GL_TEXTURE_WRAP_S               0x2802
 #define GL_TEXTURE_MIN_FILTER           0x2801
 #define GL_CLAMP_TO_EDGE                0x812F
@@ -152,6 +165,9 @@ extern void glGetClipPlanef(GLenum plane, GLfloat *eqn);
 #define GL_KEEP                         0x1E00
 #define GL_ALWAYS                       0x0207
 #define GL_CLIP_PLANE0                  0x3000
+#define GL_TEXTURE0                     0x84C0
+#define GL_TEXTURE1                     0x84C1
+#define GL_TEXTURE_COORD_ARRAY          0x8078
 #define GL_DONT_CARE                    0x1100
 #define GL_PERSPECTIVE_CORRECTION_HINT  0x0C50
 #define GL_UNPACK_ALIGNMENT             0x0CF5
@@ -314,6 +330,50 @@ static void t_texenv(void)
 	       " got 0x%04x\"\n", got == GL_DECAL ? "OK" : "FAIL",
 	       (unsigned)drain(), (unsigned)got);
 	if (got == GL_DECAL) g_ok++; else g_fail++;
+}
+
+/* THE PAIR THAT DREW BEN 10'S MENU TEXT IN BLACK.
+ *
+ * Same save/restore shape as t_texenv above, and the same cost when the getter
+ * does not answer — except that this one is invisible until a host GPU is
+ * doing the blending. Traced out of Ben 10: Ultimate Alien, one frame of its
+ * menu:
+ *
+ *     glGetTexEnvxv(GL_TEXTURE_ENV_MODE)   // saved, and we DO answer this
+ *     glGetIntegerv(GL_BLEND_DST, &dst)    // saved
+ *     glGetIntegerv(GL_BLEND_SRC, &src)    // saved
+ *     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+ *     ... draw the text ...
+ *     glTexEnvx(GL_TEXTURE_ENV_MODE, GL_MODULATE)
+ *     glEnable(GL_BLEND)
+ *     glBlendFunc(src, dst)                // restore what it read back
+ *
+ * Unhandled, both queries wrote 0, so the restore was glBlendFunc(GL_ZERO,
+ * GL_ZERO) — 1227 of them against 444 correct ones in a single run — and every
+ * blended draw afterwards multiplied to black. The software rasteriser ignores
+ * the factors and hardcodes src-alpha-over, so it showed nothing; the HLE path
+ * forwards them to the host glBlendFunc, so it showed everything. A rendering
+ * bug that only exists on the fast path is exactly the kind this binary is for.
+ *
+ * The initial values are worth a second line on hardware: GLES 1.1 §4.1.7 says
+ * GL_ONE / GL_ZERO, and that is what our shim now starts from, but only the
+ * device can confirm the VR5 agrees. */
+static void t_blendfunc(void)
+{
+	GLint src = -1, dst = -1;
+	drain();
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glGetIntegerv(GL_BLEND_SRC, &src);
+	glGetIntegerv(GL_BLEND_DST, &dst);
+	printf("RESULT blend.func_roundtrip %s err=0x%04x detail=\"want 0x0302,0x0303"
+	       " got 0x%04x,0x%04x\"\n",
+	       (src == (GLint)GL_SRC_ALPHA && dst == (GLint)GL_ONE_MINUS_SRC_ALPHA)
+	           ? "OK" : "FAIL",
+	       (unsigned)drain(), (unsigned)src, (unsigned)dst);
+	if (src == (GLint)GL_SRC_ALPHA && dst == (GLint)GL_ONE_MINUS_SRC_ALPHA)
+		g_ok++;
+	else
+		g_fail++;
 }
 
 static void t_texparam(void)
@@ -558,6 +618,55 @@ static void t_state_setters(void)
 	       "GLES1 has no getters for most of these; the err code is the test");
 }
 
+/* PER-UNIT TEXCOORD ARRAY STATE — the Pet Pals 2 "pink eye" bug, reduced.
+ *
+ * GLES 1.1 §6.1.2: GL_TEXTURE_COORD_ARRAY, and the pointer/size/type/stride
+ * that go with it, are PER TEXTURE UNIT, and glClientActiveTexture selects
+ * which unit the client-array calls address. GL_VERTEX_ARRAY and
+ * GL_COLOR_ARRAY are not — there is exactly one of each — which is precisely
+ * the asymmetry an implementation is likely to miss.
+ *
+ * We missed it. The shim kept ONE texcoord array, so a title doing
+ *
+ *     glClientActiveTexture(GL_TEXTURE0); glTexCoordPointer(uv_skin);
+ *     glClientActiveTexture(GL_TEXTURE1); glTexCoordPointer(uv_eyes);
+ *
+ * had its second call overwrite its first. Pet Pals 2 does exactly that, 3468
+ * times in a 40-second capture: unit 0 carries a 256x256 skin at VBO offset
+ * 8088, unit 1 a 512x512 eye atlas at offset 13480. The host then sampled the
+ * SKIN with the EYE ATLAS's coordinates, which landed on the pink strip in the
+ * skin's top-left corner — a magenta patch over the dog's eye, whose pixels
+ * (200,120,144) and (192,120,136) matched that corner byte for byte.
+ *
+ * Enable state is the cheapest expression of it that needs no draw and no
+ * readback: set unit 0 on and unit 1 off, then ask each. One array cannot
+ * remember two answers.
+ */
+static void t_multitex_arrays(void)
+{
+	GLboolean on0, on1;
+	char detail[160];
+	drain();
+
+	glClientActiveTexture(GL_TEXTURE0);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	glClientActiveTexture(GL_TEXTURE1);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+	glClientActiveTexture(GL_TEXTURE0);
+	on0 = glIsEnabled(GL_TEXTURE_COORD_ARRAY);
+	glClientActiveTexture(GL_TEXTURE1);
+	on1 = glIsEnabled(GL_TEXTURE_COORD_ARRAY);
+
+	/* Leave the client unit where every other test expects it. */
+	glClientActiveTexture(GL_TEXTURE0);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+
+	snprintf(detail, sizeof detail,
+	         "want unit0=1 unit1=0 got unit0=%d unit1=%d", (int)on0, (int)on1);
+	result("multitex.texcoord_array_per_unit", on0 == 1 && on1 == 0, detail);
+}
+
 static void t_clipplane(void)
 {
 	GLfloat want[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
@@ -710,8 +819,10 @@ static int glconform_main(void)
 
 	t_texenv();
 	t_texparam();
+	t_blendfunc();
 
 	t_state_setters();
+	t_multitex_arrays();
 	t_clipplane();
 	t_negative_count();
 

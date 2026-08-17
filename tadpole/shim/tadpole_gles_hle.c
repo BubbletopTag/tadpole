@@ -7,11 +7,15 @@
  *
  * DESIGN CONSTRAINTS THAT ARE NOT OBVIOUS
  * ---------------------------------------
- * 1. NEVER BLOCK FOREVER. The scripted harnesses run with no viewer at all
- *    (`--no-viewer`), so nothing drains the ring. If the encoder waited for
- *    space it would wedge every automated run. hle_on() therefore requires a
- *    live host heartbeat and gives up permanently the moment the ring backs up
- *    with no reader, falling back to the software rasteriser for the session.
+ * 1. NEVER BLOCK FOREVER. If the encoder waited for space it would wedge on any
+ *    host that stopped reading. hle_on() therefore requires a live host
+ *    heartbeat and gives up the moment the ring backs up with no reader.
+ *    Giving up no longer means quietly rendering the rest of the session in
+ *    software: it raises guest_fellback so the viewer can put a dialog on
+ *    screen — see the deprecation note above hle_software_wanted(). A run that
+ *    genuinely wants no viewer, which is every scripted harness under
+ *    `--no-viewer`, asks for the software rasteriser by name with
+ *    TADPOLE_GL_SOFTWARE=1.
  *
  * 2. NO POINTERS ON THE WIRE. A guest address is meaningless to the host, so
  *    array references travel as (buffer name, byte offset) and everything else
@@ -40,6 +44,7 @@ extern int   snprintf(char *s, u32 n, const char *fmt, ...);
 extern long  write(int fd, const void *buf, u32 n);
 extern int   ftruncate(int fd, long length);
 extern int   usleep(u32 usec);
+extern void  abort(void);
 
 #define O_RDWR   02
 #define O_CREAT  0100
@@ -58,6 +63,72 @@ static void hle_log(const char *msg)
 	if (n > 0) write(2, b, (u32)n);
 }
 
+/* ---- the software rasteriser is deprecated ------------------------------
+ *
+ * It is years behind the GL core it shares, it is roughly five times slower,
+ * and it silently cannot do things the host path does — it samples ONE texture
+ * unit, and it ignores the blend factors entirely. Both of those cost a real
+ * bug this month: Ben 10's menu text drew black and Pet Pals 2 wore its eye
+ * atlas as skin, and NEITHER was visible in software, because in software the
+ * wrong state cannot express itself. Every compat verdict in this repository
+ * was recorded on that path.
+ *
+ * So falling back to it is no longer something that happens quietly to a user
+ * who did not ask. If HLE was requested and cannot be delivered, the guest
+ * says so and raises a flag the viewer turns into a dialog, rather than
+ * pretending. Software rasterisation remains available for exactly the case it
+ * is still good for — telling whether a fault is in the shared GL core or only
+ * in the replay — and now requires being asked for by name:
+ *
+ *     TADPOLE_GL_SOFTWARE=1
+ *
+ * which is checked FIRST, so it also forces software when a host is available
+ * and would otherwise win.
+ */
+static int hle_software_wanted(void)
+{
+	const char *v = getenv("TADPOLE_GL_SOFTWARE");
+	return v && v[0] && v[0] != '0';
+}
+
+/* THE GPU PATH IS GONE. Say so, and tell the HOST so it can tell the user.
+ *
+ * NOT an abort. Killing the guest here would take the title down mid-frame and
+ * leave a crash report describing a fault the title never committed — and the
+ * user, whose save is in that process, would have no idea why. The honest
+ * outcome is to stop pretending we are rendering, raise the flag the host
+ * already watches (guest_fellback, read by hle_guest_fell_back()), and let the
+ * viewer put a dialog on screen asking for a restart.
+ *
+ * The guest keeps running. Whatever it draws after this point comes from the
+ * deprecated software rasteriser and should not be trusted — which is exactly
+ * what the dialog says. */
+static void hle_lost(const char *why)
+{
+	if (g_ring) g_ring->guest_fellback = 1;
+	hle_log("============================================================");
+	hle_log("HOST-GPU REPLAY IS NO LONGER AVAILABLE");
+	hle_log(why);
+	hle_log("");
+	hle_log("The software rasteriser is deprecated: it cannot express");
+	hle_log("multitexturing or the blend factors, so anything drawn from");
+	hle_log("here on is wrong rather than merely slow. Restart Tadpole.");
+	hle_log("");
+	hle_log("To use the software rasteriser deliberately, ask for it:");
+	hle_log("    TADPOLE_GL_SOFTWARE=1");
+	hle_log("============================================================");
+	/* THE DEVELOPER'S OPT-IN, still honoured — Options -> Graphics -> "Stop if
+	 * HLE falls back" sets it. Default is to tell the user and let the title
+	 * carry on, because their unsaved progress is in this process; this is for
+	 * when you would rather have the core file and the stack that names the
+	 * caller than a running guest. */
+	if (getenv("TADPOLE_HLE_STRICT")) {
+		hle_log("TADPOLE_HLE_STRICT set: aborting");
+		abort();
+		*(volatile int *)0 = 0;
+	}
+}
+
 /* ---- attach ------------------------------------------------------------- */
 
 static void hle_attach(void)
@@ -68,6 +139,16 @@ static void hle_attach(void)
 	void *m;
 
 	g_state = 0;
+	/* Asked for by name: software, quietly, exactly as before. */
+	if (hle_software_wanted()) {
+		hle_log("TADPOLE_GL_SOFTWARE set: using the software rasteriser");
+		return;
+	}
+	/* NOT REQUESTED AT ALL is left alone deliberately. A standalone guest
+	 * binary loads this shim without ever asking for replay — tools/glconform
+	 * is the one that matters, and it tests state and error codes, not
+	 * rendering. Only a request that CANNOT BE HONOURED raises the alarm, and
+	 * every real launch makes one: tadpole.sh and the viewer both set it. */
 	if (!getenv("TADPOLE_GL_HLE"))
 		return;
 
@@ -76,11 +157,11 @@ static void hle_attach(void)
 	snprintf(path, sizeof(path), "%s/glcmd.bin", d);
 
 	fd = open(path, O_RDWR | O_CREAT, 0666);
-	if (fd < 0) { hle_log("cannot open glcmd.bin; using software raster"); return; }
+	if (fd < 0) { hle_lost("cannot open glcmd.bin in TADPOLE_DIR"); return; }
 	ftruncate(fd, (long)TADGL_FILE_BYTES);
 	m = mmap(NULL, TADGL_FILE_BYTES, PROT_RW, MAP_SHARED, fd, 0);
 	close(fd);
-	if (m == (void *)-1) { hle_log("cannot map glcmd.bin; using software raster"); return; }
+	if (m == (void *)-1) { hle_lost("cannot map glcmd.bin"); return; }
 
 	g_ring = m;
 	g_data = TADGL_DATA(g_ring);
@@ -89,12 +170,13 @@ static void hle_attach(void)
 	 * replay. If the header is not stamped, no viewer has attached and there is
 	 * no point encoding into a ring nobody reads. */
 	if (g_ring->magic != TADGL_MAGIC || g_ring->version != TADGL_VERSION) {
-		hle_log("no host replayer attached; using software raster");
+		hle_lost("no host replayer has stamped the command ring "
+		         "(is the viewer running?)");
 		g_ring = NULL;
 		return;
 	}
 	if (!g_ring->host_alive) {
-		hle_log("host replayer not alive; using software raster");
+		hle_lost("the host replayer is not alive");
 		g_ring = NULL;
 		return;
 	}
@@ -119,24 +201,26 @@ int hle_want_resync(void)
 	return 1;
 }
 
-/* Abandon GPU rendering. Deliberately LOUD: a silent fall back to software looks
- * identical to "HLE never worked", which is exactly how a 17-second success
- * followed by a stall got reported as broken.
+/* Abandon GPU rendering MID-RUN — the host stopped draining, or a single packet
+ * will not fit the ring.
  *
- * TADPOLE_HLE_STRICT=1 makes it fatal instead, for when you want to know
- * immediately rather than discover it from a frame rate. */
+ * This used to drop to software and merely say so, which looks identical to
+ * "HLE never worked" and is how a 17-second success followed by a stall got
+ * reported as broken. TADPOLE_HLE_STRICT=1 was the opt-in that made it fatal.
+ *
+ * IT NOW TELLS THE USER INSTEAD. Continuing in software renders the rest of the
+ * session with a rasteriser that cannot express multitexturing or blend
+ * factors, so the frames after the fallback are not slower-but-right, they are
+ * WRONG — and nothing on screen said so. Aborting was the other extreme: it
+ * would take the title, and the player's unsaved progress, down with it. So
+ * raise the flag and let the viewer ask for a restart.
+ *
+ * TADPOLE_GL_SOFTWARE=1 still means software, and a session that asked for it
+ * never gets here: hle_attach() returns before any of this. */
 static void hle_give_up(const char *why)
 {
-	if (g_ring) g_ring->guest_fellback = 1;
 	g_state = 0;
-	hle_log("========================================");
-	hle_log("HLE FELL BACK TO SOFTWARE RASTERISATION");
-	hle_log(why);
-	hle_log("========================================");
-	if (getenv("TADPOLE_HLE_STRICT")) {
-		hle_log("TADPOLE_HLE_STRICT set: aborting");
-		*(volatile int *)0 = 0;      /* deliberate: fail loudly, with a core */
-	}
+	hle_lost(why);            /* raises the flag while the ring is still mapped */
 	g_ring = NULL;
 }
 

@@ -52,6 +52,70 @@ OUT="${TADPOLE_APPIMAGE_OUT:-$PROJ/build/Tadpole-x86_64.AppImage}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# ---- 0. the version, and why this script has to care ----------------------
+#
+# THIS SCRIPT PACKAGES A VIEWER; IT USED NOT TO BUILD ONE. That distinction
+# shipped a wrong version to everybody.
+#
+# tools/release.sh has always called this as
+#
+#     TADPOLE_VERSION="$VERSION" ./tools/build-appimage.sh
+#
+# which reads exactly like it stamps the release. It did not: the next line
+# down only ASSERTED that a viewer exists and then copied it, so the image was
+# built around whatever binary the developer happened to have compiled last —
+# in practice `make viewer` with the Makefile's default of "dev". The variable
+# was accepted and discarded.
+#
+# It is not a hypothetical. tadpole-10082026-0007, the current release, ships a
+# tadpole-view carrying the literal string "dev" and no version at all, so its
+# About box says "dev" and its update check reports `status dev` — which the
+# viewer shows as "you have an unreleased build", at every launch, listing all
+# thirteen releases as newer, with no way ever to say "up to date".
+#
+# So: if a version is asked for, build the viewer with it and CHECK THE STAMP
+# TOOK before packaging anything. The check is not ceremony — the Makefile
+# grew .tadpole-version precisely because `make` cannot see a -D change from
+# timestamps, and 08082026-0002 went out calling itself 0001 that way. Trust
+# the mechanism, verify the result.
+#
+# With no TADPOLE_VERSION set nothing changes: a developer build still packages
+# whatever is there and still reports "dev", which is true.
+if [ -n "${TADPOLE_VERSION:-}" ] && [ "$TADPOLE_VERSION" != dev ]; then
+    echo "==> stamping the viewer as $TADPOLE_VERSION"
+    make -C "$PROJ/tadpole" viewer TADPOLE_VERSION="$TADPOLE_VERSION" \
+        || die "could not build the viewer — nothing has been packaged"
+    # `grep -Fx ... >/dev/null`, not `grep -qx`: -q exits on the first match
+    # and `strings` then dies of SIGPIPE. Harmless here (this script sets no
+    # pipefail) but the identical check in tools/release.sh runs under one,
+    # where it turns a passing check into a failing release. Same spelling in
+    # both places so neither can drift into the trap.
+    strings "$PROJ/tadpole/viewer/tadpole-view" 2>/dev/null |
+        grep -Fx -- "$TADPOLE_VERSION" >/dev/null \
+        || die "the viewer does not carry $TADPOLE_VERSION after building.
+  Refusing to package an image that would misreport its own version — that is
+  the bug that made a release tell every user it was an unreleased build."
+    echo "    viewer reports $TADPOLE_VERSION"
+
+    # AND THE ENGINE, which is now one of this image's shipped binaries rather
+    # than something only Windows carried. glasspole takes its version through
+    # a CMake cache variable, and file(GENERATE) rewrites gp_version.c only
+    # when the string differs — so this is a relink on a release and a no-op
+    # otherwise. Same refusal as above if the stamp did not take: an engine
+    # that cannot say what it is undoes the reason the viewer's check exists.
+    if [ -d "$PROJ/glasspole/build" ] && command -v cmake >/dev/null 2>&1; then
+        echo "==> stamping glasspole as $TADPOLE_VERSION"
+        cmake -S "$PROJ/glasspole" -B "$PROJ/glasspole/build" \
+              -DTADPOLE_VERSION="$TADPOLE_VERSION" >/dev/null &&
+        cmake --build "$PROJ/glasspole/build" --target glasspole >/dev/null \
+            || die "could not build glasspole — nothing has been packaged"
+        strings "$PROJ/glasspole/build/glasspole" 2>/dev/null |
+            grep -Fx -- "$TADPOLE_VERSION" >/dev/null \
+            || die "glasspole does not carry $TADPOLE_VERSION after building."
+        echo "    glasspole reports $TADPOLE_VERSION"
+    fi
+fi
+
 # ---- 1. everything must be built first ----------------------------------
 [ -x "$PROJ/tadpole/viewer/tadpole-view" ] || die "not built — run: cd tadpole && make"
 for d in shimlibs shimlibs-gl shimlibs-z; do
@@ -82,13 +146,22 @@ cp "$PROJ/tadpole/viewer/tadpole-view" "$APPDIR/app/tadpole/viewer/"
 [ -f "$PROJ/README.md" ] && cp "$PROJ/README.md" "$APPDIR/app/"
 [ -f "$PROJ/LICENSE" ]   && cp "$PROJ/LICENSE"   "$APPDIR/app/"
 
-# ---- 3. bundle SDL2 and zlib ----------------------------------------------
+# ---- 3. bundle SDL2, zlib and the startup animation's codecs --------------
 # Version-sensitive and self-contained. GL and X11 stay on the host.
 # SDL2 COMES FROM build/deps, NOT FROM THIS MACHINE, when it is staged there.
 # See the note in tools/fetch-deps.sh: on a rolling distribution the host's
 # libSDL2-2.0.so.0 is sdl2-compat, which dlopens SDL3 by name at run time and
 # so takes an invisible dependency with it.
-for lib in libSDL2-2.0.so.0 libz.so.1; do
+#
+# THEORA/VORBIS/OGG ARE OPTIONAL AND BUNDLED ANYWAY. The viewer builds without
+# them (Fast Boot skips the animation, and with no decoder the boot sequence is
+# the logo alone), so this loop must not insist on finding them — the ldd
+# lookup below simply comes up empty and the image is one that shows a logo.
+# But an image built on a machine that HAD them and did not carry them would be
+# the worst of both: a viewer with a NEEDED entry nothing satisfies, which does
+# not start at all. Bundling what ldd actually reports keeps those in step.
+for lib in libSDL2-2.0.so.0 libz.so.1 \
+           libtheoradec.so.1 libtheoradec.so.2 libvorbis.so.0 libogg.so.0; do
     if [ "$lib" = libSDL2-2.0.so.0 ] && [ -f "$PROJ/build/deps/lib/$lib" ]; then
         cp -L "$PROJ/build/deps/lib/$lib" "$APPDIR/usr/lib/"
         echo "  bundled $lib (Ubuntu 22.04 build, from build/deps)"
@@ -133,9 +206,46 @@ done
 # ---- 3b. the staged runtime dependencies ----------------------------------
 # These are NOT copied into the user's data directory later: they are read-only
 # and large, so AppRun points at them where they sit in the mounted image.
-if [ -d "$PROJ/build/deps/bin" ] || [ -d "$PROJ/build/deps/python" ]; then
+if [ -d "$PROJ/build/deps/bin" ] || [ -d "$PROJ/build/deps/python" ] ||
+   [ -x "$PROJ/glasspole/build/glasspole" ]; then
     echo "==> bundling the staged dependencies"
     mkdir -p "$APPDIR/deps"
+    # THE DEFAULT ENGINE HAS TO BE IN THE IMAGE, or it is not the default for
+    # anyone who did not build this themselves: tad_qemu() picks glasspole
+    # first, finds none inside the AppImage, and every download quietly runs on
+    # qemu instead. It is one 7 MB file that needs no libraries beyond libc —
+    # see the -static-libstdc++ note in glasspole/CMakeLists.txt.
+    if [ -x "$PROJ/glasspole/build/glasspole" ]; then
+        mkdir -p "$APPDIR/deps/bin"
+        cp -a "$PROJ/glasspole/build/glasspole" "$APPDIR/deps/bin/"
+        gpver="$(strings "$PROJ/glasspole/build/glasspole" 2>/dev/null |
+                 grep -Ex '[0-9]{8}-[0-9]{4}' | head -1)"
+        echo "  glasspole      ${gpver:-unversioned}"
+        # A LIBRARY THE HOST MAY NOT HAVE IS NOT A BUNDLE. Refusing here beats
+        # shipping an engine that dies with a linker error on someone else's
+        # machine, which is exactly the failure the image exists to prevent.
+        miss="$(ldd "$PROJ/glasspole/build/glasspole" 2>/dev/null |
+                awk '/not found/ {print $1}')"
+        [ -z "$miss" ] || die "glasspole is missing $miss — rebuild it before packaging"
+        case "$(ldd "$PROJ/glasspole/build/glasspole" 2>/dev/null)" in
+            *libstdc++*) echo "  WARNING: glasspole links libstdc++ dynamically. Rebuild it" ;
+                         echo "           (cmake -S . -B build && ninja -C build) so the" ;
+                         echo "           image does not depend on this machine's C++ runtime." ;;
+        esac
+    else
+        # NOT FATAL, BUT NOT QUIET EITHER. The image still works — tad_qemu()
+        # falls through to the bundled qemu-arm — but it is then a different
+        # program from the one being released, tested and reported on, and the
+        # only clue would have been a compat number that moved for no reason.
+        cat <<'MSG'
+
+  NOTE: no glasspole in glasspole/build, so this image will run on qemu-arm.
+        That is NOT the default configuration any more. To build the engine:
+            cd glasspole && ./fetch-deps.sh && cmake -S . -B build -GNinja
+            ninja -C build
+
+MSG
+    fi
     [ -x "$PROJ/build/deps/bin/qemu-arm" ] && {
         mkdir -p "$APPDIR/deps/bin"
         cp -a "$PROJ/build/deps/bin/qemu-arm" "$APPDIR/deps/bin/"
@@ -196,11 +306,19 @@ if [ -d "$HERE/deps" ]; then
     export TADPOLE_DEPS="$HERE/deps"
 fi
 
-# Neither bundled nor installed is the only remaining way to have no qemu, and
-# it should say so in a window as well as a terminal — someone launching from a
-# desktop icon never sees stderr.
-if [ ! -x "${TADPOLE_DEPS:-}/bin/qemu-arm" ] && ! command -v qemu-arm >/dev/null 2>&1; then
-    MSG="This build of Tadpole does not carry qemu-arm, and this machine has none.
+# NO ENGINE AT ALL is the only remaining way to have nothing to run the guest
+# on, and it should say so in a window as well as a terminal — someone
+# launching from a desktop icon never sees stderr.
+#
+# GLASSPOLE COUNTS. It is what a normal image carries and what tad_qemu() picks
+# first; a build with glasspole and no qemu-arm is complete, and telling that
+# user to install qemu-user would send them after a package Tadpole will not
+# even look at.
+if [ ! -x "${TADPOLE_DEPS:-}/bin/glasspole" ] &&
+   [ ! -x "${TADPOLE_DEPS:-}/bin/qemu-arm" ] &&
+   ! command -v glasspole >/dev/null 2>&1 &&
+   ! command -v qemu-arm  >/dev/null 2>&1; then
+    MSG="This build of Tadpole carries no ARM engine, and this machine has none.
 
 Install your distribution's qemu-user package:
 

@@ -1,90 +1,140 @@
-# Tadpole — status and next steps
+# Tadpole — status
 
-_Updated 2026-07-27._
+_Updated 2026-08-08. Supersedes the 2026-07-27 version entirely._
+
+## What this file is for
+
+`HANDOVER.md` is the engineering log. It is append-only on purpose — findings
+go on the end, nothing is deleted, and an entry that was true in July is still
+sitting there in August next to the one that overturned it. That makes it the
+right place to answer *why is it like this* and the wrong place to answer
+*where are we*.
+
+This file answers the second question only, and it is the one document here
+that is **expected to go stale**. If it disagrees with a later HANDOVER entry,
+HANDOVER wins; then fix this file.
+
+The version it replaces had said "VideoDaemon is the blocker" for twelve days
+after that stopped being true, and a stale status file is worse than none — it
+sends the next session at a bug that was fixed a week ago.
 
 ## Where we are
 
-Milestones M0–M2 are done, M4 (first pixels) is done, M3 (the shim) is ~80%.
-The one thing standing between us and the system UI is a single daemon.
+Tadpole boots the stock system software to its home screen, signs a profile in,
+and launches titles — Flash and native Brio, 2D and 3D, with audio, touch,
+video and host-GPU rendering.
 
 | | state |
 |---|---|
-| Stock firmware 4.6.0.784 obtained + rootfs extracted, verified | done |
+| Stock firmware obtained, rootfs extracted and verified | done |
 | ARM binaries run under qemu-user | done |
-| Device dependency manifest | done — `device-deps.md` |
-| Framebuffer + input shim | done — 3 fb, 6 evdev, real names |
-| Real display output (pixel-exact) | done — `shots/` |
-| Sysroot verified against live hardware | done |
-| All 55 content packages installed into Bulk | done |
-| `AppManager` completes `SetupSystem` | done |
-| **VideoDaemon serves its socket** | **BLOCKED — next** |
-| `AppManager` reaches its main loop / draws UI | not yet |
+| Framebuffer, input, audio, filesystem shim | done |
+| `AppManager` reaches its main loop and draws the UI | done |
+| Profile creation, sign-in, home screen | done |
+| Flash titles | done |
+| Native Brio titles (2D) | done |
+| 3D — geometry, textures, perspective, the skinned player character | done |
+| Host-GPU replay (HLE) | done — ~57 fps against 11.5 software |
+| FMV / the video plane | done |
+| Launching one title directly, with no home screen | done — `TADPOLE_LAUNCH` |
+| Firmware install, online update, setup wizard, AppImage | done |
+| The window turns with the guest — portrait UI, landscape titles | done |
+| 28 of 110 installed titles still fail to launch | **where the work is** |
 
-`./tadpole.sh --logo` works and is interactive. `./tadpole.sh` gets AppManager
-through `SetupSystem` and then dies waiting on VideoDaemon.
+## The old blocker is gone, and here is how to tell
 
-## The blocker
+The previous status said `VideoDaemon` never created its socket and that
+nothing could proceed until it did. Both halves are now false.
 
-`AppManager` logs `DaemonControl socket connect failed ret=-1` and wants
-`/tmp/video_events_socket`. `rcS` starts `VideoDaemon 750 &` alongside it.
+* **The daemon runs and serves.** It binds the AF_UNIX stream socket
+  `/tmp/video_events_socket` and accepts on it — check with `ss -xl | grep
+  video` while a boot is up, and note that two Tadpole instances share that one
+  host path, so a second boot leaves the first daemon listening on an orphaned
+  inode. It was never crashing: it double-forks, and the parent's
+  `exit_group(0)` was being measured as death (HANDOVER 4.7).
+* **There is a four-second reproduction of the whole video path.**
+  `tools/vdplay.py transition` connects to that socket and asks the running
+  daemon to play a system clip. If the socket were absent the script would say
+  so, in those words.
+* **Video reaches the panel.** Sneak Peeks plays its trailers — fb2 is the
+  MLC's YUV420 video plane and it is not always the bottom layer; see the
+  2026-08-07 HANDOVER entry.
 
-Under Tadpole, VideoDaemon prints `VideoDaemon: Started Process`, forks, and
-**both processes call `exit_group(0)`** without ever calling `socket()` or
-`bind()`. It is choosing to quit, not crashing.
-
-Ruled out so far:
-* not a missing shim — it links `libdl.so.0`, which we impersonate
-* not the video assets — `/var/sounds/{Startup,Shutdown,Transition}Video.ogg`
-  were dangling (the shipped symlinks point at `LucyAssets`, a different
-  board; `rcS` repoints them per-platform). Fixed in `setup-sysroot.sh`.
-  VideoDaemon still exits.
-
-Paths it references: `/tmp/{play_trans,splash,ui_ready,vdaemon_play,
-video_events_socket}`, `/flags/nousb`, `/var/sounds/*.ogg`.
-
-## Next steps, in order
-
-**1. Ask the hardware what VideoDaemon actually does.** The device is the
-oracle and we have scripted shell access (`tools/lfsh.py`). With it awake:
+One line survives from that era and **is not evidence of a fault**:
 
 ```
-tools/lfsh.py <ip> "ps"                    # is VideoDaemon even running?
-tools/lfsh.py <ip> "ls -la /tmp /flags"    # which sockets/flags exist live
-tools/lfsh.py <ip> "cat /proc/<pid>/cmdline | tr '\0' ' '"
-tools/lfsh.py <ip> "strace -f -tt -o /tmp/vd.trace VideoDaemon 750"
+[0x0] DaemonControl socket connect failed ret=-1
 ```
 
-A trace of a *working* VideoDaemon, diffed against ours, should say in one
-read what it checks before giving up. This is the highest-value next action
-by a wide margin.
+AppManager logs it in runs where VideoDaemon is up *and* in runs where it was
+never started at all — every direct launch, including the whole compatibility
+sweep, since `tadpole.sh` only starts the daemon in its `ui` mode. Video plays
+either way. Do not reopen this on the strength of that line alone.
 
-**2. Parallel track — bypass AppManager entirely.**
-`/LF/Base/Flash/bin/saplayer` is a standalone Flash Lite player. It links
-`libdl.so.0` (our shim covers it) plus DisplayMPI, EventMPI, ButtonMPI and
-`libflashdidj.so`. Pointing it at a `.swf` could put an interactive Flash app
-on screen without AppManager, VideoDaemon or the Lightning UI. Cheap to try
-and it exercises the whole display+input path end to end.
+## Where the work actually is
 
-**3. Then: AppManager's remaining crash.** Currently a stack-corruption fault
-deep in libc with an unsymbolised two-frame backtrace. Likely a knock-on from
-the failed socket connect, so retest after (1).
+`tools/compat-sweep.sh` launched all 110 installed titles on 2026-08-08 and
+`tools/compat-report.py` turned the run into a page. 75 launch to a real
+screen, 28 crash, 6 draw nothing, 1 draws and then stops.
 
-**4. Fill in the shim as things demand it.** Expect more `ioctl`s once the UI
-runs, and audio (ALSA) at some point.
+**The clustering is the finding, not the list.** The 28 crashes share six fault
+sites:
+
+| | |
+|---|---|
+| 19 | `libuClibc+0x00059920`, SIGABRT — `locale::facet::_S_create_c_locale name not valid` |
+| 3 | `App.so+0x00127c48`, SIGSEGV — one engine build, three titles |
+| 3 | `App.so+0x00071340`, SIGSEGV — likewise |
+| 2 | `libLightningJSON.so`, two nearby offsets — GalleryWidget, StoryGalleryWidget |
+| 1 | `App.so+0x00011480` |
+
+Nineteen titles aborting in one place with one message is one bug. "28 titles
+are broken" and "six fault sites" call for completely different work, which is
+the whole reason the sweep exists rather than a list of names.
+
+**Carry the caveat with the numbers.** Every title in that run was launched
+straight in, with no home screen and no player signed in. A crash means
+"crashed this way", not "crashed", until it has been checked both ways — and
+that matters most for the widgets, since Camera, Gallery and Keyboard are
+exactly the things that would want profile data.
+
+Next, in rough order:
+
+1. **The locale cluster.** One `_S_create_c_locale` abort accounts for 19 of
+   the 28. Nothing else on this list is worth 19 titles.
+2. **Re-run the failures with a profile signed in**, so the caveat above stops
+   being a caveat.
+3. **The two `App.so` trios.** Identical offsets, so each trio is one bug in
+   one shared engine build.
+4. **The remaining GL stubs.** Still no-ops; the shim now names the first hit
+   on each and writes `gl-warnings.log`, so a title says what it wanted rather
+   than merely looking wrong. A stubbed *getter* is the dangerous kind — see
+   the `glGetFixedv` entry in HANDOVER.
 
 ## Technique notes worth remembering
 
-* **No LD_PRELOAD.** uClibc here was built without
+Kept from the previous version because they are still true, and each one costs
+a session to rediscover.
+
+* **`qemu-arm -s 67108864`.** The default 8 MB stack is too small: Brio and
+  Flash Lite recurse deeply through their scene graphs, and both AppManager and
+  saplayer faulted on `str r1, [sp]` at exactly 8 MB below the stack base. One
+  flag took this project from "crashes everywhere" to "runs", and
+  `runtime/run.sh` points here for the reason.
+* **No `LD_PRELOAD`.** This uClibc was built without
   `__LDSO_PRELOAD_ENV_SUPPORT__`. We impersonate a library the target already
   links (`libdl.so.0`, `libz.so.1`) by patching the real one's SONAME to a
-  same-length name and taking its place. Two variants because the display
-  tools link no libdl.
+  same-length name and taking its place. This is also how a title gets launched
+  directly: define `CAppManager::PushApp` and win the lookup.
 * **`qemu-arm -L` cannot create files.** It only redirects paths that already
-  exist, so new files fall through to the host and fail with ENOENT. The shim
-  translates creating opens itself.
+  exist, so a creating `open()`, a `rename()` to a new name, or a `mkdir()`
+  falls through to the host and fails. The shim translates them itself.
 * **Hooking `open()` is not enough.** uClibc's stdio reaches its own open
-  through a hidden alias that never touches the PLT, so `fopen()` is
-  invisible. The shim hooks `fopen`/`fopen64` too.
-* **gdb works**: `qemu-arm -g <port>` + host `gdb -ex 'set architecture arm'`
-  gives real backtraces through the stripped binaries via library symtabs.
-  This found every crash so far.
+  through a hidden alias that never touches the PLT, so `fopen()` is invisible
+  to an interposed `open`. The shim hooks `fopen`/`fopen64` too.
+* **gdb works**: `qemu-arm -g <port>` plus host `gdb -ex 'set architecture arm'`
+  gives real backtraces through stripped binaries via library symtabs. For a
+  crash you did not catch live, `tadpole/shim/tadpole_crash.c` and
+  `tools/crash-triage.py` name the library and offset after the fact.
+* **C++ exceptions unwind correctly** under qemu-user, our shim and the guest's
+  own unwinder — tested, so it is not the explanation for the SIGABRTs above.

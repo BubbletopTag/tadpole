@@ -39,7 +39,7 @@ pytool() { [ -n "$PY" ] && "$PY" "$HERE/pkgtool.py" "$@" 2>/dev/null; }
 
 read_meta() {                      # $1=archive -> meta.inf on stdout
     case "$1" in
-        *.lfp) command -v unzip >/dev/null && { unzip -p "$1" '*meta.inf' 2>/dev/null; return; } ;;
+        *.lfp) command -v unzip >/dev/null && { unzip -p "$1" 'meta.inf' '*/meta.inf' 2>/dev/null; return; } ;;
         *.lf2) command -v bzcat >/dev/null && { bzcat "$1" 2>/dev/null | tar xO --wildcards '*meta.inf' 2>/dev/null; return; } ;;
     esac
     pytool meta "$1"

@@ -7,31 +7,52 @@
 #   ./tadpole.sh --shell         ARM shell inside the guest, no viewer
 #   ./tadpole.sh --logo          draw the boot logo (quick "is it alive" test)
 #   ./tadpole.sh --app NAME      launch an installed app by name or PackageID
+#                                (native titles too — straight in, no home screen)
 #   ./tadpole.sh --list           list installed apps
 #   ./tadpole.sh --run PROG ...  run any guest binary with the viewer up
 #   ./tadpole.sh --no-viewer     skip the SDL window
 #   ./tadpole.sh --debug         verbose shim logging
 #   ./tadpole.sh --touch-debug   red crosshair where the viewer thinks you tapped
 #   TADPOLE_GL=0 ./tadpole.sh    use the stock GPU stack (titles will assert)
-#   ./tadpole.sh -r 90 ...       rotate the display (portrait titles)
+#   ./tadpole.sh -r 270 ...      start at a fixed rotation. The window turns
+#                                with the guest on its own now — portrait for
+#                                the LeapPad UI, landscape for a title — so
+#                                this is a starting point, not a setting.
+#                                Untick Options -> Graphics -> Turn with the
+#                                app to make it stick.
+#
+# Runs on Glasspole, this project's own ARM JIT, whenever one is built or
+# bundled; qemu-arm is the fallback. TADPOLE_QEMU="$(command -v qemu-arm)"
+# puts a single run back on qemu.
 #
 # Viewer controls:  arrows = D-pad, Z/X = A/B, Home = menu, Esc = back,
-#                   mouse click/drag = stylus, Ctrl+Q = quit.
+#                   mouse click/drag = stylus, Ctrl+R = turn, Ctrl+Q = quit.
 
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# The bundled qemu-arm if Tadpole has one, the host's otherwise. A user who
-# installed qemu-user themselves keeps working; a user who did nothing at all
-# gets the static copy that ships with the AppImage.
+# WHICH ENGINE RUNS THE GUEST. Glasspole if this checkout has one built, the
+# bundled or installed qemu-arm otherwise — tad_qemu() owns that order and the
+# reasoning behind it. A user who installed qemu-user themselves keeps working
+# either way; nothing here needs to know which of the two it got.
 PROJ="$HERE"
 . "$HERE/tools/lib-deps.sh"
 QEMU="$(tad_qemu || true)"
 if [ -z "$QEMU" ]; then
-    echo "tadpole: no qemu-arm." >&2
-    echo "  ./tools/fetch-deps.sh   stages one into build/deps (installs nothing)" >&2
+    echo "tadpole: no ARM engine — neither glasspole nor qemu-arm." >&2
+    echo "  cd glasspole && ./fetch-deps.sh && cmake -S . -B build -GNinja && ninja -C build" >&2
+    echo "  ./tools/fetch-deps.sh   stages a qemu-arm into build/deps instead" >&2
     echo "  or install your distribution's qemu-user package" >&2
     exit 1
 fi
+# TELL THE REST OF TADPOLE WHAT IT IS ACTUALLY RUNNING ON.
+#
+# The viewer needs this for two things it cannot work out for itself: the
+# straggler sweep, which only kills processes whose comm matches the engine
+# that was launched, and the About box, which used to name qemu unconditionally
+# and would now be wrong for most people. It was already read from here when
+# the user set it by hand; setting it ourselves means the answer no longer
+# depends on whether they did.
+export TADPOLE_QEMU="$QEMU"
 # DISCOVER the rootfs rather than hardcoding one firmware version. Whatever
 # install-firmware.sh extracted lands under rootfs/<version>/…/ubi_rfs, and the
 # version is whatever the user's own device shipped with. emmc_rfs is the same
@@ -83,6 +104,16 @@ fi
 : "${TADPOLE_GL:=1}"
 export TADPOLE_GL
 
+# WHICH LOGO. rcS picks by platform_family — Lucy-Boot-logo.png on a LeapsterGS,
+# Valencia-Boot-logoCW.png on everything else, this device included.
+#
+# "CW" READS AS SIDEWAYS AND IS CORRECT. The panel is portrait, so everything
+# the device draws is stored a quarter turn from how it is held — the home
+# screen and every title as much as this logo, which is why shots/01-boot-logo.png
+# has always looked like that. Presentation is the viewer's `-r` and nothing
+# else's, so this is drawn exactly as stored, same as the guest's own output.
+BOOTLOGO=/var/screens/Valencia-Boot-logoCW.png
+
 # HLE — HOST-GPU REPLAY — ON BY DEFAULT, read from the same config file.
 #
 # This used to be opt-in, and the only thing that set it was tools/probe-race.sh.
@@ -92,14 +123,27 @@ export TADPOLE_GL
 # every "how does this title look" judgement made from a plain launch was
 # judging the fallback. Same trap as TADPOLE_GL above, same fix.
 #
-# TADPOLE_GL_HLE=0 forces the software rasteriser, which is still how you tell
-# whether a rendering fault is in the shared GL core or only in the replay. The
-# shim tests for the variable's PRESENCE, so "off" has to mean unset, not 0.
-if [ -z "${TADPOLE_GL_HLE:-}" ] && [ -r "$UICFG" ]; then
-    TADPOLE_GL_HLE="$(awk '$1=="gl_hle"{print $2}' "$UICFG" | tail -1)"
+# AND NOW IT IS THE ONLY PATH. The software rasteriser is deprecated: it is
+# years behind the GL core it shares, several times slower, and it cannot
+# express state the titles rely on — it samples one texture unit and ignores the
+# blend factors. Two real bugs this month were invisible in software for exactly
+# that reason. So the config checkbox no longer turns it off (the front end
+# shows it ticked and greyed), and a guest that asks for replay and cannot get
+# it now STOPS rather than quietly rendering the rest of the session wrongly.
+#
+# TADPOLE_GL_SOFTWARE=1 is the way back, and it has to be asked for by name:
+#
+#     TADPOLE_GL_SOFTWARE=1 ./tadpole.sh --app X
+#
+# It is still the right tool for one job — telling whether a rendering fault is
+# in the shared GL core or only in the replay — which is why it is kept at all.
+if [ -n "${TADPOLE_GL_SOFTWARE:-}" ] && [ "${TADPOLE_GL_SOFTWARE}" != 0 ]; then
+    export TADPOLE_GL_SOFTWARE
+    unset TADPOLE_GL_HLE
+else
+    unset TADPOLE_GL_SOFTWARE
+    TADPOLE_GL_HLE=1; export TADPOLE_GL_HLE
 fi
-: "${TADPOLE_GL_HLE:=1}"
-if [ "$TADPOLE_GL_HLE" = 0 ]; then unset TADPOLE_GL_HLE; else export TADPOLE_GL_HLE; fi
 
 if [ "${DEV_HAS_QT:-0}" = 1 ]; then
     # EXACTLY ONE IMPERSONATION VARIANT, AND THIS IS WHY.
@@ -135,7 +179,10 @@ fi
 VIEWER="$HERE/tadpole/viewer/tadpole-view"
 export TADPOLE_DIR="${TADPOLE_DIR:-/tmp/tadpole}"
 
-use_viewer=1; debug=0; mode=front; scale=2; rotate=0; prog=""; appname=""; declare -a progargs=()
+# The command line as typed, kept before the parser shifts it away, so an error
+# message can hand back something that can actually be pasted.
+ORIG_ARGS=("$@")
+use_viewer=1; debug=0; mode=front; scale=2; rotate=""; prog=""; appname=""; declare -a progargs=()
 while [ $# -gt 0 ]; do
     case "$1" in
         --boot)      mode=ui ;;          # start the system menu immediately
@@ -155,12 +202,45 @@ while [ $# -gt 0 ]; do
         # measure.
         --touch-debug) export TADPOLE_TOUCH_DEBUG=1 ;;
         -s)          shift; scale="${1:-2}" ;;
-        -r)          shift; rotate="${1:-0}" ;;   # 90 for portrait titles
+        -r)          shift; rotate="${1:-0}" ;;   # 270 = the portrait UI
         --)          shift; progargs=("$@"); break ;;
         *)           progargs+=("$1") ;;
     esac
     shift || true
 done
+
+# NO VIEWER MEANS NO HOST GPU, AND THEREFORE NO RENDERING WORTH TRUSTING.
+#
+# The replayer lives in the viewer, so `--no-viewer` cannot do host-GPU replay
+# by construction. It used to fall back to the software rasteriser silently,
+# which is how every compat verdict in this repository came to be recorded on a
+# path that cannot multitexture and ignores the blend factors — the reason two
+# rendering bugs this month were invisible to the sweep that was supposed to
+# find them.
+#
+# So say it here, once, in the launcher, rather than letting the guest abort a
+# few seconds later with less context. Modes that never render are exempt:
+# --list and --shell draw nothing.
+#
+# ALSO EXEMPT: TADPOLE_SUPERVISED. tadpole-view sets it when IT is the one
+# invoking us — "Run System Menu" and friends run us with --no-viewer because
+# the window we would otherwise open is the one already on screen, not
+# because nobody is watching. Real host-GPU replay happens there, same as it
+# would through our own viewer. Without this, the front end's own boot path
+# hit the same refusal meant for genuinely headless callers and could not
+# start the guest at all.
+if [ "$use_viewer" = 0 ] && [ "$mode" != list ] && [ "$mode" != shell ] \
+   && [ -z "${TADPOLE_SUPERVISED:-}" ] \
+   && { [ -z "${TADPOLE_GL_SOFTWARE:-}" ] || [ "${TADPOLE_GL_SOFTWARE}" = 0 ]; }; then
+    echo "tadpole: --no-viewer has no host GPU to replay to, and the software" >&2
+    echo "  rasteriser is deprecated — it cannot express multitexturing or the" >&2
+    echo "  blend factors, so what it draws is not what the device draws." >&2
+    echo "" >&2
+    echo "  To render for real, drop --no-viewer." >&2
+    echo "  To use the software rasteriser deliberately, ask for it:" >&2
+    echo "      TADPOLE_GL_SOFTWARE=1 $0 ${ORIG_ARGS[*]}" >&2
+    exit 1
+fi
 
 # THE FRONT END MUST START WITHOUT SYSTEM FILES. That is the whole point of the
 # setup wizard: a first-time user has no firmware yet, and dying here with a
@@ -327,6 +407,24 @@ if [ -n "$LOCK" ]; then
     trap cleanup_lock EXIT
 fi
 
+# WHERE CRASHES ARE KEPT.
+#
+# One dated directory per run, outside /tmp, so a crash is still there tomorrow
+# and two of them can be compared. The shim writes crash.log into it; the
+# viewer drops the tail of the guest log beside it when a guest dies having
+# written one. Overridable so a soak run can point every iteration at one place.
+#
+# XDG_STATE_HOME is the right variable for this: it is for data that should
+# persist between restarts but is not something the user edits or would miss.
+# The no-auto-power-off flag, for sysroots built before it existed.
+# setup-sysroot.sh writes this, but an existing install never re-runs it, and
+# an update that only helps people who reinstall is not much of an update.
+[ -d "$SYSROOT/flags" ] && [ ! -e "$SYSROOT/flags/poweron" ] && \
+    : > "$SYSROOT/flags/poweron" 2>/dev/null
+
+CRASHDIR="${TADPOLE_CRASHDIR:-${XDG_STATE_HOME:-$HOME/.local/state}/tadpole/crashes/$(date +%Y%m%d-%H%M%S)}"
+mkdir -p "$CRASHDIR" 2>/dev/null || CRASHDIR="$TADPOLE_DIR"
+export TADPOLE_CRASHDIR="$CRASHDIR"
 # Per-device guest environment (DEV_ENV in the profile), as qemu -E arguments.
 # The device sets these in /etc/profile; we exec the shell binary directly and
 # never source one, so they have to be handed over explicitly.
@@ -389,6 +487,18 @@ guest() {
       # TADPOLE_STRACE=1 prints every GUEST SYSCALL. Needed because the shim
       # only sees open/fopen — stat, access and opendir bypass it, so "the
       # guest never opened X" is NOT a conclusion the shim log can support.
+      # NO CORE DUMPS BY DEFAULT.
+      #
+      # A crashing guest drops a qemu core into its cwd, which is the sysroot.
+      # 87 of them had accumulated here — 7.6 GB — and none had ever been
+      # opened, because the shim writes its own symbolised report and gdb
+      # cannot read these anyway: every r-x segment comes out with
+      # p_filesz == 0 and there is no NT_FILE note to map them back (see
+      # tadpole_crash.c). Running many instances at once would multiply that
+      # by the worker count.
+      #
+      # TADPOLE_CORES=1 restores them for anyone who does want to try.
+      [ -n "${TADPOLE_CORES:-}" ] || ulimit -c 0 2>/dev/null || true
       exec "$QEMU" -s 67108864 -L "$SYSROOT" ${TADPOLE_STRACE:+-strace} \
            ${TSLIB_ARGS[@]+"${TSLIB_ARGS[@]}"} \
            -E LD_LIBRARY_PATH="$LIBS" \
@@ -400,25 +510,92 @@ guest() {
            ${DEV_ENV_ARGS[@]+"${DEV_ENV_ARGS[@]}"} \
            $([ "$debug" = 1 ] && echo "-E TADPOLE_DEBUG=1") \
            ${TADPOLE_LOG:+-E TADPOLE_LOG="$TADPOLE_LOG"} \
+           -E TADPOLE_CRASHDIR="$CRASHDIR" \
            "$bin" "$@" )
 }
 
+# THIS USED TO DRAW THE BOOT LOGO HERE, and the only reason nobody minded is
+# that it never worked.
+#
 # The shim creates the framebuffer and state files on first open, and the
-# viewer must be able to map them before it starts. Draw the boot logo to do
-# it — the real device does exactly this from rcS, so it doubles as a splash.
-# (Must be a binary that loads a shim variant: imager-fb pulls in libz.)
-if [ ! -e "$TADPOLE_DIR/state.bin" ]; then
-    guest /usr/bin/imager-fb /dev/fb0 "$DEV_SPLASH" \
-        >/dev/null 2>&1 || true
-fi
+# viewer once had to map them before it started — so this ran imager-fb on the
+# logo to bring them into being, and the picture was a bonus splash. Two things
+# have changed since. The viewer retries try_map() every frame until it
+# succeeds (see the note by that call), so nothing needs the arena to exist
+# before a guest does; and imager-fb could not resolve __aeabi_uidiv against
+# our shim's libz, so for as long as this line has existed it drew nothing,
+# created nothing, and was ignored by the `|| true`.
+#
+# Fixing the shim made it work — which meant the front end sat at rest showing
+# LeapFrog branding instead of its own idle screen, and a cold Run System Menu
+# flashed a logo at people who have Fast Boot ticked. Neither is something to
+# fix twice, so the vestigial step is gone: the first guest creates the arena,
+# the viewer maps it when it appears, and the boot logo is drawn by the one
+# thing that is supposed to draw it — viewer/tadpole_boot.c, when asked.
 
 viewer_pid=""
 if [ "$use_viewer" = 1 ] && [ -x "$VIEWER" ]; then
-    "$VIEWER" -s "$scale" -r "$rotate" -d "$TADPOLE_DIR" &
+    # -r ONLY IF ASKED FOR. It used to be passed always, defaulting to 0,
+    # which meant starting from this script silently overrode the orientation
+    # saved in ui.cfg — and now would also override the window's own idea of
+    # which way up the guest is drawing before the guest has said anything.
+    "$VIEWER" -s "$scale" ${rotate:+-r "$rotate"} -d "$TADPOLE_DIR" &
     viewer_pid=$!
     trap 'kill $viewer_pid 2>/dev/null' EXIT INT TERM
     sleep 0.5
 fi
+
+# THE CONNECT NAG, ANSWERED THE WAY THE DEVICE ANSWERS IT.
+#
+# "Connect to LeapFrog Connect to get the most out of your LeapPad" goes up on
+# the way to the home screen, every boot, and there is nothing behind it here:
+# the service it wants closed years ago, and it is one more tap between a user
+# and their games. The device's own switch for it lives in Parent Settings ->
+# connection nag, and all that switch does is
+#
+#     _global._uiData._allProfileUIData.ConnectionReminders = <bool>
+#
+# which lands in the ALL-profiles UIData.json. HomePickerState::CheckForConnectNag
+# reads it and, when it is false, returns without pushing ConnectNag.swf —
+# measured, headless, by booting with the field set and finding the trace line
+# for the check present and the push absent.
+#
+# So Tadpole writes the same field the device would, at every launch, from the
+# front end's setting. Default off; Options -> System Settings turns it back on
+# for anyone who wants the device's behaviour exactly.
+#
+# THE PACKAGE DIRECTORY IS READ, NOT GUESSED: the LPAD UI names itself in
+# /LF/Base/LPAD/meta.inf (PackageID="PAD2-0x1F1E0002-100000" on a LeapPad2),
+# and that is the directory its UI data sits in. On a device that has never
+# booted there is no such file yet, so it is created — and if this ever met a
+# system whose id we read wrongly, AppManager would simply make its own and the
+# nag would show once more before the next launch caught it.
+connect_nag="$(awk '$1=="connect_nag"{print $2}' "$UICFG" 2>/dev/null | tail -1)"
+: "${connect_nag:=0}"
+[ "$connect_nag" = 0 ] && want_reminders=false || want_reminders=true
+set_connect_reminders() {
+    local dir f pkg
+    dir="$SYSROOT/LF/Bulk/Data/Local/All"
+    [ -d "$SYSROOT/LF/Base/LPAD" ] || return 0     # no firmware installed yet
+    for f in "$dir"/*/UIData.json; do
+        [ -f "$f" ] || continue
+        if grep -q '"ConnectionReminders"' "$f"; then
+            sed -i "s/\"ConnectionReminders\"[[:space:]]*:[[:space:]]*[a-z]*/\"ConnectionReminders\": $want_reminders/" "$f"
+        elif grep -q '^[[:space:]]*{[[:space:]]*}[[:space:]]*$' "$f"; then
+            printf '{"ConnectionReminders": %s}\n' "$want_reminders" > "$f"
+        else
+            sed -i "s/}[[:space:]]*$/,\"ConnectionReminders\": $want_reminders}/" "$f"
+        fi
+        found=1
+    done
+    [ -n "${found:-}" ] && return 0
+    pkg="$(grep -oE 'PackageID="[^"]*"' "$SYSROOT/LF/Base/LPAD/meta.inf" 2>/dev/null |
+           head -1 | cut -d\" -f2)"
+    [ -n "$pkg" ] || return 0
+    mkdir -p "$dir/$pkg" 2>/dev/null || return 0
+    printf '{"ConnectionReminders": %s}\n' "$want_reminders" > "$dir/$pkg/UIData.json"
+}
+set_connect_reminders
 
 PF="$SYSROOT/LF/Bulk/ProgramFiles"
 
@@ -464,9 +641,39 @@ case "$mode" in
                 echo "=== $name — $guestpath ==="
                 guest /LF/Base/Flash/bin/saplayer "$guestpath" ;;
             *)
-                echo "$name uses a native entry point ($entry)." >&2
-                echo "Native Brio apps need AppManager, which is not up yet." >&2
-                exit 1 ;;
+                # A NATIVE TITLE. It cannot be exec'd — CreateApp has to be
+                # called by CAppManager — so hand it to AppManager, which takes
+                # the app as argv[1] and the player as argv[2].
+                echo "=== $name — $guestpath (direct) ==="
+                # SIGN A PLAYER IN, the way the home screen would.
+                #
+                # CAppManager::Run reads argv[2] as a player ID and calls
+                # CSystem::SetCurrentPlayerID with it; with no argument there
+                # is no current player, and anything that reads profile data
+                # gets nothing back. That is not a hypothetical: GalleryWidget
+                # dereferenced the empty result and segfaulted in
+                # LTM::Value::asMap(), and it stops doing so the moment a
+                # player is set. Launching straight into a title should differ
+                # from the home screen in the steps it skips, not in who is
+                # playing.
+                #
+                # The first real profile directory, since a device that has
+                # been set up has at least one. TADPOLE_PLAYER overrides.
+                pid="${TADPOLE_PLAYER:-}"
+                if [ -z "$pid" ]; then
+                    for cand in "$SYSROOT"/LF/Bulk/Data/Local/[0-9]*; do
+                        [ -d "$cand" ] || continue
+                        pid="$(basename "$cand")"; break
+                    done
+                fi
+                : "${pid:=0}"
+                echo "    player $pid"
+                # AppManager TAKES THE APP AS argv[1] and the player as argv[2].
+                # CAppManager::Run only falls back to pushing LPAD/main.swf
+                # when it is given nothing to run, so passing a path both
+                # launches the title and skips the home screen — no shim hook,
+                # no substitution, no reading anyone else's ABI.
+                guest /LF/Base/bin/AppManager "$guestpath" "$pid" ;;
         esac ;;
     shell)
         # A SHELL THAT ACTUALLY LOOKS AT THE GUEST.
@@ -505,7 +712,7 @@ case "$mode" in
             guest /bin/busybox $line
         done ;;
     logo)
-        guest /usr/bin/imager-fb /dev/fb0 "$DEV_SPLASH"
+        guest /usr/bin/imager-fb /dev/fb0 "$BOOTLOGO"
         echo "logo drawn to $TADPOLE_DIR/fb0.bin"
         [ -n "$viewer_pid" ] && { echo "viewer showing it; Ctrl+C to stop"; wait $viewer_pid; } ;;
     run)

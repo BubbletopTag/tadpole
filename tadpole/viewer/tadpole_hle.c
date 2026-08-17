@@ -25,7 +25,6 @@
  *    the conversion in one place; the cost is a per-draw copy of a few hundred
  *    vertices, which is nothing next to the 78 ms it replaces.
  */
-#define GL_GLEXT_PROTOTYPES 1
 #include <SDL.h>
 #include <SDL_opengl.h>
 #include <stdio.h>
@@ -33,19 +32,128 @@
 #include <string.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/mman.h>
+#ifndef _WIN32
+#include <sys/mman.h>   /* the shared GL ring; see hle_host_init */
+#endif
 
 #include "../shim/tadpole_glcmd.h"
 #include "tadpole_hle.h"
+
+/* ---- OpenGL past 1.1, resolved at runtime -------------------------------
+ *
+ * Mesa's libGL exports every entry point, which is why a GL_GLEXT_PROTOTYPES
+ * build ever linked. Windows' opengl32.dll exports only OpenGL 1.1;
+ * glActiveTexture and the whole framebuffer-object family live behind
+ * wglGetProcAddress and do not link at all. So the fourteen post-1.1 entry
+ * points this file uses are fetched through SDL_GL_GetProcAddress once the
+ * context exists — on every platform, because a driver that cannot supply one
+ * (Windows' GDI OpenGL-1.1 fallback) should mean "HLE unavailable; software
+ * raster", not a link error on somebody else's machine. The PFN typedefs come
+ * from SDL_opengl_glext.h.
+ *
+ * Everything else this file calls is core 1.1 and binds at link time. A NEW
+ * call past 1.1 must be added to the table, the defines and gl_resolve()
+ * together — and the compiler enforces the first: without GL_GLEXT_PROTOTYPES
+ * there is no prototype for it to quietly fall back on. */
+/* OUR OWN TYPEDEF, because this one cannot be relied on to exist. Mesa's
+ * GL/gl.h defines GL_VERSION_1_3 before SDL_opengl_glext.h is reached, so that
+ * header skips its whole 1.3 block — the block holding
+ * PFNGLCLIENTACTIVETEXTUREPROC — while GL/gl.h itself declares a bare
+ * glClientActiveTexture prototype and no function-pointer type to go with it.
+ * Naming it ourselves sidesteps the question of which header won.
+ *
+ * It stays behind the resolver rather than being called directly for the reason
+ * in the comment above: glClientActiveTexture is GL 1.3, Windows' opengl32.dll
+ * exports 1.1, and a direct call would not link there. */
+typedef void (APIENTRYP tad_clientactivetexture_fn)(GLenum texture);
+
+static struct {
+	PFNGLACTIVETEXTUREPROC                  ActiveTexture;
+	/* The CLIENT-side twin of ActiveTexture: selects which unit
+	 * glTexCoordPointer and glEnable/DisableClientState(GL_TEXTURE_COORD_ARRAY)
+	 * address. Needed since the guest started sending a second coordinate set —
+	 * see setup_arrays(). */
+	tad_clientactivetexture_fn              ClientActiveTexture;
+	PFNGLGENFRAMEBUFFERSPROC                GenFramebuffers;
+	PFNGLBINDFRAMEBUFFERPROC                BindFramebuffer;
+	PFNGLDELETEFRAMEBUFFERSPROC             DeleteFramebuffers;
+	PFNGLGENRENDERBUFFERSPROC               GenRenderbuffers;
+	PFNGLBINDRENDERBUFFERPROC               BindRenderbuffer;
+	PFNGLDELETERENDERBUFFERSPROC            DeleteRenderbuffers;
+	PFNGLRENDERBUFFERSTORAGEPROC            RenderbufferStorage;
+	PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC RenderbufferStorageMultisample;
+	PFNGLFRAMEBUFFERTEXTURE2DPROC           FramebufferTexture2D;
+	PFNGLFRAMEBUFFERRENDERBUFFERPROC        FramebufferRenderbuffer;
+	PFNGLCHECKFRAMEBUFFERSTATUSPROC         CheckFramebufferStatus;
+	PFNGLBLITFRAMEBUFFERPROC                BlitFramebuffer;
+} g_gl;
+
+/* Call sites keep the real GL names; these defines are the loader's whole
+ * footprint on the rest of the file. */
+#define glActiveTexture                  g_gl.ActiveTexture
+#define glGenFramebuffers                g_gl.GenFramebuffers
+#define glBindFramebuffer                g_gl.BindFramebuffer
+#define glDeleteFramebuffers             g_gl.DeleteFramebuffers
+#define glGenRenderbuffers               g_gl.GenRenderbuffers
+#define glBindRenderbuffer               g_gl.BindRenderbuffer
+#define glDeleteRenderbuffers            g_gl.DeleteRenderbuffers
+#define glRenderbufferStorage            g_gl.RenderbufferStorage
+#define glRenderbufferStorageMultisample g_gl.RenderbufferStorageMultisample
+#define glFramebufferTexture2D           g_gl.FramebufferTexture2D
+#define glFramebufferRenderbuffer        g_gl.FramebufferRenderbuffer
+#define glCheckFramebufferStatus         g_gl.CheckFramebufferStatus
+#define glBlitFramebuffer                g_gl.BlitFramebuffer
+
+/* Fill the table against the CURRENT context. Zero on any miss, and every
+ * miss is named: one absent entry point usually means a whole family is
+ * absent, and the full list says which at a glance. */
+static int gl_resolve(void)
+{
+	const struct { const char *name; void **slot; } tab[] = {
+		{ "glActiveTexture",         (void **)&g_gl.ActiveTexture },
+		{ "glClientActiveTexture",   (void **)&g_gl.ClientActiveTexture },
+		{ "glGenFramebuffers",       (void **)&g_gl.GenFramebuffers },
+		{ "glBindFramebuffer",       (void **)&g_gl.BindFramebuffer },
+		{ "glDeleteFramebuffers",    (void **)&g_gl.DeleteFramebuffers },
+		{ "glGenRenderbuffers",      (void **)&g_gl.GenRenderbuffers },
+		{ "glBindRenderbuffer",      (void **)&g_gl.BindRenderbuffer },
+		{ "glDeleteRenderbuffers",   (void **)&g_gl.DeleteRenderbuffers },
+		{ "glRenderbufferStorage",   (void **)&g_gl.RenderbufferStorage },
+		{ "glRenderbufferStorageMultisample",
+		                             (void **)&g_gl.RenderbufferStorageMultisample },
+		{ "glFramebufferTexture2D",  (void **)&g_gl.FramebufferTexture2D },
+		{ "glFramebufferRenderbuffer",
+		                             (void **)&g_gl.FramebufferRenderbuffer },
+		{ "glCheckFramebufferStatus",(void **)&g_gl.CheckFramebufferStatus },
+		{ "glBlitFramebuffer",       (void **)&g_gl.BlitFramebuffer },
+	};
+	unsigned int i;
+	int missing = 0;
+
+	for (i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+		*tab[i].slot = SDL_GL_GetProcAddress(tab[i].name);
+		if (!*tab[i].slot) {
+			fprintf(stderr, "hle: %s did not resolve — driver stops at"
+			        " OpenGL 1.1?\n", tab[i].name);
+			missing++;
+		}
+	}
+	return missing == 0;
+}
 
 /* GLES1 enums that differ from, or are absent on, the desktop. */
 #define GLES_FIXED  0x140C
 
 /* Indexed by GUEST texture name, so this MUST stay larger than the guest's
- * MAX_TEXS in tadpole_gles_core.c (512). A name at or above this is dropped,
- * and a dropped texture draws black while raising no GL error — silent, and
- * indistinguishable from a texture that simply never arrived. */
-#define MAX_TEX  576
+ * MAX_TEXS in tadpole_gles_core.c — names run 1..MAX_TEXS, and the guard here
+ * is `name >= MAX_TEX`. A name at or above this is dropped, and a dropped
+ * texture draws black while raising no GL error — silent, and
+ * indistinguishable from a texture that simply never arrived.
+ *
+ * Raised with MAX_TEXS (32767) when Sonic ran out of texture names and drew
+ * white tiles. Costs 5 bytes a name here — a host name and a have-flag — so
+ * about 160 KB, and only the once-per-context-teardown reset walks all of it. */
+#define MAX_TEX  32768
 /* Indexed by GUEST buffer name, so it must exceed both the guest's MAX_BUFS
  * (2048) and the reserved client-array names HLE_CLIENT_* (4000..4003). A name
  * at or above this is dropped, and a dropped ELEMENT buffer makes the host skip
@@ -603,6 +711,7 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	void *m;
 
 	g_w = w; g_h = h;
+#ifndef _WIN32
 	snprintf(path, sizeof(path), "%s/glcmd.bin", dir);
 	fd = open(path, O_RDWR | O_CREAT, 0666);
 	if (fd < 0) { fprintf(stderr, "hle: cannot open %s\n", path); return 0; }
@@ -610,6 +719,36 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	m = mmap(NULL, TADGL_FILE_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 	close(fd);
 	if (m == MAP_FAILED) { fprintf(stderr, "hle: cannot map glcmd.bin\n"); return 0; }
+#else
+	/* The ring is SHARED with the guest's GL shim, which maps glcmd.bin as a
+	 * real view now — so the viewer maps the same file, and the two alias
+	 * exactly as MAP_SHARED does on Linux. (A calloc'd private buffer here
+	 * was the STALL: the guest wrote GL commands to the file while the
+	 * replayer read an empty copy nobody filled.) Own address space, any
+	 * address, plain MapViewOfFile — none of the placement gymnastics the
+	 * emulator's in-reservation views needed. */
+	{
+		HANDLE fh, mh;
+		(void)fd;
+		snprintf(path, sizeof(path), "%s/glcmd.bin", dir);
+		fh = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+		                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		                 NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (fh == INVALID_HANDLE_VALUE) {
+			fprintf(stderr, "hle: cannot open %s\n", path); return 0;
+		}
+		/* Size it so the mapping covers the whole ring even if we win the
+		 * race to create the file before the guest does. */
+		mh = CreateFileMappingA(fh, NULL, PAGE_READWRITE,
+		                        (DWORD)((uint64_t)TADGL_FILE_BYTES >> 32),
+		                        (DWORD)(TADGL_FILE_BYTES & 0xffffffffu), NULL);
+		CloseHandle(fh);
+		if (!mh) { fprintf(stderr, "hle: cannot map glcmd.bin\n"); return 0; }
+		m = MapViewOfFile(mh, FILE_MAP_ALL_ACCESS, 0, 0, TADGL_FILE_BYTES);
+		CloseHandle(mh);
+		if (!m) { fprintf(stderr, "hle: cannot view glcmd.bin\n"); return 0; }
+	}
+#endif
 
 	g_ring = m;
 	g_data = TADGL_DATA(g_ring);
@@ -629,6 +768,10 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	if (!g_ctx) { fprintf(stderr, "hle: no GL context: %s\n", SDL_GetError()); return 0; }
 	SDL_GL_SetSwapInterval(0);
 
+	if (!gl_resolve()) {
+		fprintf(stderr, "hle: OpenGL past 1.1 unavailable on this driver\n");
+		return 0;
+	}
 	if (!make_target(w, h, samples, scale)) {
 		fprintf(stderr, "hle: incomplete framebuffer object\n");
 		return 0;
@@ -795,17 +938,38 @@ static void want_tex_if_missing(void)
 		g_notex_logged++;
 }
 
+/* WHICH TEXTURE UNIT A SLOT'S CLIENT STATE BELONGS TO, or -1 for the arrays
+ * that are not per-unit. GL_TEXTURE_COORD_ARRAY's enable bit, and the pointer
+ * behind it, live on the unit selected by glClientActiveTexture; vertex, colour
+ * and normal have exactly one each and must not be touched by that selector. */
+static int slot_texunit(int slot)
+{
+	if (slot == TADGL_ARR_TEXCOORD)  return 0;
+	if (slot == TADGL_ARR_TEXCOORD1) return 1;
+	return -1;
+}
+
 static void setup_arrays(unsigned int nverts)
 {
 	static const GLenum client[TADGL_ARR_COUNT] = {
 		GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_TEXTURE_COORD_ARRAY,
-		GL_NORMAL_ARRAY };
+		GL_NORMAL_ARRAY, GL_TEXTURE_COORD_ARRAY };
 	int i;
 
 	for (i = 0; i < TADGL_ARR_COUNT; i++) {
 		const void *p = bind_array(i, nverts);
 		struct harr *a = &g_arr[i];
 		unsigned int stride;
+		int unit = slot_texunit(i);
+
+		/* SELECT THE UNIT BEFORE TOUCHING ITS CLIENT STATE. Without this every
+		 * glTexCoordPointer landed on whichever unit was selected last — in
+		 * practice unit 0, forever — so a title with two coordinate sets had
+		 * both writes hit one unit and the second silently won. That is what put
+		 * a pink patch over Pet Pals 2's dogs: unit 0 held the 256x256 skin and
+		 * was handed the 512x512 eye atlas's coordinates. */
+		if (unit >= 0 && g_gl.ClientActiveTexture)
+			g_gl.ClientActiveTexture(GL_TEXTURE0 + (GLenum)unit);
 
 		if (!p) {
 			if (i == TADGL_ARR_VERTEX) g_de_noarr++;   /* nothing to draw from */
@@ -825,7 +989,10 @@ static void setup_arrays(unsigned int nverts)
 			glColorPointer(a->size, a->type == GLES_FIXED ? GL_FLOAT : a->type,
 			               (GLsizei)stride, p);
 			break;
+		/* Both texcoord slots take the same call; they differ only in the unit
+		 * selected above. */
 		case TADGL_ARR_TEXCOORD:
+		case TADGL_ARR_TEXCOORD1:
 			glTexCoordPointer(a->size, a->type == GLES_FIXED ? GL_FLOAT : a->type,
 			                  (GLsizei)stride, p);
 			break;
@@ -835,6 +1002,12 @@ static void setup_arrays(unsigned int nverts)
 			break;
 		}
 	}
+	/* HAND THE CLIENT SELECTOR BACK TO UNIT 0. Nothing else in this file sets
+	 * it, so leaving it on unit 1 would make the next draw's first
+	 * glTexCoordPointer land on the wrong unit — the same class of leak as the
+	 * matrix mode in skin_end(). */
+	if (g_gl.ClientActiveTexture)
+		g_gl.ClientActiveTexture(GL_TEXTURE0);
 }
 
 /* ---- the replay loop ---------------------------------------------------- */

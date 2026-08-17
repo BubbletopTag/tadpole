@@ -41,6 +41,14 @@ file. Only the control path (ioctl) is emulated.
 
 ## 2. Current state
 
+**THIS SECTION IS FROM THE FIRST WEEK AND IS KEPT AS WRITTEN.** This file is a
+log: entries go on the end and nothing is deleted, so the oldest account of
+"where we are" is also the first thing a cold reader meets. It has been
+overtaken many times over by the sections below — native titles run, 3D and FMV
+render, titles launch directly. For today's state read `docs/STATUS.md`, which
+is short and is the one file here allowed to go stale; for how any of it works,
+keep reading from section 4.
+
 **Working**
 - Stock firmware 4.6.0.784 obtained via LFConnect; rootfs extracted and
   verified complete against its own `erootfs.md5` manifest (1611 files).
@@ -593,6 +601,12 @@ A standalone launcher would mean reimplementing AppManager's app-host: init
 Brio, dlopen, call `CreateApp`, drive the returned object's lifecycle. The
 vtable would have to be reversed from `libLightningBase.so`. Feasible, but a
 project in itself.
+
+**Solved without building any of that** — see "Native Brio titles can be
+launched DIRECTLY" at the end of this file. The conclusion above was correct
+and the search was in the wrong place: rather than replacing AppManager's
+app-host, interpose the one function it calls to start an app
+(`CAppManager::PushApp`) and hand it a different path. `./tadpole.sh --app`.
 
 ## Home-screen apps — compared against a WORKING device
 
@@ -1871,6 +1885,11 @@ fb2  video playback / FMV
 Consistent evidence: the Sneak Peeks app plays video AUDIO but shows no picture,
 which is what you would expect if nothing handles the fb2 video layer. Our GL
 rasteriser writes to **fb1**, which is the right layer for 3D.
+
+**Right about the role, and it left out the two things that mattered**: fb2
+holds YUV420 rather than RGB, and it is not fixed at the bottom of the layer
+order. Both are in "SOLVED: FMV — fb2 is the MLC's VIDEO plane" at the end of
+this file, and Sneak Peeks now shows its trailers.
 
 ## Culling is NOT the cause — measured, not argued
 
@@ -5134,6 +5153,15 @@ Resolution order is in `tools/lib-deps.sh` and is the same everywhere:
 PATH. A source checkout with the system packages installed keeps working
 exactly as before.
 
+The engine half of that order now prefers **glasspole** at every step — the
+bundle's, then `glasspole/build/glasspole`, then qemu-arm — so a checkout that
+has built the JIT runs on it without being asked, and the AppImage carries it
+in `deps/bin` beside qemu. `TADPOLE_QEMU="$(command -v qemu-arm)"` still puts
+any single run back on qemu, which is what the compatibility sweep does when it
+wants the reference. `tadpole.sh` exports whichever it chose, so the viewer's
+About box and its straggler reaper both name the engine that is actually
+running instead of assuming qemu.
+
 Verified by hiding the host's tools: with a PATH containing no `qemu-arm` and
 no `python3`, the extracted AppImage boots AppManager (433 lines of serial log)
 and scans 87 game backups.
@@ -5314,3 +5342,764 @@ start a guest, so that combination is a contradiction it rejects in two lines
 and exits. The probe then spent its full 120-second timeout waiting for a SignIn
 nothing was booting and reported "never reached SignIn". Fixed to `--boot
 --no-viewer`, matching `probe-home.sh`, with `PROBE_DEBUG=1` for the shim trace.
+
+## SOLVED: FMV — fb2 is the MLC's VIDEO plane, and it holds YUV420
+
+The decoder was never broken. Brio's `libVideo.so` decodes Theora in software
+with libtheora and had been writing finished frames into fb2 the whole time.
+Three separate things stopped any of it reaching the panel, and while the
+priority bug is the one that produced the exact reported symptom — "video plays
+audio, shows no picture" — fixing any single one of the three left the screen
+looking just as broken as before. That is why this survived so long.
+
+The old note under "Framebuffer roles" — `fb2 video playback / FMV`, from
+community intel — was right about the role and silent about the only part that
+mattered, which is that the plane is **not RGB**.
+
+### The format is announced, in a word we stored and never read
+
+`fb_var_screeninfo.nonstd`. From `include/linux/lf1000/lf1000fb.h` in the LF2
+kernel drop:
+
+```c
+#define LF1000_NONSTD_FORMAT       20
+#define LF1000_NONSTD_FORMAT_MASK  0x7
+enum { LAYER_FORMAT_RGB = 0, LAYER_FORMAT_YUV420 = 1, LAYER_FORMAT_YUV422 = 2 };
+```
+
+fb0 and fb1 report 0 always. fb2 reports **1** the moment anything starts a
+video. The shim had been copying `nonstd` into `state.bin` faithfully since the
+layer struct was written; nothing ever looked at it, so every layer went through
+the packed-RGB blit and a perfectly good frame composited as noise or as
+nothing.
+
+### The plane layout is the driver's, not a guess
+
+`lf2000fb.c`, `nxfb_ops_set_par`:
+
+```c
+soc_dpc_set_vid_address(module, pbase,                       4096,
+                                pbase + 2048,                4096,
+                                pbase + 2048 + 4096*yres/2,  4096, 0);
+```
+
+So with P the pitch: **Y at 0, Cb at P/2, Cr at P/2 + P*(yres/2)**, every plane
+strided by P, 4:2:0 so one chroma sample covers a 2x2 luma block.
+`blit_layer_yuv420()` in `tadpole_view.c` is that arithmetic and nothing else.
+
+**One divergence to know about.** The driver hardcodes P = 4096 — the YUV
+layer's `fix.line_length` on hardware is 4096 whatever the mode — while our
+shim answers `FBIOGET_FSCREENINFO` with the ordinary panel-width formula
+(1920 for 480 x 32bpp) for every layer. That is not an accident and it is not
+safe to "fix" casually: Brio lays the planes out from **what we told it**, so
+both sides agree on the SHAPE, which is all this arithmetic depends on. Making
+the shim report 4096 for fb2 alone would match the device more exactly and
+would also change every consumer of that field — see "3D surface pitch — REAL
+DIVERGENCE, but the obvious fix is WRONG (reverted)" above for what happened
+the last time the pitch was made per-layer. Separate change, separate captures.
+
+### The video plane is NOT fixed at the bottom of the compositor
+
+This is the part that had been assumed rather than checked. The MLC lets the
+video plane sit at any of four depths, and the guest picks one.
+`soc_dpc_set_vid_priority` in `arch/arm/mach-nxp3200/soc/dpc.c`:
+
+```
+0   video > 0 > 1 > 2     video above every RGB layer
+1   0 > video > 1 > 2     under fb0, but OVER fb1
+2   0 > 1 > video > 2     what we always assumed
+3   0 > 1 > 2 > video     the very bottom
+```
+
+The field is `nonstd` bits 24-25. **Sneak Peeks asks for priority 1**
+(`nonstd = 0x01100000` — format 1, priority 1) **and draws an opaque background
+on fb1**, so compositing fb2 at the bottom buried a working trailer under the
+app's own artwork. That is the whole of "plays audio, shows no picture", and no
+amount of staring at the decoder would ever have shown it.
+
+The viewer now reads the priority and swaps the two lower slots, announcing it
+once: `video plane priority N — drawing it OVER/under fb1`. Priority 0 is folded
+in with 1, because fb0 is composited in its own pass so the Tier 3 game layer
+can go between; putting video above THAT needs more than a reorder. Nothing has
+asked for it yet. Make it say so if it ever does.
+
+### xoffset IS PART OF A LAYER'S ADDRESS, not a decoration
+
+General, not a video thing — video is just where it first mattered. Brio hands
+out layer buffers from one arena at **byte** granularity and then expresses the
+result as a pan, so the whole rows go in `yoffset` and the remainder goes in
+`xoffset`. Both are address.
+
+```
+fb2 PUTVAR ... off 416,1629
+DeAllocBuffer: remove offset 002FC000          <- the guest's own allocator
+
+1629 * 1920 + 416 * 4 = 0x2FC000               <- exactly
+```
+
+We were using `yoffset` alone, so every row of the video started 416 pixels
+early. fb0 and fb1 have only ever come back with `xoffset` 0, which is why this
+went unnoticed for months in code that reads all three the same way.
+
+### Also fixed on the way, each one able to hide the others
+
+* **Playback ran 16x too fast.** `snd_pcm_mmap_writei` returned early when the
+  FIFO had no reader, skipping `pace_pcm` — pacing skipped exactly when nothing
+  was draining the pipe, and the guest's clock comes from that call blocking. A
+  4.416 s clip finished in 0.27 s with 46 of 49 frames dropped. Now 4.08 s and
+  none dropped.
+* **`SetVideoScaler` is honoured.** Sneak Peeks plays 320x240 trailers into a
+  362x272 window, so a window-sized read took 42 columns and 32 rows the decoder
+  never wrote. `layer_state` gained `vid_w`/`vid_h`.
+* **`struct layer_state` exists in FIVE places and nothing checked them.**
+  Growing it moved `layer[1]` — the game layer — eight bytes for
+  `tadpole_gles_core.c`'s copy, and every 3D title came up black with a sliver in
+  the corner. It now verifies `state.bin`'s length against its own `sizeof` and
+  falls back loudly. The three-copies warning elsewhere in this file is now a
+  five-copies warning.
+
+### What actually cracked it, and it was not a rendering idea
+
+`TADPOLE_LOG=<prefix>` — a per-pid shim log that survives a daemonize.
+VideoDaemon forks, `setsid`s and reopens 0/1/2 on `/dev/null`, so its narration
+**and the shim's** were going nowhere at all. Every previous look at this was
+reading a log that could not contain the answer. `tadpole.sh` no longer pipes
+the daemon to `/dev/null` either.
+
+Two instruments came out of it and both are worth keeping:
+
+* **`tools/vdplay.py`** — a four-second reproduction. VideoDaemon listens on
+  `/tmp/video_events_socket` and `recv()`s exactly 8 bytes, switching on the
+  second word: 4 shutdown, 5 transition, 6 startup. Protocol read out of the
+  binary, not guessed. Before this, the video path was only ever exercised by
+  reaching an expensive title by accident.
+* **`fbshot.py --layers`** — what a layer HOLDS, rather than what the composite
+  makes of it. Noise and black look identical once something opaque is drawn on
+  top, which is precisely the confusion this whole item was made of.
+
+Verified: Sneak Peeks plays its trailers — 29 of 30 one-second captures
+distinct, picture in exactly its 362-wide window at x=59, colours correct. Clam
+Prix still renders at native and at 3x with viewports 15,17 and 17,16, the
+values recorded above. Sign-in and home screen unchanged.
+
+## Native Brio titles can be launched DIRECTLY, with no home screen
+
+`./tadpole.sh --app 'Clam Prix'` boots straight into it. This retires "Launching
+native apps directly" above, which concluded that a standalone launcher meant
+reimplementing AppManager's app-host and was "a project in itself". It would
+have been. The way in was somewhere else entirely, and the earlier note had
+already written down the sentence that contains it — "make AppManager launch
+it".
+
+**Why there was no door.** A native title cannot be exec'd: its `App.so` exports
+one symbol, `CreateApp`, which `CAppManager` has to call. And AppManager's whole
+`main` is `CAppManager::Instance()->Run(argc, argv)` — `Run` ignores `argv[1]`,
+hardcodes `PushApp("LPAD/main.swf")`, and the only argument it does read is
+`argv[2]`, which it `atoi`s into a player ID. Nothing in `/LF/Base/bin` takes a
+package. So the only route was the Flash home screen: boot the UI, sign in,
+dismiss a dialog, tap a tile at coordinates that move whenever the library
+changes. Two minutes and three fragile steps to reach a title that segfaults in
+its first second.
+
+**How.** The same trick that already gets us `open()` and `ioctl()` — be earlier
+in the link order and define the symbol. `libLightningBase` calls its own
+`PushApp` through its PLT (eight sites), and in AppManager's `DT_NEEDED`
+`libdl.so.0` is #22 against `libLightningBase.so` at #25, so our definition wins
+and every one of those calls arrives in the shim:
+
+```
+$ readelf -d LF/Base/bin/AppManager | grep NEEDED | cat -n
+    22   libdl.so.0
+    25   libLightningBase.so
+    33   libc.so.0
+```
+
+With `TADPOLE_LAUNCH` set, the first call gets its path substituted. **Read
+`tadpole/shim/tadpole_shim.c` rather than this summary** — the comment there is
+the specification, and two details in it are load-bearing:
+
+* **Substituting only the first push was not enough.** AppManager pushes its
+  default UI more than once — `Run` does it, and so does the path that runs when
+  an app is popped — so `main.swf` ended up stacked ON TOP of the title, which
+  looked exactly like the launch had been ignored. Later pushes of the home
+  screen are dropped when a target is set.
+* **Reading the requested path means reading somebody else's ABI.**
+  `Glib::ustring` holds one `std::string`, which on this toolchain's pre-C++11
+  libstdc++ is a single `char*` at the front of the object. That is an
+  assumption, so it is checked before it is trusted — plausible pointer,
+  printable bytes — because a wrong guess faults inside a function every launch
+  goes through. Verified: it reads `/LF/Base/LPAD/main.swf` exactly.
+
+**This runs the REAL loader** — same `CAppManager`, same `LoadNewApp`, same
+`dlopen` and `CreateApp` — so a crash under it is the crash you would have got
+from the home screen. That is the entire point. A launcher standing up its own
+half-environment would produce crashes belonging to the launcher, which is worse
+than no launcher.
+
+What it unlocked immediately: `crash-soak.sh` rewritten to one fresh process per
+launch with no tapping, and `tools/compat-sweep.sh`, which launches all 110
+installed titles in turn. Neither is possible through a home screen.
+
+**The caveat travels with every result produced this way.** A title launched
+directly has no home screen and no player signed in. Camera, Gallery and
+Keyboard are exactly the things that would want profile data, so a crash means
+"crashed this way" until it has been checked both ways.
+
+## C++ exception unwinding under qemu-user WORKS — checked, so stop suspecting it
+
+Worth its own entry because it eliminates a whole class of explanation rather
+than fixing anything. 19 of the 28 sweep failures are a SIGABRT out of
+`libuClibc+0x00059920` reporting `locale::facet::_S_create_c_locale name not
+valid` — a C++ exception being thrown and reaching `std::terminate`. The obvious
+suspicion is that the throw is fine and the **unwind** is what fails: no
+personality routine, no `.ARM.exidx`, something qemu-user does not carry across.
+
+It does carry it. Probe:
+
+```c
+/* Does a C++ throw/catch survive qemu-user, our shim, and the guest's own
+ * unwinder? Runs from a library constructor, so the REAL loader (AppManager ->
+ * dlopen) triggers it in the real process — no synthetic environment. */
+extern "C" int printf(const char *, ...);
+
+static void probe(void) __attribute__((constructor));
+static void probe(void)
+{
+    printf("EHTEST: start\n");
+    try { throw 42; }
+    catch (int e) { printf("EHTEST: caught int %d\n", e); }
+    try { throw "str"; }
+    catch (const char *s) { printf("EHTEST: caught char* %s\n", s); }
+    printf("EHTEST: survived both\n");
+}
+```
+
+Cross-compiled to ARM, dropped in as `/LF/Bulk/ProgramFiles/EHTEST/App.so` and
+launched with `TADPOLE_LAUNCH` so the guest's own loader opens it:
+
+```
+[0x280] LoadNewApp path = /LF/Bulk/ProgramFiles/EHTEST/App.so
+EHTEST: start
+EHTEST: caught int 42
+EHTEST: caught char* str
+EHTEST: survived both
+[0x280] ... Could not load Create App symbol, /LF/Bulk/ProgramFiles/EHTEST/App.so
+```
+
+Both a thrown `int` and a thrown `char*` were caught, through
+`__cxa_throw`/`__cxa_begin_catch` in the guest's own `libstdc++.so.6` and
+`libgcc_s.so.1`. The "Could not load Create App symbol" line afterwards is
+expected and is itself the confirmation that mattered: the probe exports no
+`CreateApp`, so it rode the real `LoadNewApp` path all the way to the real
+rejection.
+
+**A constructor probe is the technique worth keeping.** It needs no `CreateApp`,
+no Brio, no app lifecycle and no cooperation from the title — write a
+constructor, install it as an `App.so`, and the real loader in the real process
+runs your code at the moment a real title would start. Anything answerable by
+"does X work in this environment" can be answered this way in about a minute,
+and the answer is about the environment titles actually run in rather than a
+standalone binary that resembles one. The locale question was probed the same
+way, with `setlocale` called across every plausible name.
+
+So the SIGABRTs are what they say they are: the locale is genuinely not being
+created. Not the unwinder.
+
+### What the locale probe measured, and the question it leaves
+
+Same constructor technique, `setlocale` across every plausible name:
+
+```
+LOCTEST: setlocale(LC_ALL,"C")           -> C
+LOCTEST: setlocale(LC_ALL,"POSIX")       -> C
+LOCTEST: setlocale(LC_ALL,"")            -> C
+LOCTEST: setlocale(LC_ALL,"en-us")       -> NULL
+LOCTEST: setlocale(LC_ALL,"en_US")       -> NULL
+LOCTEST: setlocale(LC_ALL,"en_US.UTF-8") -> NULL
+```
+
+`_S_create_c_locale` throws `name not valid` exactly when `setlocale` hands
+back NULL, so a title asking for a **named** locale aborts and a title asking
+for `C` or `""` does not.
+
+The obvious next move is to install locale data — and the reason to write this
+down before anyone does is that **the device has none either**. There is no
+`/usr/lib/locale` anywhere in the stock rootfs, `/etc/environment` holds
+nothing but comments, and `/etc/profile` sets `PATH`, `LD_LIBRARY_PATH` and
+`HISTFILESIZE` — no `LANG`, no `LC_ALL`. Whatever these 19 titles do on real
+hardware, they are not being handed a working `en_US` by uClibc.
+
+So the question is not "why is our locale missing" but **"where does the name
+come from, and why does it work there"**. Two suspects, in order:
+
+1. **`en-us` is a string this system genuinely carries, and we fabricate it.**
+   `runtime/setup-sysroot.sh` builds `/proc/mtd` and an empty `/dev/mtd1` so
+   `CMfgData::Init` succeeds, and its own comment records the consequence: "the
+   locale lookup degrades gracefully to `en-us`". The device stores that same
+   string in NOR — `LF/Base/MfgTest/SetLocale_US.sh` writes it with
+   `mfgdata set locale en-us`, and `GetLocale.sh` reads back one of `en-us`,
+   `es-es`, `fr-fr`. That is exactly the shape `setlocale` returns NULL for,
+   and "degrades gracefully" was written about `CMfgData` not crashing, not
+   about what the value would later be used for.
+2. **No player is signed in.** Every sweep launch went in through
+   `TADPOLE_LAUNCH`, and a profile is the other place a language setting would
+   come from.
+
+**The device can settle suspect 1 in one line**, and it is worth spending a
+boot on before anyone installs locale data or patches uClibc:
+
+```
+tools/lfsh.py <ip> "mfgdata get locale"
+```
+
+If hardware answers `en-us` too, then the device runs these titles with the
+same string ours chokes on, the difference is somewhere else entirely, and the
+locale data theory is dead before it costs a day. See "LeapDog — differential
+tracing against real hardware" above for getting a shell on it.
+
+## 2026-08-09 — Glasspole: AppManager's home screen, narrowed to one call
+
+Glasspole runs the LeapPad's software without qemu. Flash titles work: 14 of 15
+render, Pet Pad matching qemu to 99% of pixels, and `LPAD/main.swf` driven
+straight through `saplayer` produces the Sign In screen. What does NOT work is
+AppManager bringing that screen up itself, and this entry is about where that
+stops, so the next person does not re-walk the same ground.
+
+### The symptom
+
+After `UI loaded`, glasspole prints two lines qemu-arm never prints:
+
+```
+[0x280] LoadNewApp: loading ViewFrame
+[0x280] CGameViewFrame::Enter
+<ASSERT>: Value::asMap() Type is not a map (LightningJSON/Src/json_value.cpp:528)
+```
+
+and draws the Leapster control frame — grey chrome, black game area, one green
+button — instead of the Flash home screen. qemu at the same point constructs
+`DidjPlayer`, creates the player, sets the framebuffer, and loads the movie.
+
+### Where it is, exactly
+
+`CAppManager::LoadNewApp` in `LF/Base/lib/libLightningBase.so`. The library is
+stripped, so this was found by resolving GCC's ARM PIC pattern — `ldr rX,[pc,#N]`
+followed by `add rX,pc,rX` — back to the string each pair addresses. The code at
+`0x42320`–`0x42438` is:
+
+```
+    path = <app dir> + "/GameInfo.json"     @ 0x42340, literal -> '/GameInfo.json'
+    LTM::CJSonFile json(path, 0)            @ 0x42350
+    json.Load()                             @ 0x42360
+    if (!json.isMember("ViewFrame"))        @ 0x42370, literal -> 'ViewFrame'
+        goto 0x4279c                        @ 0x42378 — the branch qemu takes
+    name = value.asString()                 @ 0x423a0
+    if (!BaseUtils::FileExists(name))       @ 0x42404
+        goto 0x42598
+    DebugOut("%s: loading ViewFrame %s")    @ 0x42430
+```
+
+**The divergence is `LTM::Value::isMember("ViewFrame")` at 0x42370.** It returns
+false under qemu and true under glasspole. Everything downstream — the Emerald
+path construction, the view frame, the asMap assert — follows from that one
+answer.
+
+`GameInfo.json` DOES NOT EXIST for LPAD. Both emulators stat it and get ENOENT,
+so `Load()` fails in both and `isMember` is being asked about a Value that was
+never populated. Creating a valid empty `{}` at that path does NOT change the
+outcome, which is worth knowing: it is not simply "the load failed".
+
+### Ruled out, each by measurement rather than argument
+
+Ten candidates, none of them it:
+
+* **Missing syscalls.** There are none left in a whole boot.
+* **The FlashApp.so dlopen chain.** Both load the same twenty libraries in the
+  same order, `libflashdidj.so` included.
+* **JIT miscompilation.** Identical behaviour with every dynarmic optimisation
+  disabled (`GLASSPOLE_NO_OPT=1`).
+* **The doom flag.** qemu logs `HasDoomPackageCritical: global doom file
+  detected` on the same sysroot and still works. It is advisory. On real
+  hardware it routes to "waiting for tuneup"; under Tadpole there is no tuneup
+  flow to enter, so AppManager notes it and carries on.
+* **Truncated directory listings.** Was a real bug — getdents dropped entries
+  that did not fit — and fixing it did not move this.
+* **The auxiliary vector.** Was also wrong: AT_HWCAP 0x20d6 against qemu's
+  0x0fdfb0d7. Fixed, no change.
+* **The environment.** Also wrong: three variables against qemu's sixty-six,
+  LANG among the missing. Fixed, no change.
+* **sysinfo's memory figures, and argv[0] being a guest or host path.**
+* **The stat of main.swf.** Both do exactly two — doubled path fails, clean
+  path succeeds.
+
+### What that leaves
+
+Identical syscalls, identical file contents, deterministic per emulator,
+independent of JIT settings, and a wrong answer from a function reading state
+the guest never initialised. That points at guest memory whose CONTENTS differ
+between the two emulators rather than at anything either emulator does wrong —
+the initial stack sits at a different address, so every frame below it inherits
+different residue.
+
+If that is right, this is a latent bug in LeapFrog's code that qemu happens to
+survive and glasspole happens to trip, and the fix is not to match qemu byte for
+byte but to make the guest's fresh memory deterministic. Worth testing before
+believing: zero the guest's stack region at startup and see whether the answer
+changes. That experiment has not been run.
+
+## 2026-08-09 — Glasspole: a differential rig, and what it found in an hour
+
+`glasspole/tools/gp-diff.sh` runs the guest's own busybox under both `qemu-arm`
+and glasspole and diffs the output. That is the whole idea. The stock rootfs
+ships an ARM busybox that exercises most of the syscall surface, qemu sits next
+to us as a known-correct implementation, and nobody had ever pointed one at the
+other.
+
+Within minutes of existing it found four things that had survived a working
+home screen:
+
+```
+             qemu-arm                          glasspole
+ls -l        547484                            17592186044416
+ls -ld       drwxr-xr-x 8 user1000 user1000    drwxr-xr-x 1 root root
+id           uid=1000 gid=1000 groups=984,…    uid=0(root) … can't get groups
+free         Swap: 3536892 244108 3292784      Swap: 0 4194303 0
+sh -c '… >&2'  err on stderr                   21.9 MB of ENOSYS in 20 seconds
+```
+
+Each is a different bug and none of them looked like one from inside.
+
+**`struct stat64` was 96 bytes and the ARM EABI says 104.** `#pragma pack(1)`
+removed padding the kernel's declaration does not name: the EABI aligns
+`long long` to 8, so there are implicit holes before `st_size`, `st_blocks` and
+`st_ino` on top of the `__pad0`/`__pad3` that are written out. Everything from
+`st_size` onward sat four bytes early and the last eight were never written.
+17592186044416 is 4096 << 32 — the guest reading `st_blksize` as `st_size`'s
+high word. The fix names every pad and asserts every offset.
+
+That one has a tail worth knowing about. `sh -c pwd` matched qemu BEFORE the fix
+and differs after, and the new behaviour is the correct one: ash checks that
+`$PWD` and `.` are the same directory by comparing `st_dev`/`st_ino`, and
+`st_ino` was landing outside the short struct, so both stats read the same stack
+garbage and agreed. Glasspole virtualises the working directory and qemu does
+not, so `/` here against the host's directory there is the honest answer.
+
+**`dup2` did not exist**, and `fcntl(F_DUPFD)` fell into an accepted-and-ignored
+`ret = 0`, which does not merely fail — it hands the guest descriptor zero.
+busybox ash asks for `>&2`, gets ENOSYS and retries forever. Shell redirection
+is not exotic; the device's own init scripts are full of it.
+
+Implementing it exposed a second layer: `write()` short-circuited fd 1 and fd 2
+by NUMBER before consulting the descriptor table, so the `dup2` landed correctly
+and the write went to stdout anyway. The standard descriptors are in the table
+like everything else now, and carry which console stream they are.
+
+**Reporting a real uid exposed a third layer.** Making `getuid32` agree with the
+auxiliary vector (which has claimed 1000 since the auxv work) meant busybox
+stopped believing it was root and started dropping privileges on every applet —
+`setgid32`, which did not exist. "md5sum: setgid: Function not implemented".
+
+**Thread slots never came back.** The processor id handed to each new thread was
+`m.threads.size()`, and that vector only grew, so the thirty-second CREATION
+exhausted the ExclusiveMonitor however few threads were alive.
+`tests/threads-many.S` makes and retires 96 threads against a monitor sized for
+32: it prints `FAIL: clone ran out of slots` on the old binary and
+`96 threads made and retired` on the new one.
+
+### The home screen boot is FLAKY, and it was already
+
+Worth writing down before someone bisects it into a change that did not cause
+it. Booting AppManager to `UI loaded` fails roughly two times in five, always
+the same way:
+
+```
+[glasspole] GUEST FAULT: 00000044 was never mapped
+[glasspole]   thread 1000, ~5340 syscalls in
+[glasspole]   block pc ~60001a4c  sp 3fffc7a0  lr 60001a4c
+```
+
+Measured on the PRISTINE tree at 3 ok / 2 faulted out of 5, and with the fixes
+above at 5 ok / 3 faulted out of 8 — the same rate, which is how the fixes were
+cleared of causing it. `pc ~60001a4c` is inside `ld-uClibc.so.0`
+(`INTERP_BASE` is 0x60000000) during `CAppManager::LoadNewApp`'s dlopen, and the
+faulting address is a null pointer plus 0x44.
+
+**It disappears under `-strace`**, which is the most useful fact about it: this
+is a race, not a wrong answer, and anything that changes timing hides it. Two
+guest threads are live at that moment — the main one and `ButtonPowerUSBTask`,
+which is doing its second tslib probe — and the interleaving differs between a
+run that boots and one that does not.
+
+It is not new. It is simply that nobody had run the boot five times in a row.
+
+## 2026-08-13 — The boot sequence, and three bugs found by adding it
+
+Requested by Kat/ushka in the LFHacks community: turning on a LeapPad2 shows the
+LeapFrog logo, then the "LeapPad2 Explorer" animation, and Tadpole showed
+neither. **Options → System Settings → Fast Boot**, ticked by default, is the
+switch; untick it and File → Run System Menu plays both. Run System Menu only —
+launching a title goes straight to the title, on the device and here.
+
+### The device's own path exists, and we do not use it
+
+Not a design preference, a measured dead end, and worth writing down because
+the next person will think of it too:
+
+    rcS:  imager-fb /dev/fb0 /var/screens/Valencia-Boot-logoCW.png
+    rcS:  VideoDaemon 750 &
+    app:  vnotify 6      # "Send a signal to VideoDaemon to play the startup
+                         #  video" — /usr/bin/app's own comment
+
+All of it is in the firmware and all of it is runnable. Three things stop it:
+
+1. **VideoDaemon daemonises**, and Glasspole answered its `fork()` with ENOSYS —
+   so on the default engine there has never been any system video at all, the
+   transition animation between titles included. Fixed: `gp_fork()`, because a
+   guest fork is a host fork (the guest's address space is inside ours, so
+   duplicating our process duplicates theirs, with the shim's MAP_SHARED
+   framebuffer arena staying shared exactly as it must). Refused from a
+   multi-threaded guest, where the child would inherit only the calling thread.
+2. **Glasspole's AF_UNIX is in-process.** `m.bound` is per-Machine, so a second
+   guest — `vnotify` — cannot reach the daemon's `/tmp/video_events_socket`. It
+   works under qemu-arm, which hands the path to the host.
+3. Even under qemu-arm, with the request delivered, **fb2 never turned YUV**.
+   VideoDaemon redirects its own stdout to /dev/null when it daemonises, so
+   that is debugging blind inside a closed binary.
+
+So the front end plays the file itself: `viewer/tadpole_boot.c`, libogg +
+libtheoradec + libvorbis, optional at build time. It is an imitation, and the
+table at the top of that file is the shape of the admission — every system this
+is added to needs its own row, because nothing is discovered and all of it is
+declared.
+
+### `imager-fb` had never once run
+
+`--logo` is documented as the quick "is it alive" test. It printed "logo drawn"
+and drew nothing, on both engines, for as long as the libz shim variant has
+existed:
+
+    imager-fb: can't resolve symbol '__aeabi_uidiv'
+
+The note above `check-undefined` in tadpole/Makefile says `__aeabi_uidiv` "comes
+from the guest's libgcc at runtime", and that is true of every C++ guest —
+libstdc++ names libgcc_s and drags it in. It is false of the display tools,
+which are the entire reason that variant exists: imager-fb needs libz, libpng12,
+libjpeg and libc, and not one of them mentions libgcc. Naming
+`$(GUESTLIBS)/libgcc_s.so.1` in the link is the fix.
+
+Fixing it had a consequence worth keeping in mind: tadpole.sh drew the boot logo
+at startup to bring the framebuffer arena into being, and that step *started
+working*, so the front end sat at rest showing LeapFrog branding instead of its
+own idle screen. The step was vestigial anyway — the viewer retries `try_map()`
+every frame — so it is gone.
+
+### Two libtheora/libvorbis contracts, both inverted, both silent
+
+Worth stating plainly because each produced a plausible-looking result rather
+than an error:
+
+- `th_decode_headerin()` returns **0 to mean "that was NOT a header — it is your
+  first video packet, and I have not consumed it"**. A loop that exits on 0 has
+  already pulled the keyframe out of the stream and dropped it. Everything then
+  decodes onto libtheora's initial reference frame, which is mid-grey: blocks an
+  inter frame touched came out right, blocks it did not stayed grey. The picture
+  was legible and the background was wrong, which reads as a scaling bug.
+- `vorbis_synthesis_headerin()` returns **0 for success**, so the same loop
+  written the same way ran zero times, vorbis got one header of three, and there
+  was no audio at all.
+
+Both codecs have exactly three header packets. Count them.
+
+### The colour was 20 low, and still is on the guest's video plane
+
+Theora carries Y in [16,235]. Converting it with the full-range coefficients
+makes every pixel exactly 20 too dark — invisible by eye, obvious in a diff
+against ffmpeg's decode of the same file: mean |delta| 19.2 per channel before,
+under 1 after. `v_convert()` uses BT.601 studio swing.
+
+**`blit_layer_yuv420()` in tadpole_view.c still uses the full-range
+coefficients**, so the device's own in-title FMV — Sneak Peeks trailers, the
+transition animation — is washed out by the same 20. Same bug, different path.
+Not changed with this work because it would move every FMV capture in the
+compatibility sweep, and that deserves its own before/after.
+
+---
+
+## 2026-08-15 — The window turns with the app
+
+**The home screen is portrait and a game is not, on the same 480x272 buffer.**
+That has been true since the first boot and the emulator has never known it:
+the window opened landscape, the LeapPad UI arrived a quarter turn over, and
+the only fix was to notice and press Ctrl+R — then press it back on the way
+into a title. This wires the rotation to what the guest is actually drawing.
+
+### Which rotation, measured rather than assumed
+
+Take the raw framebuffer of each and rotate it both ways:
+
+| capture | 90 CW | 270 CW |
+|---|---|---|
+| `shots/24-home-with-apps.png` (sign-in) | upside down | **upright** |
+| `shots/32-clamprix-current.png` (a game) | — | — (correct at 0) |
+
+So the UI is **270** and a title is **0**. The stock boot art agrees by name —
+`Valencia-Boot-logoCW.png` is stored a quarter turn clockwise — and so do the
+UI's own SWF stage sizes: `LPAD/SignIn.swf` and `HomePicker.swf` declare
+272x480, while `LPAD/main.swf` (the shell around them) is 480x272.
+
+### How the guest is asked
+
+The shim already sees every `open()` and every `dlopen()`, and two of them are
+unambiguous. Both were read off a live session — boot, sign in, tap Pet Pad,
+press Home — not reasoned about:
+
+```
+/LF/Base/LPAD/main.swf                the UI app itself. Loaded at boot AND on
+                                      every pop back out of a title, which is
+                                      what makes LEAVING a game visible.
+/LF/Bulk/ProgramFiles/<pkg>/<AppSo>   a title's entry point: a .swf the Flash
+                                      player opens, or an App.so that
+                                      CAppManager dlopen()s.
+```
+
+**`main.swf` and nothing else under LPAD** — this is the correction that made
+native titles work, and it is worth stating why the obvious wider rule fails.
+The UI keeps running underneath a title: AppManager draws the ViewFrame chrome
+on fb0 while a Leapster game owns fb1, and its Flash side goes on loading
+states and sound effects throughout. `LaunchApp.swf` and `HomePicker.swf` are
+both opened DURING a launch, *after* the title has been handed over — and the
+two kinds of title hand over at different moments:
+
+```
+Flash    LaunchApp.swf   HomePicker.swf   <pkg>/main.swf    <- the title is last
+native   LaunchApp.swf   dlopen App.so    HomePicker.swf    <- the UI is last
+```
+
+So "any LPAD .swf means the UI is on top" turned the window back the instant a
+native title started, which is precisely what was reported from the hand: Pet
+Pad and Alphabet Stew (both Flash) turned and stayed; Ni Hao, Kai-lan and Pet
+Pals (both native Leapster titles) "looked like they wanted to turn for a split
+second, then didn't", and leaving them did nothing because the state had never
+left the UI. `main.swf` is the LPAD app itself and is loaded on exactly the two
+occasions the UI takes the screen.
+
+`screen_note()` in `tadpole_shim.c` classifies those into
+`state.bin`: `screen` (system UI / title), `screen_seq` (bumped on every
+change, so a viewer that was not looking still sees the transition) and
+`screen_pkg` (the PackageID). The viewer turns the window when that changes —
+and only when it changes, so a manual Ctrl+R stands until the guest moves to
+another screen.
+
+**The entry point is matched against the package's `meta.inf`, not guessed from
+the extension.** The home picker opens a `.swf` out of *every* installed
+package to draw its tile — `icon.swf`, `base_icon.swf` — so "a .swf under
+ProgramFiles" is true of a screen that is running nothing at all. Reading it
+that way spins the window once per icon.
+
+**A native title is only visible at `dlopen`.** `LoadNewApp` dlopen()s the
+package's `App.so` and the guest's own loader then opens the file with raw
+syscalls that never reach our `open()`.
+
+**This deliberately does NOT bring back the `PushApp` interposition** removed in
+08082026-0006. That hook read a `Glib::ustring` by guessing someone else's C++
+ABI; watching file opens needs none of that and sees the Flash player, the
+native loader and the pop back home with one rule.
+
+### Not every title is landscape, and nothing in the package says which
+
+My Books and Notepad draw portrait. Their SWF stage sizes (480x272), `Device`
+fields, `Hidden` flags and `GameInfo.json` are indistinguishable from the
+landscape ones — checked all four. So the rule is "a title is landscape" and
+the exceptions are a list in `tadpole_view.c`, each measured from a capture.
+`KeyboardWidget` is on it for a different reason: the UI pushes it as an app
+when you name a profile, and its own art says which way it goes —
+`Art/port-bg-up.png` is 327x272 with the buttons drawn sideways and
+`buttonMap.json` calls that config `Portrait-Single`. Rotating for it would
+turn the window over in the middle of typing.
+
+### The struct grew, and three other files know its layout
+
+`struct tadpole_state` gained the three screen fields **at the end**, because
+`tools/fbshot.py` and `tools/burst.py` decode the header and layers out of it
+by offset and `shim/tadpole_gles_core.c` keeps a field-for-field mirror whose
+*length* is checked at map time. That check is not decoration: a mismatch there
+silently takes the layer rectangle out and renders every 3D title to the full
+panel. All three were updated with the shim.
+
+### A startup crash that is NOT this
+
+Roughly half the windowed boots on this machine die before the sign-in screen:
+a `SIGSEGV` at `ld-uClibc+0x1a4c`, fault address `0x44`, with `libflashdidj.so`
+on the stack, immediately after `ts_config: No such file or directory`. It
+looked like this work, because the first two runs after the change both hit it.
+It is not. An interleaved A/B — one binary, the classifier switched off by an
+environment variable and back on between boots — failed on BOTH sides: 4 of 6
+boots reached sign-in with it off, 2 of 6 with it on, and an earlier
+uninterleaved batch went 6 for 6 with it on. Twelve runs cannot separate rates
+that close, and the rate moves with machine load; what they do settle is that
+the fault happens with the new code taken out. Related to the black-screen
+startup race in the same neighbourhood (tslib, and where `ts_config` lands
+relative to `LoadNewApp`), still not root-caused.
+
+The reproducer is cheap — boot with the window and wait for one of two markers,
+about ninety seconds a run:
+
+```sh
+./tadpole.sh --boot --debug > run.log 2>&1 &
+grep -a "guest exited with status 139" run.log                 # died
+grep -a "onLoadInit( _level0.mcContent.SignIn_mc )" run.log    # lived
+```
+
+---
+
+## 2026-08-15 — The Connect nag, and the door to Parent Settings
+
+Two things, and the second is the reason the first was hard to reach.
+
+### Parent Settings needs the volume keys, which were bound and undocumented
+
+The device opens Parent Settings on a chord: hold a volume button, press Home.
+`map_key()` has mapped `-` and `=` to `KEY_VOLUMEDOWN`/`KEY_VOLUMEUP` for a
+long time and **nothing said so** — not the README table, not the Controller
+panel — which is the same as not having them: the owner concluded the emulator
+could not send volume at all, because the device has no other use for those
+buttons and so nothing else ever revealed them. Both now list `- / =`.
+
+(Noted in passing: the volume SLIDER inside Parent Settings does not move. The
+audio path is a shim, so there is nothing behind it to set. Not investigated.)
+
+### What the nag actually reads
+
+`ConnectNag.swf` goes up on the way to the home screen, every boot, asking you
+to connect to a service that no longer exists. Parent Settings has the switch —
+its label key is `@ConnectionReminders`, the button is drawn "connection nag" —
+and the whole of what it does is one assignment:
+
+```
+_global._uiData._allProfileUIData.ConnectionReminders = <bool>
+```
+
+`_allProfileUIData` is the **all-profiles** UI data, which lands in
+
+```
+/LF/Bulk/Data/Local/All/<LPAD PackageID>/UIData.json
+```
+
+`HomePickerState::CheckForConnectNag` reads it and returns without pushing the
+nag when it is false. Measured headlessly, both ways: with the field absent the
+boot log has `PushState ConnectNag.swf` and the picker waits behind it; with
+`"ConnectionReminders": false` the `CheckForConnectNag` trace line is there,
+the push is not, and `UIPetLPAD::EnableButtons` follows immediately.
+
+So `tadpole.sh` writes that field before every launch, from
+`connect_nag` in `ui.cfg` — default 0, i.e. no nag — and **Options → System
+Settings → Show the LeapFrog Connect reminder** puts it back. Written at launch
+rather than at install time because the guest rewrites the file itself; the
+edit preserves the other keys (`BadgeNumber`, `_connectAlreadyPlayed` and the
+rest) and is idempotent.
+
+**The package directory is read, not guessed.** `/LF/Base/LPAD/meta.inf` names
+the UI's own package — `PackageID="PAD2-0x1F1E0002-100000"` on a LeapPad2 — and
+that is the directory its UI data sits in. On a system that has never booted
+there is no file yet, so one is created there; if that id were ever wrong for
+some other device, AppManager would make its own and the nag would show once
+more before the next launch caught it.

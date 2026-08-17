@@ -156,13 +156,34 @@ REAL_WS      := libWebServices.so.9
 TONE_SRC := shim/tone_test.c
 TONE_OUT := ../runtime/tone
 
-VIEW_SRC := viewer/tadpole_view.c viewer/tadpole_ui.c viewer/tadpole_hle.c
+VIEW_SRC := viewer/tadpole_view.c viewer/tadpole_ui.c viewer/tadpole_hle.c \
+            viewer/tadpole_boot.c
 VIEW_HDR := viewer/tadpole_ui.h viewer/tadpole_font.h viewer/tadpole_hle.h \
-            shim/tadpole_glcmd.h
+            viewer/tadpole_boot.h shim/tadpole_glcmd.h
 VIEW_OUT := viewer/tadpole-view
 
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
 SDL_LIBS   := $(shell pkg-config --libs sdl2 2>/dev/null)
+
+# THE STARTUP ANIMATION'S DECODER, AND IT IS OPTIONAL ON PURPOSE.
+#
+# The device's animations are Ogg Theora with Vorbis audio, so playing one
+# needs libogg, libtheoradec and libvorbis. That is three more libraries than
+# this viewer has ever had, for one cosmetic four-second clip that Fast Boot
+# skips by default — so a checkout without them still builds, and builds a
+# viewer that shows the logo and goes straight on. Anyone who wants the
+# animation installs the three and rebuilds; check-deps.sh says which.
+#
+# theoradec, not theora: the encoder is a separate library and we only decode.
+THEORA_PC   := ogg theoradec vorbis
+THEORA_HAVE := $(shell pkg-config --exists $(THEORA_PC) 2>/dev/null && echo 1)
+ifeq ($(THEORA_HAVE),1)
+BOOT_CFLAGS := -DTADPOLE_THEORA $(shell pkg-config --cflags $(THEORA_PC))
+BOOT_LIBS   := $(shell pkg-config --libs $(THEORA_PC))
+else
+BOOT_CFLAGS :=
+BOOT_LIBS   :=
+endif
 
 .PHONY: all shim shimz shimegl shimpkg asound gl tone viewer hle-probe hle-selftest clean check realdl realz
 
@@ -346,11 +367,27 @@ print('wrote', d, 'from', c[0].name)"
 
 shimz: $(SHIM_OUT_Z)
 
+# libgcc_s LAST, AND IT IS NOT OPTIONAL HERE — see the note above
+# check-undefined, which says __aeabi_uidiv "comes from the guest's libgcc at
+# runtime". True of every C++ guest, because libstdc++ names libgcc_s and drags
+# it in. NOT true of the display tools, which are the entire reason this libz
+# variant exists: imager-fb needs libz, libpng12, libjpeg and libc, none of
+# which mention libgcc, so our __aeabi_uidiv had nothing to resolve against and
+# the guest loader refused the whole program before main:
+#
+#     imager-fb: can't resolve symbol '__aeabi_uidiv'
+#
+# The visible symptom was not an error — `./tadpole.sh --logo` still said "logo
+# drawn" — it was that the boot logo never appeared and state.bin was never
+# created, on both engines, for as long as this variant has existed. Naming the
+# library we already depend on is the fix; the symbol does come from the guest's
+# libgcc, we simply never said so out loud.
 $(SHIM_OUT_Z): $(SHIM_SRC) $(SHIMLIBS_Z)/$(REAL_Z) | need-libs
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
 		-fuse-ld=lld -Wl,-soname,libz.so.1 -o $@ $(SHIM_SRC) \
-		$(SHIMLIBS_Z)/$(REAL_Z) $(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0
+		$(SHIMLIBS_Z)/$(REAL_Z) $(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0 \
+		$(GUESTLIBS)/libgcc_s.so.1
 	@echo "built $@"
 
 shimegl: $(SHIM_OUT_EGL)
@@ -495,6 +532,33 @@ hle-probe: viewer/hle_probe.c
 #
 # Going below 2.34 needs an older build host; 2.34 is where glibc merged
 # libpthread and every binary built since references __libc_start_main@2.34.
+# WHICH BUILD THIS IS, for the update check.
+#
+# Releases are tagged tadpole-DDMMYYYY-NNNN and the checker compares those
+# fields; anything that does not parse as one is treated as an unreleased
+# build, which is exactly right for a working copy. So the default is "dev" and
+# tools/build-appimage.sh passes the real tag when it makes a release build.
+TADPOLE_VERSION ?= dev
+
+# A VERSION CHANGE HAS TO RELINK, AND MAKE CANNOT SEE THAT FROM TIMESTAMPS.
+#
+# The version is a -D on the command line, not a file, so changing it leaves
+# every source older than the binary and `make viewer` says there is nothing to
+# do. The release script hit exactly that: it stamped 08082026-0002, make
+# skipped the relink, and the image went out reporting 08082026-0001 — which
+# then told the update checker it was a version behind itself, for ever.
+#
+# So keep the value in a file and depend on the file. Rewritten only when it
+# actually differs, so an unchanged version does not force a rebuild.
+VERSION_STAMP := .tadpole-version
+.PHONY: version-stamp
+version-stamp:
+	@if [ ! -f $(VERSION_STAMP) ] || \
+	    [ "$$(cat $(VERSION_STAMP) 2>/dev/null)" != "$(TADPOLE_VERSION)" ]; then \
+	  echo "$(TADPOLE_VERSION)" > $(VERSION_STAMP); \
+	fi
+$(VERSION_STAMP): version-stamp ;
+
 HOST_STD := -std=gnu17
 #
 # AND _GNU_SOURCE HAS TO GO WITH IT. sdl2.pc puts -D_GNU_SOURCE=1 in its
@@ -512,10 +576,15 @@ SDL_CFLAGS_PORTABLE := $(filter-out -D_GNU_SOURCE=1 -D_GNU_SOURCE,$(SDL_CFLAGS))
 
 viewer: $(VIEW_OUT)
 
-$(VIEW_OUT): $(VIEW_SRC) $(VIEW_HDR)
-	$(CC) -O2 -Wall $(HOST_STD) -o $@ $(VIEW_SRC) $(SDL_CFLAGS_PORTABLE) \
-	      $(SDL_LIBS) -lz $(shell pkg-config --libs gl)
+$(VIEW_OUT): $(VIEW_SRC) $(VIEW_HDR) $(VERSION_STAMP)
+	$(CC) -O2 -Wall $(HOST_STD) -DTADPOLE_VERSION='"$(TADPOLE_VERSION)"' \
+	      -o $@ $(VIEW_SRC) $(SDL_CFLAGS_PORTABLE) $(BOOT_CFLAGS) \
+	      $(SDL_LIBS) -lz $(shell pkg-config --libs gl) $(BOOT_LIBS)
 	@echo "built $@"
+ifneq ($(THEORA_HAVE),1)
+	@echo "  no libtheoradec/libogg/libvorbis: the startup animation will be"
+	@echo "  skipped and Fast Boot off shows the logo alone."
+endif
 
 # The UI font is generated from ASCII art so the glyphs stay reviewable.
 viewer/tadpole_font.h: ../tools/genfont.py

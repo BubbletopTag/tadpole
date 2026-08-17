@@ -327,8 +327,22 @@ def key_for(path):
 
 
 def cache_dir():
-    base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-    return os.path.join(base, "tadpole", "games")
+    """The SAME directory the viewer reads, which is not always ~/.cache.
+
+    tadpole_ui.c's games_cache_dir() walks XDG_CACHE_HOME, then Windows'
+    %LOCALAPPDATA%, then ~/.cache. This has to walk it identically or the
+    scanner writes an index nothing reads and the library stays empty after a
+    scan that reported success. Environment-driven rather than
+    platform-driven: LOCALAPPDATA is set on every Windows and on no Linux, so
+    the added link changes nothing there.
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    if xdg:
+        return os.path.join(xdg, "tadpole", "games")
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        return os.path.join(local, "Tadpole", "cache", "games")
+    return os.path.join(os.path.expanduser("~/.cache"), "tadpole", "games")
 
 
 def load_rec(cache, key, st):

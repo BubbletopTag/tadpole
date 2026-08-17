@@ -158,9 +158,18 @@ enum tadgl_op {
 };
 
 /* `which` for TADGL_ARRAYPOINTER / TADGL_CLIENTSTATE. Small dense values rather
- * than the GL enums, so the host can index an array with them. */
+ * than the GL enums, so the host can index an array with them.
+ *
+ * TEXCOORD1 IS A SEPARATE SLOT, not a parameter on TEXCOORD, because the host
+ * binds each unit's array with its own glTexCoordPointer under its own
+ * glClientActiveTexture — they are two independent arrays that happen to share
+ * an entry point, exactly as GL models them. Appending it keeps every existing
+ * opcode's encoding byte-identical; the host bounds-checks against
+ * TADGL_ARR_COUNT, so an older host simply ignores a slot it does not know.
+ *
+ * Two units because the device advertises GL_MAX_TEXTURE_UNITS = 2. */
 enum tadgl_array { TADGL_ARR_VERTEX = 0, TADGL_ARR_COLOR, TADGL_ARR_TEXCOORD,
-                   TADGL_ARR_NORMAL, TADGL_ARR_COUNT };
+                   TADGL_ARR_NORMAL, TADGL_ARR_TEXCOORD1, TADGL_ARR_COUNT };
 
 struct tadgl_hdr {
 	unsigned int magic, version, ring_bytes;

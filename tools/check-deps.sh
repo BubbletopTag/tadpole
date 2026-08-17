@@ -56,10 +56,14 @@ have_pymod() {
 
 say() { [ "$QUIET" = 1 ] || printf '%b' "$*"; }
 
-report() {                      # $1=ok/bundled/no  $2=label  $3=why
+report() {                      # $1=ok/bundled/no/optional  $2=label  $3=why
     case "$1" in
         ok)      say "  \033[32m+\033[0m $(printf '%-22s' "$2") $3\n"; ok=$((ok+1)) ;;
         bundled) say "  \033[32m+\033[0m $(printf '%-22s' "$2") $3 \033[2m(bundled)\033[0m\n"; ok=$((ok+1)) ;;
+        # NOT COUNTED AS MISSING, because it is not. An optional dependency that
+        # inflates "3 missing" teaches people to ignore the number, and the
+        # number is the whole point of this script.
+        optional) say "  \033[2m.\033[0m $(printf '%-22s' "$2") $3 \033[2m(optional)\033[0m\n" ;;
         *)       say "  \033[31m-\033[0m $(printf '%-22s' "$2") $3\n"; bad=$((bad+1)) ;;
     esac
 }
@@ -81,17 +85,28 @@ need() {                        # $1=state $2=label $3=why $4=arch $5=debian $6=
 say "Tadpole dependency check\n\n"
 if tad_have_bundle; then
     say "Bundled runtime in $TADPOLE_DEPS\n"
-    say "  qemu and the firmware tools come with Tadpole; nothing to install.\n\n"
+    say "  the ARM engine and the firmware tools come with Tadpole;\n"
+    say "  nothing to install.\n\n"
 fi
 
 if [ "$WHAT" = all ]; then
     say "To run:\n"
-    # The bundled qemu is a static binary that runs anywhere; a host qemu-arm
-    # is just as good. Either satisfies this.
-    if   [ -x "$TADPOLE_DEPS/bin/qemu-arm" ]; then s=bundled
-    elif have_cmd qemu-arm;                   then s=ok
-    else                                           s=no; fi
-    need "$s" qemu-arm "runs the guest's ARM code" qemu-user qemu-user
+    # WHICHEVER ENGINE tad_qemu() WOULD PICK, reported under its own name and
+    # in the same order — a check that answers about qemu-arm while Tadpole
+    # runs on glasspole is telling the truth about the wrong program.
+    #
+    # The bundled qemu is a static binary that runs anywhere; a host qemu-arm is
+    # just as good, and so is a glasspole built in this checkout. Any of them
+    # satisfies this. qemu-user stays the package named when there is nothing
+    # at all, because it is one command away and glasspole has to be built.
+    engine=qemu-arm
+    if   [ -x "$TADPOLE_DEPS/bin/glasspole" ];     then s=bundled; engine=glasspole
+    elif [ -x "$PROJ/glasspole/build/glasspole" ]; then s=ok;      engine=glasspole
+    elif [ -x "$TADPOLE_DEPS/bin/qemu-arm" ];      then s=bundled
+    elif have_cmd glasspole;                       then s=ok;      engine=glasspole
+    elif have_cmd qemu-arm;                        then s=ok
+    else                                                s=no; fi
+    need "$s" "$engine" "runs the guest's ARM code" qemu-user qemu-user
 
     if have_pc sdl2 || have_cmd sdl2-config; then s=ok; else s=no; fi
     # Arch dropped `sdl2`; sdl2-compat provides the ABI (on top of SDL3).
@@ -100,6 +115,11 @@ if [ "$WHAT" = all ]; then
     need "$s" OpenGL "host-GPU rendering" mesa libgl1-mesa-dev
     have_pc zlib && s=ok || s=no
     need "$s" zlib "the viewer decodes its icon" zlib zlib1g-dev
+    # The startup animation, and nothing else, so its absence costs one
+    # cosmetic four-second clip that Fast Boot skips by default anyway.
+    if pkg-config --exists ogg theoradec vorbis 2>/dev/null; then s=ok
+    else s=optional; fi
+    report "$s" "theora/vorbis/ogg" "the boot startup animation"
     say "\n"
 
     # ONLY IN A SOURCE CHECKOUT. An installed AppImage has no compiler to run

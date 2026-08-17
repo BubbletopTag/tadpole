@@ -67,6 +67,7 @@ extern int   getpid(void);
 extern int   kill(int pid, int sig);
 extern size_t strlen(const char *s);
 extern int   snprintf(char *s, size_t n, const char *fmt, ...);
+extern char *getenv(const char *name);
 
 #define O_RDONLY 0
 #define O_WRONLY 1
@@ -123,6 +124,13 @@ extern long syscall(long number, ...);
 #define SA_RESETHAND 0x80000000
 
 static char g_logpath[320];
+
+/* CLOCK_MONOTONIC at install, so the report can say how long the guest had
+ * been alive. "Crashes instantly" and "crashes in the second race" are
+ * completely different bugs and the reports were indistinguishable. */
+struct tad_crash_ts { long tv_sec; long tv_nsec; };
+extern int clock_gettime(int clk, struct tad_crash_ts *tp);
+static struct tad_crash_ts g_t0;
 static int  g_installed;
 
 /* THE REAL open(), handed to us by the shim.
@@ -351,6 +359,17 @@ static void report(int sig, void *ucv, const char *what)
 		say("\n");
 	}
 
+	{
+		/* Whole seconds only: hand-rolled decimal, no float, no snprintf —
+		 * this runs in a signal handler. */
+		struct tad_crash_ts now;
+		if (g_t0.tv_sec && clock_gettime(1, &now) == 0) {
+			say("  alive    ");
+			say_dec((ulong)(now.tv_sec - g_t0.tv_sec));
+			say("s\n");
+		}
+	}
+
 	say("  pc       ");  say_addr(pc, 0); say("\n");
 	say("  lr       ");  say_addr(lr, 0); say("\n");
 	say("  sp       ");  say_hex(sp);     say("\n");
@@ -479,8 +498,26 @@ void tad_crash_install(const char *dir, int (*real_open)(const char *, int, ...)
 	g_installed = 1;
 
 	g_open = real_open;
-	if (dir && dir[0])
-		snprintf(g_logpath, sizeof(g_logpath), "%s/crash.log", dir);
+	clock_gettime(1, &g_t0);
+
+	/* WHERE THE REPORT GOES, AND WHY NOT $TADPOLE_DIR.
+	 *
+	 * It used to be $TADPOLE_DIR/crash.log — which is under /tmp, is wiped by
+	 * every probe script before it starts, and is shared by every run. So a
+	 * crash was observable only if you happened to look before the next boot,
+	 * and two crashes could never be compared because the first was gone.
+	 *
+	 * tadpole.sh now makes a dated directory per run under
+	 * ~/.local/state/tadpole/crashes/ and passes it here. Falling back to
+	 * $TADPOLE_DIR keeps a guest launched by hand working exactly as before.
+	 */
+	{
+		const char *cd = getenv("TADPOLE_CRASHDIR");
+		if (cd && cd[0])
+			snprintf(g_logpath, sizeof(g_logpath), "%s/crash.log", cd);
+		else if (dir && dir[0])
+			snprintf(g_logpath, sizeof(g_logpath), "%s/crash.log", dir);
+	}
 
 	for (i = 0; i < sizeof(sa); i++)
 		((char *)&sa)[i] = 0;

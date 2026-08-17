@@ -135,6 +135,17 @@ struct fb_fix_screeninfo {
 #define NUM_FB          3
 #define NUM_EV          6
 
+/* WHAT THE GUEST IS SHOWING. The panel is portrait and its software is not:
+ * the LeapPad UI draws a quarter turn from how the device is held — the same
+ * reason the stock boot art is named "...CW.png" — while nearly every title
+ * draws landscape into the same buffer. So there is no one right rotation for
+ * the window; it depends on what is on screen, and only the guest knows.
+ * See screen_note() for how this is worked out and PKGID_MAX for the name. */
+#define TAD_SCREEN_UNKNOWN 0
+#define TAD_SCREEN_SYSTEM  1   /* the LeapPad UI — portrait */
+#define TAD_SCREEN_TITLE   2   /* an installed title — landscape, nearly always */
+#define PKGID_MAX          64
+
 struct layer_state {
 	u32 enabled, xres, yres, bpp, xoffset, yoffset;
 	u32 nonstd;      /* format/priority/planar bits, see lf1000fb.h */
@@ -182,6 +193,16 @@ struct tadpole_state {
 	u32 width, height;
 	u32 vsync_count;
 	struct layer_state layer[NUM_FB];
+
+	/* APPENDED AT THE END ON PURPOSE. tools/fbshot.py reads the header and
+	 * the layer array out of this same file by offset, so anything inserted
+	 * above would silently shift every layer it decodes and the capture would
+	 * come out of the wrong page. Grow this struct here, never in the middle.
+	 */
+	u32 screen;                 /* TAD_SCREEN_*: the UI, or a title */
+	u32 screen_seq;             /* bumped on every change, so a viewer that
+	                             * was not looking still sees the transition */
+	char screen_pkg[PKGID_MAX]; /* the PackageID when a title is up */
 };
 
 /* ---- geometry ---------------------------------------------------------- */
@@ -371,6 +392,27 @@ static void log_open(void)
 	hi = fcntl(fd, F_DUPFD, 100);
 	if (hi >= 0) { real_close(fd); fd = hi; }
 	g_logfd = fd;
+}
+
+/* SAY IT WHATEVER THE DEBUG LEVEL IS.
+ *
+ * dbg() is for the running commentary and is off unless somebody asked for it.
+ * This is for the handful of failures that make the emulator useless and are
+ * INVISIBLE from every other vantage point — the arena not being creatable
+ * being the one that prompted it. A user does not turn debugging on before the
+ * thing goes wrong, and the whole cost of the bug below was that nothing,
+ * anywhere, named the cause.
+ *
+ * Deliberately not routed through log_open()'s per-pid file: this has to
+ * arrive on the guest's stderr, which is what the viewer pumps into
+ * tadpole.log and what a user pastes into a report. */
+static void note(const char *msg)
+{
+	size_t n = strlen(msg);
+	if (g_logfd >= 0)
+		write(g_logfd, msg, n);
+	else
+		write(2, msg, n);
 }
 
 static void dbg(const char *msg)
@@ -620,11 +662,48 @@ static void init(void)
 	 * i.e. lines 544 and 816 of fb0) but pans a DIFFERENT fb device for
 	 * each layer (fb0 PAN 544, fb1 PAN 816). Backing each device with its
 	 * own file therefore loses every layer but the first. */
+
+	/* AN ARENA THAT CANNOT BE CREATED HAS TO SAY SO, AND USED NOT TO.
+	 *
+	 * Both opens below were written as `if (fd >= 0)` with no else, so a
+	 * TADPOLE_DIR the guest cannot write left the shim silent and carrying on.
+	 * What the user then sees is Brio discovering the consequence several
+	 * layers away and describing it in its own vocabulary:
+	 *
+	 *     [0x5] InitModule: Screen = 0 x 0, pitch = 0
+	 *     [0x5] InitModule: Mapped 00000000 to 0x50d30000, size 00000000
+	 *     [0x5] CreateHandle: No framebuffer allocation available
+	 *     <ASSERT>: Unsupported destination PixelFormat used 0
+	 *               (line 175 in LightningBase/Src/BlitBuffer.cpp)
+	 *
+	 * — four messages about pixel formats and display handles for a bug that
+	 * is one failed open of one file, whose NAME appears nowhere. And the
+	 * assert does not kill AppManager: it parks it, for ever, so the same
+	 * fault reads as "it crashed" to whoever finds the log and as "it is stuck
+	 * on a black screen" to whoever is only looking at the window. Both
+	 * reports were made, separately, about this one line.
+	 *
+	 * It was worse than merely unhelpful. That guest message already had a
+	 * documented cause on Windows — mmap view exhaustion, since fixed — so the
+	 * evidence pointed confidently at an unrelated and already-repaired bug.
+	 *
+	 * Say the path. Always, not under TADPOLE_DEBUG: the emulator is useless
+	 * from here on, nobody turns logging up before the thing fails, and one
+	 * line naming the directory is the difference between reading this and
+	 * guessing. */
 	snprintf(path, sizeof(path), "%s/fb0.bin", g_dir);
 	fd = real_open(path, O_RDWR | O_CREAT, 0666);
 	if (fd >= 0) {
 		ftruncate(fd, (long)(g_w * g_h * (g_bpp / 8) * NBUF));
 		real_close(fd);
+	} else {
+		char m[420];
+		snprintf(m, sizeof(m),
+		         "[tadpole] FATAL: cannot create the framebuffer arena %s — "
+		         "the display will have no memory to allocate from, and Brio "
+		         "will report that as \"No framebuffer allocation available\". "
+		         "Is TADPOLE_DIR reachable and writable by the guest?\n", path);
+		note(m);
 	}
 
 	/* shared state, mmapped so the viewer sees updates live */
@@ -637,7 +716,15 @@ static void init(void)
 		if (g_state == (void *)-1)
 			g_state = 0;
 	}
-	if (g_state) {
+	if (!g_state) {
+		char m[420];
+		snprintf(m, sizeof(m),
+		         "[tadpole] FATAL: cannot map the shared state %s — the viewer "
+		         "has nothing to read, so the window stays black however well "
+		         "the guest runs. Is TADPOLE_DIR reachable and writable by the "
+		         "guest?\n", path);
+		note(m);
+	} else {
 		memset(g_state, 0, sizeof(*g_state));
 		g_state->magic   = TADPOLE_MAGIC;
 		g_state->version = TADPOLE_VERSION;
@@ -988,6 +1075,185 @@ static int under_gdir(const char *path)
 	       (path[dlen] == '\0' || path[dlen] == '/');
 }
 
+/* ---- which way up: telling the viewer what is on screen ------------------
+ *
+ * THE GUEST SAYS SO BY OPENING FILES, and two openings are unambiguous. Both
+ * were measured off a live session (boot -> home -> Pet Pad -> Home button),
+ * not reasoned about:
+ *
+ *   /LF/Base/LPAD/<state>.swf            the UI. Opened when a screen is
+ *                                        pushed AND again on every pop back
+ *                                        out of a title, which is the whole
+ *                                        reason leaving a game is visible.
+ *   /LF/Bulk/ProgramFiles/<pkg>/<AppSo>  a title's entry point — a .swf that
+ *                                        the Flash player opens, or an App.so
+ *                                        that CAppManager dlopen()s.
+ *
+ * THE ENTRY POINT IS MATCHED AGAINST meta.inf, not guessed from the
+ * extension. The home picker opens a .swf out of EVERY installed package to
+ * draw its tile — icon.swf, base_icon.swf — so "a .swf under ProgramFiles" is
+ * true of a screen that is not running anything at all, and reading it that
+ * way would spin the window once per icon.
+ *
+ * WHAT IS NOT DONE HERE. This says which SCREEN is up; it does not say which
+ * way to hold the window. That is presentation, it belongs to the viewer's -r
+ * and nothing else's, and the viewer needs the package name to make its own
+ * exceptions — which is why the name is published rather than a rotation.
+ */
+static int seg_eq(const char *a, const char *b)
+{
+	while (*a && *a == *b) { a++; b++; }
+	return *a == *b;
+}
+
+/* Match `pfx` against the front of `path`, treating a run of slashes as one
+ * separator, and hand back what follows. Guest paths really do arrive with
+ * doubled slashes — "/LF/Base//LpadAssets/Art/..." and
+ * ".../PAD2-0x001F0005-000000//GameInfo.json" are both from one boot log — so
+ * a plain strncmp would miss whichever spelling it was not written for. */
+static const char *path_after(const char *path, const char *pfx)
+{
+	if (!path) return 0;
+	for (;;) {
+		if (*pfx == '/') {
+			if (*path != '/') return 0;
+			while (*path == '/') path++;
+			while (*pfx  == '/') pfx++;
+			continue;
+		}
+		if (!*pfx) return path;
+		if (*path != *pfx) return 0;
+		path++; pfx++;
+	}
+}
+
+static int has_slash(const char *s)
+{
+	for (; *s; s++)
+		if (*s == '/') return 1;
+	return 0;
+}
+
+/* The AppSo= line of a package's meta.inf: the file the picker would launch.
+ * Read with real_open so it cannot recurse back into our own open(). */
+static void pkg_entry(const char *pkg, char *out, unsigned outsz)
+{
+	char path[512], buf[2048];
+	int fd;
+	long n;
+	unsigned i, j;
+
+	out[0] = 0;
+	if (!real_open || !real_read || !real_close)
+		return;
+	snprintf(path, sizeof(path), "%s/LF/Bulk/ProgramFiles/%s/meta.inf",
+	         g_sysroot, pkg);
+	fd = real_open(path, O_RDONLY, 0);
+	if (fd < 0) {
+		snprintf(path, sizeof(path), "/LF/Bulk/ProgramFiles/%s/meta.inf", pkg);
+		fd = real_open(path, O_RDONLY, 0);
+	}
+	if (fd < 0)
+		return;
+	n = real_read(fd, buf, sizeof(buf) - 1);
+	real_close(fd);
+	if (n <= 0)
+		return;
+	buf[n] = 0;
+	for (i = 0; (long)i + 7 < n; i++) {
+		if (strncmp(buf + i, "AppSo=\"", 7))
+			continue;
+		i += 7;
+		for (j = 0; j + 1 < outsz && buf[i] && buf[i] != '"'; )
+			out[j++] = buf[i++];
+		out[j] = 0;
+		return;
+	}
+}
+
+/* Is `path` the entry point of an installed package? Fills `pkg_out` if so.
+ * The meta.inf answer is cached for one package, because the picker opens
+ * dozens of files from a package directory and only one of them is this. */
+static int title_entry(const char *path, char *pkg_out, unsigned pkg_sz)
+{
+	static char last_pkg[PKGID_MAX], last_entry[PKGID_MAX];
+	const char *rest, *file;
+	unsigned i;
+
+	if (!(rest = path_after(path, "/LF/Bulk/ProgramFiles/")))
+		return 0;
+	for (i = 0; rest[i] && rest[i] != '/'; i++)
+		;
+	if (i == 0 || i >= sizeof(last_pkg) || rest[i] != '/')
+		return 0;
+	file = rest + i;
+	while (*file == '/') file++;
+	/* An entry point sits directly in the package directory; assets do not. */
+	if (!*file || has_slash(file))
+		return 0;
+
+	if (strncmp(rest, last_pkg, i) || last_pkg[i]) {
+		memcpy(last_pkg, rest, i);
+		last_pkg[i] = 0;
+		pkg_entry(last_pkg, last_entry, sizeof(last_entry));
+	}
+	if (!last_entry[0] || !seg_eq(file, last_entry))
+		return 0;
+	snprintf(pkg_out, pkg_sz, "%s", last_pkg);
+	return 1;
+}
+
+static void screen_set(u32 kind, const char *pkg)
+{
+	if (!g_state)
+		return;
+	if (g_state->screen == kind &&
+	    (kind != TAD_SCREEN_TITLE || seg_eq(g_state->screen_pkg, pkg ? pkg : "")))
+		return;
+	snprintf(g_state->screen_pkg, sizeof(g_state->screen_pkg), "%s",
+	         (kind == TAD_SCREEN_TITLE && pkg) ? pkg : "");
+	g_state->screen = kind;
+	g_state->screen_seq++;
+	dbg("[tadpole] screen -> ");
+	dbg(kind == TAD_SCREEN_TITLE ? g_state->screen_pkg : "system UI");
+	dbg("\n");
+}
+
+static void screen_note(const char *path)
+{
+	char pkg[PKGID_MAX];
+	const char *rest;
+
+	if (!g_state || !path)
+		return;
+	/* main.swf AND NOTHING ELSE UNDER LPAD.
+	 *
+	 * THE UI KEEPS RUNNING UNDERNEATH A TITLE — AppManager draws the
+	 * ViewFrame chrome on fb0 while a Leapster game owns fb1 — and its Flash
+	 * side goes on loading states and sound effects the whole time. Both
+	 * LaunchApp.swf and HomePicker.swf are opened DURING a launch, after the
+	 * title has been handed over. Reading any LPAD file as "the UI is on top"
+	 * therefore turned the window straight back for native titles, because
+	 * the two kinds hand over at different moments:
+	 *
+	 *     Flash   LaunchApp.swf  HomePicker.swf  <pkg>/main.swf   <- title last
+	 *     native  LaunchApp.swf  dlopen App.so   HomePicker.swf   <- UI last
+	 *
+	 * which is exactly the reported symptom: Flash titles turned, native ones
+	 * turned for a split second and turned back.
+	 *
+	 * main.swf is the LPAD app ITSELF, and it is loaded on exactly the two
+	 * occasions the UI takes the screen: at boot, and on every pop back out of
+	 * a title (kPopApp -> PushApp LPAD/main.swf -> LoadNewApp). Both measured.
+	 */
+	if ((rest = path_after(path, "/LF/Base/LPAD/")) != 0) {
+		if (seg_eq(rest, "main.swf"))
+			screen_set(TAD_SCREEN_SYSTEM, 0);
+	} else if (title_entry(path, pkg, sizeof(pkg))) {
+		screen_set(TAD_SCREEN_TITLE, pkg);
+	}
+}
+
 static int open_common(const char *path, int flags, int mode)
 {
 	char real[320];
@@ -1074,13 +1340,14 @@ static int open_common(const char *path, int flags, int mode)
 		fd = real_open(full, flags, mode);
 		if (fd >= 0) {
 			if (g_debug) { dbg("[tadpole] open(sysroot) "); dbg(path); dbg("\n"); }
+			screen_note(path);
 			io_pace(path);
 			return fd;
 		}
 	}
 	{
 		int fd = real_open(path, flags, mode);
-		if (fd >= 0) io_pace(path);
+		if (fd >= 0) { screen_note(path); io_pace(path); }
 		return fd;
 	}
 }
@@ -1135,6 +1402,11 @@ void *dlopen(const char *path, int flags)
 	if (!real_dlopen)
 		return 0;
 	h = real_dlopen(path, flags);
+	/* A NATIVE TITLE ARRIVES HERE AND NOWHERE ELSE. CAppManager::LoadNewApp
+	 * dlopen()s the package's App.so, and the guest's own loader then opens
+	 * the file with raw syscalls that never reach our open() — so this is the
+	 * only place the start of a native title is visible. */
+	if (h) screen_note(path);
 	if (g_debug && !h) {
 		const char *e = real_dlerror ? real_dlerror() : 0;
 		dbg("[tadpole] dlopen FAILED ");
@@ -1948,4 +2220,77 @@ int ioctl(int fd, ulong req, ...)
 		return -1;
 	}
 	return real_ioctl(fd, req, arg);
+}
+
+/* ---- locales the guest's libstdc++ refuses ------------------------------
+ *
+ * WHAT BREAKS WITHOUT THIS. Nineteen titles die in their first second with
+ *
+ *     terminate called after throwing an instance of 'std::runtime_error'
+ *       what():  locale::facet::_S_create_c_locale name not valid
+ *
+ * They read Locale="en-us" out of their own meta.inf and construct
+ * std::locale("en-us") without catching. Five shared engines account for all
+ * nineteen — BookApp2.so, cartLauncher.so, UEB2013.so, trans.so, and the
+ * camera/photo/video widgets — so it is one fault reached nineteen ways.
+ *
+ * WHERE IT ACTUALLY COMES FROM, disassembled rather than guessed. libstdc++
+ * 6.0.14 here is built on the GENERIC locale model, and its
+ * _S_create_c_locale is the whole of the check:
+ *
+ *     *__cloc = 0;
+ *     if (strcmp(__s, "C") == 0) return;
+ *     __throw_runtime_error("locale::facet::_S_create_c_locale name not valid");
+ *
+ * It never calls setlocale — interposing that, which was the obvious first
+ * move, changes nothing. Any name but "C" throws, full stop.
+ *
+ * NONE OF THIS IS THE EMULATOR'S DOING. It is a literal strcmp inside the
+ * guest's own libstdc++, reached without touching a file or a syscall. The
+ * same binaries on this firmware fail the same way on real hardware. What it
+ * really says is that these titles are NEWER THAN THE FIRMWARE they are being
+ * run against — the packages are dated December 2013, the system August — and
+ * expect a build of libstdc++ with locale support.
+ *
+ * So this is a DELIBERATE DEVIATION FROM THE DEVICE, not an accuracy fix, and
+ * it should be read as one. It provides the success path of the function above
+ * for every name: clear the out-parameter and return, leaving the C locale in
+ * force underneath.
+ *
+ * The lie is small. The generic model has no locale but C to offer, so the
+ * alternative on the table is not "correct en-US formatting" — there is no
+ * such thing in this libstdc++ — it is SIGABRT before the first frame.
+ * Collation and number grouping stay C's, and these are ASCII titles.
+ *
+ * TADPOLE_STRICT_LOCALE=1 restores the stock behaviour, for measuring what the
+ * unmodified system does.
+ */
+static void (*real_create_c_locale)(short **, const char *, short *);
+
+void _ZNSt6locale5facet18_S_create_c_localeERPsPKcS1_(short **cloc,
+                                                      const char *name,
+                                                      short *old);
+void _ZNSt6locale5facet18_S_create_c_localeERPsPKcS1_(short **cloc,
+                                                      const char *name,
+                                                      short *old)
+{
+	init();
+	if (getenv("TADPOLE_STRICT_LOCALE")) {
+		if (!real_create_c_locale)
+			real_create_c_locale = dlsym(RTLD_NEXT,
+			        "_ZNSt6locale5facet18_S_create_c_localeERPsPKcS1_");
+		if (real_create_c_locale) {
+			real_create_c_locale(cloc, name, old);
+			return;
+		}
+	}
+	/* The success path, verbatim: the generic model stores nothing but a null
+	 * handle, because it has no locale object to build. */
+	if (cloc)
+		*cloc = 0;
+	if (g_debug && name && name[0] && !(name[0] == 'C' && !name[1])) {
+		dbg("[tadpole] std::locale(\"");
+		dbg(name);
+		dbg("\") accepted; C semantics underneath\n");
+	}
 }

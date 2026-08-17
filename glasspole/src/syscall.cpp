@@ -1,0 +1,1758 @@
+/* Glasspole — the 51.
+ *
+ * This file is the "Linux" half of the port and it is the half that never
+ * changes: syscall numbers, argument order, struct layouts, errno values, path
+ * rules. Every line here is identical on Windows. The only thing below it is
+ * host.h, and the only thing that changes on Windows is host.h's backend.
+ *
+ * The set implemented is driven by measurement rather than by reading a
+ * syscall table top to bottom. A full run of Cars 2 under `qemu-arm -strace`
+ * used 51 distinct calls; anything outside that list reports itself by name
+ * and returns -ENOSYS, so the guest tells us what it wanted instead of merely
+ * misbehaving.
+ */
+#include "machine.h"
+#include "path.h"
+
+#include <dynarmic/interface/A32/a32.h>
+
+#include <chrono>
+#include <cstddef>      /* offsetof, for the guest struct layout assertions */
+#include <cstring>
+
+namespace {
+
+/* ARM EABI syscall numbers. */
+enum : uint32_t {
+    SYS_exit = 1, SYS_read = 3, SYS_write = 4, SYS_open = 5, SYS_close = 6,
+    SYS_unlink = 10, SYS_chdir = 12, SYS_lseek = 19, SYS_getpid = 20,
+    SYS_access = 33, SYS_rename = 38, SYS_mkdir = 39, SYS_rmdir = 40,
+    SYS_brk = 45, SYS_ioctl = 54, SYS_fcntl = 55, SYS_gettimeofday = 78,
+    SYS_munmap = 91, SYS_uname = 122, SYS_mprotect = 125, SYS_llseek = 140,
+    SYS_writev = 146, SYS_rt_sigaction = 174, SYS_rt_sigprocmask = 175,
+    SYS_ugetrlimit = 191, SYS_mmap2 = 192, SYS_stat64 = 195, SYS_lstat64 = 196,
+    SYS_fstat64 = 197,
+    SYS_getuid32 = 199, SYS_getgid32 = 200, SYS_geteuid32 = 201,
+    SYS_getegid32 = 202, SYS_fcntl64 = 221, SYS_exit_group = 248,
+    /* Setting the ids, which only became reachable once GETTING them stopped
+     * answering 0. A process that believes it is root never drops privileges;
+     * one that knows it is not does, and busybox does it on EVERY applet —
+     * "md5sum: setgid: Function not implemented" and exit 1. */
+    SYS_setuid32 = 213, SYS_setgid32 = 214,
+    SYS_getgroups32 = 205, SYS_setgroups32 = 206,
+    SYS_setuid = 23, SYS_setgid = 46,
+    SYS_set_tid_address = 256, SYS_clock_gettime = 263, SYS_readlink = 85,
+    SYS_set_robust_list = 338, SYS_getcwd = 183, SYS_nanosleep = 162,
+    SYS_sched_yield = 158, SYS_setitimer = 104,
+    /* The pre-64-bit stat family. uClibc's ld.so uses THESE, not the *64
+     * variants — which is why leaving them out makes every library lookup come
+     * back "no such file" and the linker report a missing libc.so.0. */
+    SYS_stat = 106, SYS_lstat = 107, SYS_fstat = 108,
+    /* ARM private range. */
+    SYS_ARM_set_tls = 0xf0005, SYS_ARM_cacheflush = 0xf0002,
+    /* Threads. */
+    SYS_clone = 120, SYS_futex = 240, SYS_gettid = 224,
+    SYS_mknod = 14, SYS_ftruncate = 93, SYS_getdents64 = 217, SYS_getdents = 141,
+    /* Descriptor duplication. Missing entirely until it was measured: busybox
+     * ash asks for `>&2`, gets ENOSYS, and RETRIES FOREVER — 21.9 MB of
+     * "sh: 0: Function not implemented" in twenty seconds. Shell redirection
+     * is not exotic; the device's own init scripts are full of it. */
+    SYS_dup = 41, SYS_dup2 = 63,
+    /* POSIX message queues. Brio's task communication runs on these. */
+    SYS_mq_open = 274, SYS_mq_unlink = 275, SYS_mq_timedsend = 276,
+    SYS_mq_timedreceive = 277, SYS_mq_notify = 278, SYS_mq_getsetattr = 279,
+    /* The scheduler family. Brio sets thread priorities at startup and treats
+     * a failure here as fatal. */
+    SYS_sched_setparam = 154, SYS_sched_getparam = 155,
+    SYS_sched_setscheduler = 156, SYS_sched_getscheduler = 157,
+    SYS_sched_get_priority_max = 159, SYS_sched_get_priority_min = 160,
+    /* Signals. tkill and tgkill are how uClibc's raise() reaches a thread, so
+     * they are how abort() reaches the process — see signal.cpp. */
+    SYS_kill = 37, SYS_tkill = 238, SYS_tgkill = 268,
+    SYS_sigreturn = 119, SYS_rt_sigreturn = 173,
+    SYS_poll = 168, SYS_sysinfo = 116,
+    SYS_fdatasync = 148, SYS_fsync = 118, SYS_newselect = 142, SYS_statfs = 99,
+    SYS_madvise = 220,
+    /* AF_UNIX sockets, implemented in-process. ARM has direct socket calls
+     * rather than the old socketcall multiplexer. */
+    SYS_socket = 281, SYS_bind = 282, SYS_connect = 283, SYS_listen = 284,
+    SYS_accept = 285, SYS_send = 289, SYS_recv = 291, SYS_shutdown = 293,
+    SYS_setsockopt = 294, SYS_getsockopt = 295, SYS_sendto = 290, SYS_recvfrom = 292,
+    /* Both named themselves in the same sweep, from the default case. */
+    SYS_chmod = 15, SYS_timer_create = 257,
+};
+
+/* Guest open() flags, which are the same values on ARM Linux as our GP_O_*
+ * happen to be — but mapped explicitly, because "they happen to agree" is not
+ * something the Windows backend should be relying on. */
+int open_flags(uint32_t f) {
+    int o = 0;
+    switch (f & 3) {
+        case 1: o = GP_O_WRONLY; break;
+        case 2: o = GP_O_RDWR;   break;
+        default: o = GP_O_RDONLY; break;
+    }
+    if (f & 0x40)   o |= GP_O_CREAT;
+    if (f & 0x80)   o |= GP_O_EXCL;
+    if (f & 0x200)  o |= GP_O_TRUNC;
+    if (f & 0x400)  o |= GP_O_APPEND;
+    if (f & 0x800)  o |= GP_O_NONBLOCK;
+    if (f & 0x10000) o |= GP_O_DIRECTORY;
+    return o;
+}
+
+/* ARM EABI struct stat64. Laid out by hand with explicit padding because this
+ * is the GUEST's layout, not the host's — a host struct stat copied in would
+ * be right on Linux and wrong on Windows, which is the entire class of bug
+ * this project is built to avoid.
+ *
+ * IT IS 104 BYTES, AND THE PADDING IS NOT ONLY WHERE THE KERNEL NAMES IT.
+ * ARM's EABI aligns every 64-bit type to 8. The kernel's declaration spells
+ * out __pad0 and __pad3, which reads as though those were the only holes —
+ * but the compiler then inserts THREE MORE of its own, before st_size, before
+ * st_blocks, and before st_ino. Under `pack(1)` those vanish, the struct comes
+ * to 96 bytes, everything from st_size on sits four bytes early, and the last
+ * eight bytes of the guest's buffer are never written at all.
+ *
+ * Which is exactly what happened, and it survived a working home screen:
+ *
+ *     qemu-arm:  -rwxr-xr-x 1 user1000 user1000         547484 /bin/busybox
+ *     glasspole: -rwxr-xr-x 1 root     root     17592186044416 /bin/busybox
+ *
+ * 17592186044416 is 4096 << 32 — the guest reading st_blksize as st_size's
+ * high word. Anything that mallocs or reads st_size bytes fails on a 16 TB
+ * answer, and nothing points at stat.
+ *
+ * The holes are therefore written out as named padding and the offsets are
+ * asserted individually below. `pack(1)` stays, so the layout is stated here
+ * rather than inherited from whatever the host compiler would have chosen. */
+#pragma pack(push, 1)
+struct guest_stat64 {
+    uint64_t st_dev;                     /*  0 */
+    uint8_t  pad0[4];                    /*  8 */
+    uint32_t __st_ino;                   /* 12 */
+    uint32_t st_mode;                    /* 16 */
+    uint32_t st_nlink;                   /* 20 */
+    uint32_t st_uid;                     /* 24 */
+    uint32_t st_gid;                     /* 28 */
+    uint64_t st_rdev;                    /* 32 */
+    uint8_t  pad3[4];                    /* 40 */
+    uint8_t  pad_size[4];                /* 44 — EABI's own, before st_size */
+    int64_t  st_size;                    /* 48 */
+    uint32_t st_blksize;                 /* 56 */
+    uint8_t  pad_blocks[4];              /* 60 — likewise, before st_blocks */
+    uint64_t st_blocks;                  /* 64 */
+    uint32_t st_atime_, st_atime_nsec;   /* 72, 76 */
+    uint32_t st_mtime_, st_mtime_nsec;   /* 80, 84 */
+    uint32_t st_ctime_, st_ctime_nsec;   /* 88, 92 */
+    uint64_t st_ino;                     /* 96 */
+};
+#pragma pack(pop)
+static_assert(sizeof(guest_stat64) == 104, "ARM struct stat64 is 104 bytes");
+/* Individually, not just the total: a compensating pair of mistakes adds up to
+ * 104 and still puts every field in the wrong place. */
+static_assert(offsetof(guest_stat64, st_mode)    == 16, "stat64 st_mode");
+static_assert(offsetof(guest_stat64, st_nlink)   == 20, "stat64 st_nlink");
+static_assert(offsetof(guest_stat64, st_uid)     == 24, "stat64 st_uid");
+static_assert(offsetof(guest_stat64, st_rdev)    == 32, "stat64 st_rdev");
+static_assert(offsetof(guest_stat64, st_size)    == 48, "stat64 st_size");
+static_assert(offsetof(guest_stat64, st_blksize) == 56, "stat64 st_blksize");
+static_assert(offsetof(guest_stat64, st_blocks)  == 64, "stat64 st_blocks");
+static_assert(offsetof(guest_stat64, st_mtime_)  == 80, "stat64 st_mtime");
+static_assert(offsetof(guest_stat64, st_ino)     == 96, "stat64 st_ino");
+
+/* The original ARM struct stat — 64 bytes, and note how many fields are
+ * `short`. Nothing about it can be derived from the stat64 layout above. */
+#pragma pack(push, 1)
+struct guest_stat {
+    uint32_t st_dev, st_ino;
+    uint16_t st_mode, st_nlink, st_uid, st_gid;
+    uint32_t st_rdev, st_size, st_blksize, st_blocks;
+    uint32_t st_atime_, st_atime_nsec;
+    uint32_t st_mtime_, st_mtime_nsec;
+    uint32_t st_ctime_, st_ctime_nsec;
+    uint32_t unused4, unused5;
+};
+#pragma pack(pop)
+static_assert(sizeof(guest_stat) == 64, "ARM struct stat is 64 bytes");
+
+/* WHO THE GUEST IS, in one place, because two places disagreed. elf.c builds
+ * an auxiliary vector saying AT_UID/AT_GID 1000 — deliberately, "as qemu-arm
+ * reports, not 0: a guest that believes it is root takes different branches in
+ * anything that checks" — while getuid32 answered 0 and every stat came back
+ * owned by root. The guest could therefore read its own identity two ways and
+ * get two answers:
+ *
+ *     qemu-arm:  uid=1000(user1000) gid=1000(user1000) groups=998,1000
+ *     glasspole: uid=0(root) gid=0(root)id: can't get groups
+ */
+constexpr uint32_t GUEST_UID = 1000;
+constexpr uint32_t GUEST_GID = 1000;
+
+void fill_stat(const gp_statbuf &st, guest_stat *g) {
+    std::memset(g, 0, sizeof *g);
+    g->st_dev     = (uint32_t)st.dev;
+    g->st_ino     = (uint32_t)st.ino;
+    g->st_mode    = (uint16_t)st.mode;
+    g->st_nlink   = (uint16_t)(st.nlink ? st.nlink : 1);
+    g->st_uid     = (uint16_t)GUEST_UID;
+    g->st_gid     = (uint16_t)GUEST_GID;
+    g->st_size    = (uint32_t)st.size;
+    g->st_blksize = 4096;
+    g->st_blocks  = (uint32_t)((st.size + 511) / 512);
+    g->st_mtime_  = (uint32_t)(st.mtime_ns / 1000000000ull);
+    g->st_atime_  = g->st_ctime_ = g->st_mtime_;
+}
+
+void fill_stat64(const gp_statbuf &st, guest_stat64 *g) {
+    std::memset(g, 0, sizeof *g);
+    g->st_dev = st.dev;
+    g->st_ino = st.ino;
+    g->__st_ino = (uint32_t)st.ino;
+    g->st_mode    = st.mode;
+    /* Carried from the host now rather than answered 1. A directory's count is
+     * 2 plus its subdirectories, and that is how a tree walker knows when it
+     * has found them all. */
+    g->st_nlink   = st.nlink ? st.nlink : 1;
+    g->st_uid     = GUEST_UID;
+    g->st_gid     = GUEST_GID;
+    g->st_size    = (int64_t)st.size;
+    g->st_blksize = 4096;
+    g->st_blocks  = (st.size + 511) / 512;
+    g->st_mtime_  = (uint32_t)(st.mtime_ns / 1000000000ull);
+    g->st_atime_  = g->st_ctime_ = g->st_mtime_;
+}
+
+/* ---- paths -------------------------------------------------------------- */
+
+/* Canonicalise an absolute path the way the kernel does before getcwd hands it
+ * back: no empty components, no "." and no ".." left in it, and no trailing
+ * slash unless the whole path is "/".
+ *
+ * IT IS THE STRING THE GUEST SEES, and the guest does arithmetic on it. Storing
+ * chdir's argument verbatim meant getcwd answered
+ *
+ *     /tmp/sr/LF/Bulk/ProgramFiles/LST3-0x00180025-000000/     (trailing slash)
+ *     /LF/Bulk/Data/probe/dir/..                               (after chdir(".."))
+ *
+ * where qemu — where the real kernel — answers the same path canonical and
+ * without the slash. A title that concatenates or compares that string gets a
+ * different answer under the two emulators for no other reason.
+ *
+ * LEXICAL, not by resolving each component. That is the same decision lstat64
+ * already makes here: runtime/sysroot is a symlink farm and this layer's whole
+ * story is that those links are invisible, so "x/.." is x's parent and not the
+ * parent of whatever x points at. */
+std::string canon_path(const std::string &p) {
+    std::vector<std::string> parts;
+    size_t i = 0;
+    while (i < p.size()) {
+        size_t j = p.find('/', i);
+        if (j == std::string::npos) j = p.size();
+        std::string c = p.substr(i, j - i);
+        if (c == "..") { if (!parts.empty()) parts.pop_back(); }
+        else if (!c.empty() && c != ".") parts.push_back(std::move(c));
+        i = j + 1;
+    }
+    std::string out;
+    for (auto &c : parts) { out += '/'; out += c; }
+    return out.empty() ? "/" : out;
+}
+
+/* ---- descriptors -------------------------------------------------------- */
+
+/* Put a copy of `src` at the lowest free descriptor >= `from`, which is what
+ * dup(), dup2() and F_DUPFD all reduce to once the target slot is decided.
+ *
+ * `src` IS TAKEN BY VALUE ON PURPOSE. The table is a std::vector, so growing
+ * it reallocates, and a GuestFd& pointing into it does not survive that — the
+ * copy is made before anything can move. */
+int place_dup(Machine &m, GuestFd src, int from) {
+    if (from < 0) return GP_EINVAL;
+    src.used = true;
+    for (size_t i = (size_t)from; i < m.fds.size(); i++)
+        if (!m.fds[i].used) { m.fds[i] = std::move(src); return (int)i; }
+    while (m.fds.size() < (size_t)from) m.fds.emplace_back();
+    m.fds.push_back(std::move(src));
+    return (int)m.fds.size() - 1;
+}
+
+/* Release one descriptor. The underlying file is closed by the LAST one onto
+ * it and by no other — see GuestFd::share.
+ *
+ * A socket's far end is told, which it was not before: recv() waits on its own
+ * `closed` flag, so without this the peer sat in its hundred-millisecond retry
+ * loop until exit_group rather than seeing end of stream. */
+void close_fd(GuestFd *g) {
+    const bool last = !g->share || g->share.use_count() == 1;
+    if (last && g->sock) {
+        if (auto peer = g->sock->peer.lock()) {
+            std::lock_guard<std::mutex> sg(peer->mu);
+            peer->closed = true;
+            peer->cv.notify_all();
+        }
+        std::lock_guard<std::mutex> sg(g->sock->mu);
+        g->sock->closed = true;
+        g->sock->cv.notify_all();
+    }
+    if (last) {
+        if (g->file) gp_close(g->file);
+        if (g->dir)  gp_dirclose(g->dir);
+    }
+    *g = GuestFd{};
+}
+
+/* ---- AF_UNIX transfer --------------------------------------------------- */
+/*
+ * Shared by recv()/send() and by read()/write(), because a guest that opened a
+ * socket is entitled to use either pair on it and ours used to answer EBADF to
+ * the second. `guard` is the machine lock and sock_recv RELEASES it: the wait
+ * is the one place a syscall blocks, and holding the lock there would stop
+ * every other thread from making any syscall at all.
+ */
+int32_t sock_recv(Machine &m, std::unique_lock<std::mutex> &guard,
+                  const std::shared_ptr<UnixSocket> &sk, uint32_t buf, uint32_t len) {
+    guard.unlock();
+    std::string msg;
+    {
+        std::unique_lock<std::mutex> sg(sk->mu);
+        while (sk->rx.empty() && !sk->closed) {
+            if (m.exiting.load(std::memory_order_relaxed)) break;
+            sk->cv.wait_for(sg, std::chrono::milliseconds(100));
+        }
+        if (!sk->rx.empty()) { msg = std::move(sk->rx.front()); sk->rx.pop_front(); }
+    }
+    if (msg.empty()) return 0;                  /* peer gone: end of stream */
+    const uint32_t n = msg.size() < len ? (uint32_t)msg.size() : len;
+    std::memcpy(m.Ptr(buf), msg.data(), n);
+    return (int32_t)n;
+}
+
+int32_t sock_send(Machine &m, const std::shared_ptr<UnixSocket> &sk,
+                  uint32_t buf, uint32_t len) {
+    if (sk->sink) return (int32_t)len;          /* the syslog socket, see connect */
+    auto peer = sk->peer.lock();
+    if (!peer) return GP_EPIPE;
+    std::string payload((const char *)m.Ptr(buf), len);
+    {
+        std::lock_guard<std::mutex> sg(peer->mu);
+        peer->rx.push_back(std::move(payload));
+    }
+    peer->cv.notify_all();
+    return (int32_t)len;
+}
+
+const char *name_of(uint32_t nr) {
+    switch (nr) {
+        case SYS_exit: return "exit";               case SYS_read: return "read";
+        case SYS_write: return "write";             case SYS_open: return "open";
+        case SYS_close: return "close";             case SYS_brk: return "brk";
+        case SYS_ioctl: return "ioctl";             case SYS_mmap2: return "mmap2";
+        case SYS_munmap: return "munmap";           case SYS_mprotect: return "mprotect";
+        case SYS_madvise: return "madvise";
+        case SYS_stat64: return "stat64";           case SYS_fstat64: return "fstat64";
+        case SYS_lstat64: return "lstat64";
+        case SYS_uname: return "uname";             case SYS_llseek: return "_llseek";
+        case SYS_gettimeofday: return "gettimeofday";
+        case SYS_clock_gettime: return "clock_gettime";
+        case SYS_ARM_set_tls: return "set_tls";     case SYS_writev: return "writev";
+        case SYS_access: return "access";           case SYS_readlink: return "readlink";
+        case SYS_exit_group: return "exit_group";   case SYS_getcwd: return "getcwd";
+        case SYS_clone: return "clone";             case SYS_futex: return "futex";
+        case SYS_gettid: return "gettid";           case SYS_fcntl64: return "fcntl64";
+        case SYS_dup: return "dup";                 case SYS_dup2: return "dup2";
+        case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
+        case SYS_getdents64: return "getdents64";   case SYS_getdents: return "getdents";
+        case SYS_mq_open: return "mq_open";         case SYS_mq_unlink: return "mq_unlink";
+        case SYS_mq_timedsend: return "mq_timedsend";
+        case SYS_mq_timedreceive: return "mq_timedreceive";
+        case SYS_mq_getsetattr: return "mq_getsetattr";
+        case SYS_sched_get_priority_max: return "sched_get_priority_max";
+        case SYS_sched_get_priority_min: return "sched_get_priority_min";
+        case SYS_sched_getscheduler: return "sched_getscheduler";
+        case SYS_sched_setscheduler: return "sched_setscheduler";
+        case SYS_socket: return "socket";           case SYS_kill: return "kill";
+        case SYS_tkill: return "tkill";             case SYS_tgkill: return "tgkill";
+        case SYS_rt_sigaction: return "rt_sigaction";
+        case SYS_rt_sigprocmask: return "rt_sigprocmask";
+        case SYS_rt_sigreturn: return "rt_sigreturn";
+        case SYS_sigreturn: return "sigreturn";
+        case SYS_bind: return "bind";               case SYS_connect: return "connect";
+        case SYS_listen: return "listen";           case SYS_accept: return "accept";
+        case SYS_send: return "send";               case SYS_recv: return "recv";
+        case SYS_poll: return "poll";               case SYS_sysinfo: return "sysinfo";
+        case SYS_fdatasync: return "fdatasync";     case SYS_fsync: return "fsync";
+        case SYS_newselect: return "_newselect";     case SYS_rename: return "rename";
+        case SYS_statfs: return "statfs";            case SYS_chdir: return "chdir";
+        case SYS_getuid32: return "getuid32";
+        case SYS_setitimer: return "setitimer";
+        case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
+        case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
+        case SYS_chmod: return "chmod";
+        case SYS_timer_create: return "timer_create";
+        default: return "?";
+    }
+}
+
+}  // namespace
+
+void gp_syscall(Thread &t) {
+    Machine &m = *t.m;
+    auto &r = t.jit->Regs();
+    const uint32_t nr = r[7];
+    const uint32_t a0 = r[0], a1 = r[1], a2 = r[2], a3 = r[3];
+    int32_t ret = GP_ENOSYS;
+    /* Paths, not pointers. A trace line that prints 3fffe140 where the guest
+     * asked for a file name is an instrument hiding the fact you needed. */
+    std::string tpath;
+
+    /* One lock over everything that touches shared state — the descriptor
+     * table and the allocators. Taken up front rather than per case, because
+     * "which cases need it" is exactly the question a future edit gets wrong.
+     *
+     * It is NOT held across anything that blocks: futex and nanosleep unlock
+     * first, or one sleeping thread would stop every other thread from making
+     * a syscall. gettimeofday is 85% of all calls and takes it uncontended;
+     * if that ever shows up in a profile, split it out then, with a
+     * measurement rather than a guess. */
+    std::unique_lock<std::mutex> guard(m.lock);
+
+    switch (nr) {
+
+    /* ---- process ---- */
+    case SYS_exit:
+        /* ONE thread stops. CLONE_CHILD_CLEARTID is how pthread_join finds
+         * out: zero the guest word the parent is waiting on, then wake it.
+         * Skip this and every join hangs forever. */
+        if (t.clear_child_tid) {
+            uint32_t zero = 0;
+            std::memcpy(m.Ptr(t.clear_child_tid), &zero, 4);
+            gp_wake(reinterpret_cast<volatile uint32_t *>(m.Ptr(t.clear_child_tid)),
+                    0x7fffffff);
+        }
+        t.Halt();
+        return;
+
+    case SYS_exit_group:
+        guard.unlock();          /* ExitGroup takes the lock itself */
+        m.ExitGroup((int)a0);
+        return;
+
+    case SYS_getpid:    ret = 1000; break;
+    case SYS_gettid:    ret = (int32_t)t.tid; break;
+    /* The same numbers elf.c puts in AT_UID/AT_GID. See GUEST_UID above for
+     * what answering 0 here cost. */
+    case SYS_getuid32:
+    case SYS_geteuid32: ret = (int32_t)GUEST_UID; break;
+    case SYS_getgid32:
+    case SYS_getegid32: ret = (int32_t)GUEST_GID; break;
+
+    /* Becoming who you already are is the only change an unprivileged process
+     * is allowed, and it is the only one anything here asks for: busybox drops
+     * to its real ids at startup, which on a system with one identity is a
+     * no-op that must nevertheless SUCCEED. Anything else is EPERM, which is
+     * what Linux would say and what the caller is prepared for. */
+    case SYS_setuid32:
+    case SYS_setuid: ret = (a0 == GUEST_UID) ? 0 : GP_EPERM; break;
+    case SYS_setgid32:
+    case SYS_setgid: ret = (a0 == GUEST_GID) ? 0 : GP_EPERM; break;
+    case SYS_setgroups32:
+        /* Accepted: the list can only be the one group we have. */
+        ret = 0;
+        break;
+
+    case SYS_getgroups32: {
+        /* size, list. Size 0 asks only for the count. One supplementary group,
+         * which is the primary one — without this `id` reports "can't get
+         * groups" and anything checking membership sees none. */
+        if (a0 == 0) { ret = 1; break; }
+        if (a1) { uint32_t g0 = GUEST_GID; std::memcpy(m.Ptr(a1), &g0, 4); }
+        ret = 1;
+        break;
+    }
+
+    case SYS_set_tid_address:
+        /* RETURNS THE CALLER'S TID, and that is not a detail. uClibc's threads
+         * learn their own identity from it, so answering 0 makes every thread
+         * believe its id is zero — and pthread_join then sees the thread it is
+         * joining as itself and refuses with EDEADLK, "Resource deadlock
+         * avoided", from somewhere that looks nothing like thread setup.
+         *
+         * It also sets clear_child_tid, which is how a thread that was NOT
+         * created with CLONE_CHILD_CLEARTID still gets its exit noticed. */
+        t.clear_child_tid = a0;
+        ret = (int32_t)t.tid;
+        break;
+
+    case SYS_set_robust_list:
+    case SYS_ARM_cacheflush:
+        /* Accepted and ignored. dynarmic manages its own code cache. */
+        ret = 0;
+        break;
+
+    /* ---- signals ---- */
+    /* All of these are in signal.cpp; the cases here only unpack arguments.
+     * Delivery happens at the BOTTOM of this function, after r0 is written. */
+    case SYS_rt_sigaction:   ret = gp_sigaction (t, (int)a0, a1, a2, a3); break;
+    case SYS_rt_sigprocmask: ret = gp_sigprocmask(t, (int)a0, a1, a2, a3); break;
+
+    case SYS_kill:
+    case SYS_tkill:
+    case SYS_tgkill:
+        ret = gp_signal_send(t, nr, a0, a1, a2);
+        break;
+
+    case SYS_sigreturn:
+    case SYS_rt_sigreturn:
+        /* RETURNS NOTHING, and must not. r0 comes back from the saved frame —
+         * it is the value the interrupted syscall had already produced — so
+         * falling through to `r[0] = ret` below would overwrite the one
+         * register sigreturn exists to restore. */
+        gp_sigreturn(t, nr == SYS_rt_sigreturn);
+        return;
+
+    case SYS_setitimer:
+        /* Still refused. Signals now arrive, but nothing here keeps a timer to
+         * raise SIGALRM FROM — that wants a clock source and a thread to run
+         * it on, and the one known caller (libsiimpl's ualarm, which uClibc
+         * spells with setitimer) tolerates the refusal and the title runs.
+         * Accepting it and never firing would be the worse lie of the two. */
+        ret = GP_ENOSYS;
+        break;
+
+    case SYS_timer_create: {
+        /* A POSIX timer that is created and never armed, because that is
+         * exactly what the guest asks for. Brio's CKernelMPI::CreateTimer calls
+         * timer_create at start-up and treats any failure as fatal — the
+         * -ENOSYS from the default case is what stopped PAW Patrol: The Great
+         * Robot Rescue dead, with <ASSERT> POSIX function fails with error #38
+         * from System/Kernel/Kernel.cpp:911.
+         *
+         * WHAT THE TITLE ACTUALLY DOES, measured under qemu -strace: five
+         * timer_create calls and NOT ONE timer_settime, timer_gettime or
+         * timer_delete in a full run to a drawn screen. So there is nothing
+         * here to schedule. Handing back a distinct id and remembering nothing
+         * is not a shortcut around a timer implementation; it is the whole of
+         * the behaviour the guest exercises.
+         *
+         * The ids are distinct and never reused so that the day something does
+         * arm one, timer_settime lands in the default case and NAMES ITSELF
+         * rather than being quietly accepted against a timer that would never
+         * fire. Signals cannot be delivered at all yet (see SYS_kill), so an
+         * armed timer would be a promise this emulator could not keep.
+         *
+         * Arguments are (clockid, struct sigevent *, timer_t *). The sigevent
+         * is not read: every field in it describes a notification, and there is
+         * no notification. */
+        if (!a2) { ret = GP_EFAULT; break; }
+        static std::atomic<uint32_t> next_timer_id{ 1 };
+        uint32_t id = next_timer_id.fetch_add(1, std::memory_order_relaxed);
+        std::memcpy(m.Ptr(a2), &id, sizeof id);
+        ret = 0;
+        break;
+    }
+
+    case SYS_ARM_set_tls:
+        /* The kernel's ARM TLS helper. dynarmic keeps TPIDRURO for us, and
+         * uClibc reads it through the c15 coprocessor path. */
+        t.tls = a0;
+        ret = 0;
+        break;
+
+    case SYS_ugetrlimit:
+        /* RLIM_INFINITY for everything asked so far. Writing a real pair keeps
+         * uClibc from believing a limit of zero. */
+        if (a1) { uint32_t *p = (uint32_t *)m.Ptr(a1); p[0] = 0xffffffffu; p[1] = 0xffffffffu; }
+        ret = 0;
+        break;
+
+    /* ---- scheduling ---- */
+    /*
+     * Accepted and largely ignored. There is one real host thread per guest
+     * thread and the host's scheduler is already running them; what matters is
+     * that the RANGE is sane, because Brio computes its own priorities from it
+     * and treats a failure as fatal. The numbers below are Linux's.
+     */
+    case SYS_sched_get_priority_max:
+        ret = (a0 == 1 /*SCHED_FIFO*/ || a0 == 2 /*SCHED_RR*/) ? 99 : 0;
+        break;
+    case SYS_sched_get_priority_min:
+        ret = (a0 == 1 || a0 == 2) ? 1 : 0;
+        break;
+    case SYS_sched_getscheduler:
+        ret = 0;      /* SCHED_OTHER */
+        break;
+    case SYS_sched_setscheduler:
+    case SYS_sched_setparam:
+        ret = 0;
+        break;
+    case SYS_sched_getparam:
+        if (a1) { uint32_t z = 0; std::memcpy(m.Ptr(a1), &z, 4); }
+        ret = 0;
+        break;
+
+    case SYS_poll: {
+        /* struct pollfd is { int fd; short events; short revents; } — 8 bytes.
+         * Sockets are answered from our own buffers; anything backed by a real
+         * file goes to the host, because the shim's event FIFOs are written by
+         * the viewer in another process. */
+        const uint32_t nfds = a1;
+        if (nfds > 64) { ret = GP_EINVAL; break; }
+        uint8_t *p = m.Ptr(a0);
+
+        gp_file *hf[64] = {};
+        int hidx[64];
+        int hn = 0;
+        int hits = 0;
+
+        for (uint32_t i = 0; i < nfds; i++) {
+            int32_t fd; std::memcpy(&fd, p + i * 8, 4);
+            uint16_t rev = 0;
+            GuestFd *g = m.Fd(fd);
+            if (!g) {
+                rev = 0x20;                     /* POLLNVAL */
+            } else if (g->sock) {
+                std::lock_guard<std::mutex> sg(g->sock->mu);
+                if (!g->sock->rx.empty()) rev = 0x01;   /* POLLIN */
+            } else if (g->file) {
+                hf[hn] = g->file; hidx[hn] = (int)i; hn++;
+            } else {
+                rev = 0x01;                     /* the console: always ready */
+            }
+            std::memcpy(p + i * 8 + 6, &rev, 2);
+            if (rev) hits++;
+        }
+
+        if (hits) { ret = hits; break; }
+
+        /* Nothing ready, and nothing backed by a real file to wait on — every
+         * descriptor was a socket or the console. Returning 0 here would be the
+         * same false timeout fixed below, AND a busy loop: the guest asks for a
+         * second, gets "expired" instantly, and asks again. Sleep out the real
+         * timeout instead. */
+        if (hn == 0) {
+            const int32_t ms = (int32_t)a2;
+            guard.unlock();
+            if (ms < 0) {
+                while (!m.exiting.load(std::memory_order_relaxed)) gp_sleep_ns(50000000ull);
+            } else {
+                const uint64_t deadline0 = gp_mono_ns() + (uint64_t)ms * 1000000ull;
+                while (!m.exiting.load(std::memory_order_relaxed) && gp_mono_ns() < deadline0)
+                    gp_sleep_ns(20000000ull);
+            }
+            ret = 0;
+            break;
+        }
+
+        /* Nothing ready yet, and real files to wait on.
+         *
+         * THE WAIT IS SLICED BUT THE TIMEOUT IS NOT. Slicing lets exit_group be
+         * noticed instead of slept through; returning 0 at the end of a slice
+         * would tell the guest its wait EXPIRED, which is a lie — poll returning
+         * 0 means the full timeout elapsed, and a state machine keyed on that
+         * will act on a timeout that never happened. So loop until the real
+         * deadline, and only then report zero. */
+        const int32_t want = (int32_t)a2;
+        const uint64_t deadline = want < 0 ? 0 : gp_mono_ns() + (uint64_t)want * 1000000ull;
+        guard.unlock();
+
+        for (;;) {
+            if (m.exiting.load(std::memory_order_relaxed)) { ret = 0; break; }
+
+            int slice = 100;
+            if (deadline) {
+                const uint64_t now = gp_mono_ns();
+                if (now >= deadline) { ret = 0; break; }
+                const uint64_t left_ms = (deadline - now) / 1000000ull;
+                if (left_ms < 100) slice = (int)left_ms + 1;
+            }
+
+            unsigned char ready[64] = {};
+            int r0 = gp_poll_readable(hf, hn, slice, ready);
+            if (r0 < 0) { ret = r0; break; }
+            if (r0 == 0) continue;              /* slice expired, deadline has not */
+
+            for (int i = 0; i < hn; i++) {
+                if (!ready[i]) continue;
+                uint16_t rev = 0x01;
+                std::memcpy(p + hidx[i] * 8 + 6, &rev, 2);
+                hits++;
+            }
+            ret = hits;
+            break;
+        }
+        break;
+    }
+
+    /* ---- AF_UNIX sockets ---- */
+    case SYS_socket: {
+        /* domain, type, protocol. Only AF_UNIX matters: nothing in this
+         * workload talks to a network, and pretending to would be worse than
+         * refusing. */
+        constexpr uint32_t AF_UNIX = 1;
+        if (a0 != AF_UNIX) { ret = GP_EAFNOSUPPORT; break; }
+        auto sk = std::make_shared<UnixSocket>();
+        ret = m.AllocFd(nullptr, nullptr, "<socket>");
+        if (ret >= 0) m.fds[ret].sock = std::move(sk);
+        break;
+    }
+
+    case SYS_bind: {
+        /* fd, sockaddr_un*, len. sockaddr_un is { u16 family; char path[108] }. */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        std::string name((const char *)m.Ptr(a1 + 2));
+        if (m.trace) tpath = name;
+        g->sock->name = name;
+        m.bound[name] = g->sock;
+        /* The guest expects a filesystem entry to appear; some code stats it.
+         * A regular file is close enough and unlinks the same way. */
+        gp_file *touch = nullptr;
+        if (gp_open(m.HostPath(name).c_str(), GP_O_WRONLY | GP_O_CREAT, 0666, &touch) == 0)
+            gp_close(touch);
+        ret = 0;
+        break;
+    }
+
+    case SYS_listen: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        g->sock->listening = true;
+        ret = 0;
+        break;
+    }
+
+    case SYS_connect: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        std::string name((const char *)m.Ptr(a1 + 2));
+        if (m.trace) tpath = name;
+
+        auto it = m.bound.find(name);
+        std::shared_ptr<UnixSocket> server = it == m.bound.end() ? nullptr : it->second.lock();
+
+        /* THE SYSLOG SOCKET IS ACCEPTED AND THROWN AWAY, and the reason is an
+         * errno two calls later rather than anything about logging.
+         *
+         * syslogd runs on the device (etc/init.d/syslog starts it), so on real
+         * hardware this connect succeeds. Under qemu-arm it also succeeds —
+         * qemu hands the sun_path to the host, and a systemd host has a
+         * world-writable /dev/log — so the guest's messages quietly go to the
+         * host's journal. Here AF_UNIX is ours and nothing is bound, so it
+         * failed, and THAT is what produced the divergence the compatibility
+         * sweep saw:
+         *
+         *   qemu       ts_config: No such file or directory
+         *   glasspole  ts_config: Permission denied
+         *
+         * uClibc's syslog falls back to LOG_CONS when it cannot reach the
+         * logger, which means open("/dev/console") — a root-owned device on
+         * the host that BOTH emulators refuse identically with EACCES
+         * (measured; this is not a path bug). tslib's ts_config returns -1
+         * without touching errno, so the caller's perror("ts_config") printed
+         * whatever the last failing syscall left behind: ENOENT under qemu,
+         * where the console was never opened, and EACCES here, where it was
+         * opened and refused 48 times in one run.
+         *
+         * Succeeding is what the device does and what qemu does. Dropping the
+         * bytes is the only part that differs, and nothing reads them back. */
+        if (!server && name == "/dev/log") {
+            g->sock->sink = true;
+            ret = 0;
+            break;
+        }
+
+        if (!server || !server->listening) {
+            /* The documented benign case: DaemonControl with no VideoDaemon
+             * behind it. ECONNREFUSED is what the guest is used to seeing. */
+            ret = GP_ECONNREFUSED;
+            break;
+        }
+
+        /* A fresh socket for the server's end, cross-linked with the client's. */
+        auto server_end = std::make_shared<UnixSocket>();
+        server_end->peer = g->sock;
+        g->sock->peer    = server_end;
+        {
+            std::lock_guard<std::mutex> sg(server->mu);
+            server->backlog.push_back(server_end);
+        }
+        server->cv.notify_all();
+        ret = 0;
+        break;
+    }
+
+    case SYS_accept: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        auto server = g->sock;
+        guard.unlock();
+
+        std::shared_ptr<UnixSocket> conn;
+        {
+            std::unique_lock<std::mutex> sg(server->mu);
+            while (server->backlog.empty()) {
+                if (m.exiting.load(std::memory_order_relaxed)) break;
+                server->cv.wait_for(sg, std::chrono::milliseconds(100));
+            }
+            if (!server->backlog.empty()) {
+                conn = server->backlog.front();
+                server->backlog.pop_front();
+            }
+        }
+        if (!conn) { ret = GP_EINTR; break; }
+
+        guard.lock();
+        ret = m.AllocFd(nullptr, nullptr, "<accepted>");
+        if (ret >= 0) m.fds[ret].sock = std::move(conn);
+        break;
+    }
+
+    case SYS_send:
+    case SYS_sendto: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        ret = sock_send(m, g->sock, a1, a2);
+        break;
+    }
+
+    case SYS_recv:
+    case SYS_recvfrom: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->sock) { ret = GP_EBADF; break; }
+        ret = sock_recv(m, guard, g->sock, a1, a2);
+        break;
+    }
+
+    case SYS_shutdown:
+    case SYS_setsockopt:
+    case SYS_getsockopt:
+        ret = 0;
+        break;
+
+    /* ---- message queues ---- */
+    /*
+     * Entirely ours: no host primitive is involved, because every one of these
+     * is between threads of a single guest process. Windows has no mq_* and
+     * does not need one.
+     */
+    case SYS_mq_open: {
+        /* name, oflag, mode, attr */
+        std::string name = m.Str(a0);
+        if (m.trace) tpath = name;
+        constexpr uint32_t O_CREAT = 0x40, O_EXCL = 0x80;
+
+        auto it = m.mqs.find(name);
+        if (it == m.mqs.end()) {
+            if (!(a1 & O_CREAT)) { ret = GP_ENOENT; break; }
+            auto q = std::make_shared<MsgQueue>();
+            if (a3) {
+                /* struct mq_attr is longs: flags, maxmsg, msgsize, curmsgs. */
+                const uint32_t *at = (const uint32_t *)m.Ptr(a3);
+                if (at[1]) q->maxmsg  = at[1];
+                if (at[2]) q->msgsize = at[2];
+            }
+            it = m.mqs.emplace(name, std::move(q)).first;
+        } else if ((a1 & O_CREAT) && (a1 & O_EXCL)) {
+            ret = GP_EEXIST;
+            break;
+        }
+
+        ret = m.AllocFd(nullptr, nullptr, name);
+        if (ret >= 0) {
+            m.fds[ret].mq     = it->second;
+            m.fds[ret].oflags = a1;
+        }
+        break;
+    }
+
+    case SYS_mq_unlink:
+        /* The name goes; descriptors already open keep working, because they
+         * hold a shared_ptr. That is what POSIX promises. */
+        if (m.trace) tpath = m.Str(a0);
+        ret = m.mqs.erase(m.Str(a0)) ? 0 : GP_ENOENT;
+        break;
+
+    case SYS_mq_timedsend:
+    case SYS_mq_timedreceive: {
+        /* mqdes, msg_ptr, msg_len, msg_prio(+), abs_timeout */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->mq) { ret = GP_EBADF; break; }
+        auto q = g->mq;                       /* keep it alive past the unlock */
+        const bool sending    = nr == SYS_mq_timedsend;
+        const bool nonblock   = (g->oflags & 0x800 /*O_NONBLOCK*/) != 0;
+        const uint32_t abstime = r[4];
+
+        /* An ABSOLUTE deadline, unlike futex's relative one. Converting here
+         * rather than at the wait keeps the clock read out of the lock. */
+        uint64_t deadline_ns = 0;
+        if (abstime) {
+            const uint32_t *ts = (const uint32_t *)m.Ptr(abstime);
+            deadline_ns = (uint64_t)ts[0] * 1000000000ull + ts[1];
+        }
+
+        if (sending && a2 > q->msgsize) { ret = GP_EINVAL; break; }
+
+        /* Copy in before unlocking; guest memory is stable but the descriptor
+         * table is not. */
+        std::string payload;
+        if (sending) payload.assign((const char *)m.Ptr(a1), a2);
+
+        guard.unlock();
+
+        std::unique_lock<std::mutex> qg(q->mu);
+        for (;;) {
+            if (m.exiting.load(std::memory_order_relaxed)) { ret = GP_EINTR; break; }
+
+            if (sending) {
+                if (q->msgs.size() < q->maxmsg) {
+                    q->msgs.emplace(a3, std::move(payload));
+                    q->cv.notify_all();
+                    ret = 0;
+                    break;
+                }
+            } else if (!q->msgs.empty()) {
+                auto first = q->msgs.begin();
+                const uint32_t prio = first->first;
+                const std::string msg = std::move(first->second);
+                q->msgs.erase(first);
+                q->cv.notify_all();
+                qg.unlock();
+                if (msg.size() > a2) { ret = GP_EMSGSIZE; break; }
+                std::memcpy(m.Ptr(a1), msg.data(), msg.size());
+                if (a3) { uint32_t p = prio; std::memcpy(m.Ptr(a3), &p, 4); }
+                ret = (int32_t)msg.size();
+                break;
+            }
+
+            if (nonblock) { ret = GP_EAGAIN; break; }
+
+            /* Always a timed wait, even with no deadline: a queue that is never
+             * fed would otherwise ignore exit_group and hang the process on the
+             * way out. */
+            if (deadline_ns) {
+                const uint64_t now = gp_wall_ns();
+                if (now >= deadline_ns) { ret = GP_ETIMEDOUT; break; }
+                uint64_t left = deadline_ns - now;
+                if (left > 100000000ull) left = 100000000ull;
+                q->cv.wait_for(qg, std::chrono::nanoseconds(left));
+            } else {
+                q->cv.wait_for(qg, std::chrono::milliseconds(100));
+            }
+        }
+        break;
+    }
+
+    case SYS_mq_getsetattr: {
+        /* mqdes, newattr, oldattr */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->mq) { ret = GP_EBADF; break; }
+        if (a2) {
+            std::lock_guard<std::mutex> qg(g->mq->mu);
+            uint32_t *out = (uint32_t *)m.Ptr(a2);
+            out[0] = g->oflags & 0x800;          /* mq_flags: O_NONBLOCK only */
+            out[1] = g->mq->maxmsg;
+            out[2] = g->mq->msgsize;
+            out[3] = (uint32_t)g->mq->msgs.size();
+        }
+        ret = 0;
+        break;
+    }
+
+    case SYS_mq_notify:
+        /* Nothing in the census ever registered a notification, and answering
+         * "no" is better than pretending to deliver one. */
+        ret = GP_ENOSYS;
+        break;
+
+    /* ---- threads ---- */
+    case SYS_clone:
+        /* flags, child_stack, parent_tidptr, tls, child_tidptr */
+        guard.unlock();          /* spawning takes the lock itself */
+        ret = gp_spawn_thread(t, a0, a1, a2, a3, r[4]);
+        break;
+
+    case SYS_futex: {
+        /* uaddr, op, val, timeout, uaddr2, val3. Only WAIT and WAKE appear in
+         * the census, and only the PRIVATE variants — the guest is one process,
+         * so there is nothing for the shared ones to be shared with. */
+        constexpr uint32_t FUTEX_WAIT = 0, FUTEX_WAKE = 1, FUTEX_PRIVATE = 128;
+        const uint32_t op = a1 & ~(FUTEX_PRIVATE | 256u /* CLOCK_REALTIME */);
+        auto *addr = reinterpret_cast<volatile uint32_t *>(m.Ptr(a0));
+
+        if (op == FUTEX_WAIT) {
+            uint64_t ns = 0;
+            if (a3) {
+                const uint32_t *ts = (const uint32_t *)m.Ptr(a3);
+                ns = (uint64_t)ts[0] * 1000000000ull + ts[1];
+                if (!ns) ns = 1;     /* 0 means "forever" to gp_wait_on */
+            }
+            /* MUST NOT hold the lock while blocking. */
+            guard.unlock();
+            ret = gp_wait_on(addr, a2, ns);
+        } else if (op == FUTEX_WAKE) {
+            ret = gp_wake(addr, (int)a2);
+        } else {
+            gp_log("futex op %u is not implemented\n", a1);
+            ret = GP_ENOSYS;
+        }
+        break;
+    }
+
+    /* ---- memory ---- */
+    case SYS_brk: {
+        /* brk(0) asks where the break is. Growing it commits; shrinking is
+         * accepted but nothing is returned to the host, which is legal and
+         * saves a decommit path nobody exercises. */
+        if (a0 == 0) { ret = (int32_t)m.brk_cur; break; }
+        if (a0 > m.brk_cur) {
+            uint32_t lo = (m.brk_cur + GP_PAGE - 1) & ~(GP_PAGE - 1);
+            uint32_t hi = (a0 + GP_PAGE - 1) & ~(GP_PAGE - 1);
+            if (hi > lo && m.Commit(lo, hi - lo, GP_PROT_READ | GP_PROT_WRITE) < 0) {
+                ret = (int32_t)m.brk_cur; break;
+            }
+        }
+        m.brk_cur = a0;
+        ret = (int32_t)m.brk_cur;
+        break;
+    }
+
+    case SYS_mmap2: {
+        /* addr, len, prot, flags, fd, pgoffset. MAP_FIXED is honoured; anything
+         * else gets the next slot from the bump allocator, 64 KB aligned
+         * because that is what Windows will insist on. */
+        const uint32_t len   = (a1 + GP_PAGE - 1) & ~(GP_PAGE - 1);
+        const uint32_t flags = a3;
+        const int32_t  fd    = (int32_t)r[4];
+        const uint32_t pgoff = r[5];
+        const bool fixed = (flags & 0x10) != 0;
+
+        uint32_t at = fixed ? (a0 & ~(GP_PAGE - 1)) : m.mmap_next;
+        if (!fixed) m.mmap_next = (at + len + GP_ALLOC_GRAN - 1) & ~(GP_ALLOC_GRAN - 1);
+
+        int prot = 0;
+        if (a2 & 1) prot |= GP_PROT_READ;
+        if (a2 & 2) prot |= GP_PROT_WRITE;
+        if (a2 & 4) prot |= GP_PROT_EXEC;
+
+        /* MAP_SHARED on a real file has to be a REAL shared mapping. This is
+         * the shim's pixel path: it hands the guest a descriptor onto a host
+         * file, the guest maps it, and the viewer maps the same file so both
+         * sides see one set of pages. Copying the contents in would run
+         * perfectly and leave the screen black. */
+        constexpr uint32_t MAP_SHARED = 0x01;
+        if (fd >= 0 && (flags & MAP_SHARED)) {
+            GuestFd *g = m.Fd(fd);
+            if (!g || !g->file) { ret = GP_EBADF; break; }
+            int r0 = gp_map_shared(m.Ptr(at), len, g->file,
+                                   (uint64_t)pgoff * GP_PAGE, prot);
+            if (r0 < 0) { ret = r0; break; }
+            ret = (int32_t)at;
+            break;
+        }
+
+        if (m.Commit(at, len, GP_PROT_READ | GP_PROT_WRITE) < 0) { ret = GP_ENOMEM; break; }
+
+        if (fd >= 0) {
+            /* File-backed. Read it in rather than mapping: a real shared
+             * mapping is the one thing Win32 cannot place inside a reservation
+             * without Windows 10 APIs, and the guest's file mappings are
+             * private (MAP_PRIVATE for shared objects) in every case the
+             * census produced. */
+            GuestFd *g = m.Fd(fd);
+            if (!g || !g->file) { ret = GP_EBADF; break; }
+            std::memset(m.Ptr(at), 0, len);
+            gp_pread(g->file, m.Ptr(at), a1, (uint64_t)pgoff * GP_PAGE);
+            /* RECORDED, so that a crash report can name this library. Only
+             * file-backed mappings: an anonymous one has nothing to be called
+             * and the kernel leaves its path field empty too. See
+             * Machine::WriteProcMaps. */
+            m.AddMap(at, len, prot, g->path);
+            m.WriteProcMaps();
+        } else {
+            std::memset(m.Ptr(at), 0, len);
+        }
+
+        if (prot) m.Commit(at, len, prot);
+        ret = (int32_t)at;
+        break;
+    }
+
+    case SYS_madvise:
+        /* Advice, and we are entitled to ignore it — which is what the name
+         * means. The guest says a range is finished with; acting on that would
+         * mean decommitting pages it may well touch again. */
+        ret = 0;
+        break;
+
+    case SYS_munmap:
+        /* Deliberately a no-op for now. Returning the pages is correct but the
+         * bump allocator never reuses them, and a wrong decommit is far more
+         * expensive to debug than some retained address space. */
+        ret = 0;
+        break;
+
+    case SYS_mprotect: {
+        int prot = 0;
+        if (a2 & 1) prot |= GP_PROT_READ;
+        if (a2 & 2) prot |= GP_PROT_WRITE;
+        if (a2 & 4) prot |= GP_PROT_EXEC;
+        uint32_t lo = a0 & ~(GP_PAGE - 1);
+        uint32_t hi = (a0 + a1 + GP_PAGE - 1) & ~(GP_PAGE - 1);
+        ret = m.Commit(lo, hi - lo, prot) < 0 ? GP_ENOMEM : 0;
+        break;
+    }
+
+    /* ---- files ---- */
+    case SYS_open: {
+        std::string p = m.Str(a0);
+        std::string h = m.HostPath(p);
+        if (m.trace) tpath = p + " -> " + h;
+        gp_file *f = nullptr;
+        int r0 = gp_open(h.c_str(), open_flags(a1), a2, &f);
+        if (r0 < 0) { ret = r0; break; }
+        ret = m.AllocFd(f, nullptr, p);
+        if (ret < 0) gp_close(f);
+        else m.fds[ret].oflags = a1;
+        break;
+    }
+
+    case SYS_close: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g) { ret = GP_EBADF; break; }
+        close_fd(g);
+        ret = 0;
+        break;
+    }
+
+    /* dup(oldfd) — the lowest free descriptor.
+     * dup2(oldfd, newfd) — that one exactly, closing whatever was there. */
+    case SYS_dup:
+    case SYS_dup2: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g) { ret = GP_EBADF; break; }
+        if (nr == SYS_dup2) {
+            const int newfd = (int)a1;
+            if (newfd < 0) { ret = GP_EBADF; break; }
+            /* dup2 onto itself is a no-op that must NOT close anything —
+             * getting this wrong closes the descriptor the guest was asking
+             * to keep. */
+            if (newfd == (int)a0) { ret = newfd; break; }
+            if (GuestFd *old = m.Fd(newfd)) close_fd(old);
+            g = m.Fd((int)a0);            /* close_fd cannot move it, but say so */
+            ret = place_dup(m, *g, newfd);
+            /* place_dup takes the lowest free slot >= newfd, and newfd is now
+             * free, so it lands exactly there. */
+            break;
+        }
+        ret = place_dup(m, *g, 0);
+        break;
+    }
+
+    case SYS_read: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g) { ret = GP_EBADF; break; }
+        if (g->sock) { ret = sock_recv(m, guard, g->sock, a1, a2); break; }
+        /* Nothing feeds the guest's stdin, and end of file is what a program
+         * reading from a closed console is built to handle. */
+        if (g->console >= 0) { ret = 0; break; }
+        if (!g->file) { ret = GP_EBADF; break; }
+        ret = (int32_t)gp_read(g->file, m.Ptr(a1), a2);
+        break;
+    }
+
+    case SYS_write: {
+        /* THE TABLE FIRST, then the console. The other order is what made
+         * `>&2` a no-op — see GuestFd::console. */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g) { ret = GP_EBADF; break; }
+        if (g->console >= 0) { ret = (int32_t)gp_console_write(g->console, m.Ptr(a1), a2); break; }
+        if (g->sock) { ret = sock_send(m, g->sock, a1, a2); break; }
+        if (!g->file) { ret = GP_EBADF; break; }
+        ret = (int32_t)gp_write(g->file, m.Ptr(a1), a2);
+        break;
+    }
+
+    case SYS_writev: {
+        /* iovec is two words per entry on 32-bit ARM. */
+        int64_t total = 0;
+        const uint32_t *iov = (const uint32_t *)m.Ptr(a1);
+        for (uint32_t i = 0; i < a2; i++) {
+            uint32_t bufp = iov[i * 2], lenp = iov[i * 2 + 1];
+            if (!lenp) continue;
+            int64_t n;
+            GuestFd *g = m.Fd((int)a0);
+            if (!g)                   n = GP_EBADF;
+            else if (g->console >= 0) n = gp_console_write(g->console, m.Ptr(bufp), lenp);
+            else if (g->sock)         n = sock_send(m, g->sock, bufp, lenp);
+            else if (!g->file)        n = GP_EBADF;
+            else                      n = gp_write(g->file, m.Ptr(bufp), lenp);
+            if (n < 0) { total = n; break; }
+            total += n;
+        }
+        ret = (int32_t)total;
+        break;
+    }
+
+    case SYS_lseek: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        ret = (int32_t)gp_seek(g->file, (int32_t)a1, (int)a2);
+        break;
+    }
+
+    case SYS_llseek: {
+        /* fd, offset_high, offset_low, result*, whence */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        int64_t off = ((int64_t)a1 << 32) | a2;
+        int64_t n = gp_seek(g->file, off, (int)r[4]);
+        if (n < 0) { ret = (int32_t)n; break; }
+        if (a3) { int64_t *p = (int64_t *)m.Ptr(a3); *p = n; }
+        ret = 0;
+        break;
+    }
+
+    case SYS_stat:
+    case SYS_lstat: {
+        gp_statbuf st;
+        if (m.trace) tpath = m.Str(a0);
+        int r0 = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st);
+        if (r0 < 0) { ret = r0; break; }
+        fill_stat(st, (guest_stat *)m.Ptr(a1));
+        ret = 0;
+        break;
+    }
+
+    case SYS_fstat: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        gp_statbuf st;
+        int r0 = gp_fstat(g->file, &st);
+        if (r0 < 0) { ret = r0; break; }
+        fill_stat(st, (guest_stat *)m.Ptr(a1));
+        ret = 0;
+        break;
+    }
+
+    /* lstat64 deliberately FOLLOWS symlinks here, which is not what lstat
+     * means anywhere else.
+     *
+     * runtime/sysroot is a symlink farm: /LF/Base and /bin point at the real
+     * rootfs on the host. Answering truthfully — "that is a symlink to
+     * /home/..." — hands the guest a host path it cannot use, and anything
+     * walking the tree sees links instead of directories. Following them is
+     * what makes the sysroot look like a filesystem to the guest.
+     *
+     * Its absence is what sent AppManager down the CriticalDoom path: `ls`
+     * and every directory scan got ENOSYS, so the firmware looked like it was
+     * not installed at all. */
+    case SYS_lstat64:
+    case SYS_stat64: {
+        gp_statbuf st;
+        if (m.trace) tpath = m.Str(a0);
+        int r0 = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st);
+        if (r0 < 0) { ret = r0; break; }
+        fill_stat64(st, (guest_stat64 *)m.Ptr(a1));
+        ret = 0;
+        break;
+    }
+
+    case SYS_fstat64: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        gp_statbuf st;
+        int r0 = gp_fstat(g->file, &st);
+        if (r0 < 0) { ret = r0; break; }
+        fill_stat64(st, (guest_stat64 *)m.Ptr(a1));
+        ret = 0;
+        break;
+    }
+
+    case SYS_access: {
+        /* The error was fixed first: every failure was flattened to ENOENT, so
+         * a path whose parent is a file, or one the host refuses, was reported
+         * as simply absent and the guest went looking for the wrong cause.
+         *
+         * THE MODE IS CHECKED NOW, and it has to be — access(W_OK) exists
+         * precisely so a program can find out whether writing will work, and
+         * answering "yes" to every question makes the call useless. Measured
+         * against qemu on a 0444 file: W_OK is EACCES there and was 0 here, as
+         * was X_OK on a plain data file.
+         *
+         * The test is "does ANY permission class grant it", not "does OUR uid
+         * get it". We do not model uids — st_uid and st_gid are invented
+         * constants a few lines up — so a class-by-class answer would be
+         * fiction. This one is the truthful half: a bit that is set nowhere
+         * cannot be granted to anyone, which is exactly the case the guest is
+         * asking about on a read-only file, and a bit that is set somewhere is
+         * left alone rather than guessed at. */
+        gp_statbuf st;
+        if (m.trace) tpath = m.Str(a0);
+        int r0 = gp_stat(m.HostPath(m.Str(a0)).c_str(), &st);
+        if (r0 < 0) { ret = r0; break; }
+        constexpr uint32_t R_ANY = 0444, W_ANY = 0222, X_ANY = 0111;
+        const uint32_t want = a1;
+        ret = (((want & 4) && !(st.mode & R_ANY)) ||
+               ((want & 2) && !(st.mode & W_ANY)) ||
+               ((want & 1) && !(st.mode & X_ANY))) ? GP_EACCES : 0;
+        break;
+    }
+
+    case SYS_readlink:
+        /* Nothing in the rootfs that the guest reads is a symlink we need to
+         * resolve, and EINVAL ("not a link") is the answer that makes uClibc
+         * fall through rather than retry. */
+        ret = GP_EINVAL;
+        break;
+
+    case SYS_mknod: {
+        /* The shim's five input event nodes. Only FIFOs appear here — a guest
+         * asking for a real device node is a fact worth hearing about, not
+         * something to quietly succeed at. */
+        constexpr uint32_t S_IFMT = 0xf000, S_IFIFO = 0x1000;
+        std::string p = m.Str(a0);
+        if (m.trace) tpath = p;
+        if ((a1 & S_IFMT) != S_IFIFO) {
+            gp_log("mknod(%s, mode %o): not a FIFO, and device nodes are not "
+                   "implemented — the shim is supposed to have absorbed those\n",
+                   p.c_str(), a1);
+            ret = GP_EPERM;
+            break;
+        }
+        ret = gp_mkfifo(m.HostPath(p).c_str(), a1 & 07777);
+        if (ret == GP_EEXIST) ret = 0;   /* a leftover FIFO is not a failure */
+        break;
+    }
+
+    case SYS_fsync:
+    case SYS_fdatasync: {
+        /* CAtomicFile writes a temp file, syncs it and renames. Without this
+         * it logs "fdatasync failed; returning -1" on every save, and the
+         * atomic-rename contract it is built on quietly stops holding. */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        ret = gp_sync(g->file);
+        break;
+    }
+
+    case SYS_newselect: {
+        /* nfds, readfds, writefds, exceptfds, timeout. Only the read set is
+         * ever non-empty here, so it is answered through the same path as
+         * poll rather than growing a second implementation of the same idea. */
+        const uint32_t nfds = a0;
+        uint32_t *rfds = a1 ? (uint32_t *)m.Ptr(a1) : nullptr;
+        if (!rfds || nfds == 0) {
+            /* A pure sleep, which is what select with no descriptors is. */
+            uint64_t ns = 0;
+            if (r[4]) {
+                const uint32_t *tv = (const uint32_t *)m.Ptr(r[4]);
+                ns = (uint64_t)tv[0] * 1000000000ull + (uint64_t)tv[1] * 1000ull;
+            }
+            guard.unlock();
+            const uint64_t deadline0 = gp_mono_ns() + ns;
+            while (!m.exiting.load(std::memory_order_relaxed) && gp_mono_ns() < deadline0)
+                gp_sleep_ns(ns < 20000000ull ? ns : 20000000ull);
+            ret = 0;
+            break;
+        }
+
+        gp_file *hf[64] = {};
+        int hidx[64], hn = 0, hits = 0;
+        for (uint32_t fd = 0; fd < nfds && fd < 64; fd++) {
+            if (!(rfds[fd / 32] & (1u << (fd % 32)))) continue;
+            GuestFd *g = m.Fd((int)fd);
+            if (g && g->sock) {
+                std::lock_guard<std::mutex> sg(g->sock->mu);
+                if (!g->sock->rx.empty()) { hits++; continue; }
+            } else if (g && g->file) {
+                hf[hn] = g->file; hidx[hn] = (int)fd; hn++;
+                continue;
+            } else if (g) {
+                hits++; continue;              /* the console: always ready */
+            }
+            rfds[fd / 32] &= ~(1u << (fd % 32));
+        }
+        if (hits || hn == 0) { ret = hits; break; }
+
+        int ms = 100;
+        if (r[4]) {
+            const uint32_t *tv = (const uint32_t *)m.Ptr(r[4]);
+            const uint64_t want = (uint64_t)tv[0] * 1000ull + tv[1] / 1000ull;
+            if (want < 100) ms = (int)want;
+        }
+        guard.unlock();
+        unsigned char ready[64] = {};
+        int r0 = gp_poll_readable(hf, hn, ms, ready);
+        if (r0 < 0) { ret = r0; break; }
+        for (int i = 0; i < hn; i++)
+            if (ready[i]) hits++; else rfds[hidx[i] / 32] &= ~(1u << (hidx[i] % 32));
+        ret = hits;
+        break;
+    }
+
+    case SYS_ftruncate: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        ret = gp_truncate(g->file, a1);
+        break;
+    }
+
+    /* The 32-bit getdents, which qemu-arm shows the guest still using in four
+     * places. struct linux_dirent is { u32 ino; u32 off; u16 reclen; char
+     * name[]; } with the type byte AFTER the name — an oddity of the old call
+     * that is easy to get wrong by analogy with getdents64. */
+    case SYS_getdents: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g) { ret = GP_EBADF; break; }
+        if (!g->dir) {
+            int r0 = gp_diropen(m.HostPath(g->path).c_str(), &g->dir);
+            if (r0 < 0) { ret = r0; break; }
+        }
+        uint8_t *out = m.Ptr(a1);
+        uint32_t used = 0;
+        for (;;) {
+            const char *name = nullptr;
+            uint32_t is_dir = 0;
+            std::string held;
+            if (g->has_pending) {
+                held   = g->pending_name;
+                name   = held.c_str();
+                is_dir = g->pending_is_dir;
+            } else {
+                int r0 = gp_dirnext(g->dir, &name, &is_dir);
+                if (r0 <= 0) { ret = r0 < 0 ? r0 : (int32_t)used; break; }
+            }
+            const uint32_t nlen = (uint32_t)std::strlen(name);
+            const uint32_t rec  = (10 + nlen + 1 + 1 + 3) & ~3u;
+            if (used + rec > a2) {
+                g->pending_name   = name;
+                g->pending_is_dir = is_dir;
+                g->has_pending    = true;
+                ret = used ? (int32_t)used : GP_EINVAL;
+                break;
+            }
+            g->has_pending = false;
+            uint8_t *e = out + used;
+            uint32_t ino = 1 + used, off = used + rec;
+            std::memcpy(e + 0, &ino, 4);
+            std::memcpy(e + 4, &off, 4);
+            uint16_t reclen = (uint16_t)rec;
+            std::memcpy(e + 8, &reclen, 2);
+            std::memcpy(e + 10, name, nlen + 1);
+            e[rec - 1] = is_dir ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
+            used += rec;
+        }
+        break;
+    }
+
+    case SYS_getdents64: {
+        /* fd, buf, count. The guest's struct linux_dirent64 is
+         * { u64 ino; s64 off; u16 reclen; u8 type; char name[]; }, packed, and
+         * padded so each record is 8-aligned. */
+        GuestFd *g = m.Fd((int)a0);
+        if (!g) { ret = GP_EBADF; break; }
+        if (!g->dir) {
+            int r0 = gp_diropen(m.HostPath(g->path).c_str(), &g->dir);
+            if (r0 < 0) { ret = r0; break; }
+        }
+        uint8_t *out = m.Ptr(a1);
+        uint32_t used = 0;
+        for (;;) {
+            const char *name = nullptr;
+            uint32_t is_dir = 0;
+            std::string held;
+            if (g->has_pending) {
+                held   = g->pending_name;
+                name   = held.c_str();
+                is_dir = g->pending_is_dir;
+            } else {
+                int r0 = gp_dirnext(g->dir, &name, &is_dir);
+                if (r0 <= 0) { ret = r0 < 0 ? r0 : (int32_t)used; break; }
+            }
+            const uint32_t nlen = (uint32_t)std::strlen(name);
+            const uint32_t rec  = (19 + nlen + 1 + 7) & ~7u;
+            if (used + rec > a2) {
+                /* No room. HOLD the entry for the next call rather than losing
+                 * it: /LF/Bulk/ProgramFiles has over a hundred packages and
+                 * cannot fit in one 4 KB buffer, so dropping the overflow makes
+                 * the guest see a truncated filesystem with no error anywhere.
+                 * If nothing fits at all the buffer is too small for a single
+                 * name, which is EINVAL. */
+                g->pending_name   = name;
+                g->pending_is_dir = is_dir;
+                g->has_pending    = true;
+                ret = used ? (int32_t)used : GP_EINVAL;
+                break;
+            }
+            g->has_pending = false;
+            uint8_t *e = out + used;
+            uint64_t ino = 1 + used;
+            std::memcpy(e + 0, &ino, 8);
+            int64_t off = used + rec;
+            std::memcpy(e + 8, &off, 8);
+            uint16_t reclen = (uint16_t)rec;
+            std::memcpy(e + 16, &reclen, 2);
+            e[18] = is_dir ? 4 /*DT_DIR*/ : 8 /*DT_REG*/;
+            std::memcpy(e + 19, name, nlen + 1);
+            used += rec;
+        }
+        break;
+    }
+
+    case SYS_unlink: ret = gp_unlink(m.HostPath(m.Str(a0)).c_str()); break;
+    case SYS_rename: {
+        /* CAtomicFile's whole contract: write a temp, sync it, rename over the
+         * target. The enum had this number from the start and the case did not
+         * exist, so every atomic save was failing at the last step. */
+        std::string from = m.Str(a0), to = m.Str(a1);
+        if (m.trace) tpath = from + " -> " + to;
+        ret = gp_rename(m.HostPath(from).c_str(), m.HostPath(to).c_str());
+        break;
+    }
+    case SYS_mkdir:  ret = gp_mkdir (m.HostPath(m.Str(a0)).c_str(), a1); break;
+    case SYS_rmdir:  ret = gp_rmdir (m.HostPath(m.Str(a0)).c_str()); break;
+    case SYS_chmod: {
+        /* AppManager chmods /tmp/bam-wrapper to 0555 while setting up power and
+         * USB, and the file is not there under either emulator — qemu answers
+         * ENOENT and carries on. So the whole of this call's product is an
+         * errno, and the default case was answering the wrong one.
+         *
+         * AND IT DOES NOT MAKE EITHER CALLER WORK, which is the point of
+         * writing it down. Toy Story 3 and LeapSchool: Reading were the two
+         * titles that reached it, and both are blank UNDER QEMU TOO for an
+         * unrelated reason: App.so fails to load and AppManager restarts
+         * itself, identically on both sides. What the missing case cost was a
+         * diagnosis — "unimplemented syscall 15" was the loudest line in those
+         * logs and it was pointing at nothing. Implementing it takes the false
+         * lead away and leaves the real failure visible. */
+        std::string p = m.Str(a0);
+        if (m.trace) tpath = p;
+        ret = gp_chmod(m.HostPath(p).c_str(), a1 & 07777);
+        break;
+    }
+
+    case SYS_ioctl:
+        /* Every ioctl in the census was TCGETS, libc asking whether a
+         * descriptor is a terminal. ENOTTY is the truthful answer and the one
+         * that makes stdio pick block buffering. */
+        ret = GP_ENOTTY;
+        break;
+
+    case SYS_fcntl:
+    case SYS_fcntl64: {
+        /* F_GETFL is the one that matters: uClibc's stdio asks it to decide
+         * whether a stream may be written, and answering 0 for stdout says
+         * O_RDONLY. The standard descriptors are in the table like everything
+         * else — OpenStdio put them there — so they are answered from it
+         * rather than by number, which is what lets a dup'd one answer for
+         * the stream it now carries. */
+        const uint32_t cmd = a1;
+        if (cmd == 3 /*F_GETFL*/) {
+            GuestFd *g = m.Fd((int)a0);
+            ret = g ? (int32_t)g->oflags : GP_EBADF;
+            break;
+        }
+        /* F_DUPFD, and F_DUPFD_CLOEXEC which differs only in a flag nothing
+         * here can act on. These used to fall into the accepted-and-ignored
+         * `ret = 0` below — which does not merely fail to duplicate, it hands
+         * the guest DESCRIPTOR ZERO as the answer, so the next write goes to
+         * what the guest believes is stdin. */
+        if (cmd == 0 /*F_DUPFD*/ || cmd == 1030 /*F_DUPFD_CLOEXEC*/) {
+            GuestFd *g = m.Fd((int)a0);
+            if (!g) { ret = GP_EBADF; break; }
+            ret = place_dup(m, *g, (int)a2);
+            break;
+        }
+        ret = 0;   /* F_GETFD, F_SETFD, F_SETFL: accepted */
+        break;
+    }
+
+    case SYS_getcwd: {
+        const size_t n = m.cwd.size() + 1;
+        /* ERANGE, NOT EINVAL. It is what the kernel answers for a buffer too
+         * small to hold the path, and callers act on the difference: the libc
+         * getcwd(NULL, 0) form doubles its buffer and tries again on ERANGE,
+         * and gives up on anything else. Measured against qemu with a 1-byte
+         * buffer — errno 34 there, 22 here. */
+        if (a1 < n) { ret = GP_ERANGE; break; }
+        std::memcpy(m.Ptr(a0), m.cwd.c_str(), n);
+        ret = (int32_t)n;
+        break;
+    }
+
+    case SYS_chdir: {
+        /* Guest-relative chdir is resolved through the CURRENT cwd before it
+         * replaces it, so `chdir("Data")` from a package directory works. */
+        std::string want = m.Str(a0);
+        if (m.trace) tpath = want;
+        std::string target = want;
+        /* gp_path_kind, not `target[0] != '/'`, for the reason spelled out in
+         * path.h: on Windows a path that names its own volume is absolute and
+         * a test that only knows the leading slash calls it relative. Nothing
+         * the viewer sends can produce one today — TADPOLE_SYSROOT is
+         * deliberately spelled drive-relative precisely because it ends up
+         * here — but a user who points it at a native path should not have
+         * every chdir silently glued onto the guest's cwd. */
+        int kind = gp_path_kind(target.c_str());
+        if (kind == GP_PATH_RELATIVE) {
+            target = m.cwd;
+            if (target.empty() || target.back() != '/') target += '/';
+            target += want;
+            kind = gp_path_kind(target.c_str());
+        }
+        gp_statbuf st;
+        /* THE REAL ERRNO, not ENOENT for everything. A path whose parent is a
+         * file is ENOTDIR and one that is too long is ENAMETOOLONG; flattening
+         * both to "not there" is how a guest ends up looking for the wrong
+         * cause. Measured: chdir() with a 5000-byte path gives 36 under qemu
+         * and used to give 2 here.
+         *
+         * ONE CWD, not two. An earlier fix kept the resolved host directory
+         * beside this one; HostPath now recurses through the sysroot rule
+         * instead and needs no second string to stay in step with. */
+        int r0 = gp_stat(m.HostPath(target).c_str(), &st);
+        if (r0 < 0) { ret = r0; break; }
+        if (!st.is_dir) { ret = GP_ENOTDIR; break; }
+        /* canon_path splits on '/' and re-joins with a leading one, so it
+         * would turn "C:/x" into "/C:/x". A path that names its own volume is
+         * kept verbatim and left for Win32 to canonicalise, which it does. */
+        m.cwd = kind == GP_PATH_HOST ? target : canon_path(target);
+        ret = 0;
+        break;
+    }
+
+    /* ---- time ---- */
+    case SYS_gettimeofday: {
+        if (a0) {
+            uint64_t ns = gp_wall_ns();
+            uint32_t *tv = (uint32_t *)m.Ptr(a0);
+            tv[0] = (uint32_t)(ns / 1000000000ull);
+            tv[1] = (uint32_t)((ns % 1000000000ull) / 1000);
+        }
+        ret = 0;
+        break;
+    }
+
+    case SYS_clock_gettime: {
+        uint64_t ns = (a0 == 1 /*MONOTONIC*/) ? gp_mono_ns() : gp_wall_ns();
+        uint32_t *ts = (uint32_t *)m.Ptr(a1);
+        ts[0] = (uint32_t)(ns / 1000000000ull);
+        ts[1] = (uint32_t)(ns % 1000000000ull);
+        ret = 0;
+        break;
+    }
+
+    case SYS_nanosleep: {
+        const uint32_t *ts = (const uint32_t *)m.Ptr(a0);
+        uint64_t ns = (uint64_t)ts[0] * 1000000000ull + ts[1];
+        guard.unlock();          /* never sleep holding the lock */
+        gp_sleep_ns(ns);
+        ret = 0;
+        break;
+    }
+
+    case SYS_sched_yield: gp_thread_yield(); ret = 0; break;
+
+    case SYS_statfs: {
+        /* struct statfs, 32-bit ARM: type, bsize, blocks, bfree, bavail,
+         * files, ffree, fsid[2], namelen, frsize, flags, spare[4].
+         *
+         * The numbers describe the CONSOLE's storage rather than the host's,
+         * for the same reason sysinfo does: the guest decides whether it has
+         * room to install or save from these, and reporting a 2 TB host disk
+         * invites it to believe things that are not true on real hardware. */
+        uint32_t *sf = (uint32_t *)m.Ptr(a1);
+        std::memset(sf, 0, 64);
+        sf[0] = 0x858458f6;                  /* RAMFS_MAGIC, near enough */
+        sf[1] = 4096;                        /* bsize */
+        sf[2] = 1024u * 1024;                /* blocks: 4 GB */
+        sf[3] = 512u * 1024;                 /* bfree:  2 GB */
+        sf[4] = 512u * 1024;                 /* bavail */
+        sf[5] = 100000;                      /* files */
+        sf[6] = 50000;                       /* ffree */
+        sf[9] = 255;                         /* namelen */
+        ret = 0;
+        break;
+    }
+
+    case SYS_sysinfo: {
+        /* struct sysinfo, 32-bit ARM: uptime, loads[3], totalram, freeram,
+         * sharedram, bufferram, totalswap, freeswap, procs, pad, totalhigh,
+         * freehigh, mem_unit, then padding to 64 bytes.
+         *
+         * The device had 128 MB and the guest sizes caches from this, so the
+         * numbers are the console's rather than the host's — reporting 32 GB
+         * of host RAM would have it allocate accordingly. */
+        /* THE INDICES WERE OFF BY ONE FIELD AND THEN BY THREE. procs is a u16
+         * pair with its padding, so it is si[10], not si[9] — si[9] is
+         * freeswap. mem_unit is si[13], not si[12] — si[12] is freehigh. Which
+         * left mem_unit at ZERO, and every total the guest computes as
+         * ram * mem_unit with it. busybox happens to clamp a zero to 1 and so
+         * looked plausible; it gave away the other end instead, reporting
+         * 4194303 of swap in use on a machine reporting none.
+         *
+         *   qemu-arm:  Swap:  3536892  244108  3292784
+         *   glasspole: Swap:        0 4194303         0
+         */
+        uint32_t *si = (uint32_t *)m.Ptr(a0);
+        std::memset(si, 0, 64);
+        si[0]  = (uint32_t)(gp_mono_ns() / 1000000000ull);   /* uptime */
+        si[4]  = 128u * 1024 * 1024;                          /* totalram */
+        si[5]  =  96u * 1024 * 1024;                          /* freeram */
+        si[10] = 1;                                           /* procs (+pad) */
+        si[13] = 1;                                           /* mem_unit */
+        ret = 0;
+        break;
+    }
+
+    case SYS_uname: {
+        /* Six 65-byte fields. The guest checks the release string to decide
+         * which kernel features exist, so it claims what the real device ran. */
+        char *u = (char *)m.Ptr(a0);
+        std::memset(u, 0, 6 * 65);
+        std::strcpy(u + 0 * 65, "Linux");
+        std::strcpy(u + 1 * 65, "leappad");
+        std::strcpy(u + 2 * 65, "2.6.37.4-leapfrog");
+        std::strcpy(u + 3 * 65, "#1 PREEMPT");
+        std::strcpy(u + 4 * 65, "armv7l");
+        std::strcpy(u + 5 * 65, "(none)");
+        ret = 0;
+        break;
+    }
+
+    default:
+        gp_log("unimplemented syscall %u (%s) at pc=%08x — "
+               "args %08x %08x %08x %08x\n",
+               nr, name_of(nr), r[15], a0, a1, a2, a3);
+        ret = GP_ENOSYS;
+        break;
+    }
+
+    /* Always carry the NUMBER as well as the name. A trace line reading "?" is
+     * an instrument that hides the one fact you needed from it. */
+    if (m.trace) {
+        if (!tpath.empty())
+            gp_log("  [%u] %3u %-14s %s = %d\n", t.tid, nr, name_of(nr), tpath.c_str(), ret);
+        else
+            gp_log("  [%u] %3u %-14s(%08x, %08x, %08x) = %d\n",
+                   t.tid, nr, name_of(nr), a0, a1, a2, ret);
+    }
+
+    r[0] = (uint32_t)ret;
+
+    /* AND ONLY NOW IS A SIGNAL DELIVERED.
+     *
+     * The frame a handler runs on top of is the one sigreturn resumes, so it
+     * has to contain the answer this call produced. Delivering inside the case
+     * above would save r0 as whatever the guest passed in — and raise() would
+     * appear to have returned its own signal number.
+     *
+     * The lock is dropped first because delivery takes it again to read the
+     * disposition table, and half the cases above have already let go of it. */
+    if (t.sigpend.load(std::memory_order_relaxed) ||
+        m.quit_gen.load(std::memory_order_relaxed) != t.quit_seen) {
+        if (guard.owns_lock()) guard.unlock();
+        gp_signal_deliver(t);
+    }
+}

@@ -1,0 +1,9 @@
+/* The launcher's icon, which is also the icon Windows shows for its
+ * shortcuts: a .lnk pointing at an exe with an embedded icon needs no icon of
+ * its own, so this one resource covers the desktop, the Start menu, the task
+ * bar and Add/Remove Programs at once.
+ *
+ * glasspole.ico is generated from glasspole.png by tools/build-windows.sh —
+ * a Vista+ icon may carry a PNG verbatim, so it is the same artwork rather
+ * than a hand-traced copy that would drift from it. */
+1 ICON "glasspole.ico"

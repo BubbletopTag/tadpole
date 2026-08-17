@@ -22,12 +22,17 @@ LAYER_FIELDS = ("enabled", "xres", "yres", "bpp", "xoffset", "yoffset",
                 "vid_w", "vid_h")
 LAYER_SIZE = 4 * len(LAYER_FIELDS)
 HDR_SIZE = 20                      # magic, version, width, height, vsync_count
+# What follows the layers: screen (u32), screen_seq (u32) and a 64-byte
+# PackageID — the shim's account of WHICH SCREEN the guest is showing, which
+# the viewer turns the window with. Nothing here needs it; it is counted so the
+# size check below still recognises a state.bin this script can read.
+TAIL_SIZE = 4 + 4 + 64
 
 
 def check_size(nbytes):
-    """state.bin is exactly the header plus NUM_FB layers. Anything else means
-    this script and the shim disagree about the struct."""
-    want = HDR_SIZE + NUM_FB * LAYER_SIZE
+    """state.bin is the header, NUM_FB layers, and the screen tail. Anything
+    else means this script and the shim disagree about the struct."""
+    want = HDR_SIZE + NUM_FB * LAYER_SIZE + TAIL_SIZE
     if nbytes != want:
         sys.stderr.write(
             "fbshot: state.bin is %d bytes, expected %d — LAYER_FIELDS is out "
@@ -199,6 +204,7 @@ def main():
     args = sys.argv[1:]
     probe = None
     layers_only = False
+    stat_only = False
     i = 0
     while i < len(args):
         if args[i] == "-d":
@@ -206,6 +212,9 @@ def main():
         elif args[i] == "--probe":
             # --probe X,Y,W,H,RRGGBB — "is that patch mostly that colour?"
             probe = args[i + 1]; i += 2
+        elif args[i] == "--stat":
+            # "lit N% colours M" — see the note in main().
+            stat_only = True; i += 1
         elif args[i] == "--layers":
             # What each layer HOLDS, no PNG. See layer_report().
             layers_only = True; i += 1
@@ -216,6 +225,27 @@ def main():
     if magic != MAGIC:
         print(f"bad magic 0x{magic:08x} in {d}/state.bin", file=sys.stderr)
         return 1
+
+    if stat_only:
+        # IS THERE A PICTURE? — the question a compatibility sweep asks.
+        #
+        # Layer occupancy cannot answer it: it counts non-zero BYTES, and an
+        # opaque black screen is 25% non-zero from its alpha alone, which reads
+        # as "97% full" while showing nothing. What separates a menu from a
+        # blank is colour: how much of the frame is not near-black, and how
+        # many distinct colours are in it. A flat fill has a handful; a title
+        # screen has thousands.
+        rgb = composite(d, w, h, layers)
+        n = w * h
+        lit = 0
+        cols = set()
+        for i in range(0, n * 3, 3):
+            r, g, b = rgb[i], rgb[i + 1], rgb[i + 2]
+            if r > 24 or g > 24 or b > 24:
+                lit += 1
+            cols.add((r >> 3, g >> 3, b >> 3))
+        print("lit %d%% colours %d" % (100 * lit // n, len(cols)))
+        return 0
 
     if layers_only:
         layer_report(d, w, h, layers)

@@ -18,15 +18,61 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+/* Guest supervision (fork/wait/kill) and the shared mappings — the two things
+ * with no Windows spelling. Their users are stubbed out below on Windows;
+ * see "guest supervision" for why they are stubs and not ports. */
 #include <sys/wait.h>
 #include <signal.h>
-#include <libgen.h>
-#include "tadpole_ui.h"
-#include "tadpole_hle.h"
 #include <sys/mman.h>
+#else
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>       /* map_file: MapViewOfFile of the guest's arena */
+#include <shellapi.h>      /* ShellExecuteA: hand over to the update installer */
+#include <limits.h>        /* INT_PTR's companions */
+#include <io.h>            /* _open_osfhandle: pipe HANDLEs as CRT fds */
+
+/* The FIFO stand-ins, viewer end. glasspole's gp_mkfifo maps a FIFO path to
+ * the named pipe \\.\pipe\tadpole-<basename>; this is the other half of that
+ * contract (see host_win32.c for the whole of it). Reader creates the pipe,
+ * writer connects — the viewer reads audio and writes events, the guest the
+ * reverse, and whichever end is late retries: the shim per audio period, us
+ * through ev_open_missing() every frame. The HANDLE is wrapped into a CRT fd
+ * so every read()/write() above stays exactly as Linux wrote it. */
+static int tp_fifo_fd(const char *path, int want_read)
+{
+	char name[128];
+	const char *base = strrchr(path, '/');
+	HANDLE h;
+
+	base = base ? base + 1 : path;
+	snprintf(name, sizeof(name), "\\\\.\\pipe\\tadpole-%s", base);
+	h = CreateFileA(name,
+	                want_read ? GENERIC_READ | GENERIC_WRITE : GENERIC_WRITE,
+	                0, NULL, OPEN_EXISTING, 0, NULL);
+	if (h == INVALID_HANDLE_VALUE) {
+		if (!want_read)
+			return -1;             /* no reader yet: retry, as on Linux */
+		h = CreateNamedPipeA(name, PIPE_ACCESS_DUPLEX,
+		                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
+		                     1, 64 << 10, 64 << 10, 0, NULL);
+		if (h == INVALID_HANDLE_VALUE)
+			return -1;
+		ConnectNamedPipe(h, NULL);     /* NOWAIT: arms, never blocks */
+	}
+	return _open_osfhandle((intptr_t)h, _O_RDWR | _O_BINARY);
+}
+#endif
+#include "tadpole_ui.h"
+#include "tadpole_boot.h"
+#include "tadpole_hle.h"
+#include "tadpole_port.h"
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <dirent.h>              /* guest_sweep_stragglers walks /proc */
+#endif
 
 #define TADPOLE_MAGIC 0x54414450u   /* "TADP" */
 #define NUM_FB 3
@@ -36,6 +82,13 @@
  * See the drop in the render loop — this is "the title has gone", not a
  * frame-pacing tolerance. */
 #define GL_STALE_MS 1000u
+
+/* Set by the Makefile; "dev" in a working copy. The update checker treats
+ * anything that is not a release tag as an unreleased build and offers the
+ * newest release without claiming you are behind. */
+#ifndef TADPOLE_VERSION
+#define TADPOLE_VERSION "dev"
+#endif
 
 /* Mirrors struct tadpole_state in the shim. Keep the two in sync. */
 struct layer_state {
@@ -49,11 +102,24 @@ struct layer_state {
 	uint32_t vid_w, vid_h;
 };
 
+/* What the guest is showing. The shim works this out from the files the guest
+ * opens — see the long note by screen_note() in tadpole_shim.c — and says so
+ * here; deciding which way up to hold the window from it is ours, below. */
+#define TAD_SCREEN_UNKNOWN 0
+#define TAD_SCREEN_SYSTEM  1
+#define TAD_SCREEN_TITLE   2
+#define PKGID_MAX          64
+
 struct tadpole_state {
 	uint32_t magic, version;
 	uint32_t width, height;
 	uint32_t vsync_count;
 	struct layer_state layer[NUM_FB];
+	/* Appended at the end, and it must stay at the end: tools/fbshot.py
+	 * decodes the header and the layers out of this file by offset. */
+	uint32_t screen;
+	uint32_t screen_seq;
+	char     screen_pkg[PKGID_MAX];
 };
 
 /* struct input_event as the 32-bit ARM guest sees it: 32-bit time_t. NOT the
@@ -140,6 +206,7 @@ static int   g_evfd[NUM_EV];
 static void *g_fb[NUM_FB];
 static size_t g_fbsz[NUM_FB];
 static struct tadpole_state *g_state;
+static size_t g_statesz;              /* bytes actually mapped at g_state */
 
 /* ---- audio -------------------------------------------------------------- *
  *
@@ -223,6 +290,7 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
 
 static void audio_open_fifo(void)
 {
+#ifndef _WIN32
 	char path[512];
 
 	snprintf(path, sizeof(path), "%s/audio", g_dir);
@@ -230,6 +298,13 @@ static void audio_open_fifo(void)
 	/* O_RDWR on a FIFO never blocks and never sees EOF, so we can hold the
 	 * read end open whether or not the guest has started writing. */
 	g_afd = open(path, O_RDWR | O_NONBLOCK);
+#else
+	/* The reader end of the audio pipe — we create it, the shim's writer
+	 * connects when it starts (or retries per period if we were late). */
+	char path[512];
+	snprintf(path, sizeof(path), "%s/audio", g_dir);
+	g_afd = tp_fifo_fd(path, 1);
+#endif
 }
 
 /* Open (or reopen) the SDL device when the guest publishes a format. */
@@ -335,6 +410,7 @@ static void audio_pump(void)
 
 static void *map_file(const char *path, size_t *len_out)
 {
+#ifndef _WIN32
 	struct stat st;
 	void *p;
 	int fd = open(path, O_RDWR);
@@ -352,6 +428,36 @@ static void *map_file(const char *path, size_t *len_out)
 	if (len_out)
 		*len_out = (size_t)st.st_size;
 	return p;
+#else
+	/* The guest (glasspole) maps these files as REAL shared views since its
+	 * chunked-reservation change, so their pages are live — and mapping them
+	 * here needs none of the placement gymnastics the emulator needed: our
+	 * own address space, any address, plain MapViewOfFile, Windows 7 API.
+	 * This is the Linux architecture reproduced, not a new one; the
+	 * one-process design remains the plan of record and deletes this too. */
+	HANDLE f, m;
+	LARGE_INTEGER sz;
+	void *p;
+
+	f = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
+	                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+	                NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (f == INVALID_HANDLE_VALUE)
+		return NULL;
+	if (!GetFileSizeEx(f, &sz) || sz.QuadPart == 0) {
+		CloseHandle(f);
+		return NULL;
+	}
+	m = CreateFileMappingA(f, NULL, PAGE_READWRITE, 0, 0, NULL);
+	CloseHandle(f);
+	if (!m)
+		return NULL;
+	p = MapViewOfFile(m, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+	CloseHandle(m);                     /* the view keeps the section alive */
+	if (p && len_out)
+		*len_out = (size_t)sz.QuadPart;
+	return p;
+#endif
 }
 
 static void send_event(int dev, uint16_t type, uint16_t code, int32_t value)
@@ -1114,10 +1220,33 @@ static int ui_shot(SDL_Renderer *ren, SDL_Window *win, const char *state,
 	 * always renders the idle case, so it cannot show a greyed-out File menu —
 	 * exactly the thing being debugged when Run System Menu stuck disabled. */
 	ui_set_running(guest_external());
+	/* Settled, not mid-entrance: this renders one frame, and an animated one
+	 * would capture whatever part of the fade it happened to catch. */
+	ui_anim_disable();
 	ui_debug_state(state);
 	SDL_SetRenderDrawColor(ren, 12, 30, 20, 255);
 	SDL_RenderClear(ren);
-	ui_draw_idle(ren, lw, lh + UI_BAR_H);
+	/* TADPOLE_SHOT_BG=RRGGBB SWAPS THE IDLE SCREEN FOR A FLAT COLOUR, and it
+	 * exists because the idle screen is the one backdrop the glass panels are
+	 * never in trouble over. They are translucent and they ADD the blurred
+	 * backdrop to their own body, so how readable a menu is depends entirely
+	 * on what is behind it — and the idle void is near-black, which adds
+	 * nothing. A panel that looks perfect in every shot in shots/ can still be
+	 * unreadable over a title's box art, which is exactly how the washed-out
+	 * File menu got shipped. Setting this to FFFFFF renders the worst case the
+	 * UI can ever be asked to sit on, so the contrast can be measured instead
+	 * of guessed at. */
+	{
+		const char *bg = getenv("TADPOLE_SHOT_BG");
+		unsigned v;
+		if (bg && sscanf(bg, "%x", &v) == 1) {
+			SDL_SetRenderDrawColor(ren, (Uint8)(v >> 16), (Uint8)(v >> 8),
+			                       (Uint8)v, 255);
+			SDL_RenderClear(ren);
+		} else {
+			ui_draw_idle(ren, lw, lh + UI_BAR_H);
+		}
+	}
 	ui_draw(ren, lw, lh + UI_BAR_H);
 
 	SDL_GetRendererOutputSize(ren, &ow, &oh);
@@ -1133,6 +1262,168 @@ static int ui_shot(SDL_Renderer *ren, SDL_Window *win, const char *state,
 	(void)win;
 	printf("ui-shot %s -> %s (%dx%d)\n", state, out, ow, oh);
 	return ok;
+}
+
+/* ---- --selftest-apps: does the launcher actually scroll? -------------------
+ *
+ * The list is fed real SDL_Event structs through ui_event(), the same call the
+ * main loop makes, and the position is read back after each one. That is the
+ * only thing that answers the question: an earlier round of this shipped with
+ * a launcher whose scrolling "looked right" in the source and did almost
+ * nothing in the hand — the wheel worked, and nothing else did.
+ *
+ * Needs a renderer, because ui_init() builds the font atlas, so it runs after
+ * the window exists rather than as a bare unit test.
+ */
+static int st_check(const char *what, int got, int want, int *bad)
+{
+	int ok = (got == want);
+	printf("  %-34s %4d  expected %4d  %s\n", what, got, want, ok ? "ok" : "FAIL");
+	if (!ok) (*bad)++;
+	return ok;
+}
+
+static void st_key(int lw, int lh, SDL_Keycode k)
+{
+	SDL_Event e;
+	memset(&e, 0, sizeof(e));
+	e.type = SDL_KEYDOWN;
+	e.key.keysym.sym = k;
+	ui_event(&e, lw, lh);
+}
+
+static void st_wheel(int lw, int lh, int y)
+{
+	SDL_Event e;
+	memset(&e, 0, sizeof(e));
+	e.type = SDL_MOUSEWHEEL;
+	e.wheel.y = y;
+	ui_event(&e, lw, lh);
+}
+
+static int selftest_apps(SDL_Renderer *ren, int rotate, int w, int h)
+{
+	int lw = (rotate == 90 || rotate == 270) ? h : w;
+	int lh = ((rotate == 90 || rotate == 270) ? w : h) + UI_BAR_H;
+	int n = 0, top = 0, sel = 0, rows = 0, bad = 0;
+
+	ui_anim_disable();
+	ui_debug_state("apps");
+	/* One frame, so the draw sets how many rows actually fit — the paging
+	 * keys and the wheel clamp both work off it. */
+	ui_draw(ren, lw, lh);
+	ui_debug_apps(&n, &top, &sel, &rows);
+
+	printf("app launcher: %d installed, %d rows visible\n\n", n, rows);
+	if (n < 8) {
+		printf("SKIPPED — needs a populated sysroot to mean anything\n");
+		return 0;
+	}
+
+	printf("wheel\n");
+	st_wheel(lw, lh, -1);                       /* one notch down */
+	ui_debug_apps(NULL, &top, NULL, NULL);
+	st_check("top after one notch down", top, 2, &bad);
+	st_wheel(lw, lh, 1);
+	ui_debug_apps(NULL, &top, NULL, NULL);
+	st_check("top after one notch back up", top, 0, &bad);
+
+	printf("arrows\n");
+	st_key(lw, lh, SDLK_DOWN);
+	ui_debug_apps(NULL, NULL, &sel, NULL);
+	st_check("selection after Down", sel, 1, &bad);
+	st_key(lw, lh, SDLK_UP);
+	ui_debug_apps(NULL, NULL, &sel, NULL);
+	st_check("selection after Up", sel, 0, &bad);
+
+	printf("the view follows the selection\n");
+	{
+		int i;
+		for (i = 0; i < rows + 3; i++) st_key(lw, lh, SDLK_DOWN);
+		ui_debug_apps(NULL, &top, &sel, NULL);
+		st_check("selection after rows+3 Downs", sel, rows + 3, &bad);
+		st_check("top scrolled to keep it visible", top, sel - rows + 1, &bad);
+	}
+
+	printf("paging and ends\n");
+	st_key(lw, lh, SDLK_HOME);
+	ui_debug_apps(NULL, &top, &sel, NULL);
+	st_check("selection after Home", sel, 0, &bad);
+	st_check("top after Home", top, 0, &bad);
+	st_key(lw, lh, SDLK_PAGEDOWN);
+	ui_debug_apps(NULL, NULL, &sel, NULL);
+	st_check("selection after PageDown", sel, rows, &bad);
+	st_key(lw, lh, SDLK_END);
+	ui_debug_apps(NULL, &top, &sel, NULL);
+	st_check("selection after End", sel, n - 1, &bad);
+	st_check("top after End", top, n - rows, &bad);
+
+	printf("type to jump\n");
+	{
+		/* THE LETTER COMES FROM THE LIBRARY, not from this file.
+		 *
+		 * It used to press 'w' and require a 'w' title, which was true of the
+		 * install it was written on and of nobody else's. On a sysroot with
+		 * 23 titles and no W the launcher was working perfectly and the test
+		 * printed "FAILED — the launcher does not scroll", which is the worst
+		 * thing a self-test can do: it spends the credibility that makes the
+		 * real failure worth reading.
+		 *
+		 * So: count the initials, and probe with the commonest one. Two
+		 * entries under it makes the "press again" check meaningful; with
+		 * one, jumping is still testable and advancing is not, so that check
+		 * is skipped rather than failed. */
+		int counts[26], i, n = 0, best = -1;
+		char letter;
+		memset(counts, 0, sizeof(counts));
+		ui_debug_apps(&n, NULL, NULL, NULL);
+		for (i = 0; i < n; i++) {
+			char c = ui_debug_app_initial(i);
+			if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+			if (c >= 'a' && c <= 'z') counts[c - 'a']++;
+		}
+		for (i = 0; i < 26; i++)
+			if (best < 0 || counts[i] > counts[best]) best = i;
+		if (best < 0 || counts[best] == 0) {
+			printf("  no title starts with a letter — nothing to jump to\n");
+		} else {
+			letter = (char)('a' + best);
+			st_key(lw, lh, SDLK_HOME);
+			st_key(lw, lh, SDLK_a + best);
+			ui_debug_apps(NULL, &top, &sel, NULL);
+			{
+				/* Assert the LETTER, not an index: whatever somebody else's
+				 * library holds, a jump to a letter has to land on that
+				 * letter and has to drag the view with it. */
+				char c = ui_debug_app_initial(sel);
+				int hit = (c == letter || c == letter - 'a' + 'A');
+				char label[48];
+				snprintf(label, sizeof(label),
+				         "first letter after pressing %c", letter);
+				printf("  %-34s  '%c'  expected  '%c'  %s\n",
+				       label, c ? c : '?', letter, hit ? "ok" : "FAIL");
+				if (!hit) bad++;
+				st_check("view followed the jump",
+				         sel >= top && sel < top + rows, 1, &bad);
+			}
+			if (counts[best] > 1) {
+				int again;
+				char label[48];
+				snprintf(label, sizeof(label),
+				         "pressing %c again advances", letter);
+				st_key(lw, lh, SDLK_a + best);
+				ui_debug_apps(NULL, NULL, &again, NULL);
+				st_check(label, again != sel, 1, &bad);
+			} else {
+				printf("  only one %c title — nothing to advance to\n", letter);
+			}
+		}
+	}
+
+	printf("\n%s\n", bad
+	       ? "FAILED — the launcher does not scroll"
+	       : "PASS — wheel, arrows, paging, ends and type-to-jump all move the list");
+	return bad ? 1 : 0;
 }
 
 /* The input FIFOs are made by the SHIM, so on a cold start they do not exist
@@ -1153,7 +1444,11 @@ static void ev_open_missing(void)
 		if (g_evfd[i] >= 0)
 			continue;
 		snprintf(path, sizeof(path), "%s/ev%d", g_dir, i);
+#ifndef _WIN32
 		g_evfd[i] = open(path, O_RDWR | O_NONBLOCK);
+#else
+		g_evfd[i] = tp_fifo_fd(path, 0);   /* writer end; guest serves */
+#endif
 	}
 }
 
@@ -1169,6 +1464,86 @@ static void set_logical(SDL_Renderer *ren, int rotate, int w, int h)
 	SDL_RenderSetLogicalSize(ren, lw, lh + UI_BAR_H);
 }
 
+/* ---- following the guest's orientation -----------------------------------
+ *
+ * THE HOME SCREEN IS PORTRAIT AND A GAME IS NOT, on the same 480x272 buffer.
+ * The LeapPad UI draws a quarter turn from how the device is held — the same
+ * reason the stock boot art is named "...CW.png" — so reading it upright means
+ * turning the picture back, 270 degrees clockwise. Titles are drawn the way
+ * they are played: landscape, no rotation. Verified by taking the raw
+ * framebuffer of each and rotating it both ways (shots/24-home-with-apps.png
+ * against shots/32-clamprix-current.png): only 270 puts "Sign In" the right
+ * way up, and only 0 leaves Clam Prix alone.
+ *
+ * So the answer changes as the guest moves between the two, which is what
+ * this is for. The shim reports WHICH SCREEN; the rotation is ours.
+ *
+ * NOT EVERY TITLE IS LANDSCAPE, and nothing in the package says which is
+ * which. My Books and Notepad draw portrait, and their stage sizes, device
+ * fields and Hidden flags are indistinguishable from the landscape ones — the
+ * only honest source is looking at the thing. So the rule is "a title is
+ * landscape", and the exceptions are listed here, each one measured from a
+ * capture. Anything not listed and drawn the other way is one Ctrl+R away,
+ * and that manual choice then stands until the guest changes screen.
+ */
+static const char *const PORTRAIT_TITLES[] = {
+	/* PackageID           what it is, and where the measurement is */
+	"PAD2-0x001E0013-000000",  /* My Books  — compat sweep, late.png */
+	"PADS-0x0028000C-000000",  /* Notepad   — compat sweep, late.png */
+	/* The text-entry keyboard the UI pushes when you name a profile. It is a
+	 * package like any other, so it arrives here as a "title" — but it is
+	 * part of a portrait screen, and its own art says so: Art/port-bg-up.png
+	 * is 327x272 with the buttons drawn sideways, and buttonMap.json calls
+	 * that config "Portrait-Single". Rotating for it would turn the window
+	 * over in the middle of typing a name. */
+	"KeyboardWidget",
+};
+
+static int rotate_for_screen(unsigned screen, const char *pkg)
+{
+	char id[PKGID_MAX];
+	size_t i;
+
+	if (screen != TAD_SCREEN_TITLE)
+		return 270;                 /* the LeapPad UI, and the boot logo */
+	/* pkg points into shared memory a guest wrote and may have died in the
+	 * middle of writing, so terminate it here rather than trusting it. */
+	snprintf(id, sizeof(id), "%s", pkg ? pkg : "");
+	for (i = 0; i < sizeof PORTRAIT_TITLES / sizeof *PORTRAIT_TITLES; i++)
+		if (!strcmp(id, PORTRAIT_TITLES[i]))
+			return 270;
+	return 0;
+}
+
+/* A rotation the front end already knows is coming, before any guest has said
+ * so: launching the system menu means portrait, launching a title means
+ * whatever that title is. Without it, "Run System Menu" would play the boot
+ * logo — a portrait picture — sideways for the twenty seconds until
+ * AppManager opens its first screen. -1 = nothing pending. */
+static int g_rot_want = -1;
+
+/* Resize and re-letterbox for a new rotation or scale. Both the manual
+ * control and the automatic follow come through here.
+ *
+ * SDL_SetWindowSize blocks on a window-manager round trip — measured at 4.8
+ * seconds here. The guest is meanwhile waiting for us to replay its frame, so
+ * drain the ring on BOTH sides of the resize; otherwise rotating reliably
+ * starves it into falling back to software, which is exactly what was
+ * reported when only the manual path existed. */
+static void apply_layout(SDL_Renderer *ren, SDL_Window *win, int rotate,
+                         int scale, int w, int h)
+{
+	int lw = (rotate == 90 || rotate == 270) ? h : w;
+	int lh = (rotate == 90 || rotate == 270) ? w : h;
+
+	if (hle_host_ready() && g_state && g_fb[1])
+		hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
+	set_logical(ren, rotate, w, h);
+	SDL_SetWindowSize(win, lw * scale, (lh + UI_BAR_H) * scale);
+	if (hle_host_ready() && g_state && g_fb[1])
+		hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
+}
+
 static int try_map(void)
 {
 	char path[600];
@@ -1176,7 +1551,11 @@ static int try_map(void)
 
 	if (g_state) return 1;
 	snprintf(path, sizeof(path), "%s/state.bin", g_dir);
-	g_state = map_file(path, NULL);
+	/* THE SIZE MATTERS, not just the mapping. An arena left behind by an
+	 * older shim is short by the screen fields at the end, and reading them
+	 * out of it would be reading past the file. Recorded here, checked before
+	 * the orientation follow trusts them. */
+	g_state = map_file(path, &g_statesz);
 	if (!g_state) return 0;
 	if (g_state->magic != TADPOLE_MAGIC) {   /* half-written; try again later */
 		g_state = NULL;
@@ -1221,15 +1600,42 @@ static void find_project_dir(const char *argv0)
 		const char *e = getenv("TADPOLE_PROJECT");
 		if (e && *e) {
 			snprintf(g_projdir, sizeof(g_projdir), "%s", e);
+			/* Forward slashes here too, not only on the argv[0] path
+			 * below. tadpole.exe hands this over in Windows spelling, and
+			 * a backslash reaching the guest's LD_LIBRARY_PATH is not a
+			 * separator to uClibc — every library then fails to load, with
+			 * "can't load library 'libVideoMPI.so'" as the only clue. */
+			for (i = 0; g_projdir[i]; i++)
+				if (g_projdir[i] == '\\') g_projdir[i] = '/';
 			return;
 		}
 	}
-	if (!realpath(argv0, buf)) {
+	if (!tp_realpath(argv0, buf, sizeof(buf))) {
 		snprintf(g_projdir, sizeof(g_projdir), "%s", ".");
 		return;
 	}
+	/* One separator convention below this line. Win32 APIs accept forward
+	 * slashes everywhere, so normalise rather than teach every strrchr
+	 * about backslashes. A no-op on Linux. */
+	for (i = 0; buf[i]; i++)
+		if (buf[i] == '\\') buf[i] = '/';
 	for (i = 0; i < 3; i++) {
 		char *slash = strrchr(buf, '/');
+		if (!slash || slash == buf) break;
+		*slash = 0;
+	}
+	/* Strip-three is right for <proj>/tadpole/viewer/tadpole-view and one
+	 * short for the CMake layout's viewer/build/tadpole-view.exe — where it
+	 * lands on <proj>/tadpole, every prerequisite looks missing, and the
+	 * wizard tells a fully-installed machine to start over. So verify the
+	 * guess the way tadpole.exe does: the project root is wherever
+	 * tadpole.sh is, walking up if need be. */
+	for (i = 0; i < 3; i++) {
+		char probe[1100];
+		char *slash;
+		snprintf(probe, sizeof(probe), "%s/tadpole.sh", buf);
+		if (access(probe, F_OK) == 0) break;
+		slash = strrchr(buf, '/');
 		if (!slash || slash == buf) break;
 		*slash = 0;
 	}
@@ -1243,17 +1649,42 @@ static void find_project_dir(const char *argv0)
  * THE DEBUG LEVEL EXPANDS HERE, in one place, so that "level 2" has exactly
  * one meaning. See the table in tadpole_ui.h.
  */
+#ifndef _WIN32
 static void guest_setenv(const struct ui_settings *c)
 {
 	char buf[32];
 	int lv = c->debug_level;
 
 	if (c->gl)           setenv("TADPOLE_GL", "1", 1);          else unsetenv("TADPOLE_GL");
-	if (c->gl_hle)       setenv("TADPOLE_GL_HLE", "1", 1);      else unsetenv("TADPOLE_GL_HLE");
+	/* TADPOLE_GL_SOFTWARE COMES FROM THE USER'S SHELL, not from the settings —
+	 * it is the deliberate way to the deprecated software rasteriser, and on
+	 * Windows setting it before launching the viewer is the ONLY way to reach
+	 * it, since the checkbox that used to is now locked on. The guest inherits
+	 * our environment, so it arrives on its own; the point of naming it here is
+	 * that TADPOLE_GL_HLE must not be sent alongside it. The shim prefers
+	 * software when both are present, but "both are present" is a contradiction
+	 * to have to reason about at the far end. */
+	if (getenv("TADPOLE_GL_SOFTWARE") || !c->gl_hle)
+		unsetenv("TADPOLE_GL_HLE");
+	else
+		setenv("TADPOLE_GL_HLE", "1", 1);
+	/* This guest is launched WITH --no-viewer, but not headless: we are the
+	 * viewer, already running, and we read the shared arena this guest writes
+	 * into for host-GPU replay same as if it had opened its own window.
+	 * tadpole.sh's --no-viewer refusal exists for the OTHER case — a caller
+	 * with no viewer anywhere in the picture — and cannot tell the two apart
+	 * on its own, so we say so. */
+	setenv("TADPOLE_SUPERVISED", "1", 1);
 	if (c->gl_dumpframe) setenv("TADPOLE_GL_DUMPFRAME", "1", 1);else unsetenv("TADPOLE_GL_DUMPFRAME");
 	if (c->gl_dumptex)   setenv("TADPOLE_GL_DUMPTEX", "1", 1);  else unsetenv("TADPOLE_GL_DUMPTEX");
 	if (c->touch_debug)  setenv("TADPOLE_TOUCH_DEBUG", "1", 1); else unsetenv("TADPOLE_TOUCH_DEBUG");
-	if (c->hle_strict)   setenv("TADPOLE_HLE_STRICT", "1", 1);  else unsetenv("TADPOLE_HLE_STRICT");
+	/* NOT unset when absent from the settings, unlike its neighbours. The
+	 * "Stop if HLE falls back" row is gone — replay dying raises a dialog now,
+	 * and the only remaining choice was between that and killing the title,
+	 * which is a debugging preference rather than a setting. So the environment
+	 * is the only way to ask for it, and clearing it here would take that away
+	 * from anyone who did. */
+	if (c->hle_strict) setenv("TADPOLE_HLE_STRICT", "1", 1);
 	if (c->tslib)        setenv("TADPOLE_TSLIB", "1", 1);       else unsetenv("TADPOLE_TSLIB");
 
 	/* Level 2 turns on the shim's own tracing and the GL layer's; level 3 adds
@@ -1280,6 +1711,7 @@ static void guest_setenv(const struct ui_settings *c)
 	}
 	setenv("TADPOLE_DIR", g_dir, 1);
 }
+#endif  /* !_WIN32 — only spawn_script's child calls this */
 
 /* ---- where the guest's output goes ---------------------------------------
  *
@@ -1299,11 +1731,17 @@ static FILE *g_glog_file;
 
 static void guest_log_path(char *out, size_t n)
 {
+	/* XDG override, then the platform's app-data directory, then ~/.local.
+	 * LOCALAPPDATA is just an environment variable — set on every Windows,
+	 * never set on Linux — so this chain needs no #ifdef to be right on
+	 * both. */
 	const char *x = getenv("XDG_STATE_HOME");
+	const char *la = getenv("LOCALAPPDATA");
 	const char *home = getenv("HOME");
 	char *p;
-	if (x && *x) snprintf(out, n, "%s/tadpole", x);
-	else         snprintf(out, n, "%s/.local/state/tadpole", home ? home : "/tmp");
+	if (x && *x)        snprintf(out, n, "%s/tadpole", x);
+	else if (la && *la) snprintf(out, n, "%s/Tadpole/state", la);
+	else                snprintf(out, n, "%s/.local/state/tadpole", home ? home : "/tmp");
 	/* EVERY level of it. ~/.local/state does not exist on a fresh account, and
 	 * one mkdir() of a path whose parent is missing fails with ENOENT — which
 	 * is exactly how the first log file went nowhere, silently, while the
@@ -1311,10 +1749,10 @@ static void guest_log_path(char *out, size_t n)
 	for (p = out + 1; *p; p++) {
 		if (*p != '/') continue;
 		*p = 0;
-		mkdir(out, 0755);
+		tp_mkdir(out);
 		*p = '/';
 	}
-	mkdir(out, 0755);
+	tp_mkdir(out);
 	{
 		size_t l = strlen(out);
 		snprintf(out + l, n - l, "/tadpole.log");
@@ -1363,6 +1801,456 @@ static void guest_log_close(void)
  * to $TADPOLE_DIR/.lock and refuses a second instance on the same dir. Without
  * this the menu would offer "Run System Menu" against a live guest and the
  * launch would just fail on the lock. */
+#ifdef _WIN32
+/* ---- guest supervision, Windows --------------------------------------------
+ *
+ * Not fork-shaped after all. On Linux tadpole.sh assembles an emulator
+ * command and the viewer forks the script; here the same knowledge assembles
+ * the same command for CreateProcess — glasspole IS the emulator on Windows,
+ * and starting a process is the one part of supervision Win32 does natively.
+ * What stays unported are the SCRIPTS: the tools written in bash and python
+ * (updates, installs) still answer honestly that they need the full build.
+ *
+ * The guest environment mirrors what tools/tadpole-win.ps1 proved out, with
+ * paths spelled drive-relative: they must survive a colon-separated
+ * LD_LIBRARY_PATH, and glasspole's sysroot fallthrough opens them natively
+ * against the current drive. */
+static HANDLE g_guest_h;
+static HANDLE g_tool_h;
+
+/* Run one of the project's Python tools and stream its output to the progress
+ * panel.
+ *
+ * OUTPUT GOES THROUGH A FILE, NOT A PIPE, and that is the point. The panel is
+ * drained by tool_drain() from the UI thread with plain read() calls that
+ * expect a non-blocking descriptor; an anonymous pipe on Windows has no such
+ * mode, so a read between the tool's lines would freeze the window. A file
+ * has exactly the semantics wanted for free: reads return what has been
+ * written so far and 0 at the end, over and over, until the writer finishes.
+ * Same trick as the guest's log, for the same reason.
+ *
+ * Which Python: TADPOLE_PYTHON if set, then the py launcher, then python3 and
+ * python. First one that starts wins; if none do, the caller's "could not
+ * start" message is the truth. */
+/* Where Python actually is, in the order worth trying. PATH is the LEAST
+ * reliable of these on Windows: python.org's per-user installer does not add
+ * itself by default, so "python" resolving is the exception rather than the
+ * rule, and a tool that only tries PATH tells most users they have no Python
+ * while it sits in their profile. */
+static const char *find_python(char *buf, size_t n)
+{
+	const char *e = getenv("TADPOLE_PYTHON");
+	char probe[900];
+	WIN32_FIND_DATAA fd;
+	HANDLE h;
+
+	if (e && *e && access(e, F_OK) == 0) {
+		snprintf(buf, n, "\"%s\"", e);
+		return buf;
+	}
+	/* Project-local, the Windows spelling of tools/fetch-deps.sh's
+	 * build/deps/python — a Python that came with Tadpole beats one that
+	 * happens to be installed. */
+	snprintf(probe, sizeof(probe), "%s/build/deps/python/python.exe", g_projdir);
+	if (access(probe, F_OK) == 0) {
+		snprintf(buf, n, "\"%s\"", probe);
+		return buf;
+	}
+	e = getenv("LOCALAPPDATA");
+	if (e && *e) {
+		snprintf(probe, sizeof(probe), "%s\\Programs\\Python\\Python3*", e);
+		h = FindFirstFileA(probe, &fd);
+		if (h != INVALID_HANDLE_VALUE) {
+			do {
+				snprintf(probe, sizeof(probe),
+				         "%s\\Programs\\Python\\%s\\python.exe", e, fd.cFileName);
+				if (access(probe, F_OK) == 0) {
+					FindClose(h);
+					snprintf(buf, n, "\"%s\"", probe);
+					return buf;
+				}
+			} while (FindNextFileA(h, &fd));
+			FindClose(h);
+		}
+	}
+	return NULL;              /* the PATH candidates are tried after this */
+}
+
+static pid_t spawn_python(const char *rel, char *const argv[], int *outfd)
+{
+	static const char *cand[] = { NULL, "py -3", "python3", "python" };
+	char found[1024];
+	char cmd[4096], logp[700];
+	SECURITY_ATTRIBUTES sa;
+	STARTUPINFOA si;
+	PROCESS_INFORMATION pi;
+	HANDLE lh;
+	unsigned c;
+	int i, n, ok = 0;
+
+	cand[0] = find_python(found, sizeof(found));
+
+	memset(&sa, 0, sizeof(sa));
+	sa.nLength = sizeof(sa);
+	sa.bInheritHandle = TRUE;
+	snprintf(logp, sizeof(logp), "%s/tool.log", g_dir);
+	lh = CreateFileA(logp, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+	                 &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (lh == INVALID_HANDLE_VALUE)
+		return -1;
+
+	for (c = 0; c < sizeof(cand) / sizeof(cand[0]) && !ok; c++) {
+		if (!cand[c] || !cand[c][0])
+			continue;
+		n = snprintf(cmd, sizeof(cmd), "%s \"%s/%s\"", cand[c], g_projdir, rel);
+		for (i = 1; argv[i] && n < (int)sizeof(cmd) - 4; i++)
+			n += snprintf(cmd + n, sizeof(cmd) - n, " \"%s\"", argv[i]);
+		memset(&si, 0, sizeof(si));
+		si.cb = sizeof(si);
+		si.dwFlags    = STARTF_USESTDHANDLES;
+		si.hStdOutput = lh;
+		si.hStdError  = lh;
+		memset(&pi, 0, sizeof(pi));
+		if (CreateProcessA(NULL, cmd, NULL, NULL, TRUE, CREATE_NO_WINDOW,
+		                   NULL, g_projdir, &si, &pi))
+			ok = 1;
+	}
+	CloseHandle(lh);
+	if (!ok) {
+		fprintf(stderr, "tadpole-view: no Python found for %s — install "
+		        "Python 3 from python.org, or set TADPOLE_PYTHON\n", rel);
+		ui_status("this needs Python 3 installed");
+		return -1;
+	}
+	CloseHandle(pi.hThread);
+	if (g_tool_h)
+		CloseHandle(g_tool_h);
+	g_tool_h = pi.hProcess;
+	if (outfd)
+		*outfd = open(logp, O_RDONLY);
+	return (pid_t)pi.dwProcessId;
+}
+
+/* C:\x/y -> /x/y (drop_drive) or C:/x/y (keep it), because this is the only
+ * place host spelling becomes guest spelling.
+ *
+ * The separator conversion is never optional: a backslash is not a separator
+ * to uClibc OR to glasspole's HostPath, so a TADPOLE_DIR of "C:\Users\...\run"
+ * would reach the guest as a single opaque name, the shim's framebuffer files
+ * would go somewhere the guest never looks, and the title would die inside its
+ * display module with "No framebuffer allocation available". %LOCALAPPDATA%
+ * hands us exactly that spelling, so this is not defensive: it is the common
+ * case.
+ *
+ * THE DRIVE LETTER IS A DIFFERENT QUESTION, AND GETTING IT WRONG COST AN
+ * INSTALL. Dropping it was the rule for everything, because a colon splits a
+ * colon-separated LD_LIBRARY_PATH and the resulting driveless path resolves
+ * against the guest process's current drive — which the viewer sets to the
+ * install tree, so the install's own paths come out right by construction.
+ *
+ * TADPOLE_DIR is the one path that is NOT in the install tree. It lives under
+ * %LOCALAPPDATA%, i.e. on the user profile's drive. On the C: install that
+ * everyone including the installer's default uses, the two drives are the same
+ * one and the missing letter is refilled correctly by accident. Install to E:
+ * and the guest is told the runtime directory is at /Users/<name>/AppData/...
+ * — which it dutifully resolves on E:, where there is no such directory. Every
+ * fb0.bin, state.bin and event node then fails to open, and the log reads:
+ *
+ *     [0x5] CreateHandle: No framebuffer allocation available
+ *     <ASSERT>: [0x0] Unsupported destination PixelFormat used 0
+ *
+ * — a framebuffer complaint with no framebuffer code behind it.
+ *
+ * So: keep the drive for the single-value variables that may name another
+ * volume, drop it only where a colon genuinely cannot survive. LD_LIBRARY_PATH
+ * is that one place, and every entry in it is inside the install tree anyway.
+ * glasspole anchors what is left on the drive its own .exe was loaded from
+ * rather than on the current directory — see the note above widen() in
+ * host_win32.c — so the driveless spelling no longer depends on how the
+ * process was started either. */
+static void drel(const char *in, char *out, size_t n, int drop_drive)
+{
+	size_t i;
+	if (drop_drive && in[0] && in[1] == ':')
+		in += 2;
+	for (i = 0; i + 1 < n && in[i]; i++)
+		out[i] = in[i] == '\\' ? '/' : in[i];
+	out[i] = 0;
+}
+
+static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
+                          int *outfd, int silent)
+{
+	char R[1024], dir[600], cmd[4096];
+	const char *prog = NULL;
+	int i, n;
+	STARTUPINFOA si;
+	PROCESS_INFORMATION pi;
+
+	(void)silent;
+	if (outfd) *outfd = -1;
+
+	/* TOOLS RUN AS PYTHON HERE. Every tool the viewer spawns exists in both
+	 * spellings now: the .sh ones are Linux's entry points and the .py ones
+	 * are what Windows runs, with no bash anywhere. The Linux path is
+	 * untouched — it still spawns the scripts.
+	 *
+	 * FIRMWARE WAS THE HOLE, and it was the whole product on Windows. The
+	 * setup wizard could download system files and then had nothing to
+	 * install them with, so the honest refusal below left a user who had
+	 * done everything right staring at a first-run screen. install-firmware,
+	 * online-update, make-profile and erase-firmware are the four that
+	 * closes. A profile matters as much as the firmware: without one the
+	 * system boots to Create Profile and stops, so "installed" and
+	 * "playable" are different states and both need a tool here.
+	 *
+	 * The refusal stays for anything genuinely unported, because a tool that
+	 * half-works is worse than one that says it cannot. */
+	if (!as_guest) {
+		static const struct { const char *sh, *py; } port[] = {
+			{ "tools/install-game.sh",     "tools/install-game.py"     },
+			{ "tools/scan-games.sh",       "tools/scan-games.py"       },
+			{ "tools/install-firmware.sh", "tools/install-firmware.py" },
+			{ "tools/install-didj.sh",     "tools/install-didj.py"     },
+			{ "tools/online-update.sh",    "tools/online-update.py"    },
+			{ "tools/make-profile.sh",     "tools/make-profile.py"     },
+			{ "tools/erase-firmware.sh",   "tools/erase-firmware.py"   },
+		};
+		const char *py = NULL;
+		unsigned k;
+		for (k = 0; k < sizeof(port) / sizeof(port[0]); k++)
+			if (!strcmp(script, port[k].sh)) { py = port[k].py; break; }
+		if (!py && strstr(script, ".py"))               py = script;
+		if (!py) {
+			fprintf(stderr, "tadpole-view: cannot run %s — that tool is a "
+			        "shell script and Windows has no shell for it\n", script);
+			return -1;
+		}
+		return spawn_python(py, argv, outfd);
+	}
+	if (strcmp(script, "tadpole.sh") != 0) {
+		fprintf(stderr, "tadpole-view: cannot run %s — guests launch "
+		        "natively on Windows\n", script);
+		return -1;
+	}
+	/* argstart is where the GUEST's own argv begins, and it is tracked
+	 * explicitly rather than left in the loop variable: falling out of the
+	 * scan with i on the NULL terminator and then stepping past it reads off
+	 * the end of argv, which crashes the viewer the moment anyone picks Run
+	 * System Menu. */
+	int argstart = 0;
+	for (i = 1; argv[i]; i++) {
+		if (!strcmp(argv[i], "--boot")) {
+			prog = "/LF/Base/bin/AppManager";
+			break;                  /* AppManager takes no arguments here */
+		}
+		if (!strcmp(argv[i], "--run") && argv[i + 1]) {
+			prog = argv[i + 1];
+			argstart = i + 2;       /* everything after is the guest's */
+			break;
+		}
+		if (!strcmp(argv[i], "--app")) {
+			ui_status("launch titles from the home screen on Windows");
+			return -1;
+		}
+	}
+	if (!prog) {
+		ui_status("nothing to launch");
+		return -1;
+	}
+
+	/* R: the install tree, drive filed off. Everything derived from it stays
+	 * that way — LD_LIBRARY_PATH because a colon there is a separator, and
+	 * TADPOLE_SYSROOT because the shim prepends it to guest paths and then
+	 * chdir()s into the result, which glasspole canonicalises as a guest path.
+	 * All of those live on the install's own drive, so the drive glasspole
+	 * anchors them on is the right one.
+	 *
+	 * dir: TADPOLE_DIR, WITH ITS DRIVE, because it is the one path in the run
+	 * that is not in the install tree — %LOCALAPPDATA% is on the user profile's
+	 * volume, which is only the install's volume by coincidence. See drel().
+	 *
+	 * --sysroot is given absolutely rather than as "runtime/sysroot". It was
+	 * relative, which quietly made the sysroot lookup depend on the child's
+	 * current directory being the one we pass below; when that assumption
+	 * fails nothing says so — every guest path falls through to the literal
+	 * branch and the rootfs appears to be empty.
+	 *
+	 * Quoted, all of them: "C:\Program Files\..." and any user whose name has
+	 * a space in it would otherwise end the argument early. */
+	drel(g_projdir, R, sizeof(R), 1);
+	drel(g_dir, dir, sizeof(dir), 0);
+	n = snprintf(cmd, sizeof(cmd),
+	    "\"%s/glasspole/build/glasspole.exe\" --sysroot \"%s/runtime/sysroot\""
+	    " -E \"LD_LIBRARY_PATH=%s/runtime/shimlibs-gl:%s/runtime/shimlibs-z:"
+	    "%s/runtime/shimlibs:%s/runtime/libs\""
+	    " -E \"TADPOLE_DIR=%s\""
+	    " -E TSLIB_CONFFILE=/nonexistent-ts.conf"
+	    " -E \"TADPOLE_SYSROOT=%s/runtime/sysroot\"",
+	    g_projdir, g_projdir, R, R, R, R, dir, R);
+	if (ui_cfg()->gl || ui_cfg()->gl_hle)
+		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL=1");
+	/* HLE REPLAY GOES TO THE GUEST ON WINDOWS AGAIN — THE BLOCKER IS GONE.
+	 *
+	 * It was held back because AppManager died before its first frame with
+	 *     [0x5] CreateHandle: No framebuffer allocation available
+	 *     <ASSERT> Unsupported destination PixelFormat used 0
+	 * while TADPOLE_GL=1 alone stayed up.
+	 *
+	 * RE-MEASURED, and it no longer happens. AppManager launched with
+	 * TADPOLE_GL=1 TADPOLE_GL_HLE=1 against a viewer holding the ring boots
+	 * to "UI entered" with three successful CreateHandle calls at
+	 * 480x272 (1920). Confirmed as not-my-doing by rebuilding glasspole from
+	 * this same commit with the host_win32.c view fix reverted: THAT boots
+	 * too. Something between the original measurement and here repaired it —
+	 * the TADPOLE_DIR spelling fix and the syscall/errno/chdir work are all
+	 * candidates — so this note deliberately does not claim a cause.
+	 *
+	 * WHAT WITHHOLDING IT COST, which is the reason this matters more than a
+	 * crash: it did not turn rendering off, it silently selected the SOFTWARE
+	 * RASTERISER. tadpole.sh's own note describes that path as drawing simple
+	 * screens correctly and "visibly mangling busy ones". So every 3D title on
+	 * Windows was being judged on the fallback, and "content too large for its
+	 * frame, a banner drawn flipped, objects missing" is what that fallback
+	 * looks like — a Windows-only rendering bug with no Windows-only rendering
+	 * code behind it.
+	 *
+	 * If it regresses, the honest move is to re-measure and say so here, not
+	 * to withhold silently: a user cannot tell the fallback from the real
+	 * thing except by the picture being wrong. */
+	if (ui_cfg()->gl_hle)
+		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL_HLE=1");
+	/* THE DIAGNOSIS VARIABLES, which guest_env() sets on POSIX and this path
+	 * did not set at all. Windows spells its guest environment by hand, one
+	 * -E at a time, so a variable not named here simply never reaches the
+	 * shim — and TADPOLE_GL_DEBUG was never named here. Debug level 2 in the
+	 * viewer therefore turned on the GL trace on Linux and did NOTHING on
+	 * Windows, which is precisely the platform where the 3D output is wrong
+	 * and the trace is the thing you want.
+	 *
+	 * It looked like it was working, which is why it survived: tad_gl_warn()
+	 * and tad_gl_report() write to gl-warnings.log whatever the level is, so
+	 * a Windows run still produced a GL error tally. What it could not
+	 * produce was the per-call trace naming the enum that raised them. */
+	if (ui_cfg()->debug_level >= 2)
+		n += snprintf(cmd + n, sizeof(cmd) - n,
+		              " -E TADPOLE_DEBUG=1 -E TADPOLE_GL_DEBUG=1");
+	if (ui_cfg()->gl_dumpframe)
+		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL_DUMPFRAME=1");
+	if (ui_cfg()->gl_dumptex)
+		n += snprintf(cmd + n, sizeof(cmd) - n, " -E TADPOLE_GL_DUMPTEX=1");
+	n += snprintf(cmd + n, sizeof(cmd) - n, " %s", prog);
+	if (argstart)
+		for (i = argstart; argv[i] && n < (int)sizeof(cmd) - 2; i++)
+			n += snprintf(cmd + n, sizeof(cmd) - n, " %s", argv[i]);
+
+	/* THE GUEST MUST HAVE SOMEWHERE TO WRITE. CREATE_NO_WINDOW alone leaves
+	 * the child with no console and no standard handles, so every guest
+	 * write() to stdout fails — and AppManager, four hundred log lines
+	 * chattier than anything else here, gives up and exits within seconds.
+	 * That looks exactly like "the emulator cannot start" and is not.
+	 * So hand it a real file: $TADPOLE_DIR/guest.log, inheritable, as both
+	 * stdout and stderr. It is the Windows spelling of the POSIX path's
+	 * pipe-or-/dev/null, and it doubles as the log a user can send us. */
+	{
+		SECURITY_ATTRIBUTES sa;
+		char logp[700];
+		HANDLE lh;
+
+		memset(&sa, 0, sizeof(sa));
+		sa.nLength = sizeof(sa);
+		sa.bInheritHandle = TRUE;
+		snprintf(logp, sizeof(logp), "%s/guest.log", g_dir);
+		lh = CreateFileA(logp, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+		                 &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+		if (lh == INVALID_HANDLE_VALUE)
+			lh = CreateFileA("NUL", GENERIC_WRITE, 0, &sa, OPEN_EXISTING, 0, NULL);
+
+		/* WITH DEBUG ON, THE GUEST GETS A CONSOLE OF ITS OWN. AppManager is
+		 * four hundred lines of boot chatter and the single most useful
+		 * artefact when a title misbehaves; watching it arrive live is worth
+		 * a window, and it is what "debug level 1" means everywhere else in
+		 * this program. Quiet by default: a console per launch would be
+		 * noise for someone who only wants to play. The log file is written
+		 * either way, so nothing is lost by choosing the quiet one. */
+		int console = ui_cfg()->debug_level >= 1;
+		memset(&si, 0, sizeof(si));
+		si.cb = sizeof(si);
+		if (!console) {
+			si.dwFlags    = STARTF_USESTDHANDLES;
+			si.hStdInput  = NULL;
+			si.hStdOutput = lh;
+			si.hStdError  = lh;
+		}
+		memset(&pi, 0, sizeof(pi));
+		if (!CreateProcessA(NULL, cmd, NULL, NULL, !console,
+		                    console ? CREATE_NEW_CONSOLE : CREATE_NO_WINDOW,
+		                    NULL, g_projdir, &si, &pi)) {
+			if (lh != INVALID_HANDLE_VALUE) CloseHandle(lh);
+			fprintf(stderr, "tadpole-view: glasspole would not start "
+			        "(GetLastError %lu)\n", (unsigned long)GetLastError());
+			ui_status("glasspole would not start — is it built?");
+			return -1;
+		}
+		if (lh != INVALID_HANDLE_VALUE) CloseHandle(lh);
+	}
+	CloseHandle(pi.hThread);
+	if (g_guest_h)
+		CloseHandle(g_guest_h);
+	g_guest_h = pi.hProcess;
+	return (pid_t)pi.dwProcessId;
+}
+
+static int guest_external(void) { return 0; }
+
+static int guest_alive(void)
+{
+	if (!g_guest_h)
+		return 0;
+	if (WaitForSingleObject(g_guest_h, 0) == WAIT_TIMEOUT)
+		return 1;
+	CloseHandle(g_guest_h);
+	g_guest_h = NULL;
+	return 0;
+}
+
+static void guest_stop(void)
+{
+	/* Before the early return, not after it: the presentation has to end even
+	 * when there is no guest handle to terminate, or a launch that failed
+	 * leaves the logo up over nothing. */
+	boot_stop();
+	if (!g_guest_h)
+		return;
+	/* TerminateProcess without ceremony: since the shared-view change there
+	 * is no write-back to lose, and the guest holds no state outside its
+	 * TADPOLE_DIR files, which are already coherent. */
+	TerminateProcess(g_guest_h, 0);
+	WaitForSingleObject(g_guest_h, 2000);
+	CloseHandle(g_guest_h);
+	g_guest_h = NULL;
+}
+
+/* Reap a finished Python tool, so the progress panel closes and reports.
+ * Without this the panel would sit at "starting..." for ever, which is how a
+ * working installer still looks broken. */
+static int tool_reap(pid_t pid, int *exited_ok)
+{
+	DWORD code = 1;
+	(void)pid;
+	if (!g_tool_h)
+		return 0;
+	if (WaitForSingleObject(g_tool_h, 0) == WAIT_TIMEOUT)
+		return 0;
+	GetExitCodeProcess(g_tool_h, &code);
+	CloseHandle(g_tool_h);
+	g_tool_h = NULL;
+	*exited_ok = (code == 0);
+	return 1;
+}
+
+#else  /* POSIX guest supervision */
+
 static int guest_external(void)
 {
 	char path[600];
@@ -1396,18 +2284,170 @@ static int guest_alive(void)
 	return 1;
 }
 
+/* THE ONE THAT LEFT THE GROUP. VideoDaemon daemonizes the textbook way — fork,
+ * setsid, close every descriptor (see tadpole_shim.c) — so it is in ITS OWN
+ * SESSION and no kill(-pgid) can ever reach it. Measured on a close:
+ *
+ *     pid     ppid   pgid    sid
+ *     172353  172322 172322  172290   the viewer's session — killed
+ *     172348  3853   172346  172346   its own — outlived every close
+ *
+ * tadpole.sh already knows this happens and reaps by TADPOLE_DIR, but it does
+ * so at STARTUP, which is a launch too late: between closing and next opening,
+ * a guest nobody can see is still running, holding the arena and the audio
+ * FIFO. Do it here, at the moment of closing, which is where it belongs.
+ *
+ * MATCHED EXACTLY, and ancestors skipped, for the reasons tadpole.sh gives at
+ * length: a prefix match makes /tmp/tadpole reap /tmp/tadpole-2, and our own
+ * launcher exports the same TADPOLE_DIR, so killing "anything that matches"
+ * kills the shell that started us.
+ */
+#ifdef __linux__
+static int is_our_ancestor(pid_t cand)
+{
+	pid_t p = getpid();
+	int hops;
+	for (hops = 0; p > 1 && hops < 64; hops++) {
+		char path[64];
+		FILE *f;
+		int ppid = 0;
+		if (p == cand) return 1;
+		snprintf(path, sizeof(path), "/proc/%d/stat", (int)p);
+		if (!(f = fopen(path, "r"))) return 0;
+		/* comm can contain spaces and parentheses; ppid is the field after
+		 * the last ')'. */
+		{
+			char buf[512], *rp;
+			size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+			buf[n] = 0;
+			rp = strrchr(buf, ')');
+			if (!rp || sscanf(rp + 1, " %*c %d", &ppid) != 1) ppid = 0;
+		}
+		fclose(f);
+		p = ppid;
+	}
+	return 0;
+}
+
+/* THE ENVIRONMENT VARIABLE ALONE IS NOT ENOUGH TO KILL SOMETHING OVER.
+ *
+ * TADPOLE_DIR is exported, so EVERY child of the launcher inherits it — during
+ * testing this sweep cheerfully killed a `sleep` that happened to be a sibling
+ * of the viewer. Anything the user ran from the same shell would go the same
+ * way. So the environment says WHICH session a process belongs to, and this
+ * says whether it is a guest at all: only the emulator binary is ever swept.
+ *
+ * TADPOLE_QEMU first, because that is what actually got launched — a user
+ * running Glasspole, or a bring-your-own build, is not covered by a hardcoded
+ * list. The two names are the fallback for when it is unset. */
+static int looks_like_a_guest(int pid)
+{
+	char path[64], comm[64], *nl;
+	const char *emu = getenv("TADPOLE_QEMU");
+	FILE *f;
+	size_t n;
+
+	snprintf(path, sizeof(path), "/proc/%d/comm", pid);
+	if (!(f = fopen(path, "r"))) return 0;
+	n = fread(comm, 1, sizeof(comm) - 1, f);
+	fclose(f);
+	comm[n] = 0;
+	if ((nl = strchr(comm, '\n'))) *nl = 0;
+	if (!comm[0]) return 0;
+
+	if (emu && *emu) {
+		const char *b = strrchr(emu, '/');
+		b = b ? b + 1 : emu;
+		/* comm is truncated to 15 characters; compare on that. */
+		if (!strncmp(comm, b, 15)) return 1;
+	}
+	return !strcmp(comm, "qemu-arm") || !strcmp(comm, "glasspole");
+}
+
+static void guest_sweep_stragglers(void)
+{
+	char want[600];
+	DIR *d;
+	struct dirent *e;
+	size_t wlen;
+
+	if (!g_dir || !*g_dir) return;
+	wlen = (size_t)snprintf(want, sizeof(want), "TADPOLE_DIR=%s", g_dir);
+	if (wlen >= sizeof(want)) return;
+	if (!(d = opendir("/proc"))) return;
+
+	while ((e = readdir(d))) {
+		char path[64], buf[8192];
+		int pid = atoi(e->d_name);
+		FILE *f;
+		size_t n, i;
+		int hit = 0;
+
+		if (pid <= 1 || pid == (int)getpid()) continue;
+		snprintf(path, sizeof(path), "/proc/%d/environ", pid);
+		if (!(f = fopen(path, "r"))) continue;      /* gone, or not ours */
+		n = fread(buf, 1, sizeof(buf) - 1, f);
+		fclose(f);
+		buf[n] = 0;
+		/* environ is NUL-separated: compare whole entries, never a prefix. */
+		for (i = 0; i < n; i += strlen(buf + i) + 1) {
+			if (!strcmp(buf + i, want)) { hit = 1; break; }
+			if (!buf[i]) break;
+		}
+		if (!hit || is_our_ancestor((pid_t)pid)) continue;
+		if (!looks_like_a_guest(pid)) continue;
+		kill((pid_t)pid, SIGKILL);
+	}
+	closedir(d);
+}
+#else
+static void guest_sweep_stragglers(void) { }
+#endif
+
+/* SWEEP THE WHOLE GROUP, EVEN WHEN THE LEADER WENT QUIETLY.
+ *
+ * A guest is not one process. AppManager starts VideoDaemon, and both run in
+ * the process group this function signals. The SIGTERM goes to the group, but
+ * the wait loop only ever watched the LEADER — and returned the moment it was
+ * reaped, before the SIGKILL below. So a sibling that does not act on SIGTERM
+ * outlived every close, orphaned, holding $TADPOLE_DIR and its .lock.
+ *
+ * That is not theoretical: four VideoDaemon processes from a session hours
+ * earlier were still running when this was found, and one survives every
+ * `--boot` and close, measured. The next launch then meets
+ *
+ *     tadpole: another instance (pid NNN) is using /tmp/tadpole
+ *
+ * which is how "I closed it" and "it is still running" end up both true.
+ *
+ * So the SIGKILL is now unconditional. It costs one signal to an empty group
+ * in the common case, and kill(2) on a group with no members simply fails with
+ * ESRCH, which is the correct outcome and needs no test. */
 static void guest_stop(void)
 {
-	int i, st;
-	if (g_guest <= 0) return;
-	kill(-g_guest, SIGTERM);
-	for (i = 0; i < 40; i++) {                     /* up to 2s to go quietly */
-		if (waitpid(g_guest, &st, WNOHANG) == g_guest) { g_guest = 0; return; }
-		SDL_Delay(50);
+	int i, st, reaped = 0;
+
+	/* Nothing left to introduce. Stopping the guest without this leaves the
+	 * logo on screen over a dead system, which reads as a hang. */
+	boot_stop();
+
+	if (g_guest > 0) {
+		kill(-g_guest, SIGTERM);
+		for (i = 0; i < 40; i++) {             /* up to 2s to go quietly */
+			if (waitpid(g_guest, &st, WNOHANG) == g_guest) { reaped = 1; break; }
+			SDL_Delay(50);
+		}
+		kill(-g_guest, SIGKILL);
+		if (!reaped) waitpid(g_guest, &st, 0);
+		g_guest = 0;
 	}
-	kill(-g_guest, SIGKILL);
-	waitpid(g_guest, &st, 0);
-	g_guest = 0;
+	/* UNCONDITIONALLY, because the guest is very often not ours to wait on.
+	 * `./tadpole.sh --app X` — the normal way to start a title — launches the
+	 * emulator from the SCRIPT and the viewer beside it, so g_guest is 0 here
+	 * and the early return this used to take meant closing the window left the
+	 * whole guest running. The window went away and the emulator did not,
+	 * which is as close to "closing it does nothing" as makes no difference. */
+	guest_sweep_stragglers();
 }
 
 /* argv must be NULL-terminated; runs <proj>/<script> with the settings applied.
@@ -1458,6 +2498,17 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 	return pid;
 }
 
+/* Nonblocking reap: 1 with *exited_ok set when pid has finished, else 0. */
+static int tool_reap(pid_t pid, int *exited_ok)
+{
+	int st;
+	if (waitpid(pid, &st, WNOHANG) != pid) return 0;
+	*exited_ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+	return 1;
+}
+
+#endif  /* guest supervision */
+
 static void guest_launch_ui(void)
 {
 	char *av[8];
@@ -1474,10 +2525,50 @@ static void guest_launch_ui(void)
 	g_guest = spawn_script("tadpole.sh", av, 1, quiet ? NULL : &g_glog_fd, quiet);
 	ui_set_running(g_guest > 0);
 	ui_status(g_guest > 0 ? "booting..." : "launch failed");
+	/* The system menu is portrait, and so is the boot logo drawn over it. */
+	if (g_guest > 0)
+		g_rot_want = rotate_for_screen(TAD_SCREEN_SYSTEM, "");
+	/* THE ONE PLACE THE BOOT SEQUENCE IS ARMED, and it stays the one place.
+	 * Launching a title — guest_launch_app(), guest_launch_swf() — must not
+	 * play it: a LeapPad does not show you its logo because you started a
+	 * game, and neither does this. */
+	if (g_guest > 0 && !ui_cfg()->fast_boot)
+		boot_arm(g_projdir);
 }
 
 /* A .swf is run by the guest's Flash player, so the path has to be one the
  * GUEST can see: sysroot-relative, not a host path. */
+/* Start an installed app by PackageID.
+ *
+ * tadpole.sh --app resolves the entry point out of the package's meta.inf and
+ * takes both kinds: a .swf goes to saplayer, a native App.so goes to
+ * AppManager with TADPOLE_LAUNCH set. That distinction is exactly what the
+ * old "Launch .swf" browser could not make, so it could only ever start half
+ * the library. */
+static void guest_launch_app(const char *pkg)
+{
+	char *av[6];
+	int i = 0;
+
+	if (!pkg || !pkg[0])
+		return;
+	av[i++] = (char *)"tadpole.sh";
+	av[i++] = (char *)"--app";
+	av[i++] = (char *)pkg;
+	av[i] = NULL;
+	guest_stop();
+	guest_log_close();
+	guest_log_open();
+	g_guest = spawn_script("tadpole.sh", av, 1, &g_glog_fd, 0);
+	if (g_guest > 0) ui_status("%s", pkg);
+	else             ui_status("could not start %s", pkg);
+	/* Turn NOW rather than when the title's first file open reaches the shim:
+	 * a launch takes seconds, and the window flipping over halfway through
+	 * reads as a glitch where turning with the click reads as the answer. */
+	if (g_guest > 0)
+		g_rot_want = rotate_for_screen(TAD_SCREEN_TITLE, pkg);
+}
+
 static void guest_launch_swf(const char *hostpath)
 {
 	char sysroot[1100], *av[8];
@@ -1516,6 +2607,12 @@ static int  g_tool_len;
 
 /* Up to two arguments, either of which may be NULL — enough for every tool
  * here, and it keeps the "one argument" callers unchanged. */
+/* The update check reuses the tool runner, but its output is a report to be
+ * parsed rather than a log to be shown, and it must not open a progress panel.
+ * g_tool_update marks which kind of run is in flight. */
+static int  g_tool_update;
+static char g_update_dest[1100];
+
 static void tool_run2(const char *what, const char *script,
                       const char *a1, const char *a2)
 {
@@ -1556,8 +2653,15 @@ static void tool_runv(const char *what, const char *script, char *const av[])
 	g_tool_len = 0;
 	g_tool = spawn_script(script, argv, 0, &g_tool_fd, 0);
 	ui_status("%s...", what);
-	if (g_tool > 0) { ui_progress_begin(what); ui_progress_line("starting..."); }
-	else ui_status("%s could not start", what);
+	/* No progress panel for the update check: it is a background errand, and
+	 * covering the window with a box every launch to say "still nothing new"
+	 * is exactly the behaviour that makes people turn updaters off. */
+	if (g_tool > 0 && !g_tool_update) {
+		ui_progress_begin(what); ui_progress_line("starting...");
+	} else if (g_tool <= 0) {
+		g_tool_update = 0;
+		ui_status("%s could not start", what);
+	}
 }
 
 /* Drain whatever the tool has written, a line at a time. Called every frame. */
@@ -1579,6 +2683,10 @@ static void tool_drain(void)
 					long a2 = 0, b2 = 0;
 					if (sscanf(g_tool_buf + 11, "%ld %ld", &a2, &b2) == 2 && b2 > 0)
 						ui_progress_pct((int)((a2 * 100) / b2));
+				} else if (g_tool_update) {
+					ui_update_line(g_tool_buf);
+				} else if (!strncmp(g_tool_buf, "pct ", 4)) {
+					ui_progress_pct(atoi(g_tool_buf + 4));
 				} else if (g_tool_len) {
 					ui_progress_line(g_tool_buf);
 				}
@@ -1592,20 +2700,132 @@ static void tool_drain(void)
 
 static void tool_poll(void)
 {
-	int st, ok;
+	int ok = 0;
 	if (g_tool <= 0) return;
 	tool_drain();
-	if (waitpid(g_tool, &st, WNOHANG) != g_tool) return;
+	if (!tool_reap(g_tool, &ok)) return;
 	tool_drain();                      /* anything written just before exit */
-	if (g_tool_len) { g_tool_buf[g_tool_len] = 0; ui_progress_line(g_tool_buf); }
+	if (g_tool_len) {
+		g_tool_buf[g_tool_len] = 0;
+		if (g_tool_update) ui_update_line(g_tool_buf);
+		else               ui_progress_line(g_tool_buf);
+	}
 	g_tool_len = 0;
 	if (g_tool_fd >= 0) { close(g_tool_fd); g_tool_fd = -1; }
-	ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+
+	/* THE UPDATE CHECK OWNS ITS OWN ENDING. It never opened a progress panel
+	 * — a check that flashes a dialog at every launch is worse than no check —
+	 * so it must not close one, and its report is shown by the UI instead. */
+	if (g_tool_update) {
+		g_tool_update = 0;
+		g_tool = 0;
+		ui_update_finish();
+		ui_status(" ");
+		return;
+	}
+	if (g_update_dest[0] && ok) {
+		/* INSTALL IT AND RESTART, rather than leaving homework.
+		 *
+		 * "Saved as <path> — now quit, swap the files and chmod +x" was a
+		 * correct instruction and a bad update: it asks someone to do by hand
+		 * the one step that is easy to get wrong, and until they do, the thing
+		 * they downloaded is not the thing they are running.
+		 *
+		 * A running AppImage is a mounted image, so it cannot be overwritten
+		 * in place — but it CAN be replaced by rename, which is atomic and
+		 * leaves the running mount alone: the old inode stays alive until this
+		 * process exits, which is exactly the moment we stop needing it.
+		 * Then re-exec the new path.
+		 */
+		const char *img = getenv("APPIMAGE");
+		char dest[1100];
+		snprintf(dest, sizeof(dest), "%s", g_update_dest);
+		g_update_dest[0] = 0;
+
+#ifdef _WIN32
+		/* Hand over to the installer and get out of its way. It has to
+		 * replace files this process is holding open, so the running program
+		 * closing itself IS the last step of the update rather than an
+		 * inconvenience to work around.
+		 *
+		 * "/S" — SILENTLY, AND THAT IS THE POINT OF THE WHOLE EXERCISE.
+		 *
+		 * Updating here used to mean: the window disappears, an installer
+		 * appears, agree to the introduction, confirm the directory, press
+		 * Install, then find Tadpole and open it again. Six steps and a
+		 * closed program. On Linux the same button renames the new AppImage
+		 * over the running one and execv()s it — the window blinks and comes
+		 * back on the new version, and nothing is asked. That gap is what
+		 * "Windows users cannot update as easily" means.
+		 *
+		 * A silent NSIS install skips every page, keeps the directory the
+		 * previous install recorded in the registry, and the installer's
+		 * .onInstSuccess starts tadpole.exe again when it is done. The user
+		 * presses Download and the program comes back updated, which is what
+		 * the Linux side has always done. Running it by hand from Explorer is
+		 * unaffected and still asks everything it used to. */
+		ui_progress_line("installing the update");
+		ui_progress_done(1);
+		guest_stop();
+		guest_log_close();
+		if ((INT_PTR)ShellExecuteA(NULL, "open", dest, "/S", NULL, SW_SHOWNORMAL) > 32) {
+			SDL_Quit();
+			exit(0);
+		}
+		ui_progress_line("downloaded, but the installer would not start —");
+		ui_progress_line(dest);
+		return;
+#endif
+		if (img && img[0] && !strcmp(dest + strlen(dest) - 4, ".new")) {
+			char target[1100];
+			snprintf(target, sizeof(target), "%s", img);
+			if (rename(dest, target) == 0) {
+				chmod(target, 0755);
+				ui_progress_line("installed - restarting Tadpole");
+				ui_progress_done(1);
+				guest_stop();
+				guest_log_close();
+				SDL_Quit();
+				/* execv, not fork: the user asked for the new version, and
+				 * leaving the old one running beside it is how you end up
+				 * with two windows and no idea which is which. */
+				{
+					char *av[2];
+					av[0] = target;
+					av[1] = NULL;
+					execv(target, av);
+				}
+				/* Only reached if exec failed — say so plainly, do not
+				 * pretend the update worked. */
+				ui_progress_line("installed, but could not restart - "
+				                 "close Tadpole and open it again");
+				return;
+			}
+			{
+				char note[1200];
+				snprintf(note, sizeof(note),
+				         "Downloaded, but could not replace %s - move %s "
+				         "over it yourself.", target, dest);
+				ui_progress_line(note);
+			}
+		} else {
+			char note[1200];
+			snprintf(note, sizeof(note),
+			         "Saved as %s - this is not an AppImage install, so "
+			         "nothing was replaced.", dest);
+			ui_progress_line(note);
+		}
+	}
 	ui_status("%s %s", g_tool_what, ok ? "done" : "FAILED");
 	ui_invalidate_prereqs();      /* it may have installed or erased things */
 	/* A scan writes a new index, and an install changes which titles are
 	 * marked as already there — both are what the library is looking at. */
 	ui_games_reload();
+	/* The Micromods screen reads that index and the Downloads folder, and a
+	 * scan or an install has just changed one of them. Reloading here is what
+	 * makes the list appear when the scan finishes, rather than the next time
+	 * the screen is opened. */
+	ui_micromods_reload();
 	ui_progress_done(ok);
 	g_tool = 0;
 }
@@ -1640,17 +2860,48 @@ int main(int argc, char **argv)
 	int n;                            /* index into the composite order */
 	int vid_over_fb1 = 0;             /* MLC video priority puts fb2 above fb1 */
 	int said_vid_order = -1;
+	int g_upd_checked = 0;            /* the silent update check has run */
 	int gl_have = 0;                  /* tex_gl holds a current frame */
 	Uint32 gl_stamp = 0;              /* when that frame arrived */
 	int gl_rx = 0, gl_ry = 0, gl_rw = 0, gl_rh = 0;   /* where it belongs */
+	Uint32 fps_at = 0;                /* clock at the last frame-rate sample */
+	unsigned long fps_frames = 0, fps_packets = 0;    /* counters at that sample */
+	int fps_primed = 0;               /* fps_at/fps_frames hold a real reading */
+	int fps_shown = 0;                /* the status line is ours to clear */
+	int gpu_lost_told = 0;            /* the replay-died dialog, once a session */
 	char path[512];
 	int scale = 2, w, h, i, running = 1, touching = 0;
-	int rotate = 0;   /* degrees CW; portrait apps need 90 */
+	int rotate = 0;   /* degrees CW; the LeapPad UI is drawn at 270 */
+	/* The last screen transition acted on — see rotate_for_screen(). Both,
+	 * because a fresh guest zeroes the shared state: the counter alone would
+	 * miss a new session whose first transition landed on the same number. */
+	unsigned screen_seq_seen = 0, screen_kind_seen = TAD_SCREEN_UNKNOWN;
 	char actpath[1024];
 	int selftest_want = 0;
 	const char *shot_state = NULL, *shot_out = NULL;
+	int apps_test = 0;
 	int boot_now = 0, power_announced = 0;
 	const char *env;
+
+	/* --version, ANSWERED BEFORE ANYTHING ELSE HAPPENS.
+	 *
+	 * "Which build am I running?" is the first question on every bug report and
+	 * the only place it could be answered was Help -> About, which needs a
+	 * window, a GPU and a working install to reach. It is also the only way to
+	 * check a Windows build without a Windows desktop in front of you, which is
+	 * how the "released binaries report dev" complaint went unmeasured for as
+	 * long as it did: the string is in the executable, but nothing would say it
+	 * out loud.
+	 *
+	 * Deliberately the very first thing in main — before find_project_dir(),
+	 * before settings are read and long before SDL — so it answers on a machine
+	 * where the rest of the program cannot start at all. */
+	for (i = 1; i < argc; i++) {
+		if (!strcmp(argv[i], "--version")) {
+			printf("%s\n", TADPOLE_VERSION);
+			return 0;
+		}
+	}
 
 	find_project_dir(argv[0]);
 	/* Saved settings are the defaults; command-line flags still win, so the
@@ -1658,6 +2909,23 @@ int main(int argc, char **argv)
 	ui_preload_settings();
 	scale  = ui_cfg()->scale;
 	rotate = ui_cfg()->rotate;
+	/* The compiled-in default is /tmp/tadpole, which is meaningless on
+	 * Windows. LOCALAPPDATA is the Windows spelling of "per-user writable app
+	 * data" and is never set on Linux, so checking the environment — rather
+	 * than the platform — keeps this one chain correct on both. An explicit
+	 * TADPOLE_DIR still wins, as it always has. */
+	{
+		static char defdir[600];
+		const char *la = getenv("LOCALAPPDATA");
+		if (la && *la) {
+			snprintf(defdir, sizeof(defdir), "%s/Tadpole", la);
+			tp_mkdir(defdir);
+			snprintf(defdir + strlen(defdir), sizeof(defdir) - strlen(defdir),
+			         "/run");
+			tp_mkdir(defdir);
+			g_dir = defdir;
+		}
+	}
 	if ((env = getenv("TADPOLE_DIR")) != NULL)
 		g_dir = env;
 	g_touch_debug = getenv("TADPOLE_TOUCH_DEBUG") != NULL;
@@ -1683,6 +2951,8 @@ int main(int argc, char **argv)
 			shot_state = argv[++i];
 			shot_out   = argv[++i];
 		}
+		else if (!strcmp(argv[i], "--selftest-apps"))
+			apps_test = 1;
 	}
 	if (selftest_want)
 		return selftest(rotate, scale);
@@ -1699,7 +2969,11 @@ int main(int argc, char **argv)
 	 * hold the write end open whether or not the guest is reading yet. */
 	for (i = 0; i < NUM_EV; i++) {
 		snprintf(path, sizeof(path), "%s/ev%d", g_dir, i);
+#ifndef _WIN32
 		g_evfd[i] = open(path, O_RDWR | O_NONBLOCK);
+#else
+		g_evfd[i] = tp_fifo_fd(path, 0);   /* writer end; guest serves */
+#endif
 	}
 
 	if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
@@ -1709,7 +2983,8 @@ int main(int argc, char **argv)
 	{
 		int ww = (rotate == 90 || rotate == 270) ? h : w;
 		int wh = (rotate == 90 || rotate == 270) ? w : h;
-		win = SDL_CreateWindow("Tadpole", SDL_WINDOWPOS_CENTERED,
+		ui_brand_apply();
+		win = SDL_CreateWindow(ui_brand_name(), SDL_WINDOWPOS_CENTERED,
 		                       SDL_WINDOWPOS_CENTERED,
 		                       ww * scale, (wh + UI_BAR_H) * scale,
 		                       SDL_WINDOW_RESIZABLE);
@@ -1720,6 +2995,14 @@ int main(int argc, char **argv)
 	{
 		SDL_Surface *ico = ui_icon_surface();
 		if (ico) { SDL_SetWindowIcon(win, ico); SDL_FreeSurface(ico); }
+	}
+	if (apps_test) {
+		int rc = selftest_apps(ren, rotate, w, h);
+		ui_shutdown();
+		SDL_DestroyRenderer(ren);
+		SDL_DestroyWindow(win);
+		SDL_Quit();
+		return rc;
 	}
 	if (shot_state) {
 		int rc = ui_shot(ren, win, shot_state, shot_out, rotate, w, h) ? 0 : 1;
@@ -1954,6 +3237,33 @@ int main(int argc, char **argv)
 			}
 		}
 
+		/* A FINGER THAT DOES NOT MOVE STILL REPORTS. A MOUSE DOES NOT.
+		 *
+		 * The events above are the whole story of a click: one sample on the
+		 * way down, more only if the pointer MOVES, one on the way up. Click
+		 * without dragging — which is what tapping an icon is — and the guest
+		 * gets a single position and then silence until the release.
+		 *
+		 * A real touchscreen streams for as long as a finger is down, and this
+		 * device's software is built on that. tslib's chain is filters with
+		 * memory (/etc/ts.conf here: pthres, dejitter delta=100), and Qt's
+		 * tslib handler reads on until the pressure CHANGES — so a lone sample
+		 * can be absorbed with nothing emitted and nothing logged anywhere.
+		 *
+		 * tools/tap.py already streams at 50 Hz for exactly this reason, which
+		 * is why taps from the script landed while taps in the window did not:
+		 * the same gesture told two different ways, and only one of them the
+		 * way the hardware tells it.
+		 *
+		 * So repeat the current position every frame while the button is held.
+		 * ~60 Hz here against ~100 Hz on the device. */
+		if (touching) {
+			send_event(EV_TOUCH, EV_ABS, ABS_X, g_touch_mark_x);
+			send_event(EV_TOUCH, EV_ABS, ABS_Y, g_touch_mark_y);
+			send_event(EV_TOUCH, EV_ABS, ABS_PRESSURE, TOUCH_PRESSURE);
+			send_event(EV_TOUCH, EV_SYN, SYN_REPORT, 0);
+		}
+
 		/* Replay whatever the guest queued. The finished frame lands in the
 		 * SAME place the software rasteriser writes — fb1's page in the shared
 		 * arena — so the three-layer compositor below needs no changes. */
@@ -2082,6 +3392,27 @@ int main(int argc, char **argv)
 				        (unsigned)GL_STALE_MS);
 		}
 
+		/* THE CHECK THAT RUNS BY ITSELF — once, a few seconds in.
+		 *
+		 * Not at startup proper: the first seconds belong to opening the
+		 * window and, for a first-time user, the setup wizard, and a network
+		 * round trip competing with that is how a launch feels slow. Delayed,
+		 * silent, and it only ever surfaces if there really is something
+		 * newer — ui_update_finish() drops the "you are up to date" and the
+		 * "no connection" cases when the check was not asked for.
+		 */
+		if (!g_upd_checked && SDL_GetTicks() > 4000 && g_tool <= 0 &&
+		    !ui_modal() && ui_cfg()->update_check) {
+			char *av[3];
+			g_upd_checked = 1;
+			av[0] = (char *)"--current";
+			av[1] = (char *)TADPOLE_VERSION;
+			av[2] = NULL;
+			ui_update_begin(1);
+			g_tool_update = 1;
+			tool_runv("Checking for updates", "tools/check-update.py", av);
+		}
+
 		hle_host_want_full(ui_cfg()->render_scale > 1);
 
 		memset(pixels, 0, (size_t)w * h * 4);
@@ -2195,7 +3526,16 @@ int main(int argc, char **argv)
 
 			SDL_SetRenderDrawColor(ren, 6, 15, 10, 255);
 			SDL_RenderClear(ren);
-			if (g_state) {
+			/* THE BOOT PRESENTATION OWNS THE PANEL WHILE IT RUNS, and it runs
+			 * over a guest that is already booting — the same overlap the
+			 * device has, where VideoDaemon plays the animation while
+			 * AppManager starts behind it. So this replaces the composite
+			 * rather than waiting for it, and boot_draw() stops itself the
+			 * moment the guest raises /tmp/ui_ready. The chrome below is
+			 * still drawn: the menu bar is ours, not the device's. */
+			if (boot_active() && boot_draw(ren, &dst, rotate)) {
+				/* the panel is the animation's this frame */
+			} else if (g_state) {
 				/* Bottom: everything below the game layer. */
 				SDL_UpdateTexture(tex, NULL, pixels, w * 4);
 				if (rotate)
@@ -2343,6 +3683,42 @@ int main(int argc, char **argv)
 				ui_status("running");
 		}
 
+		/* HOLD THE WINDOW THE WAY THE GUEST IS DRAWING.
+		 *
+		 * Only on a CHANGE of screen, which is what makes the manual control
+		 * still worth having: rotate a title that draws portrait and the
+		 * choice stands until the guest moves to another screen, rather than
+		 * being argued with a frame later. */
+		{
+			static int auto_was = -1;
+			int want = -1;
+			/* Ticking the setting acts NOW rather than at the next screen:
+			 * forgetting what we last saw makes the current screen a change
+			 * again, and the same code below does the work. */
+			if (auto_was != ui_cfg()->auto_rotate) {
+				auto_was = ui_cfg()->auto_rotate;
+				if (auto_was) screen_kind_seen = TAD_SCREEN_UNKNOWN;
+			}
+			if (g_rot_want >= 0) {
+				want = g_rot_want;
+				g_rot_want = -1;
+			} else if (g_state && g_statesz >= sizeof *g_state &&
+			           g_state->screen != TAD_SCREEN_UNKNOWN &&
+			           (g_state->screen_seq != screen_seq_seen ||
+			            g_state->screen != screen_kind_seen)) {
+				screen_seq_seen  = g_state->screen_seq;
+				screen_kind_seen = g_state->screen;
+				want = rotate_for_screen(g_state->screen,
+				                         g_state->screen_pkg);
+			}
+			/* NOT SAVED. ui_cfg()->rotate is what is on screen now, so the
+			 * bar's ROT chip and Ctrl+R both read from one place; the SAVED
+			 * setting stays whatever the user last chose by hand. */
+			if (want >= 0 && ui_cfg()->auto_rotate && want != rotate) {
+				rotate = ui_cfg()->rotate = want;
+				apply_layout(ren, win, rotate, scale, w, h);
+			}
+		}
 		ev_open_missing();
 		/* ANNOUNCE EXTERNAL POWER REPEATEDLY, NOT ONCE.
 		 *
@@ -2423,42 +3799,179 @@ int main(int argc, char **argv)
 		}
 		if (g_guest > 0 && !guest_alive()) {
 			ui_status("stopped");
+			fps_shown = 0;         /* "stopped" says more than "HLE idle" would */
 			guest_log_close();     /* flush the tail of a boot that just died */
 		}
 		ui_set_running(g_guest > 0 || guest_external());
 		g_touch_debug = ui_cfg()->touch_debug;
-		if (hle_host_ready()) {
-			static Uint32 last;
-			static unsigned long prev_frames;
+		/* A FRAME RATE IS A MEASUREMENT — ONLY PRINT ONE THAT WAS TAKEN.
+		 *
+		 * "Never show a bare frame rate once the guest has given up" was only
+		 * half the problem. The other half is that the replayer is brought up
+		 * before any guest exists and stays up after one dies, so the bar sat
+		 * at "HLE 0 fps" whenever nothing was being rendered through it — and
+		 * that reads as "the emulator is broken" rather than "nothing is being
+		 * measured right now" (reported by FairPlay137).
+		 *
+		 * COMPLETED FRAMES ARE THE EVIDENCE, not a live guest. g_guest and
+		 * guest_external() are no use here: under `tadpole.sh --boot` the guest
+		 * is our SIBLING and the lock holds the script's own pid, so the viewer
+		 * believes nothing is running while a title renders at 60 fps. Gating
+		 * on those would blank the number in the commonest boot path.
+		 *
+		 * Frames also beat the fallback flag, which lives in the ring and is
+		 * only cleared by hle_host_init() — one title giving up would otherwise
+		 * leave the banner there for every title after it, viewer-lifetime.
+		 *
+		 * Packets tell "producing nothing" apart from "not being asked for
+		 * anything": commands arriving with no frame out of them in a whole
+		 * second is a real zero, and hiding that would hide a genuine stall. */
+		if (!hle_host_ready()) {
+			fps_primed = 0;
+		} else {
 			Uint32 now2 = SDL_GetTicks();
-			if (now2 - last >= 1000) {
+			if (!fps_primed) {
+				/* g_frames is cumulative and starts wherever the replayer
+				 * happens to be, so the first tick only takes a baseline —
+				 * subtracting from zero would report a whole session's frames
+				 * as one second of them. */
+				hle_host_stats(&fps_frames, &fps_packets);
+				fps_at = now2;
+				fps_primed = 1;
+			} else if (now2 - fps_at >= 1000) {
 				unsigned long f, pk;
+				/* Divide by the window we actually got. The pump is paced by
+				 * the frame cap and by whatever the guest is doing, so a tick
+				 * that lands at 1400 ms would otherwise overstate by 40%. */
+				Uint32 dt = now2 - fps_at;
 				hle_host_stats(&f, &pk);
-				/* Never show a bare frame rate once the guest has given up:
-				 * "HLE 0 fps" reads as "HLE is broken" when the truth is
-				 * "HLE stopped being used". Say which. */
-				if (hle_guest_fell_back())
+				if (f > fps_frames) {
+					ui_status("HLE %lu fps",
+					          ((f - fps_frames) * 1000 + dt / 2) / dt);
+					fps_shown = 1;
+				} else if (hle_guest_fell_back()) {
 					ui_status("HLE FELL BACK - software");
-				else
-					ui_status("HLE %lu fps", f - prev_frames);
-				prev_frames = f;
-				last = now2;
-				(void)pk;
+					fps_shown = 1;
+					/* A line on the status bar was how this was reported for
+					 * months, and it is the one place nobody looks while a
+					 * game is on screen. The software rasteriser cannot
+					 * express what the titles ask for, so every frame after
+					 * this point is wrong rather than slow — that deserves
+					 * something the user has to dismiss.
+					 *
+					 * Once per session, and only when nothing else is up:
+					 * ui_alert() declines while a menu or dialog is open, so
+					 * retry on later ticks until it lands. */
+					if (!gpu_lost_told) {
+						char body[160];
+						snprintf(body, sizeof(body),
+						         "GPU render engine CRASHED. "
+						         "Please restart %s.", ui_brand_name());
+						if (ui_alert("Graphics", body))
+							gpu_lost_told = 1;
+					}
+				} else if (pk > fps_packets) {
+					ui_status("HLE 0 fps");
+					fps_shown = 1;
+				} else if (fps_shown) {
+					/* Nothing came through in that second. Say so rather than
+					 * leaving the last number on the bar, where it would be
+					 * read as current. */
+					ui_status("HLE idle");
+					fps_shown = 0;
+				}
+				fps_frames = f;
+				fps_packets = pk;
+				fps_at = now2;
 			}
 		}
 
 		switch (ui_take_action(actpath, sizeof(actpath))) {
 		case UI_ACT_RUN_UI:  guest_launch_ui();  power_announced = 0; break;
 		case UI_ACT_RUN_SWF: guest_launch_swf(actpath); power_announced = 0; break;
+		case UI_ACT_RUN_APP: guest_launch_app(actpath); power_announced = 0; break;
 		case UI_ACT_STOP:
 			guest_stop();
 			ui_set_running(0);
 			ui_status("stopped");
+			fps_shown = 0;
 			break;
 		case UI_ACT_QUIT: running = 0; break;
 		case UI_ACT_INSTALL_PKG:
 			tool_run("install", "tools/install-game.sh", actpath);
 			break;
+		case UI_ACT_CONVERT_CART: {
+			/* THE .tar GOES TO THE GAMES FOLDER, not beside the .bin. The
+			 * point of converting is to install it, and the Game Library
+			 * reads that folder — so the result appears where the user is
+			 * already looking rather than next to a 128 MB image they now
+			 * have to go and find. */
+			/* ARGUMENTS ONLY — tool_runv() puts the script in argv[0] itself.
+			 *
+			 * This listed the script here as well, so the command that actually
+			 * ran was
+			 *     tools/cart2tar.py tools/cart2tar.py -o <games> <dump.bin>
+			 * and argparse bound its `images` positional to the FIRST contiguous
+			 * run of positionals — the duplicated script name — consumed -o, and
+			 * then had the real .bin left over with nowhere to put it:
+			 *     error: unrecognized arguments: /home/…/dump.bin
+			 *
+			 * So Convert Cartridge Dump could never have worked from the menu,
+			 * and had argparse been more permissive it would have been worse:
+			 * the tool would have tried to convert its own source file. Every
+			 * other tool_runv caller here passes arguments only; this was the
+			 * one that did not. */
+			char *av[6];
+			char gd[600];
+			const char *dir = ui_cfg()->games_dir;
+			int n = 0;
+			if (dir && *dir) {
+				snprintf(gd, sizeof(gd), "%s", dir);
+				av[n++] = (char *)"-o";
+				av[n++] = gd;
+			}
+			av[n++] = (char *)actpath;
+			av[n]   = NULL;
+			tool_runv("converting cartridge", "tools/cart2tar.py", av);
+			break;
+		}
+		/* ONE TITLE'S BONUS CONTENT, ASKED FOR RATHER THAN INVENTED.
+		 *
+		 * Nothing on the device enumerates what a title's micromods are
+		 * called, and the titles do not agree on how they recognise one —
+		 * Clam Prix matches the meta.inf Name against a table in its own
+		 * binary, Ni Hao Kai-lan ignores the name and reads a marker file
+		 * inside the package. So the packages are fetched from LeapFrog,
+		 * which serves the real ones with the real names. See
+		 * tools/micromods.py. */
+		case UI_ACT_MICROMODS_SCAN:
+			tool_run2("scanning micromods", "tools/micromods.py",
+			          "--scan", actpath);
+			break;
+		case UI_ACT_MICROMODS_INSTALL: {
+			/* ARGUMENTS ONLY. tool_runv() puts the script in argv[0], so
+			 * naming it here as well ran
+			 *     micromods.py micromods.py --scan 0x… --install --only …
+			 * and argparse, which has no positional to bind that to, exited 2
+			 * with "unrecognized arguments: tools/micromods.py". Install
+			 * therefore failed for every title, every time, while Scan — which
+			 * goes through tool_run2 and passes its arguments correctly —
+			 * worked, so the screen looked half alive rather than broken.
+			 *
+			 * This is the SECOND time this exact mistake has shipped; see the
+			 * note on UI_ACT_CONVERT_CART above, which is the same bug with
+			 * the same symptom. */
+			char *av[7];
+			int n = 0;
+			av[n++] = (char *)"--scan";
+			av[n++] = actpath;
+			av[n++] = (char *)"--install";
+			av[n++] = (char *)"--only";
+			av[n++] = (char *)ui_action_arg();
+			av[n]   = NULL;
+			tool_runv("installing micromods", "tools/micromods.py", av);
+			break;
+		}
 		case UI_ACT_SCAN_GAMES:
 			tool_run("reading games", "tools/scan-games.sh", actpath);
 			break;
@@ -2472,9 +3985,71 @@ int main(int argc, char **argv)
 		case UI_ACT_SETUP_FIRMWARE:
 			tool_run("firmware", "tools/install-firmware.sh", actpath);
 			break;
+		/* Two buttons, two halves of the same setup — see the Didj page in
+		 * tadpole_ui.c. Split because they are two separate downloads and the
+		 * file browser hands back one path at a time. */
+		case UI_ACT_SETUP_DIDJ:
+			tool_run2("didj", "tools/install-didj.sh", "--setup", actpath);
+			break;
+		case UI_ACT_SETUP_DIDJ_OVERLAY:
+			tool_run2("didj", "tools/install-didj.sh", "--overlay", actpath);
+			break;
+		/* Fetch-and-install, one button each. No path: the URLs live in
+		 * install-didj.py beside the note on where each piece comes from. */
+		case UI_ACT_FETCH_DIDJ:
+			tool_run("didj", "tools/install-didj.sh", "--fetch-compat");
+			break;
+		case UI_ACT_FETCH_DIDJ_OVERLAY:
+			tool_run("didj", "tools/install-didj.sh", "--fetch-overlay");
+			break;
 		case UI_ACT_BUILD_SYSROOT:
 			tool_run("sysroot", "runtime/setup-sysroot.sh", NULL);
 			break;
+		case UI_ACT_CHECK_UPDATE: {
+			char *av[3];
+			av[0] = (char *)"--current";
+			av[1] = (char *)TADPOLE_VERSION;
+			av[2] = NULL;
+			ui_update_begin(0);
+			g_tool_update = 1;
+			tool_runv("Checking for updates", "tools/check-update.py", av);
+			break;
+		}
+		case UI_ACT_DO_UPDATE: {
+			/* WHERE THE NEW IMAGE GOES. Next to the running AppImage when
+			 * there is one — that is where the user keeps it and what their
+			 * launcher points at — otherwise the current directory. It is
+			 * written to <name>.new rather than over the running file: a
+			 * running AppImage is a mounted image, and overwriting it under
+			 * itself is how you get a half-updated program that cannot
+			 * explain itself. */
+			const char *img = getenv("APPIMAGE");
+			char dest[1100];
+			char *av[3];
+#ifdef _WIN32
+			/* A Windows release is an INSTALLER, not an image to swap under
+			 * ourselves: it goes to the user's own data directory and is run
+			 * when the download finishes (see tool_poll), which is the
+			 * convention every Windows updater follows and the only one that
+			 * can replace files this process is holding open. */
+			(void)img;
+			snprintf(dest, sizeof(dest), "%s/Glasspole-Setup.exe",
+			         g_dir[0] ? g_dir : ".");
+#else
+			if (img && img[0])
+				snprintf(dest, sizeof(dest), "%s.new", img);
+			else
+				snprintf(dest, sizeof(dest), "%s/Tadpole-x86_64.AppImage",
+				         g_projdir[0] ? g_projdir : ".");
+#endif
+			av[0] = (char *)"--download";
+			av[1] = dest;
+			av[2] = NULL;
+			snprintf(g_update_dest, sizeof(g_update_dest), "%s", dest);
+			g_tool_update = 0;
+			tool_runv("Downloading update", "tools/check-update.py", av);
+			break;
+		}
 		case UI_ACT_ONLINE_UPDATE:
 			tool_run("online update", "tools/online-update.sh", NULL);
 			break;
@@ -2502,19 +4077,7 @@ int main(int argc, char **argv)
 		case UI_ACT_RELAYOUT:
 			rotate = ui_cfg()->rotate;
 			scale  = ui_cfg()->scale;
-			/* SDL_SetWindowSize blocks on a window-manager round trip — measured
-			 * at 4.8 seconds here. The guest is meanwhile waiting for us to
-			 * replay its frame, so drain the ring on BOTH sides of the resize;
-			 * otherwise rotating reliably starves it into falling back to
-			 * software, which is exactly what was reported. */
-			if (hle_host_ready() && g_state && g_fb[1])
-				hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
-			set_logical(ren, rotate, w, h);
-			SDL_SetWindowSize(win,
-			        ((rotate == 90 || rotate == 270) ? h : w) * scale,
-			        (((rotate == 90 || rotate == 270) ? w : h) + UI_BAR_H) * scale);
-			if (hle_host_ready() && g_state && g_fb[1])
-				hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
+			apply_layout(ren, win, rotate, scale, w, h);
 			break;
 		default: break;
 		}

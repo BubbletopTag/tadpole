@@ -23,11 +23,64 @@ games — the ones from your own device. See
 | Touch and buttons | yes |
 | Host-GPU rendering (HLE) | yes — about 5x the software renderer |
 | 3D (race tracks) | yes — Clam Prix races render and play |
-| Skinned player character | **not yet** — the kart draws, its rider does not |
+| Skinned player character | yes — the rider draws with the kart |
 | FMV / video layer | yes — Sneak Peeks trailers and the system videos play |
+| Boot logo and startup animation | yes — off by default, see Fast Boot |
 
 Frame rate on an AMD FirePro W4100: ~57 fps with GPU replay, against 11.5 fps
 software. Both are capped at the panel's real 60 Hz.
+
+## How many titles actually run
+
+Every installed title, launched in turn and screenshotted:
+
+```sh
+./tools/compat-sweep.sh          # launch each one, capture it, record a verdict
+./tools/compat-report.py         # -> build/compat/<date>/index.html
+COMPAT_EMU="$(command -v qemu-arm)" ./tools/compat-sweep.sh     # the other engine
+./tools/compat-compare.py --a <qemu-run> --b <glasspole-run>    # both, side by side
+```
+
+The most recent run, 110 titles, both engines swept sequentially on the same
+firmware the same hour:
+
+| | qemu-arm | Glasspole |
+|---|---|---|
+| Launches to a real screen | 82 | 85 |
+| Crashes before drawing | 16 | 17 |
+| Runs, draws nothing | 12 | 8 |
+| — of which Flash | 14/15 | 14/15 |
+| — of which native Brio | 68/95 | 71/95 |
+
+**The two engines are effectively one-to-one on this catalogue.** Glasspole is
+the from-scratch ARM JIT (see `glasspole/`); qemu-arm is the reference. That
+result is why Glasspole is now the engine Tadpole runs by default, on Linux as
+well as Windows: when the numbers are the same, the engine worth putting in
+front of people is the one whose bugs are ours to fix. qemu-arm stays as the
+fallback when no Glasspole is built, and as the reference the sweep diffs
+against — `TADPOLE_QEMU="$(command -v qemu-arm)" ./tadpole.sh` for a single run
+on it. Three
+titles either way is inside the run-to-run spread — the guest's own dynamic
+loader has an unlocked `dlopen`, so a title that loads two libraries at once
+can fault on one run and reach its menu on the next, and each engine dodges
+that race on different runs. Treat the two columns as the same number.
+
+**The failures are not one bug each.** They cluster: a handful of distinct
+fault sites account for nearly all of them, and the report puts that above the
+table for exactly this reason. Chasing the clusters is what took Glasspole from
+56 to 85 in a day — one of those clusters was a single `chdir` that made every
+relative open resolve under the sysroot twice, and it alone was wearing three
+disguises across 21 titles.
+
+**And every one of those launches had no player signed in.** The sweep starts
+titles directly, with no home screen, because that is what makes a hundred
+launches practical; a title that wants profile data may well behave differently
+when it has some. A crash here means "crashed this way" until it is checked
+both ways.
+
+The report is a single self-contained page — every thumbnail embedded, so it
+can be sent on its own. It is written under `build/`, which is not in the
+repository, so run the sweep to get one.
 
 ---
 
@@ -38,8 +91,8 @@ chmod +x Tadpole-x86_64.AppImage
 ./Tadpole-x86_64.AppImage
 ```
 
-One file, no install step, no dependencies to hunt down — a static `qemu-arm`
-and the firmware toolchain ride along inside it. The setup wizard opens on the
+One file, no install step, no dependencies to hunt down — the ARM engine and
+the firmware toolchain ride along inside it. The setup wizard opens on the
 first run and asks for the two things Tadpole cannot ship: your device's system
 files, and your cartridge backups.
 
@@ -49,8 +102,14 @@ To build that file yourself:
 ./tools/fetch-deps.sh          # stage qemu and the firmware tools (~70 MB)
 ./tools/online-update.sh       # system files, straight from LeapFrog
 cd tadpole && make && cd ..    # the shim and the viewer
+(cd glasspole && ./fetch-deps.sh && cmake -S . -B build -GNinja && ninja -C build)
 ./tools/build-appimage.sh      # -> build/Tadpole-x86_64.AppImage, ~22 MB
 ```
+
+**The Glasspole line is not optional if you want the image people download.**
+It is the engine Tadpole runs on by default, and `build-appimage.sh` can only
+bundle one that exists — skip it and the image you built falls back to the
+bundled qemu-arm, which is a different program from the one being released.
 
 **The firmware step is not optional, and it comes before `make`.** The ARM shim
 links against the LeapPad's own uClibc, which is LeapFrog's and cannot be
@@ -66,9 +125,10 @@ is the only way to find out whether the instructions above are true.
 
 ## Requirements
 
-**If you have the AppImage, there are none.** It carries a static `qemu-arm` and
-a private Python with `ubi_reader`, so there is nothing to install and nothing
-to look up for your distribution. Download it, `chmod +x`, run it.
+**If you have the AppImage, there are none.** It carries Glasspole — the ARM
+engine it runs on by default — a static `qemu-arm` behind it, and a private
+Python with `ubi_reader`, so there is nothing to install and nothing to look up
+for your distribution. Download it, `chmod +x`, run it.
 
 Everything below is for building from source.
 
@@ -100,7 +160,7 @@ Roughly 70 MB, pinned by SHA-256, re-fetchable at any time
 
 | | Arch | Debian / Ubuntu | Fedora | Why |
 |---|---|---|---|---|
-| qemu-arm | `qemu-user` | `qemu-user` | `qemu-user` | runs the guest's 32-bit ARM code — *or bundled* |
+| an ARM engine | `qemu-user` | `qemu-user` | `qemu-user` | runs the guest's 32-bit ARM code — *or bundled, and a built `glasspole/` satisfies it too* |
 | SDL2 | `sdl2-compat` | `libsdl2-dev` | `SDL2-devel` | window, input, audio |
 | OpenGL | `mesa` | `libgl1-mesa-dev` | `mesa-libGL-devel` | host-GPU rendering (HLE) |
 | zlib | `zlib` | `zlib1g-dev` | `zlib-ng-compat-devel` | the viewer decodes its own icon |
@@ -146,6 +206,7 @@ would actually be used import `ubireader.ubifs.misc`?*), and
 ```sh
 sudo pacman -S qemu-user sdl2-compat mesa zlib clang lld make python \
                base-devel curl unzip bzip2 zstd xz
+sudo pacman -S libogg libtheora libvorbis      # optional: startup animation
 ```
 
 ### Debian / Ubuntu
@@ -153,6 +214,7 @@ sudo pacman -S qemu-user sdl2-compat mesa zlib clang lld make python \
 ```sh
 sudo apt install qemu-user libsdl2-dev libgl1-mesa-dev zlib1g-dev \
                  clang lld make python3 pkg-config curl unzip bzip2 zstd xz-utils
+sudo apt install libogg-dev libtheora-dev libvorbis-dev   # optional: startup animation
 ```
 
 ### Fedora
@@ -160,6 +222,7 @@ sudo apt install qemu-user libsdl2-dev libgl1-mesa-dev zlib1g-dev \
 ```sh
 sudo dnf install qemu-user SDL2-devel mesa-libGL-devel zlib-ng-compat-devel \
                  clang lld make python3 pkgconf-pkg-config curl unzip bzip2 zstd xz
+sudo dnf install libogg-devel libtheora-devel libvorbis-devel  # optional: startup animation
 ```
 
 Then `./tools/fetch-deps.sh` for the rest. If you would rather not use it, add
@@ -279,6 +342,39 @@ bundles a shared library package alongside the game. The scanner copes with the
 same variety in icons — RGB and RGBA PNG, and the Flash-era titles whose
 manifest names a `.swf` and ships the artwork beside it as `PopUpIcon.png`.
 
+### Raw cartridge dumps (`.bin`)
+
+The other way people back a cartridge up is on the device itself, which needs
+no PC software at all:
+
+```sh
+dd if=/dev/mtdblock6 of=/LF/Bulk/cart.bin     # on the device, over telnet
+```
+
+then pull the file off by FTP. That is a complete, faithful backup — and it is
+a raw FAT filesystem image, not a package, so Tadpole could not install one.
+
+**File → Convert Cartridge Dump...** turns it into a `.tar` and writes it into
+your games folder, where the Game Library picks it up like any other backup.
+
+```sh
+./tools/cart2tar.py cart.bin            # or several, and -o to choose where
+./tools/fatread.py cart.bin             # just list what is on it
+```
+
+The FAT reading is hand-written (`tools/fatread.py`, no dependencies) because
+every off-the-shelf way to do it is missing on one platform or the other:
+`mount -o loop` needs root and does not exist on Windows, and `mtools` is not
+installed by default on any of the three Linux distributions above. Long
+filenames are read properly — LeapFrog's own files are not 8.3, and a reader
+that ignores VFAT produces a package of mangled stubs that installs and then
+fails to load.
+
+Nothing is rearranged on the way through. A cartridge holds the title *and* a
+`lib/` package of shared libraries, both with their own `meta.inf`, and the
+installer already knows what to do with an archive containing several — so the
+faithful copy is also the one that installs correctly.
+
 ---
 
 ## Running
@@ -294,8 +390,15 @@ wizard opens instead of a wall of errors.
 ```sh
 ./tadpole.sh --boot     # open it and start the system menu immediately
 ./tadpole.sh --list     # list installed titles
+./tadpole.sh --app NAME # launch one title straight in, no home screen
 ./tadpole.sh --shell    # an ARM shell inside the guest
 ```
+
+`--app` takes a name or a Package ID and matches on either, so
+`--app 'Clam Prix'` is enough. It skips the menu, the sign-in and the tile —
+useful when you are testing one title over and over, and the reason a sweep of
+a hundred of them is practical at all. Titles that expect a signed-in player
+may behave differently this way than they do from the home screen.
 
 ### Controls
 
@@ -307,13 +410,47 @@ wizard opens instead of a wall of errors.
 | Home | Menu |
 | Esc | Back |
 | Mouse | stylus |
+| - / = | volume down / up |
 | Ctrl+R | rotate |
 | Ctrl+Q | quit |
+
+**Parent Settings** is behind the device's own chord: hold a volume key and
+press **Home** from the home screen. That is what `-` and `=` are for — the
+device has volume buttons and nothing else here needs them.
 
 The D-pad rotates with the display. A Leapster title is landscape on a portrait
 device, so its axes sit a quarter turn from the hardware's; Tadpole corrects for
 that automatically. If the directions still feel wrong in your orientation, set
 `TADPOLE_DPAD_SHIFT=0..3`.
+
+### The window turns with the app
+
+The home screen is portrait and a game is not — on the same 480x272 panel. The
+LeapPad UI draws a quarter turn from how the device is held, which is why the
+stock boot art is named `...logoCW.png`; titles draw landscape into the same
+buffer. So Tadpole turns the window to match: **portrait for the system menu,
+sign-in and home screen, landscape the moment a title starts, and back again
+when you leave it.**
+
+It follows the guest rather than guessing: the shim reports which screen is up
+— the UI's own `/LF/Base/LPAD/main.swf`, or a package's entry point as named by
+its `meta.inf` — and the viewer decides the rotation from that.
+
+A few LeapPad titles draw portrait (My Books and Notepad are the two in this
+library); those are listed in the viewer and turn the right way. For anything
+else drawn the other way up, **Ctrl+R** still works, and your choice stands
+until the guest moves to another screen. Untick **Options → Graphics → Turn
+with the app** to go back to a fixed orientation.
+
+### The Connect reminder is off
+
+The device asks you to connect it to LeapFrog Connect on the way to the home
+screen, every boot. The service it wants is gone, so Tadpole answers the way
+the device does: Parent Settings' own **connection nag** switch writes
+`ConnectionReminders` into the all-profiles `UIData.json`, and Tadpole writes
+that same field before each launch. **Options → System Settings → Show the
+LeapFrog Connect reminder** puts it back if you want the device's behaviour
+exactly.
 
 ### Settings
 
@@ -336,8 +473,27 @@ With **Write a log file** on, the whole lot also goes to
 `tadpole.log.1`. That matters when Tadpole is launched from a desktop icon and
 there is no terminal to print to.
 
-**System Settings** holds "Boot the system menu at startup" and the remembered
-games folder.
+**System Settings** holds "Boot the system menu at startup", the remembered
+games folder, and:
+
+**Fast Boot** — ticked, which is why you have never seen a LeapPad2 boot in
+Tadpole. Turn it off and **File → Run System Menu** does what the device does
+when you switch it on: the LeapFrog logo, then the "LeapPad2 Explorer"
+animation with its chime, then the home screen. It costs no time — the
+animation plays over a guest that is already booting and stops the moment
+AppManager raises `/tmp/ui_ready`, exactly where VideoDaemon stops it on
+hardware — so on a fast boot you see less of it than on a slow one.
+
+It applies to **Run System Menu only**. Launching a title goes straight to the
+title, on the device and here.
+
+Both are your own files, read out of the firmware you installed:
+`/var/screens/Valencia-Boot-logoCW.png` and
+`/LF/Base/LpadAssets/Video/StartupVideo.ogg`. Tadpole ships neither. The
+animation needs libogg, libtheora and libvorbis at build time; without them the
+sequence is the logo alone (see Requirements).
+
+Suggested by Kat/ushka in the LFHacks community.
 
 ### Useful environment variables
 
@@ -346,14 +502,60 @@ Anything set here wins over the saved settings.
 | | |
 |---|---|
 | `TADPOLE_GL=0` | use the stock GPU stack (titles will assert — for debugging) |
-| `TADPOLE_GL_HLE=1` | host-GPU rendering |
-| `TADPOLE_HLE_STRICT=1` | crash rather than silently fall back to software |
+| `TADPOLE_GL_SOFTWARE=1` | the deprecated software rasteriser — see below |
+| `TADPOLE_HLE_STRICT=1` | stop the guest outright when replay dies, instead of showing the dialog |
 | `TADPOLE_HZ=n` | frame cap (default 60; `0` uncaps) |
 | `TADPOLE_DIR=path` | where the shared framebuffers and FIFOs live |
 | `TADPOLE_DEBUG=1` | verbose shim logging (what debug level 2 sets) |
 | `TADPOLE_STRACE=1` | every guest syscall (what debug level 3 sets) |
-| `TADPOLE_QEMU=path` | a specific qemu-arm, instead of the bundled or installed one |
-| `TADPOLE_DEPS=dir` | where the bundled qemu and Python live (the AppImage sets this) |
+| `TADPOLE_QEMU=path` | a specific engine, instead of the default Glasspole — `"$(command -v qemu-arm)"` to run on qemu |
+| `TADPOLE_DEPS=dir` | where the bundled engine and Python live (the AppImage sets this) |
+| `TADPOLE_THEME=green` | the original green chrome, instead of blue |
+
+### The software rasteriser is deprecated
+
+Host-GPU replay is the only supported way to render. The software rasteriser is
+still in the binary, and it is still the right tool for exactly one job —
+telling whether a rendering fault is in the shared GL core or only in the replay
+— but it is years behind, several times slower, and it cannot express things the
+titles rely on: it samples one texture unit and it ignores the blend factors.
+Two bugs found this month were invisible on it for that reason, having been
+scored "ok" by every compatibility sweep, which runs headless and therefore in
+software.
+
+So it is no longer reachable by accident:
+
+* **Options → Graphics → "Host GPU replay"** is ticked, greyed and always on.
+  A saved setting that turned it off is ignored.
+* **If replay dies mid-session**, the guest no longer drops quietly to software.
+  It raises a dialog — *GPU render engine CRASHED. Please restart Tadpole.* —
+  because the frames after that point would be wrong rather than merely slow.
+* **`--no-viewer` refuses** unless you ask for software by name; there is no
+  host GPU without a viewer.
+
+To use it deliberately:
+
+```sh
+TADPOLE_GL_SOFTWARE=1 ./tadpole.sh --app "Ben 10"
+TADPOLE_GL_SOFTWARE=1 ./tadpole.sh --boot --no-viewer      # headless
+```
+
+On Windows, set it in the shell before launching:
+
+```bat
+set TADPOLE_GL_SOFTWARE=1
+"%LOCALAPPDATA%\Programs\Glasspole\Glasspole.exe"
+```
+
+or in PowerShell:
+
+```powershell
+$env:TADPOLE_GL_SOFTWARE = 1
+& "$env:LOCALAPPDATA\Programs\Glasspole\Glasspole.exe"
+```
+
+The viewer passes its own environment down to the guest, so setting it before
+launch is all that is needed on either platform.
 
 ---
 
@@ -399,6 +601,7 @@ tadpole/shim/           guest-side libraries (ARM) — the emulation itself
 tadpole/viewer/         the application: window, UI, audio, host-GPU replay
 tools/                  install and diagnostic scripts
 tools/test-build.sh     build from scratch in a clean container, 3 distributions
+tools/compat-sweep.sh   launch every installed title and record what it did
 rootfs/                 firmware you installed          (not distributed)
 runtime/sysroot/        the guest's filesystem view
 docs/HANDOVER.md        engineering notes — how it works and why

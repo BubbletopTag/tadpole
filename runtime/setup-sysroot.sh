@@ -99,17 +99,35 @@ shadow_meta() {
             [ -L "$dst/$b" ] && rm -f "$dst/$b"
             shadow_meta "$e" "$dst/$b"
         else
-            ln -sfn "$e" "$dst/$b"
+            lns "$e" "$dst/$b"
         fi
     done
 }
+# HOW "LINK" IS SPELLED HERE. On Linux it is a symlink, as it always was. On
+# MSYS it is a COPY: MSYS's default `ln -s` writes WSL-style reparse points
+# (tag 0xA000001D) that native Win32 programs cannot follow — glasspole.exe
+# gets ENOENT straight through them — and true NTFS symlinks need a privilege
+# an ordinary session does not hold. Copying costs ~100 MB of disk and keeps
+# every property that matters: rootfs/ stays pristine, and the sysroot is
+# readable by native code. The [ -L ] re-run guards below stay correct either
+# way — a copy is not a link, so they simply never fire on MSYS.
+case "$(uname -s)" in
+    MSYS*|MINGW*) lns() {
+        # A dangling link is legal; a missing copy SOURCE under set -e would
+        # abort the whole script (linuxrc, whose target never materialises on
+        # Windows, did exactly that). Note it and carry on.
+        [ -e "$1" ] || { echo "    (no $1 — skipped)"; return 0; }
+        rm -rf "$2"; cp -a "$1" "$2"
+    } ;;
+    *)            lns() { ln -sfn "$1" "$2"; } ;;
+esac
 
 echo "==> sysroot skeleton"
 mkdir -p "$SYSROOT"
 cd "$SYSROOT"
 # read-only parts of the stock image
 for d in bin boot etc lib linuxrc mnt sbin erootfs.md5; do
-    ln -sfn "$ROOTFS/$d" "$d"
+    lns "$ROOTFS/$d" "$d"
 done
 # Firmware/ is nothing BUT meta.inf files, and the daemon rewrites all of them.
 [ -L Firmware ] && rm -f Firmware
@@ -133,13 +151,13 @@ echo "==> /usr overlay (absolute-path library lookups)"
 mkdir -p usr
 for d in "$ROOTFS"/usr/*; do
     b="$(basename "$d")"
-    [ "$b" = lib ] || ln -sfn "$d" "usr/$b"
+    [ "$b" = lib ] || lns "$d" "usr/$b"
 done
 mkdir -p usr/lib
 for src in "$ROOTFS"/usr/lib "$ROOTFS"/lib; do
     for f in "$src"/*; do
         [ -e "$f" ] || continue
-        ln -sfn "$(rootfs_target "$f")" "usr/lib/$(basename "$f")" 2>/dev/null || true
+        lns "$(rootfs_target "$f")" "usr/lib/$(basename "$f")" 2>/dev/null || true
     done
 done
 
@@ -173,8 +191,8 @@ SHIM_DL="$PROJ/runtime/shimlibs/libdl.so.0"
 if [ "${DEV_HAS_QT:-0}" = 1 ]; then
     echo "    libdl left as the device's own ($DEV_NAME injects via libEGL)"
 elif [ -e "$SHIM_DL" ]; then
-    ln -sfn "$SHIM_DL" lib/libdl.so.0
-    ln -sfn "$SHIM_DL" usr/lib/libdl.so.0
+    lns "$SHIM_DL" lib/libdl.so.0
+    lns "$SHIM_DL" usr/lib/libdl.so.0
 else
     echo "    WARNING: shim libdl not built yet — run 'cd tadpole && make shim'," >&2
     echo "    then re-run this script, or native apps will crash on launch." >&2
@@ -192,7 +210,7 @@ echo "==> /etc overlay (ALSA null sink)"
 mkdir -p etc
 for f in "$ROOTFS"/etc/*; do
     b="$(basename "$f")"
-    [ "$b" = asound.conf ] || ln -sfn "$f" "etc/$b"
+    [ "$b" = asound.conf ] || lns "$f" "etc/$b"
 done
 cat > etc/asound.conf <<'ASOUND'
 # Tadpole: null audio sink. See runtime/setup-sysroot.sh for why.
@@ -217,11 +235,11 @@ echo "==> /var/sounds video symlinks (rcS does this per-platform)"
 mkdir -p var
 for d in "$ROOTFS"/var/*; do
     b="$(basename "$d")"
-    [ "$b" = sounds ] || ln -sfn "$d" "var/$b"
+    [ "$b" = sounds ] || lns "$d" "var/$b"
 done
 mkdir -p var/sounds
 for f in "$ROOTFS"/var/sounds/*; do
-    ln -sfn "$f" "var/sounds/$(basename "$f")" 2>/dev/null || true
+    lns "$f" "var/sounds/$(basename "$f")" 2>/dev/null || true
 done
 # DEV_SOUNDS is "<name in /var/sounds> <path under the rootfs>", one per line,
 # transcribed from this device's branch of rcS. Do not be tempted to derive it:
@@ -230,7 +248,7 @@ done
 printf '%s\n' "$DEV_SOUNDS" | while read -r name src; do
     [ -n "$name" ] || continue
     if [ -e "$ROOTFS/$src" ]; then
-        ln -sfn "$ROOTFS/$src" "var/sounds/$name"
+        lns "$ROOTFS/$src" "var/sounds/$name"
     else
         echo "    note: no $src (var/sounds/$name will be absent)" >&2
     fi
@@ -367,6 +385,19 @@ printf '0 65536 0 0 0 65536 65536\n' > flags/pointercal
 # here and some code paths check it.
 : > flags/developer
 
+# /flags/poweron STOPS THE DEVICE SWITCHING ITSELF OFF.
+#
+# libLightningBase reads it beside /tmp/shutdown and /flags/apprelaunch — the
+# inactivity machinery — and without it the emulator powers down after about a
+# minute of no input, which on a desktop reads as "it crashed" rather than "a
+# battery-powered toy saved its battery". MfgTest/ResetUnit.sh deletes it as
+# part of a factory reset, which is the tell that it is a persistent flag like
+# /flags/developer above rather than something set at runtime.
+#
+# It is NOT the same mechanism as /flags/idle_timeouts below: this one is
+# Brio's, that one is the Qt shell's, and a Qt device needs both.
+: > flags/poweron
+
 # THE DEVICE POWERS ITSELF OFF AFTER FOUR MINUTES, AND SAYS SO IN PASSING.
 #
 #     [IdleTimeout] Timer intervals set to: 1st interval 120 seconds,
@@ -465,7 +496,7 @@ for d in /lib /usr/lib /LF/Base/lib /LF/Base/Brio/lib /LF/Base/Flash/lib \
     [ -d "$ROOTFS$d" ] || continue
     for so in "$ROOTFS$d"/*.so*; do
         [ -e "$so" ] || continue
-        ln -sfn "$(rootfs_target "$so")" "$LIBDIR/$(basename "$so")"
+        lns "$(rootfs_target "$so")" "$LIBDIR/$(basename "$so")"
         nlib=$((nlib+1))
     done
 done

@@ -1,0 +1,6 @@
+deps/
+# build*, not build: parallel work gets its own build directory rather than
+# three processes racing on one ninja.
+build*/
+*.bin
+*.elf

@@ -4,6 +4,9 @@ games/
 rootfs/
 sources/
 runtime/sysroot/
+# The Didj controller overlay, staged by tools/install-didj.sh and reapplied to
+# every Didj game it installs. Downloaded, not ours to commit.
+runtime/didj/
 runtime/libs/
 runtime/shimlibs/
 runtime/shimlibs-z/
@@ -16,6 +19,12 @@ reference/
 # Build products
 tadpole/viewer/tadpole-view
 runtime/tone
+# what tools/micromods.py wrote into this checkout's Downloads, so it can
+# take exactly that back out again. Local state about a local sysroot.
+runtime/micromods-made.json
+# Micromod packages downloaded from LeapFrog. Kept so a re-scan or a sysroot
+# reset costs the server nothing; it is their content, not ours to redistribute.
+runtime/micromods-cache/
 *.o
 
 # Captures and scratch
@@ -40,6 +49,11 @@ tools/glconform/*.log
 # obligation to meet than a repository quietly accumulating vendored binaries.
 build/
 
+# The release script. It lives in the working copy rather than in the
+# repository: it publishes to one particular GitHub repository, pushes tags, and
+# is the maintainer's tool rather than part of what Tadpole is.
+post-commit.sh
+
 # Byte-compiled Python from running the tools in place.
 __pycache__/
 *.pyc
@@ -52,3 +66,4 @@ __pycache__/
 keys/
 keys
 runtime/shimlibs-pkg/
+tadpole/.tadpole-version

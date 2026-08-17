@@ -118,6 +118,30 @@ def cmd_extract(path, dest):
     return 0
 
 
+def merge_tree(src, dst):
+    """Copy a directory over one that may already exist.
+
+    shutil.copytree's dirs_exist_ok does this in one line AND IS PYTHON 3.8.
+    The bundled interpreter on Windows is 3.7 — deliberately, because 3.8
+    cannot load a .pyd on an unpatched Windows 7 (see tools/build-windows.sh)
+    — so that one keyword raised TypeError on the one platform this branch
+    exists for. Nothing on Linux ever reached it, which is exactly why it
+    survived: the symlink ledger above only replays on hosts that cannot make
+    symlinks.
+    """
+    import shutil as _sh
+    os.makedirs(dst, exist_ok=True)
+    for name in os.listdir(src):
+        s, d = os.path.join(src, name), os.path.join(dst, name)
+        if os.path.isdir(s) and not os.path.islink(s):
+            merge_tree(s, d)
+        elif not os.path.exists(d):
+            try:
+                os.link(s, d)          # same volume, no privilege needed
+            except OSError:
+                _sh.copy2(s, d)
+
+
 def cmd_ubi(image, dest):
     try:
         from ubireader.scripts.ubireader_extract_files import main
@@ -125,8 +149,103 @@ def cmd_ubi(image, dest):
         die("ubi_reader is not available to this Python (%s).\n"
             "         Run tools/fetch-deps.sh, or install ubi_reader." % e)
     os.makedirs(dest, exist_ok=True)
-    sys.argv = ["ubireader_extract_files", "-o", dest, image]
-    return main() or 0
+
+    # SYMLINKS DO NOT SURVIVE WINDOWS, unless caught here. os.symlink needs a
+    # privilege an ordinary session lacks, and ubi_reader swallows the failure
+    # per link — so the extraction "succeeds" minus every symlink in the image,
+    # which for this rootfs means /lib's SONAME chain, the ELF interpreter
+    # /lib/ld-uClibc.so.0 and about a hundred busybox applet names: nothing
+    # dynamic can load, and nothing says why. Divert to a ledger instead: try
+    # the real symlink first (Linux never reaches the ledger), then materialise
+    # each recorded link as a HARD link — same volume, no privilege, and native
+    # code reads it as the plain file it is — with a copy as the fallback.
+    # Multiple passes, because a link's target may itself be a link that a
+    # later pass creates.
+    import shutil
+    pending = []
+    real_symlink = os.symlink
+
+    def recording_symlink(src, dst, *a, **k):
+        try:
+            real_symlink(src, dst, *a, **k)
+        except (OSError, NotImplementedError):
+            pending.append((src, dst))
+
+    # DEVICE NODES CANNOT BE MADE HERE, AND ARE NOT WANTED. os.mknod does not
+    # exist AT ALL on Windows, so ubi_reader's per-node try/except reports
+    #
+    #     Warn: DEV Fail: module 'os' has no attribute 'mknod'
+    #
+    # once per node — alarming enough to be reported as a bug, while the
+    # firmware it produced was in fact complete. On Linux the same nodes fail
+    # just as surely, with EPERM, because mknod on a character device is
+    # root-only and this runs as an ordinary user. So NEITHER platform has ever
+    # created one, the extraction has always been "missing" /dev/console and
+    # friends, and nothing has ever needed them: the guest's /dev is served by
+    # the shim, not by the image.
+    #
+    # Recording them rather than letting each one raise keeps the log honest —
+    # the count is reported below — and, unlike ubi_reader's use_dummy_devices,
+    # writes nothing to disk. A dummy REGULAR file at /dev/console would be
+    # worse than an absent one: the guest's open() would succeed and it would
+    # then read and write a file nobody drains.
+    real_mknod = getattr(os, "mknod", None)
+    skipped_devs = []
+
+    def recording_mknod(path, mode=0o600, device=0, *a, **k):
+        if real_mknod is None:
+            skipped_devs.append(path)
+            return
+        try:
+            real_mknod(path, mode, device, *a, **k)
+        except (OSError, NotImplementedError):
+            skipped_devs.append(path)
+
+    os.symlink = recording_symlink
+    os.mknod = recording_mknod
+    try:
+        sys.argv = ["ubireader_extract_files", "-o", dest, image]
+        rc = main() or 0
+    finally:
+        os.symlink = real_symlink
+        if real_mknod is None:
+            del os.mknod
+        else:
+            os.mknod = real_mknod
+
+    if skipped_devs:
+        sys.stderr.write(
+            "pkgtool: %d device node(s) not created (%s and the rest) - the "
+            "guest's /dev comes from the shim, so the extraction is complete "
+            "without them\n"
+            % (len(skipped_devs), os.path.basename(skipped_devs[0])))
+
+    root = os.path.abspath(dest)
+    for _ in range(8):                       # link-to-link chains, not loops
+        if not pending:
+            break
+        again = []
+        for src, dst in pending:
+            # A guest-absolute target ("/bin/busybox") is rooted in the
+            # extraction, not the host.
+            t = (os.path.join(root, src.lstrip("/\\")) if os.path.isabs(src)
+                 else os.path.join(os.path.dirname(dst), src))
+            if os.path.isdir(t):
+                merge_tree(t, dst)
+            elif os.path.isfile(t):
+                try:
+                    os.link(t, dst)
+                except OSError:
+                    shutil.copy2(t, dst)
+            else:
+                again.append((src, dst))     # target not made yet, or dangling
+        if len(again) == len(pending):
+            break                            # nothing progressed: all dangling
+        pending = again
+    for src, dst in pending:
+        sys.stderr.write("pkgtool: dangling symlink skipped: %s -> %s\n"
+                         % (dst, src))
+    return rc
 
 
 def main(argv):
