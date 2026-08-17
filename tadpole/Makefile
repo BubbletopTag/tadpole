@@ -428,6 +428,32 @@ shimegl-links: $(GLES_OUT) $(ASOUND_OUT)
 	@# By SONAME, which is the filename the loader looks for.
 	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libGLESv1_CM.so.1
 	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libopengles_lite.so
+	@# libGLES_CM.so IS A THIRD NAME FOR THE SAME API AND THE LEAPPAD3 IS THE
+	@# FIRST DEVICE TO ASK FOR IT — and it is not cosmetic, because on this
+	@# device that library is Mali's COMBINED GLES+EGL: it defines eglGetDisplay
+	@# and eglInitialize itself, alongside __egl_platform_* and
+	@# mali_egl_image_*. libLightning2D.so, where CGraphics2D::init() lives,
+	@# has libGLES_CM.so in its NEEDED. Miss this one name and the stock Mali
+	@# driver is loaded as a SECOND EGL implementation beside ours — so a
+	@# display created by one is passed to the other, our eglInitialize
+	@# correctly refuses a handle it never issued, and the title dies on
+	@#     <ASSERT>: [0x5] eglInitialize() failed
+	@# which reads like our EGL being broken rather than there being two.
+	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libGLES_CM.so
+	@# AND libGLESv2.so, FOR THE SAME REASON AND NOT BECAUSE ANYTHING WANTS
+	@# GLES2. It is Mali's combined library too — eglGetDisplay, eglInitialize,
+	@# eglMakeCurrent and eglSwapBuffers are all defined in it — and it sits
+	@# BEFORE libEGL.so in BrioWrapper's DT_NEEDED, so it won the global lookup
+	@# and the stock Mali eglInitialize ran instead of ours. Ours was never
+	@# called at all, which is why instrumenting it printed nothing while the
+	@# assert still fired.
+	@#
+	@# Safe to point at the GLES1 shim: neither BrioWrapper nor libLightning2D
+	@# imports a single GLES2-only entry point (no glCreateShader, glUseProgram,
+	@# glUniform*, glVertexAttrib*), so nothing here is losing an API — it is
+	@# only losing a second EGL. Anything that DOES want real GLES2 will fail
+	@# loudly at load time rather than quietly, which is the right trade.
+	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libGLESv2.so
 	@cp $(ASOUND_OUT) $(SHIMLIBS_EGL)/libasound.so.2
 	@# libAudio.so's DT_NEEDED says libasound.so.2, and so does the SONAME, so
 	@# no alias is needed here — unlike the GL pair above.
