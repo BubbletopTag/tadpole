@@ -279,7 +279,10 @@ static int pkt_begin(u32 op, u32 payload)
 	int spins = 0;
 
 	if (!g_ring) return 0;
-	if (need > TADGL_RING) {          /* single packet larger than the ring */
+	/* Stated against the payload, using the constant the HOST validates with,
+	 * so the two ends cannot drift apart — they did, and it cost a white
+	 * screen. See TADGL_MAX_PAYLOAD. */
+	if (payload > TADGL_MAX_PAYLOAD) {
 		hle_give_up("packet larger than the ring; using software raster");
 		return 0;
 	}

@@ -1085,8 +1085,14 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			padded = (p.len + 3u) & ~3u;
 			/* Validate before trusting either field. A bad op or an absurd
 			 * length means we are not looking at a packet boundary at all, and
-			 * crawling forward would only corrupt more. */
-			if (p.op >= TADGL_OP_COUNT || padded > TADGL_RING / 2u) {
+			 * crawling forward would only corrupt more.
+			 *
+			 * "Absurd" IS THE WRITER'S LIMIT, not a rule of thumb. This read
+			 * TADGL_RING / 2 and threw away a legitimate 1024x1024 texture that
+			 * pkt_begin had been perfectly willing to write — see
+			 * TADGL_MAX_PAYLOAD, which both ends now share so they cannot drift
+			 * apart again. */
+			if (p.op >= TADGL_OP_COUNT || padded > TADGL_MAX_PAYLOAD) {
 				if (!g_desync++)
 					fprintf(stderr, "hle: bad packet op=%u len=%u at %u;"
 					        " resyncing\n", p.op, p.len, save);

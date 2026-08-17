@@ -200,6 +200,31 @@ struct tadgl_hdr {
 
 struct tadgl_pkt { unsigned short op, pad; unsigned int len; };
 
+/* THE LARGEST PAYLOAD ONE PACKET MAY CARRY. Both ends must use this and only
+ * this, which is the whole reason it is a shared constant rather than a number
+ * written out twice.
+ *
+ * It WAS written twice, and the two copies disagreed. The writer's rule was
+ * "does it fit in the ring at all" (pkt_begin: `need > TADGL_RING`); the reader
+ * rejected anything over TADGL_RING / 2 as obviously garbage. Every LeapPad2
+ * title sent packets far below both limits, so the gap between them was
+ * invisible for the entire life of the ring — the comment on TADGL_RING still
+ * reasons about "a texture upload can be 320x240x4 = 300 KB", which is what
+ * those titles really did send.
+ *
+ * Pet Pad Party on the LeapPad3 uploads a 1024x1024 RGBA texture: 4194304 bytes
+ * of pixels plus 12 of name/width/height. The ring is 8 MB, so the writer
+ * accepted it, waited for room, and wrote all 4 MB. The reader read the header,
+ * compared 4194316 against TADGL_RING / 2 = 4194304, declared it absurd BY
+ * TWELVE BYTES, and resynced to head — discarding that packet and everything
+ * queued behind it.
+ *
+ * The symptom was a pure white screen with the title running quite happily
+ * underneath, which reads as "the renderer is broken" rather than "one bounds
+ * check is twelve bytes too tight".
+ */
+#define TADGL_MAX_PAYLOAD (TADGL_RING - (unsigned int)sizeof(struct tadgl_pkt))
+
 #define TADGL_DATA(h) ((unsigned char *)(h) + sizeof(struct tadgl_hdr))
 #define TADGL_FILE_BYTES (sizeof(struct tadgl_hdr) + TADGL_RING)
 
