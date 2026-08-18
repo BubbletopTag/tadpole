@@ -1236,10 +1236,16 @@ static int g_wiz_page;
  *
  * NOT "tablets" ANY MORE, which is why the page is now headed "Which device?".
  * The lineup outgrew the word: the Leapster Explorer and the Leapster GS are
- * handhelds, the LeapTV is a set-top box that plugs into a television, and the
- * Didj at the bottom of the list is a 2008 handheld older than any of them.
- * Barely half of what this page offers is a tablet, and calling them all one
- * was the sort of wrong that makes a user scroll past the thing they own.
+ * 320x240 handhelds, and the Didj at the bottom of the list is a 2008 handheld
+ * older than either. Calling them all tablets was the sort of wrong that makes
+ * a user scroll past the thing they own.
+ *
+ * THE LeapTV IS DELIBERATELY NOT OFFERED YET. It is a set-top box rather than a
+ * handheld — no battery, no touchscreen, a television for a panel and a motion
+ * controller for input — so it is not one more row so much as a second set of
+ * assumptions, and nothing in this repo has run one. Its codename is kept in
+ * the table below because the mapping is a fact worth not re-deriving, not
+ * because the device is supported.
  *
  * Read from runtime/devices/*.conf rather than hardcoded, so adding a device
  * is one file and no C. The shell side reads the same directory the same way
@@ -1263,8 +1269,9 @@ struct devinfo {
 	 *
 	 * Confirmed against firmware: Madrid=LeapPad Explorer, Valencia=LeapPad2,
 	 * Cabo=LeapPad3, Rio=LeapPad Ultra, Bogota=LeapPad Platinum,
-	 * Santiago=LeapPad Ultimate, Glasgow=LeapTV. Left blank when a profile
-	 * does not name one; nothing is invented here. */
+	 * Santiago=LeapPad Ultimate, Glasgow=LeapTV (recorded, not offered — see
+	 * above). Left blank when a profile does not name one; nothing is
+	 * invented here. */
 	char plat[16];
 	int  installed;            /* a rootfs for this device is already here */
 };
