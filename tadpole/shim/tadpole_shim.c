@@ -361,6 +361,7 @@ static void *(*real_fopen)(const char *, const char *);
 static void *(*real_dlopen)(const char *, int);
 static char *(*real_dlerror)(void);
 static void *(*real_fopen64)(const char *, const char *);
+static void *(*real_opendir)(const char *);
 
 /* Open <TADPOLE_LOG>.<pid>.log and park it on a high fd.
  *
@@ -472,6 +473,7 @@ static void init(void)
 	real_dlerror= dlsym(RTLD_NEXT, "dlerror");
 	real_fopen  = dlsym(RTLD_NEXT, "fopen");
 	real_fopen64= dlsym(RTLD_NEXT, "fopen64");
+	real_opendir= dlsym(RTLD_NEXT, "opendir");
 
 	for (i = 0; i < MAXFD; i++) {
 		g_fb_of_fd[i] = -1;
@@ -1116,6 +1118,44 @@ void *fopen64(const char *path, const char *mode)
 	return fopen_common(path, mode, real_fopen64 ? real_fopen64 : real_fopen);
 }
 
+/* opendir() — THE ONE THAT ASKS ABOUT A DIRECTORY RATHER THAN A FILE, and the
+ * second thing a rootless launch trips over.
+ *
+ * Brio finds its modules by listing a directory, not by opening a known name:
+ * libModule.so's FindModules() takes the first LD_LIBRARY_PATH entry, tries
+ * "<it>/Module/", falls back to /LF/Base/Brio/Module/ and hands that to
+ * CBootSafeKernelMPI::GetFilesInDirectory — which is in libKernelMPI.so, and
+ * libKernelMPI.so's undefined symbols say exactly how it does it:
+ *
+ *     closedir  opendir  readdir64  stat64  dlopen  dlsym  ...
+ *
+ * stat64 was already translated here; opendir was not, so the listing came
+ * back empty and AppManager stopped with
+ *
+ *     BOOTFAIL: No modules found in: /LF/Base/Brio/Module/
+ *
+ * after having successfully dlopen()ed libModule.so from that very directory.
+ * readdir/closedir need nothing: they take the DIR* this returns.
+ *
+ * Under qemu-user and under a chroot this never mattered, because the path was
+ * already translated before the guest's libc saw it. */
+void *opendir(const char *path)
+{
+	init();
+	if (!real_opendir) return 0;
+	if (path && path[0] == '/' && g_sysroot[0] && !under_gdir(path)) {
+		char full[512];
+		void *d;
+		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
+		if ((d = real_opendir(full)) != 0) {
+			if (g_debug) { dbg("[tadpole] opendir(sysroot) "); dbg(path); dbg("\n"); }
+			return d;
+		}
+	}
+	if (g_debug) { dbg("[tadpole] opendir(literal) "); dbg(path ? path : "(null)"); dbg("\n"); }
+	return real_opendir(path);
+}
+
 /* SAY WHEN A dlopen FAILS. Debug builds only.
  *
  * Brio loads its modules by hand — libModuleMPI scans /LF/Base/Brio/Module/
@@ -1134,6 +1174,36 @@ void *dlopen(const char *path, int flags)
 	init();
 	if (!real_dlopen)
 		return 0;
+	/* SYSROOT FIRST, for the same reason open() does it — and it took a
+	 * rootless launch to make it matter. Under qemu-user and under a chroot
+	 * something else translates the path before the guest's loader ever sees
+	 * it: qemu's `-L` at the syscall boundary, the kernel's root at the
+	 * chroot. Run the guest's own ARM code on Android with no chroot (see
+	 * android/NOTES-arm32.md, "Rootless") and neither exists, and the loader
+	 * opens the path with raw syscalls of its own that no interposer can
+	 * reach — so an absolute guest path is the last thing anybody can rewrite
+	 * HERE, before it goes in.
+	 *
+	 * The measurement that says so is the first line AppManager ever printed
+	 * on that route:
+	 *
+	 *     Unable to open module '/LF/Base/Brio/Module/libModule.so', not found
+	 *     BOOTFAIL: Failed to load found module at sopath: ...
+	 *
+	 * Brio's very first module. Everything else the process had done so far
+	 * went through open()/fopen() and was already translated.
+	 *
+	 * Falls back to the literal path, so a host-valid path and every other
+	 * platform behave exactly as before. */
+	if (path && path[0] == '/' && g_sysroot[0] && !under_gdir(path)) {
+		char full[512];
+		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
+		if ((h = real_dlopen(full, flags)) != 0) {
+			if (g_debug) { dbg("[tadpole] dlopen(sysroot) "); dbg(path); dbg("\n"); }
+			screen_note(path);
+			return h;
+		}
+	}
 	h = real_dlopen(path, flags);
 	/* A NATIVE TITLE ARRIVES HERE AND NOWHERE ELSE. CAppManager::LoadNewApp
 	 * dlopen()s the package's App.so, and the guest's own loader then opens
@@ -1326,8 +1396,11 @@ int unlink(const char *path)
 		if (path && path[0] == '/' && g_sysroot[0] &&                         \
 		    !(dlen && strncmp(path, g_dir, dlen) == 0)) {                     \
 			sysrootify(f, sizeof(f), path);                                   \
-			if (realfn(f, buf) == 0)                                          \
+			if (realfn(f, buf) == 0) {                                        \
+				if (g_debug) { dbg("[tadpole] " #name "(sysroot) ");          \
+				               dbg(path); dbg("\n"); }                        \
 				return 0;                                                     \
+			}                                                                 \
 		}                                                                     \
 		return realfn(path, buf);                                             \
 	}

@@ -2924,6 +2924,22 @@ static int looks_like_a_guest(int pid)
 		/* comm is truncated to 15 characters; compare on that. */
 		if (!strncmp(comm, b, 15)) return 1;
 	}
+#ifdef __ANDROID__
+	/* THE ROOTLESS GUEST IS NOT AN EMULATOR, so neither name below can ever
+	 * match it: what runs is the firmware's own AppManager, under its own
+	 * name. It is our child, so the ordinary kill path reaches it — but only
+	 * while we are alive. Force-stop the app and AppManager is reparented to
+	 * init and carries on holding the arena, which is exactly the "I closed
+	 * it and it is still running" this sweep exists to end. Measured: pid
+	 * 2824, ppid 1, still drawing the home screen after the app was gone.
+	 *
+	 * Safe because the caller has ALREADY matched TADPOLE_DIR exactly and
+	 * skipped our own ancestors; this only decides whether a process that is
+	 * demonstrably ours is a guest. */
+	if (!strcmp(comm, "AppManager") || !strcmp(comm, "VideoDaemon") ||
+	    !strcmp(comm, "saplayer"))
+		return 1;
+#endif
 	return !strcmp(comm, "qemu-arm") || !strcmp(comm, "glasspole");
 }
 
@@ -3070,6 +3086,178 @@ static void guest_stop(void)
 static char  g_gp_arg[10][1164];
 static char *g_gp_argv[24];
 
+/* ---- the rootless route: no chroot, no helper, no root -------------------
+ *
+ * Non-empty means the guest below is being started by THIS PROCESS, natively,
+ * with the sysroot as its working directory. See android_native_argv().
+ */
+static char g_native_cwd[1164];
+
+/* THE ELF INTERPRETER IS THE ENTIRE PROBLEM, and it is one byte wide.
+ *
+ * Everything else about running the guest's own ARM32 code from inside the app
+ * turned out to be already solved or already measured:
+ *
+ *   exec       an app on API 27 CAN execute a file it wrote. The probe that
+ *              said otherwise was our own bug (see the correction in
+ *              android/NOTES-arm32.md); run-as, which gives exactly the app's
+ *              own u:r:untrusted_app:s0:c512,c768, execs one happily.
+ *   paths      tadpole_shim.c already rewrites absolute guest paths through
+ *              $TADPOLE_SYSROOT — that is how the desktop works under
+ *              qemu-user, where there is no chroot either.
+ *   the CPU    this is an armeabi-v7a process on ARM32 silicon. The guest's
+ *              instructions ARE the host's instructions.
+ *
+ * What is left is that the guest binaries name `/lib/ld-uClibc.so.0` in
+ * PT_INTERP and the KERNEL resolves that before one instruction of ours has
+ * run. chroot is what used to make it resolve, and chroot needs CAP_SYS_CHROOT,
+ * which an app has at no API level. Nor is there a way round it through
+ * namespaces on this class of device — measured on the dev tablet:
+ *
+ *     $ zcat /proc/config.gz | grep -i namespace
+ *     # CONFIG_NAMESPACES is not set
+ *
+ * so unshare(CLONE_NEWNS) cannot even be compiled into that kernel.
+ *
+ * TWO ROUTES WERE TRIED. Invoking the loader directly — `ld-uClibc.so.0 <prog>`
+ * — is how you would do this with glibc, and uClibc 0.9.32 answers:
+ *
+ *     Standalone execution is not supported yet
+ *
+ * The other one works, and it costs nothing. Linux opens a RELATIVE PT_INTERP
+ * against the exec'ing process's working directory (fs/binfmt_elf.c reads the
+ * string straight out of the file and hands it to open_exec(), which is an
+ * AT_FDCWD lookup). And "lib/ld-uClibc.so.0" is exactly one byte shorter than
+ * "/lib/ld-uClibc.so.0", so dropping the leading slash FITS IN PLACE: same
+ * p_offset, same p_filesz, one more trailing NUL. No ELF surgery, no second
+ * copy of the binary, and the file stays the same size.
+ *
+ * Measured three ways on the tablet, with busybox out of the same firmware:
+ *
+ *     patched   + cd sysroot  ->  ROUTE2_OK, exit 0
+ *     patched   + cd /        ->  No such file or directory
+ *     unpatched + cd sysroot  ->  No such file or directory
+ *
+ * IT DOES NOT BREAK THE CHROOT PATH. chroot(2) is followed by chdir("/"), and
+ * inside the chroot "/" IS the sysroot — so a relative interpreter resolves to
+ * the same file the absolute one used to. The root helper keeps working on a
+ * tree this has been run over, which is what lets it stay as the fallback.
+ *
+ * Idempotent, and silent about a file that is already relative.
+ */
+static int android_relinterp(const char *prog)
+{
+	unsigned char eh[52], ph[32];
+	unsigned long phoff, off;
+	unsigned phentsize, phnum, i;
+	int fd, ret = 0, seen = 0;
+
+	if ((fd = open(prog, O_RDWR)) < 0)
+		return 0;
+	if (read(fd, eh, sizeof eh) != (ssize_t)sizeof eh) { close(fd); return 0; }
+	/* ELF32 little-endian only; that is what this ABI is. */
+	if (eh[0] != 0x7f || eh[1] != 'E' || eh[2] != 'L' || eh[3] != 'F' ||
+	    eh[4] != 1 || eh[5] != 1) { close(fd); return 0; }
+
+	phoff     = (unsigned long)eh[28] | ((unsigned long)eh[29] << 8) |
+	            ((unsigned long)eh[30] << 16) | ((unsigned long)eh[31] << 24);
+	phentsize = (unsigned)eh[42] | ((unsigned)eh[43] << 8);
+	phnum     = (unsigned)eh[44] | ((unsigned)eh[45] << 8);
+	if (phentsize < 32 || phnum == 0 || phnum > 128) { close(fd); return 0; }
+
+	for (i = 0; i < phnum; i++) {
+		char buf[64];
+		unsigned long filesz;
+		unsigned type;
+		ssize_t n;
+
+		if (lseek(fd, (off_t)(phoff + (unsigned long)i * phentsize), SEEK_SET) < 0)
+			break;
+		if (read(fd, ph, 32) != 32) break;
+		type = (unsigned)ph[0] | ((unsigned)ph[1] << 8) |
+		       ((unsigned)ph[2] << 16) | ((unsigned)ph[3] << 24);
+		if (type != 3) continue;                       /* PT_INTERP */
+		off    = (unsigned long)ph[4]  | ((unsigned long)ph[5] << 8) |
+		         ((unsigned long)ph[6] << 16) | ((unsigned long)ph[7] << 24);
+		filesz = (unsigned long)ph[16] | ((unsigned long)ph[17] << 8) |
+		         ((unsigned long)ph[18] << 16) | ((unsigned long)ph[19] << 24);
+		seen = 1;
+		if (filesz < 2 || filesz > sizeof buf) break;
+		if (lseek(fd, (off_t)off, SEEK_SET) < 0) break;
+		n = read(fd, buf, (size_t)filesz);
+		if (n != (ssize_t)filesz) break;
+		if (buf[0] != '/') { ret = 1; break; }         /* already relative */
+		/* Shift left one and NUL-fill. The last byte MUST stay NUL: the
+		 * kernel rejects an interpreter string that does not end in one. */
+		memmove(buf, buf + 1, (size_t)filesz - 1);
+		buf[filesz - 1] = 0;
+		if (lseek(fd, (off_t)off, SEEK_SET) < 0) break;
+		if (write(fd, buf, (size_t)filesz) == (ssize_t)filesz) ret = 1;
+		break;
+	}
+	close(fd);
+	/* NO PT_INTERP AT ALL IS NOT A FAILURE. A statically linked guest binary
+	 * needs no loader and so needs nothing done to it; saying "cannot make it
+	 * runnable" about a program that was always runnable would be a refusal
+	 * invented by this function. */
+	return seen ? ret : 1;
+}
+
+/* The environment tadpole.sh's guest() builds, minus what guest_setenv()
+ * already set. Called in the CHILD, after fork and before execv.
+ *
+ * TADPOLE_SYSROOT is the one that is new here rather than merely moved. Under
+ * the root helper it is deliberately UNSET, because the chroot has already
+ * made every guest path real and a second rewrite on top of it would be wrong.
+ * With no chroot the shim is the only thing doing the translation, so it has
+ * to be told where the sysroot is — exactly as on the desktop. */
+static void android_native_setenv(void)
+{
+	char buf[1160];
+
+	snprintf(buf, sizeof(buf),
+	         "%s/runtime/shimlibs-gl:%s/runtime/shimlibs-z:"
+	         "%s/runtime/shimlibs:%s/runtime/libs",
+	         g_projdir, g_projdir, g_projdir, g_projdir);
+	setenv("LD_LIBRARY_PATH", buf, 1);
+	snprintf(buf, sizeof(buf), "%s/runtime/sysroot", g_projdir);
+	setenv("TADPOLE_SYSROOT", buf, 1);
+	/* Deliberately nonexistent: tslib's module chain has a null ops->read and
+	 * crashes on the first tap, so it must fail init and let Brio use its own
+	 * touchscreen path. Same value tadpole.sh and the helper pass. */
+	setenv("TSLIB_CONFFILE", "/nonexistent-ts.conf", 1);
+}
+
+/* Build the argv for running the guest's own binary, and make its interpreter
+ * resolvable. Returns NULL and sets a status line if it cannot. */
+static char *const *android_native_argv(char *const argv[], const char *prog,
+                                        int argstart, char *path, size_t pathsz)
+{
+	int i, n = 0;
+
+	snprintf(g_native_cwd, sizeof(g_native_cwd), "%s/runtime/sysroot", g_projdir);
+	/* The guest's own spelling of the program is absolute and guest-relative;
+	 * the host has to be told where that really is. */
+	snprintf(path, pathsz, "%s%s", g_native_cwd, prog);
+	if (access(path, X_OK) != 0) {
+		ui_status("no system files — install firmware first");
+		g_native_cwd[0] = 0;
+		return NULL;
+	}
+	if (!android_relinterp(path)) {
+		ui_status("cannot make %s runnable (ELF interpreter)", prog);
+		g_native_cwd[0] = 0;
+		return NULL;
+	}
+
+	g_gp_argv[n++] = path;
+	if (argstart)
+		for (i = argstart; argv[i] && n < 22; i++)
+			g_gp_argv[n++] = argv[i];
+	g_gp_argv[n] = NULL;
+	return g_gp_argv;
+}
+
 static char *const *android_guest_argv(char *const argv[], char *path,
                                        size_t pathsz)
 {
@@ -3093,8 +3281,24 @@ static char *const *android_guest_argv(char *const argv[], char *path,
 	}
 	if (!prog) { ui_status("nothing to launch"); return NULL; }
 
+	g_native_cwd[0] = 0;
 	snprintf(path, pathsz, "%s/glasspole/build/glasspole", g_projdir);
 	if (access(path, X_OK) != 0) {
+		/* NO ENGINE ON THIS ABI — AND, SINCE THE INTERPRETER PROBLEM WAS
+		 * SOLVED, NO LONGER A DEAD END. armeabi-v7a carries no
+		 * libglasspole.so because dynarmic has no 32-bit host backend, and
+		 * this branch could only apologise. But a v7a process is ITSELF in
+		 * AArch32, so the guest's instructions need no engine at all: they
+		 * need a loader the kernel can find. See android_relinterp().
+		 *
+		 * GATED ON BEING A 32-BIT PROCESS OURSELVES, which is the one test
+		 * that cannot be wrong about whether this device runs AArch32 at
+		 * EL0 — we are running in it. A 64-bit build with no glasspole is a
+		 * missing engine and still says so; probing properties or looking
+		 * for /system/bin/linker would only be guessing at what a ROM
+		 * advertises. */
+		if (sizeof(void *) == 4)
+			return android_native_argv(argv, prog, argstart, path, pathsz);
 		ui_status("no ARM engine — see linkEngine() in TadpoleActivity");
 		return NULL;
 	}
@@ -3437,6 +3641,18 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 			if (null >= 0) { dup2(null, 1); dup2(null, 2); close(null); }
 		}
 		if (as_guest) guest_setenv(ui_cfg());
+#ifdef __ANDROID__
+		/* THE WORKING DIRECTORY IS LOAD-BEARING ON THE ROOTLESS ROUTE, and
+		 * it is the only place it ever is: the guest's PT_INTERP has been
+		 * made relative, so the kernel resolves the loader against the CWD
+		 * of the process calling execve. chdir() here, execv() below, and
+		 * `lib/ld-uClibc.so.0` is found in the sysroot. See
+		 * android_relinterp() for why it is a relative path at all. */
+		if (as_guest && g_native_cwd[0]) {
+			android_native_setenv();
+			if (chdir(g_native_cwd) != 0) _exit(126);
+		} else
+#endif
 		if (chdir(g_projdir) != 0) _exit(126);
 		execv(path, argv);
 		_exit(127);
