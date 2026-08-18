@@ -4,6 +4,7 @@
 #   ./tools/install-didj.sh --setup DIDJ.zip [ControlOverlay.zip]
 #   ./tools/install-didj.sh --status
 #   ./tools/install-didj.sh <game.zip|game.tar> [more...]
+#   ./tools/install-didj.sh --to-tar <game.zip|game.lfp> [more...]
 #
 # WHAT A DIDJ GAME IS, AND WHY IT NEEDS ANY OF THIS
 # -------------------------------------------------
@@ -164,7 +165,7 @@ setup() {
 # ---- per-game install ------------------------------------------------------
 install_one() {
     local arc="$1" metapath="$2" prefix meta dev pid name tld dest prof
-    local own_icon own_preview art
+    local own_icon own_preview own_large art new
 
     prefix="$(dirname "$metapath")"
     meta="$(arc_cat "$arc" "$metapath" 2>/dev/null)" || return 0
@@ -184,6 +185,7 @@ install_one() {
     # the restored Icon=/PreviewImage= lines should name; see below.
     own_icon="$(field "$meta" Icon)"
     own_preview="$(field "$meta" PreviewImage)"
+    own_large="$(field "$meta" LargeIcon)"
     [ -n "$tld" ] || return 0
     dest="$BULK/ProgramFiles/$tld"
 
@@ -232,6 +234,34 @@ install_one() {
     [ -n "$art" ] && printf 'Icon="%s"\n' "$art" >> "$dest/meta.inf"
     art="$(pick_art "$own_preview" previewimage.png)"
     [ -n "$art" ] && printf 'PreviewImage="%s"\n' "$art" >> "$dest/meta.inf"
+    # LargeIcon IS THE THIRD ARTWORK FIELD, and it was being dropped: the ".png"
+    # delete takes it like the other two and only two were ever put back. Sonic
+    # and SuperChicks have none, so nothing showed it; JetPack Heroes has
+    # LargeIcon="Description.png", a 256x128 PNG shipped inside the package.
+    # It is a real field — "LargeIcon" is in the meta.inf key table in
+    # LF/Base/lib/libLightningJSON.so beside AppSo and PreviewImage, and stock
+    # LST3-0x00180010-000000 and LST3-0x00180002-000000 both carry it. No
+    # fallback: the overlay has no large art, and no LargeIcon at all is what
+    # every other package on the device has.
+    if [ -n "$own_large" ] && [ -f "$dest/$own_large" ]; then
+        printf 'LargeIcon="%s"\n' "$own_large" >> "$dest/meta.inf"
+    fi
+
+    # ---- packagefiles.md5 ---------------------------------------------------
+    #
+    # NOTHING ON THE DEVICE ENFORCES IT — measured: 31 of the 124 installed
+    # packages in a working sysroot already disagree with their own manifest,
+    # every one on ./meta.inf, because install-game.sh appended ProfileAccess
+    # after LeapFrog generated it. This is for whoever later runs md5sum -c and
+    # has to decide whether the one failing line is ours or a bad download.
+    # ONE line re-hashed; the rest stays byte-for-byte as the vendor wrote it,
+    # for the reason micromods.py's update_checksum spells out.
+    if [ -f "$dest/packagefiles.md5" ] \
+       && grep -q '[[:space:]]\./meta\.inf$' "$dest/packagefiles.md5"; then
+        new="$(md5sum "$dest/meta.inf" | cut -d' ' -f1)"
+        sed -i "s|^[0-9a-f]\{32\}\([[:space:]]*\)\./meta\.inf$|$new\1./meta.inf|" \
+            "$dest/packagefiles.md5"
+    fi
 
     # ---- THE HOME-SCREEN TILE ----------------------------------------------
     #
@@ -280,7 +310,10 @@ case "${1:-}" in
     # TLS, redirects and progress are already solved there, and netssl knows how
     # to explain a certificate failure on an old machine. One implementation.
     # Same hand-off as the downloads: the tile resampler lives in Python.
-    --refresh|--fetch-compat|--fetch-overlay)
+    # --to-tar joins them for the same reason: it needs the tile resampler, and
+    # writing an LFManager-shaped tar — lfu:lfu, 0777 files, 0700 dirs — is a
+    # job for tarfile rather than for GNU tar flags that differ on every host.
+    --refresh|--fetch-compat|--fetch-overlay|--to-tar)
         . "$HERE/lib-deps.sh"
         PY="$(tad_python || true)"
         [ -n "$PY" ] || die "no python3 available to download with."

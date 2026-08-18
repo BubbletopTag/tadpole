@@ -4,6 +4,7 @@
     ./tools/install-didj.py --setup DIDJ.zip [ControlOverlay.zip]
     ./tools/install-didj.py --status
     ./tools/install-didj.py <game.zip|game.tar> [more...]
+    ./tools/install-didj.py --to-tar <game.zip|game.lfp> [more...]
 
 A faithful port of tools/install-didj.sh, which stays the Linux entry point.
 This exists because Windows has no bash: the viewer there runs Python for its
@@ -32,16 +33,21 @@ summarised:
     indexed by that three-letter code.
   * The save area Bulk/Data/Local/<profile>/<PackageID>/ must exist before first
     launch, for the reason install-game.py spells out.
+  * --to-tar does the same conversion but writes an installable .tar instead of
+    touching a sysroot, because the Android build's InstallGame refuses Didj
+    packages and points at this tool, which had no way to hand it a file.
 """
+import hashlib
 import json
 import os
 import re
 import shutil
 import struct
-import zlib
 import sys
 import tarfile
+import time
 import zipfile
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -492,22 +498,37 @@ def setup(argv):
         print("Re-run with:  install-didj.py --setup %s ControlOverlay.zip" % didjzip)
 
 
-# ---- per-game install ------------------------------------------------------
-def install_one(arc, metapath):
-    prefix = os.path.dirname(metapath) or "."
+# ---- per-game conversion ---------------------------------------------------
+def ident(arc, metapath):
+    """(PackageID, 3LD, Name) for a Didj package in `arc`, else None.
+
+    Split out because the destination is named from the 3LD, so the caller has
+    to know it BEFORE there is anywhere to convert into.
+    """
     meta = arc_read(arc, metapath)
     if field(meta, "Device") != "Didj":
-        return 0                       # not ours; install-game.py has it
-
+        return None                    # not ours; install-game.py has it
     pid = field(meta, "PackageID")
-    name = field(meta, "Name")
     tld = field(meta, "3LD") or field(meta, "ShortName") or pid
+    return (pid, tld, field(meta, "Name")) if tld else None
+
+
+def convert_into(arc, metapath, dest):
+    """Extract one Didj package into `dest` and apply the whole recipe there.
+
+    ONE IMPLEMENTATION OF THE RECIPE, because there are two callers now: the
+    install, which writes into a sysroot, and --to-tar, which writes a package
+    somebody carries to another machine. Letting those drift would produce a
+    title that launches on the desktop and not on the tablet because one of them
+    appended ProfileAccess and the other did not — a difference nobody would
+    think to look for in here.
+    """
+    prefix = os.path.dirname(metapath) or "."
+    meta = arc_read(arc, metapath)
     # Read these BEFORE the .png delete wipes them.
     own_icon = field(meta, "Icon")
     own_preview = field(meta, "PreviewImage")
-    if not tld:
-        return 0
-    dest = os.path.join(BULK, "ProgramFiles", tld)
+    own_large = field(meta, "LargeIcon")
 
     shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest, exist_ok=True)
@@ -549,6 +570,21 @@ def install_one(arc, metapath):
     art = pick(own_preview, "previewimage.png")
     if art:
         out.append('PreviewImage="%s"' % art)
+    # LargeIcon IS THE THIRD ARTWORK FIELD, and it went missing here for as long
+    # as this tool existed: the blanket ".png" delete takes it like the other
+    # two, and only two were ever put back. Sonic and SuperChicks — the titles
+    # this was written against — have no LargeIcon, so nothing showed it.
+    # JetPack Heroes does: LargeIcon="Description.png", a 256x128 RGBA PNG that
+    # ships inside the package and was simply being dropped.
+    #
+    # It is a real field, not a Didj leftover: "LargeIcon" sits in the meta.inf
+    # key table in LF/Base/lib/libLightningJSON.so beside AppSo and PreviewImage,
+    # and two stock installed packages carry it — LST3-0x00180010-000000 with
+    # LargeIcon="IconSelected.png" and LST3-0x00180002-000000 with
+    # LargeIcon="preview.png". No generic fallback: the overlay has no large art,
+    # and an absent LargeIcon is what every other package on the device has.
+    if own_large and os.path.isfile(os.path.join(dest, own_large)):
+        out.append('LargeIcon="%s"' % own_large)
 
     # ---- THE HOME-SCREEN TILE ----------------------------------------------
     #
@@ -581,6 +617,58 @@ def install_one(arc, metapath):
 
     with open(mpath, "w", encoding="utf-8") as f:
         f.write("\n".join(out) + "\n")
+    restamp_manifest(dest, "meta.inf")
+
+
+# NOTHING ON THE DEVICE ENFORCES packagefiles.md5 — measured: 31 of the 124
+# installed packages in a working sysroot already disagree with their own
+# manifest, every one of them on ./meta.inf, because install-game.py appended
+# ProfileAccess after LeapFrog generated it. JetPack Heroes arrives that way
+# from LeapFrog too: 1043 of its 1044 lines match and ./meta.inf does not.
+#
+# So this is not a fix for a launch failure. It is for the person who later runs
+# md5sum -c against a package Tadpole produced and has to decide whether the one
+# line that fails is our doing or a corrupt download. One line, re-hashed;
+# every other line stays exactly as the vendor wrote it, for the reason
+# micromods.py's update_checksum spells out — regenerating the whole manifest
+# can only lose information, and once did.
+def restamp_manifest(dest, name):
+    man = os.path.join(dest, "packagefiles.md5")
+    target = "./" + name
+    try:
+        with open(man, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.read().splitlines()
+        with open(os.path.join(dest, name), "rb") as f:
+            digest = hashlib.md5(f.read()).hexdigest()
+    except OSError:
+        return                    # no manifest is normal; most packages have none
+    hit = False
+    for i, ln in enumerate(lines):
+        parts = ln.split(None, 1)
+        if len(parts) == 2 and parts[1].strip() == target:
+            # KEEP THEIR SPACING. The packages do not agree on one or two spaces
+            # between hash and path — micromods.py hit the same thing — and a
+            # rewritten manifest should still diff cleanly against the original.
+            tail = ln[len(parts[0]):]
+            sep = tail[:len(tail) - len(tail.lstrip())]
+            lines[i] = digest + sep + target
+            hit = True
+    if not hit:
+        return                    # not listed — adding it is not our call
+    try:
+        with open(man, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
+def install_one(arc, metapath):
+    who = ident(arc, metapath)
+    if not who:
+        return 0
+    pid, tld, name = who
+    dest = os.path.join(BULK, "ProgramFiles", tld)
+    convert_into(arc, metapath, dest)
 
     # The save area, keyed by PackageID, which the meta.inf keeps even though
     # the folder does not.
@@ -594,6 +682,162 @@ def install_one(arc, metapath):
 
     print("  %-12s %-26s %s" % ("Didj", tld, name))
     return 1
+
+
+# ---- the converted package, as a FILE --------------------------------------
+#
+# WHY THIS EXISTS. android/app/java/org/tadpole/view/InstallGame.java meets a
+# Didj dump and prints "a Didj package — convert it on a desktop with
+# tools/install-didj.py" — and until now that instruction had nowhere to land.
+# This tool only ever wrote into a sysroot, so there was no artifact to carry
+# back to the tablet, and the advice was a dead end. --to-tar runs the same
+# convert_into() and writes the result as the LFManager-shaped .tar install-game
+# already accepts everywhere, Android included.
+#
+# FLAT — meta.inf and App.so at the top, no wrapper directory. That is the first
+# of the three shapes install-game.py documents and the only one with no folder
+# name to invent. install-game then files it under Bulk/ProgramFiles/<PackageID>
+# instead of this tool's Bulk/ProgramFiles/<3LD>, and measurement says that is
+# fine: DidjPatches.json keys its substitutions on the ABSOLUTE path of the .so
+# being launched ("/LF/Cart/snc/App.so"), exactly as LexPatches.json does — which
+# spells its ProgramFiles keys with the PackageID — so no folder name of any
+# spelling is ever looked up in either map.
+#
+# uid/gid 1000 lfu:lfu, files 0777, dirs 0700, GNU format: measured off a real
+# LFManager backup rather than chosen. The executable bit is the one that has to
+# be right — a 0644 App.so fails on device as "Exec format error" against a
+# perfectly good ARM binary, the trap tools/fix-perms.py exists to undo.
+LFU_ID, LFU_NAME = 1000, "lfu"
+
+
+def source_mtimes(arc, prefix):
+    """Relative path -> mtime, read out of the archive being converted.
+
+    arc_extract copies through copyfileobj and carries no timestamps, so without
+    this every file in the produced tar is stamped with the minute the
+    conversion ran. LeapFrog's dates are part of what the package is.
+    """
+    out = {}
+    for member, name, isdir in safe_names(arc, prefix):
+        if isdir:
+            continue
+        try:
+            if isinstance(arc, zipfile.ZipFile):
+                out[name] = int(time.mktime(tuple(arc.getinfo(member).date_time)
+                                            + (0, 0, -1)))
+            else:
+                out[name] = int(member.mtime)
+        except (ValueError, OverflowError, KeyError):
+            pass                     # a bad date is not worth failing a convert
+    return out
+
+
+def write_tar(src, out, mtimes):
+    """The directory `src` -> one flat LFManager-shaped tar at `out`."""
+    files, dirs = [], []
+    for root, dn, fn in os.walk(src):
+        rel = os.path.relpath(root, src)
+        pre = "" if rel == "." else rel.replace(os.sep, "/") + "/"
+        dirs.extend(pre + d for d in dn)
+        files.extend(pre + f for f in fn)
+
+    # LFMANAGER'S ORDER: meta.inf, then App.so, then the tree. Nothing reads a
+    # tar in order — this only keeps a converted package indistinguishable from
+    # a stock backup to whoever lists it.
+    head = [n for n in ("meta.inf", "App.so") if n in files]
+    order = head + sorted(set(files) - set(head)) + sorted(dirs)
+
+    def stamp(ti, rel, isdir):
+        ti.uid = ti.gid = LFU_ID
+        ti.uname = ti.gname = LFU_NAME
+        ti.mode = 0o700 if isdir else 0o777
+        if rel in mtimes:
+            ti.mtime = mtimes[rel]
+        return ti
+
+    done = set()
+    with tarfile.open(out, "w", format=tarfile.GNU_FORMAT) as t:
+        for rel in order:
+            # Parent directories first, so the archive extracts in stream order.
+            parts = rel.split("/")
+            for i in range(1, len(parts)):
+                p = "/".join(parts[:i])
+                if p in done:
+                    continue
+                done.add(p)
+                d = os.path.join(src, p.replace("/", os.sep))
+                t.addfile(stamp(t.gettarinfo(d, p), p, True))
+            if rel in done:
+                continue
+            done.add(rel)
+            full = os.path.join(src, rel.replace("/", os.sep))
+            ti = t.gettarinfo(full, rel)
+            if os.path.isdir(full):
+                t.addfile(stamp(ti, rel, True))
+            else:
+                with open(full, "rb") as f:
+                    t.addfile(stamp(ti, rel, False), f)
+
+
+def to_tar(paths):
+    """Convert Didj dumps into installable .tar files. -> exit code.
+
+    THE OVERLAY IS REQUIRED AND THE COMPATIBILITY FILES ARE NOT, which looks
+    backwards until you notice which of the two travels inside the package. The
+    overlay does — it is GameInfo.json and PADS/ sitting beside App.so, and a tar
+    built without it is missing the only thing that lets a Didj game reach the
+    shoulder buttons this hardware does not have. The compatibility files live in
+    LF/Base on the machine that runs the game, so a converting machine does not
+    need them and the finished tar cannot carry them.
+    """
+    if not overlay_ready():
+        die('no controller overlay staged.\n'
+            '  Run:  install-didj.py --fetch-overlay\n'
+            '  (or --overlay ControlOverlay.zip if you already have it)')
+    print("Converting Didj packages to installable .tar")
+    made = 0
+    for path in paths:
+        if not os.path.isfile(path):
+            print("no such file: " + path, file=sys.stderr)
+            continue
+        print("%s:" % os.path.basename(path), flush=True)
+        try:
+            with arc_open(path) as arc:
+                for m in metas(arc):
+                    who = ident(arc, m)
+                    if not who:
+                        continue
+                    _pid, tld, name = who
+                    out = os.path.join(os.path.dirname(os.path.abspath(path)),
+                                       (name or tld) + ".tar")
+                    # A .tar dump already named after the title would be
+                    # overwritten by its own conversion, and the input may be the
+                    # only copy of a game somebody had to dump themselves.
+                    if os.path.abspath(out) == os.path.abspath(path):
+                        out = out[:-4] + " (LeapPad2).tar"
+                    staging = out + ".staging"
+                    try:
+                        convert_into(arc, m, staging)
+                        write_tar(staging, out,
+                                  source_mtimes(arc, os.path.dirname(m) or "."))
+                    finally:
+                        shutil.rmtree(staging, ignore_errors=True)
+                    print("  %-12s %-26s %s" % ("Didj", tld, name))
+                    print("  -> %s (%.1f MB)" % (out, os.path.getsize(out) / 1e6))
+                    made += 1
+        except (tarfile.TarError, zipfile.BadZipFile, OSError) as e:
+            print("  cannot read %s: %s" % (os.path.basename(path), e),
+                  file=sys.stderr)
+    if not made:
+        print()
+        print('No Didj packages found. A Didj game\'s meta.inf says Device="Didj";')
+        print("for anything else use ./tools/install-game.py")
+        return 1
+    print()
+    print("converted %d title(s). Install them with install-game — the tablet's" % made)
+    print('"Install .tar directly" takes them too. The DEVICE still needs the Didj')
+    print("compatibility files in LF/Base, which no game .tar can carry.")
+    return 0
 
 
 def refresh_icons():
@@ -702,7 +946,11 @@ def main():
     argv = sys.argv[1:]
     if not argv:
         die("usage: install-didj.py --setup DIDJ.zip [ControlOverlay.zip] "
-            "| --status | <game.zip> [...]")
+            "| --status | --to-tar <game.zip> [...] | <game.zip> [...]")
+    if argv[0] == "--to-tar":
+        if len(argv) < 2:
+            die("usage: install-didj.py --to-tar <game.zip|game.lfp> [more...]")
+        return to_tar(argv[1:])
     if argv[0] == "--setup":
         setup(argv[1:])
         return 0
