@@ -4079,14 +4079,17 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 
 			/* THE LAST ROW IS THE DIDJ, AND IT IS NOT A DEVICE PROFILE.
 			 *
-			 * Tadpole does not boot a Didj. Its games run on the LeapPad2's
-			 * own firmware, through the compatibility layer LeapFrog shipped
-			 * on the Leapster Explorer — "End Load DidjPatches" is in the log
-			 * of every stock boot — and what a fresh install lacks is only
-			 * the DATA that layer reads. Installing that is what the "Didj
-			 * support" page two steps along already does, so this row is a
-			 * way IN to that page and not a second copy of it: clicking it
-			 * goes there. It never takes the selection and never writes a
+			 * Tadpole does not boot a Didj yet. Its games can instead be run
+			 * on the LeapPad2's firmware using a compatibility layer BUILT BY
+			 * A MEMBER OF THE LFHacks COMMUNITY — not by LeapFrog, and an
+			 * earlier version of this comment said otherwise, which is worth
+			 * correcting rather than quietly deleting: attributing community
+			 * work to the vendor is the kind of error that propagates.
+			 *
+			 * What a fresh install lacks is the DATA that layer reads, which
+			 * is what the "Didj support" page installs. So this row is a way
+			 * IN to that page and not a second copy of it: clicking it goes
+			 * there. It never takes the selection and never writes a
 			 * `device` line, because device.sh would have to resolve that to
 			 * a didj.conf, and a profile for a system nothing here can boot
 			 * is a worse lie than an empty list.
