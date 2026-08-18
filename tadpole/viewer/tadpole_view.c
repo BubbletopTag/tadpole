@@ -2089,6 +2089,12 @@ static int try_map(void)
  */
 static pid_t g_guest;                 /* the emulator */
 static pid_t g_tool;                  /* short-lived helper (install, etc) */
+/* THE TOOL IS NOT PORTED, as distinct from the tool failing to start. Set by
+ * spawn_script when there is no implementation of it on this platform, and read
+ * by tool_run2/tool_runv, which would otherwise overwrite the specific message
+ * with a generic one — "online update could not start", in a status line, with
+ * no panel, while the wizard sits there looking untouched. */
+static int   g_tool_unported;
 static char  g_tool_what[64];
 static char  g_projdir[1024];
 
@@ -3354,6 +3360,7 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 		 * one rather than blaming the platform. */
 		int tfd = android_tool_start(script, argv);
 		if (tfd < 0) {
+			g_tool_unported = 1;
 			/* NAMED THE WAY A PERSON WOULD NAME IT. "tools/cart2tar.py" is
 			 * how the viewer spells its tools internally and means nothing to
 			 * whoever pressed the button; the bare name is what the menu item
@@ -3540,11 +3547,24 @@ static void tool_run2(const char *what, const char *script,
 	if (g_tool > 0) { ui_status("busy: %s", g_tool_what); return; }
 	snprintf(g_tool_what, sizeof(g_tool_what), "%s", what);
 	g_tool_len = 0;
+	g_tool_unported = 0;
 	g_tool = spawn_script(script, av, 0, &g_tool_fd, 0);
-	ui_status("%s...", what);
 	if (g_tool > 0) {
+		ui_status("%s...", what);
 		ui_progress_begin(what);
 		ui_progress_line("starting...");
+	} else if (g_tool_unported) {
+		/* THE PANEL OPENS ANYWAY, because a button that answers only in the
+		 * corner of the menu bar reads as a button that does nothing — which
+		 * is exactly how this was reported. Somebody who pressed it is looking
+		 * at the middle of the screen. */
+		ui_status("%s: not on Android yet", what);
+		ui_progress_begin(what);
+		ui_progress_line("Not available on Android yet.");
+		ui_progress_line("");
+		ui_progress_line("This tool has not been ported. Everything it needs");
+		ui_progress_line("still works from a desktop — see android/BETA.md.");
+		ui_progress_done(0);
 	} else {
 		ui_status("%s could not start", what);
 	}
@@ -3566,6 +3586,7 @@ static void tool_runv(const char *what, const char *script, char *const av[])
 	if (g_tool > 0) { ui_status("busy: %s", g_tool_what); return; }
 	snprintf(g_tool_what, sizeof(g_tool_what), "%s", what);
 	g_tool_len = 0;
+	g_tool_unported = 0;
 	g_tool = spawn_script(script, argv, 0, &g_tool_fd, 0);
 	ui_status("%s...", what);
 	/* No progress panel for the update check: it is a background errand, and
@@ -3574,8 +3595,18 @@ static void tool_runv(const char *what, const char *script, char *const av[])
 	if (g_tool > 0 && !g_tool_update) {
 		ui_progress_begin(what); ui_progress_line("starting...");
 	} else if (g_tool <= 0) {
+		int quiet = g_tool_update;
 		g_tool_update = 0;
-		ui_status("%s could not start", what);
+		if (g_tool_unported) {
+			ui_status("%s: not on Android yet", what);
+			if (!quiet) {
+				ui_progress_begin(what);
+				ui_progress_line("Not available on Android yet.");
+				ui_progress_done(0);
+			}
+		} else {
+			ui_status("%s could not start", what);
+		}
 	}
 }
 
