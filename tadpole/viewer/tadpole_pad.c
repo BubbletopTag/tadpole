@@ -341,6 +341,42 @@ static void finger_logical(SDL_Renderer *ren, const SDL_TouchFingerEvent *t,
 	*ly = (int)fy;
 }
 
+/* IS THIS FINGER ALREADY SPOKEN FOR? Asked by the guest's touchscreen path,
+ * which has to know two different things and gets both from here.
+ *
+ * The finger SDL mirrors as the mouse is handled through its MOUSE copy
+ * everywhere — by this file, and by the guest's touchscreen — so its finger
+ * copy belongs to nobody. Acting on it as well would press the same point
+ * twice and leave it held when only one of the two lifted.
+ *
+ * A finger this file has claimed for a direction is not a stylus touch, which
+ * is the rule the `continue` after pad_event() already enforces for the
+ * events pad_event() consumes. Motion is the case it does not cover: a finger
+ * that came down on the D-pad and slid off is still ours, and pad_event()
+ * says so by returning 1 — but a caller that wants to ask BEFORE dispatching
+ * needs this. */
+int pad_owns_finger(SDL_FingerID fid)
+{
+	int i;
+
+	if (g_synth && g_mouse_finger_down && fid == g_mouse_finger)
+		return 1;
+	for (i = 0; i < PAD_PTRS; i++)
+		if (g_ptr[i].used && !g_ptr[i].is_mouse && g_ptr[i].fid == fid)
+			return 1;
+	return 0;
+}
+
+/* Normalised finger coordinates to the logical ones every other pointer event
+ * already arrives in. It lives here because this is where it was needed first
+ * and where it is exercised; the guest's touchscreen needs exactly the same
+ * conversion and must not grow a second copy of it that can drift. */
+void pad_finger_logical(SDL_Renderer *ren, const SDL_TouchFingerEvent *t,
+                        int *lx, int *ly)
+{
+	finger_logical(ren, t, lx, ly);
+}
+
 int pad_event(const SDL_Event *e, SDL_Renderer *ren)
 {
 	struct ptr *p;

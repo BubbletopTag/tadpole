@@ -4089,6 +4089,13 @@ int main(int argc, char **argv)
 	int gpu_lost_told = 0;            /* the replay-died dialog, once a session */
 	char path[512];
 	int scale = 2, w, h, i, running = 1, touching = 0;
+	/* WHICH POINTER IS HOLDING THE GUEST'S TOUCHSCREEN. It is resistive and
+	 * reports one point, so exactly one pointer may drive it at a time —
+	 * whichever pressed first keeps it until it lifts. Without an owner, a
+	 * second finger landing on the picture would fight the first for the one
+	 * coordinate pair the guest has. */
+	int gt_active = 0, gt_is_mouse = 0;
+	SDL_FingerID gt_fid = 0;
 	int rotate = 0;   /* degrees CW; the LeapPad UI is drawn at 270 */
 	/* The last screen transition acted on — see rotate_for_screen(). Both,
 	 * because a fresh guest zeroes the shared state: the counter alone would
@@ -4322,6 +4329,7 @@ int main(int argc, char **argv)
 				if (ui_event(&e, lw, lh + UI_BAR_H)) {
 					if (touching) {   /* don't strand a held stylus */
 						touching = 0;
+						gt_active = 0;
 						send_event(EV_TOUCH, EV_ABS, ABS_PRESSURE, 0);
 						send_event(EV_TOUCH, EV_KEY, BTN_TOUCH, 0);
 						send_event(EV_TOUCH, EV_SYN, SYN_REPORT, 0);
@@ -4395,6 +4403,17 @@ int main(int argc, char **argv)
 			case SDL_MOUSEBUTTONDOWN:
 			case SDL_MOUSEBUTTONUP: {
 				int fx, fy;
+				/* ONE POINTER OWNS THE TOUCHSCREEN AT A TIME, because the
+				 * LeapPad's is resistive and reports exactly one. The mouse
+				 * is the first finger down; a second finger arrives only as
+				 * SDL_FINGER* and is handled below. */
+				if (e.type == SDL_MOUSEBUTTONDOWN) {
+					if (gt_active) break;      /* someone else has it */
+					gt_active = 1; gt_is_mouse = 1;
+				} else {
+					if (!gt_active || !gt_is_mouse) break;
+					gt_active = 0;
+				}
 				event_to_fb(rotate, w, h, e.button.x,
 				            e.button.y - UI_BAR_H, &fx, &fy);
 				touching = (e.type == SDL_MOUSEBUTTONDOWN);
@@ -4430,7 +4449,7 @@ int main(int argc, char **argv)
 				break;
 			}
 			case SDL_MOUSEMOTION:
-				if (touching) {
+				if (touching && gt_active && gt_is_mouse) {
 					int fx, fy;
 					event_to_fb(rotate, w, h, e.motion.x,
 					            e.motion.y - UI_BAR_H, &fx, &fy);
@@ -4440,6 +4459,73 @@ int main(int argc, char **argv)
 					send_event(EV_TOUCH, EV_ABS, ABS_PRESSURE, TOUCH_PRESSURE);
 					send_event(EV_TOUCH, EV_SYN, SYN_REPORT, 0);
 				}
+				break;
+
+			/* ---- the SECOND finger, which used to reach nothing ----------
+			 *
+			 * SDL synthesises mouse events from the FIRST finger only, and
+			 * the guest's touchscreen was driven from those alone — so a
+			 * second finger produced SDL_FINGER* events that this loop threw
+			 * away. That is not an edge case on this emulator: the Leapster
+			 * titles draw their OWN A and B buttons into the picture (see
+			 * android/NOTES-camera.md's neighbours and the on-screen pad's
+			 * header for why the overlay is D-pad + Home only), so "hold a
+			 * direction and press A" is two fingers by design — one on the
+			 * viewer's pad, one on the guest's picture.
+			 *
+			 * AND IT WORKED OR NOT DEPENDING ON WHICH FINGER LANDED FIRST,
+			 * which is exactly the "cannot do it consistently" it was
+			 * reported as. Press A first and A is the mouse, so A reaches the
+			 * guest and the D-pad finger is handled by pad_event(); press the
+			 * D-pad first and the D-pad finger is the mouse, so A arrives
+			 * only as SDL_FINGERDOWN and went nowhere.
+			 *
+			 * pad_owns_finger() answers the two things that must not happen
+			 * here: acting on the finger SDL is already reporting as the
+			 * mouse (that would poke the same point twice), and acting on a
+			 * finger the D-pad has claimed (that would press LEFT and poke
+			 * the bottom-left corner of the screen at the same time — the
+			 * bug the `continue` after pad_event() exists to prevent). */
+			case SDL_FINGERDOWN: {
+				int lx, ly, fx, fy;
+				if (gt_active) break;
+				if (pad_owns_finger(e.tfinger.fingerId)) break;
+				pad_finger_logical(ren, &e.tfinger, &lx, &ly);
+				if (ly < UI_BAR_H) break;          /* the bar is not the guest */
+				gt_active = 1; gt_is_mouse = 0; gt_fid = e.tfinger.fingerId;
+				event_to_fb(rotate, w, h, lx, ly - UI_BAR_H, &fx, &fy);
+				touching = 1;
+				g_touch_mark_x = fx; g_touch_mark_y = fy;
+				send_event(EV_TOUCH, EV_ABS, ABS_X, fx);
+				send_event(EV_TOUCH, EV_ABS, ABS_Y, fy);
+				send_event(EV_TOUCH, EV_ABS, ABS_PRESSURE, TOUCH_PRESSURE);
+				send_event(EV_TOUCH, EV_KEY, BTN_TOUCH, 1);
+				send_event(EV_TOUCH, EV_SYN, SYN_REPORT, 0);
+				break;
+			}
+
+			case SDL_FINGERMOTION: {
+				int lx, ly, fx, fy;
+				if (!gt_active || gt_is_mouse) break;
+				if (e.tfinger.fingerId != gt_fid) break;
+				pad_finger_logical(ren, &e.tfinger, &lx, &ly);
+				event_to_fb(rotate, w, h, lx, ly - UI_BAR_H, &fx, &fy);
+				g_touch_mark_x = fx; g_touch_mark_y = fy;
+				send_event(EV_TOUCH, EV_ABS, ABS_X, fx);
+				send_event(EV_TOUCH, EV_ABS, ABS_Y, fy);
+				send_event(EV_TOUCH, EV_ABS, ABS_PRESSURE, TOUCH_PRESSURE);
+				send_event(EV_TOUCH, EV_SYN, SYN_REPORT, 0);
+				break;
+			}
+
+			case SDL_FINGERUP:
+				if (!gt_active || gt_is_mouse) break;
+				if (e.tfinger.fingerId != gt_fid) break;
+				gt_active = 0;
+				touching = 0;
+				send_event(EV_TOUCH, EV_ABS, ABS_PRESSURE, 0);
+				send_event(EV_TOUCH, EV_KEY, BTN_TOUCH, 0);
+				send_event(EV_TOUCH, EV_SYN, SYN_REPORT, 0);
 				break;
 			}
 		}

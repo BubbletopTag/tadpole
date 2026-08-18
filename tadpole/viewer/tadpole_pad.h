@@ -66,6 +66,15 @@ void pad_place(const SDL_Rect *screen);
  */
 int pad_event(const SDL_Event *e, SDL_Renderer *ren);
 
+/* 1 when the pad is holding this finger, or when it is the finger SDL mirrors
+ * as the mouse — in both cases the guest's touchscreen must leave it alone.
+ * See the long note above the definition. */
+int pad_owns_finger(SDL_FingerID fid);
+
+/* Normalised finger coordinates -> logical, the space mouse events arrive in. */
+void pad_finger_logical(SDL_Renderer *ren, const SDL_TouchFingerEvent *t,
+                        int *lx, int *ly);
+
 /* Which buttons are held now, and which bits have changed since the last call
  * to pad_take_changed() — that one clears as it reports, so the caller sends
  * one key event per real transition and no more. Read the state AFTER taking
