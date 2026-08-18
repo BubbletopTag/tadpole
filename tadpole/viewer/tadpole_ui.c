@@ -1232,6 +1232,39 @@ enum { WIZ_WELCOME = 0, WIZ_DEVICE, WIZ_SYSTEM, WIZ_DIDJ,
        WIZ_PROFILE, WIZ_GAMES, WIZ_DONE, WIZ_PAGES };
 static int g_wiz_page;
 
+/* WHICH STEPS APPLY TO THE DEVICE THAT WAS PICKED.
+ *
+ * WIZ_DIDJ installs a compatibility layer — built by a member of the LFHacks
+ * community, not by LeapFrog — that lets Didj GAMES run on LeapPad2 firmware.
+ * It is an add-on to one device, so it has no business appearing when any other
+ * is selected: a Leapster GS owner cannot use it, and a page that cannot apply
+ * is worse than no page because the reader has to work out that it does not.
+ *
+ * It is NOT the Didj itself. The Didj is a device with its own profile and its
+ * own row in the picker; see the note above the row loop.
+ *
+ * Skipped rather than greyed out. Every other step here is one the user must
+ * read, and leaving a dead one in the sequence makes "Next" mean two different
+ * things on two different pages. */
+static int wiz_page_applies(int page)
+{
+	if (page == WIZ_DIDJ)
+		return strcmp(g_cfg.device, "leappad2") == 0;
+	return 1;
+}
+
+/* Step in `dir` (+1 / -1), skipping steps this device has no use for. Stops at
+ * the ends rather than wrapping. */
+static int wiz_step(int from, int dir)
+{
+	int p = from + dir;
+	while (p > 0 && p < WIZ_PAGES - 1 && !wiz_page_applies(p))
+		p += dir;
+	if (p < 0) p = 0;
+	if (p > WIZ_PAGES - 1) p = WIZ_PAGES - 1;
+	return p;
+}
+
 /* ---- the devices Tadpole knows how to be --------------------------------
  *
  * NOT "tablets" ANY MORE, which is why the page is now headed "Which device?".
@@ -3927,7 +3960,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		Uint8 wiz_alpha;
 		char welcome[48];
 		const char *TITLES[WIZ_PAGES] = {
-			welcome, "Which device?", "System files", "Didj support",
+			welcome, "Which device?", "System files", "Didj games",
 			"Who is playing?", "Games", "Ready"
 		};
 		snprintf(welcome, sizeof(welcome), "Welcome to %s", ui_brand_name());
@@ -4050,7 +4083,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			int rows, rw;
 			char foot[64];
 			if (!g_ndevs) devices_scan();
-			rows = g_ndevs + 1;              /* the Didj row rides along */
+			rows = g_ndevs;                  /* every row is a real profile now */
 			rw   = wiz_dev_w(&d, vis, rows);
 			g_dev_rows = vis;
 			/* Clamp here rather than at the wheel event: how many rows fit
@@ -4077,60 +4110,35 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			 * what tells you there is more of it below the fold. */
 			chip(r, bx - 3, ly - 4, rw + 16, vis * WIZ_DEV_ROW_H + 4, C_VOID, 0);
 
-			/* THE LAST ROW IS THE DIDJ, AND IT IS NOT A DEVICE PROFILE.
+			/* EVERY ROW IS A REAL PROFILE. There used to be a synthetic Didj
+			 * row appended past the end of g_devs, which selected nothing and
+			 * jumped to the "Didj support" page instead. It existed because
+			 * there was no didj.conf and "Didj" is the word someone with a
+			 * shelf of Didj cartridges looks for.
 			 *
-			 * Tadpole does not boot a Didj yet. Its games can instead be run
-			 * on the LeapPad2's firmware using a compatibility layer BUILT BY
-			 * A MEMBER OF THE LFHacks COMMUNITY — not by LeapFrog, and an
-			 * earlier version of this comment said otherwise, which is worth
-			 * correcting rather than quietly deleting: attributing community
-			 * work to the vendor is the kind of error that propagates.
+			 * runtime/devices/didj.conf exists now, so keeping the extra row
+			 * would list the Didj TWICE — once as itself and once as a link to
+			 * a different feature. The two were never the same thing:
 			 *
-			 * What a fresh install lacks is the DATA that layer reads, which
-			 * is what the "Didj support" page installs. So this row is a way
-			 * IN to that page and not a second copy of it: clicking it goes
-			 * there. It never takes the selection and never writes a
-			 * `device` line, because device.sh would have to resolve that to
-			 * a didj.conf, and a profile for a system nothing here can boot
-			 * is a worse lie than an empty list.
+			 *   - THE DIDJ, the 2008 LF1000 handheld, whose own firmware is on
+			 *     the CDN under packages/DIDJ/ (13 packages, 56.9 MB, all
+			 *     live). That is a row here like any other.
+			 *   - "DIDJ SUPPORT", a compatibility layer built by a member of
+			 *     the LFHacks community — not by LeapFrog — that lets Didj
+			 *     GAMES run on LeapPad2 firmware. That is an add-on to the
+			 *     LeapPad2, so its page is now shown only when the LeapPad2 is
+			 *     the selected device, rather than sitting in every run as a
+			 *     step most people skip.
 			 *
-			 * It is in the list at all because "Didj" is the word someone
-			 * with a shelf of Didj cartridges will look for, and finding
-			 * nothing under D is how they conclude Tadpole cannot do it.
-			 *
-			 * A NATIVE PORT IS A REAL PROJECT AND THIS IS NOT IT. The Didj
-			 * has firmware of its own on the same CDN, under packages/DIDJ/,
-			 * laid out nothing like a LeapPad's LF/Base:
-			 *
-			 *   DIDJ-0x000E0002-000001  lightning-boot   (no install path)
-			 *   DIDJ-0x000E0003-000001  Firmware        -> /Didj/Base/
-			 *   DIDJ-0x000E0004-000001  Brio            -> /Didj/Base/
-			 *   DIDJ-0x000E0005-000003  Fonts           -> /Didj/Base/
-			 *   DIDJ-0x000E0006-000005  LocalizedAudio  -> /Didj/Base/
-			 *   DIDJ-0x000E0007-000006  Tutorials       -> /Didj/Base/
-			 *   DIDJ-0x000E0008-000007  UniversalArt    -> /Didj/Base/
-			 *   DIDJ-0x000E0009-000008  UniversalAudio  -> /Didj/Base/
-			 *   DIDJ-0x000E000A-000001  bin             -> /Didj/Base/
-			 *   DIDJ-0x000E000B-000004  lib             -> /Didj/Base/
-			 *   DIDJ-0x000E000C-000002  BLT             -> /Didj/Base/
-			 *   DIDJ-0x000E0010-000002  Avatar1         -> /Didj/Data/Avatars/
-			 *   DIDJ-0x000F0001-000000  POW             -> /Didj/ProgramFiles/
-			 *   anything else                           -> /Didj/Data/MDL/
-			 *
-			 * lightning-boot is the only entry with no destination, which
-			 * reads as the bootloader rather than a package installed into
-			 * the tree. Nothing in the tree consumes any of this today —
-			 * tools/install-didj.py does not mention lightning-boot or a
-			 * /Didj path anywhere — so it is written down here rather than
-			 * acted on. Whoever writes didj.conf will want it. */
+			 * Conflating them is what the deleted comment did, and it took a
+			 * correction from someone who knew the provenance to catch it. */
 
 			for (i3 = g_dev_top; i3 < rows && i3 - g_dev_top < vis; i3++) {
 				int ry  = ly + (i3 - g_dev_top) * WIZ_DEV_ROW_H;
-				int on  = (i3 == g_dev_sel && i3 < g_ndevs);
+				int on  = (i3 == g_dev_sel);
 				int hot = inside(g_mx, g_my, bx, ry - 3, rw, 24);
-				int didj = (i3 == g_ndevs);   /* the last row; see above */
-				const char *nm  = didj ? "Didj" : g_devs[i3].name;
-				const char *lcd = didj ? "320x240" : g_devs[i3].lcd;
+				const char *nm  = g_devs[i3].name;
+				const char *lcd = g_devs[i3].lcd;
 				char line[96];
 
 				fill(r, bx, ry - 3, rw, 24,
@@ -4157,23 +4165,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 				}
 				text(r, bx + 44, ry + 1, nm,
 				     on || hot ? C_ACCENT : C_TEXT);
-				if (didj) {
-					/* Says where its games actually run, and carries the same
-					 * arrow the sidebar uses for "this leads somewhere".
-					 *
-					 * Falls back to the bare resolution when the row is too
-					 * narrow for the sentence, which in portrait it is: text()
-					 * does not clip, so the alternative is "the LeapPad2"
-					 * printed across the edge of the panel. The arrow still
-					 * says the row leads somewhere, and the page it leads to
-					 * explains itself. */
-					snprintf(line, sizeof(line), "%s   runs on the LeapPad2",
-					         lcd);
-					if (text_w(line) > rw - 50)
-						snprintf(line, sizeof(line), "%s", lcd);
-					text(r, bx + rw - 6 - text_w(GL_SUB), ry + 1, GL_SUB,
-					     hot ? C_ACCENT : C_TEXT_DIM);
-				} else {
+				{
 					snprintf(line, sizeof(line), "%s%s", lcd,
 					         g_devs[i3].installed ? "   installed" : "");
 					/* ONLY IF THE NAME LEAVES ROOM FOR IT, the same test the
@@ -4319,7 +4311,11 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		 * a 132px box. The filename belongs in the line above, where there is
 		 * room for it. */
 		case WIZ_DIDJ:
-			text(r, bx, by, "Optional. Only for Didj game dumps.", C_TEXT_DIM);
+			/* Says whose firmware this is added TO, because the page is only
+			 * reachable with the LeapPad2 selected and the reader should not
+			 * have to infer that from the fact that it appeared. */
+			text(r, bx, by, "Optional. Add Didj game support to", C_TEXT_DIM);
+			text(r, bx, by + 10, "the LeapPad2 firmware.", C_TEXT_DIM);
 			{
 				static const char *NAMES[2] = { "Didj compatibility files",
 				                                "Controller overlay" };
@@ -4349,7 +4345,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			 * always works — Download depends on a source being published, and
 			 * for the compatibility files that question is still open. */
 			text(r, bx, by + 46, "1. DIDJ.zip", C_TEXT);
-			text(r, bx + 12, by + 57, "the Leapster Explorer's Didj files",
+			text(r, bx + 12, by + 57, "community-built Didj game support",
 			     C_TEXT_DIM);
 			{
 				SDL_Rect b = { bx + 12, by + 69, 76, 13 };
@@ -5142,9 +5138,9 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		for (i = 0; i < 3; i++) {
 			SDL_Rect b = wiz_btn(&d, i);
 			if (!inside(mx, my, b.x, b.y, b.w, b.h)) continue;
-			if (i == 0 && g_wiz_page > 0) g_wiz_page--;
+			if (i == 0 && g_wiz_page > 0) g_wiz_page = wiz_step(g_wiz_page, -1);
 			else if (i == 1) {
-				if (g_wiz_page < WIZ_PAGES - 1) g_wiz_page++;
+				if (g_wiz_page < WIZ_PAGES - 1) g_wiz_page = wiz_step(g_wiz_page, +1);
 				else { g_modal = M_NONE; g_wiz_page = 0; }
 			} else if (i == 2) { g_modal = M_NONE; g_wiz_page = 0; }
 			return 1;
@@ -5159,11 +5155,6 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			for (i3 = g_dev_top; i3 < rows && i3 - g_dev_top < vis; i3++) {
 				int ry = ly + (i3 - g_dev_top) * WIZ_DEV_ROW_H;
 				if (!inside(mx, my, d.x + 62, ry - 3, rw, 24)) continue;
-				/* The Didj row goes to the page that installs Didj support
-				 * rather than selecting anything — it is not a device profile,
-				 * and writing `device didj` would leave device.sh looking for a
-				 * didj.conf that must not exist. See the draw. */
-				if (i3 == g_ndevs) { g_wiz_page = WIZ_DIDJ; return 1; }
 				g_dev_sel = i3;
 				snprintf(g_cfg.device, sizeof(g_cfg.device), "%s",
 				         g_devs[i3].id);
