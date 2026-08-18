@@ -248,6 +248,17 @@ static char           g_proj[PATHMAX];
  * through it. The software rasteriser is the fallback, not the reference — it
  * draws simple screens correctly and visibly mangles busy ones, and it is far
  * slower. This only decides who rasterises; nothing about the guest changes. */
+/* ANDROID GETS THE CHEAP CHROME AND NOBODY ELSE DOES. See the note above
+ * `frost` in tadpole_ui.h for what it costs; the split is by platform rather
+ * than by "is this a touchscreen" because it is about the GPU on the other end
+ * of the readback, not about how the thing is held. A desktop that wants the
+ * cheap look ticks the box, and every capture in shots/ is unchanged. */
+#ifdef __ANDROID__
+#define FROST_DEFAULT 0
+#else
+#define FROST_DEFAULT 1
+#endif
+
 static struct ui_settings g_cfg = {
 	.gl               = 1,
 	.gl_hle           = 1,
@@ -279,6 +290,7 @@ static struct ui_settings g_cfg = {
 	.pad_opacity      = 70,
 	.pad_left         = 1,
 	.touch_ui         = 1,
+	.frost            = FROST_DEFAULT,
 	.games_dir        = "",
 };
 static enum ui_action g_action;
@@ -920,6 +932,11 @@ static void chip(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
 
 /* ---- frosted glass --------------------------------------------------------
  *
+ * TADPOLE_FROST=0/1 OVERRIDES THE SETTING, for the same reason
+ * TADPOLE_TOUCH_UI does: the before and after of this cannot be captured
+ * otherwise, because reaching the tick box means opening a dialog and the
+ * dialog is the thing being measured.
+ *
  * Captures whatever is already drawn and hands back a small, softly blurred
  * copy of it: a few passes of "redraw at half size with linear filtering",
  * which is a cheap, GPU-only stand-in for a real gaussian blur and is plenty
@@ -943,6 +960,13 @@ static void chip(SDL_Renderer *r, int x, int y, int w, int h, unsigned col,
  * it with texture coordinates. One capture also does for every panel in the
  * frame.
  */
+static int m_frost(void)
+{
+	const char *e = getenv("TADPOLE_FROST");
+	if (e) return atoi(e) != 0;
+	return g_cfg.frost;
+}
+
 static SDL_Texture *glass_blur(SDL_Renderer *r)
 {
 	unsigned char *px;
@@ -1024,6 +1048,16 @@ static SDL_Texture *glass_capture(SDL_Renderer *r)
 {
 	Uint32 now = SDL_GetTicks();
 
+	/* OFF MEANS THE READBACK NEVER HAPPENS. Not "capture it and draw it at
+	 * zero alpha" — the expensive half of the frost is the capture, and a
+	 * setting that still paid for it would save nothing. The cached texture
+	 * goes too rather than sitting in VRAM: at a tablet's output size it is
+	 * several megabytes of a picture nothing will ask for again. */
+	if (!m_frost()) {
+		glass_free();
+		return NULL;
+	}
+
 	if (g_glass && now - g_glass_at < 100)
 		return g_glass;
 
@@ -1095,6 +1129,11 @@ static void panel_glass(SDL_Renderer *r, int x, int y, int w, int h,
                         SDL_Texture *blur, float rtop)
 {
 	float rad = rr_radius_panel(w, h);
+	/* Asked directly rather than inferred from `blur != NULL`: a capture can
+	 * also come back NULL from a renderer without render-target support or
+	 * from a mid-resize frame, and those want the full shadow they have always
+	 * had, not the cheap one. This is a setting, not a failure. */
+	int frosted = m_frost();
 	int i;
 
 	if (rtop > rad) rtop = rad;
@@ -1104,14 +1143,27 @@ static void panel_glass(SDL_Renderer *r, int x, int y, int w, int h,
 	 * edge is a second border, not a shadow. Six thin ones instead of three
 	 * fat ones — same total darkness, spread over twice the distance, and
 	 * with each step small enough that the banding between rings disappears.
-	 * The offset grows faster than the spread so the light stays overhead. */
-	for (i = 6; i >= 1; i--) {
+	 * The offset grows faster than the spread so the light stays overhead.
+	 *
+	 * THE SHADOW COMES DOWN WITH THE FROST, because it is the other half of
+	 * what a panel costs and it is not a rounded corner. Each ring covers the
+	 * whole panel and then some, so six of them is six full-panel passes of
+	 * alpha blending before a single pixel of the panel itself is drawn — on
+	 * a 250x200 dialog at a tablet's output scale that is a couple of million
+	 * blended pixels per frame, spent on something nobody is looking at.
+	 *
+	 * Two rings at the same outer reach rather than a tighter shadow: dropping
+	 * the spread would have been the cheaper edit and the wrong one, since a
+	 * shadow that hugs the panel is the "second border" the six were written
+	 * to avoid. The alpha doubles to make up part of the four rings that are
+	 * gone; the rest stays lost, and a slightly lighter shadow is the price. */
+	for (i = 6; i >= 1; i -= frosted ? 1 : 3) {
 		float grow = (float)i * 2.2f;
 		float gtop = rtop > 0 ? rtop + grow : 0;
 		rr_fill_ex(r, NULL, x - grow, y - grow + 1.0f + grow * 0.55f,
 		          w + 2 * grow, h + 2 * grow,
 		          gtop, gtop, rad + grow, rad + grow,
-		          C_SHADOW, (Uint8)(13 * (7 - i)));
+		          C_SHADOW, (Uint8)(13 * (7 - i) * (frosted ? 1 : 2)));
 	}
 
 	rr_geom(r, NULL, NULL, (float)x, (float)y, (float)w, (float)h,
@@ -2373,7 +2425,7 @@ void ui_cfg_save(void)
 	           "io_delay_us %d\ntslib %d\n"
 	           "boot_on_start %d\nfast_boot %d\n"
 	           "pad_on %d\npad_size %d\npad_opacity %d\npad_left %d\n"
-	           "touch_ui %d\n",
+	           "touch_ui %d\nfrost %d\n",
 	        g_cfg.gl, g_cfg.gl_hle, g_cfg.debug_level, g_cfg.log_to_file,
 	        g_cfg.gl_dumpframe, g_cfg.gl_dumptex,
 	        g_cfg.rotate, g_cfg.auto_rotate, g_cfg.scale, g_cfg.touch_debug,
@@ -2383,7 +2435,7 @@ void ui_cfg_save(void)
 	        g_cfg.tslib,
 	        g_cfg.boot_on_start, g_cfg.fast_boot,
 	        g_cfg.pad_on, g_cfg.pad_size, g_cfg.pad_opacity, g_cfg.pad_left,
-	        g_cfg.touch_ui);
+	        g_cfg.touch_ui, g_cfg.frost);
 	/* Last, and only if set: it is the one value that can contain spaces. */
 	if (g_cfg.games_dir[0])
 		fprintf(f, "games_dir %s\n", g_cfg.games_dir);
@@ -2445,6 +2497,7 @@ static void cfg_load(void)
 			else if (!strcmp(k, "pad_opacity"))     g_cfg.pad_opacity = val;
 			else if (!strcmp(k, "pad_left"))        g_cfg.pad_left = val;
 			else if (!strcmp(k, "touch_ui"))        g_cfg.touch_ui = val;
+			else if (!strcmp(k, "frost"))           g_cfg.frost = val;
 			/* Older files carried these two; the debug level replaced them.
 			 * Honour them once so an existing install does not silently lose
 			 * the logging it was set up with. */
@@ -3117,9 +3170,17 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	case M_PAD:   return dlg_fit(lw, lh, 240,
 	                             dlg_body_h(5, ui_touch_ui() ? 60 : 100));
 	case M_DEBUG: return dlg_fit(lw, lh, 268, dlg_body_h(8, 0));
-	/* Two settings, the games folder and its path, then a row of two buttons
-	 * sitting where a sixth row would be. */
-	case M_SYSTEM: return dlg_fit(lw, lh, 268, dlg_body_h(6, 6));
+	/* Three settings and the frost, the games folder and its path, then a row
+	 * of two buttons sitting where a seventh row would be.
+	 *
+	 * THE FROST WENT HERE AND NOT IN GRAPHICS SETTINGS, which is where a
+	 * performance knob belongs and where there is no room: M_GFX already asks
+	 * for nine touch-sized rows, which is 275 logical pixels in a window that
+	 * can offer 266, so its last row is drawn over its own Close button. A
+	 * tenth row there would have hidden the setting behind the bug. This is
+	 * also the dialog the other "what the chrome looks like" switch lives in,
+	 * which is the one someone turning things off will already have open. */
+	case M_SYSTEM: return dlg_fit(lw, lh, 268, dlg_body_h(7, 6));
 	case M_FILES: return dlg_fit(lw, lh, 300, 172);
 	case M_WIZARD: return dlg_fit(lw, lh, 348, 210);
 	case M_PROGRESS: return dlg_fit(lw, lh, 350, 150);
@@ -3980,20 +4041,27 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		 * a mouse who would rather have the rows back. */
 		row_check(r, &d, 2, "Touch-sized menus and buttons",
 		          g_cfg.touch_ui, row_hit(&d, 2, g_mx, g_my));
-		text(r, d.x + 10, row_y(&d, 3) + 2, "Games folder:", C_TEXT);
+		/* Directly under the other switch for how the chrome looks, and named
+		 * for the thing on screen rather than for the technique: nobody goes
+		 * looking for "backdrop downsample chain". What it costs is said in
+		 * the status line when it is turned off, which is the moment anyone
+		 * cares. */
+		row_check(r, &d, 3, "Frosted glass behind panels",
+		          g_cfg.frost, row_hit(&d, 3, g_mx, g_my));
+		text(r, d.x + 10, row_y(&d, 4) + 2, "Games folder:", C_TEXT);
 		path_tail(buf, sizeof(buf),
 		          g_cfg.games_dir[0] ? g_cfg.games_dir : "(not chosen yet)");
-		text(r, d.x + 14, row_y(&d, 3) + 12, buf,
+		text(r, d.x + 14, row_y(&d, 4) + 12, buf,
 		     g_cfg.games_dir[0] ? C_ACCENT : C_TEXT_DIM);
 		{
-			SDL_Rect b = { d.x + 10, row_y(&d, 5) + 2, 76, ui_btn_h() };
+			SDL_Rect b = { d.x + 10, row_y(&d, 6) + 2, 76, ui_btn_h() };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + text_dy(b.h), "Game Library",
 			       hot ? C_ACCENT : C_TEXT);
 		}
 		{
-			SDL_Rect b = { d.x + 94, row_y(&d, 5) + 2, 96, ui_btn_h() };
+			SDL_Rect b = { d.x + 94, row_y(&d, 6) + 2, 96, ui_btn_h() };
 			int hot = inside(g_mx, g_my, b.x, b.y, b.w, b.h);
 			chip(r, b.x, b.y, b.w, b.h, hot ? C_BAR_HI : C_PANEL, 1);
 			text_c(r, b.x, b.w, b.y + text_dy(b.h), "Setup Wizard",
@@ -4832,9 +4900,19 @@ void ui_draw_idle(SDL_Renderer *ren, int lw, int lh)
 	/* An ellipse through the four corners: with rx = w/2 and ry = h/2 scaled
 	 * by sqrt(2), (w/2)^2/rx^2 + (h/2)^2/ry^2 = 1 lands the rim exactly on
 	 * the corners, so the picture darkens evenly towards its own frame
-	 * instead of towards a circle drawn inside it. */
-	radial(ren, lw / 2, cy, 0.7071f * (float)lw, 0.7071f * (float)ih,
-	      C_SHADOW, 0, 138);
+	 * instead of towards a circle drawn inside it.
+	 *
+	 * AND IT GOES WHEN THE FROST DOES, because half of why it is here is to
+	 * give the glass a tonal range to pick up, and with no glass there is
+	 * nothing picking anything up. What is left is one blend of the whole
+	 * screen, every frame, for a corner darkening nobody is meant to notice —
+	 * on the idle screen that is the entire per-frame cost of the chrome, and
+	 * the idle screen is where a slow device is looked at longest. The
+	 * gradient underneath stays: it is opaque, so it costs what the clear it
+	 * replaced cost and the backdrop is not flat black without it. */
+	if (m_frost())
+		radial(ren, lw / 2, cy, 0.7071f * (float)lw, 0.7071f * (float)ih,
+		      C_SHADOW, 0, 138);
 	if (g_logo) {
 		SDL_Rect dst = { lw / 2 - 32, cy - 46, 64, 64 };
 		SDL_RenderCopy(ren, g_logo, NULL, &dst);
@@ -5584,12 +5662,21 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		if (row_hit(&d, 0, mx, my)) g_cfg.boot_on_start = !g_cfg.boot_on_start;
 		else if (row_hit(&d, 1, mx, my)) g_cfg.fast_boot = !g_cfg.fast_boot;
 		else if (row_hit(&d, 2, mx, my)) g_cfg.touch_ui = !g_cfg.touch_ui;
-		else if (inside(mx, my, d.x + 10, row_y(&d, 5) + 2, 76, ui_btn_h())) {
+		else if (row_hit(&d, 3, mx, my)) {
+			g_cfg.frost = !g_cfg.frost;
+			/* Takes effect on the very next frame — this dialog is one of the
+			 * panels it governs, so the answer to "was that worth it" is on
+			 * screen before the finger is off the glass. */
+			ui_status("%s", g_cfg.frost
+			          ? "Frosted glass on"
+			          : "Frosted glass off - faster panels");
+		}
+		else if (inside(mx, my, d.x + 10, row_y(&d, 6) + 2, 76, ui_btn_h())) {
 			ui_cfg_save();
 			games_open();
 			return 1;
 		}
-		else if (inside(mx, my, d.x + 94, row_y(&d, 5) + 2, 96, ui_btn_h())) {
+		else if (inside(mx, my, d.x + 94, row_y(&d, 6) + 2, 96, ui_btn_h())) {
 			ui_cfg_save();
 			g_wiz_page = 0;
 			g_modal = M_WIZARD;

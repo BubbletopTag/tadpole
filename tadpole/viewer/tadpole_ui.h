@@ -122,6 +122,16 @@ struct ui_settings {
 	/* Taller bar, menu items, rows and buttons — see the note above
 	 * ui_bar_h(). On by default in this build for the same reason pad_on is. */
 	int touch_ui;
+	/* The frosted glass behind every panel, and the six-ring shadow under it.
+	 * OFF BY DEFAULT ON ANDROID and on nowhere else, which is the second thing
+	 * this build disagrees with the desktop one about on purpose: the frost is
+	 * a full-screen GPU-to-CPU readback plus a seven-step downsample chain,
+	 * ten times a second for as long as a menu is open (see glass_blur() in
+	 * viewer/tadpole_ui.c), and on the class of tablet this build exists for
+	 * that stalls the pipeline hard enough to make the chrome itself the
+	 * slowest thing on screen. Rounded corners, the body gradient and the lit
+	 * rim all stay either way — they are one mesh each and cost nothing. */
+	int frost;
 	char games_dir[UI_GAMESDIR_MAX];   /* the folder the library was read from */
 };
 
