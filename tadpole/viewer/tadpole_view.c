@@ -2828,6 +2828,9 @@ static int guest_external(void)
 /* Defined with the native-helper interface further down, which belongs beside
  * android_guest_argv() and so lands after the two functions here that need it. */
 static int   g_guest_native;
+/* Set when the guest we forked died of SIGSYS. Read by the poll below, which
+ * would otherwise overwrite anything said here with a bare "stopped". */
+static int   g_guest_sigsys;
 static pid_t android_native_request(const char *req);
 #endif
 
@@ -2843,7 +2846,24 @@ static int guest_alive(void)
 	if (g_guest_native)
 		return guest_external();
 #endif
-	if (waitpid(g_guest, &st, WNOHANG) == g_guest) { g_guest = 0; return 0; }
+	if (waitpid(g_guest, &st, WNOHANG) == g_guest) {
+		g_guest = 0;
+#ifdef __ANDROID__
+		/* SAY WHY, BECAUSE THE ALTERNATIVE IS A STATUS LINE THAT GOES
+		 * "booting..." -> "stopped" AND MEANS NOTHING.
+		 *
+		 * A guest started by this process inherits the seccomp-bpf filter
+		 * zygote installs on every app — filters cross execve — and the
+		 * firmware's uClibc uses syscalls that filter refuses (stat, fstat,
+		 * mknod, rmdir; see android/NOTES-arm32.md). The refusal is not an
+		 * error return, it is SIGSYS, and the guest dies before printing a
+		 * single line, so the log is empty too. There is no way for an app
+		 * to relax its own filter; the root helper is the way round it. */
+		if (WIFSIGNALED(st) && WTERMSIG(st) == SIGSYS)
+			g_guest_sigsys = 1;
+#endif
+		return 0;
+	}
 	return 1;
 }
 
@@ -5002,6 +5022,24 @@ int main(int argc, char **argv)
 				ui_status("AA off");
 		}
 		if (g_guest > 0 && !guest_alive()) {
+#ifdef __ANDROID__
+			if (g_guest_sigsys) {
+				g_guest_sigsys = 0;
+				/* SHORT, BECAUSE THE BAR ONLY DRAWS A STATUS THAT FITS
+				 * between the last menu and the rotate button — a long one
+				 * is not truncated, it is not drawn at all, which is how
+				 * the first attempt at this produced an EMPTY status line
+				 * and looked like the branch was never taken. The sentence
+				 * goes to the log, where there is room for it. */
+				fprintf(stderr, "tadpole-view: the guest was killed by SIGSYS. "
+				        "An app process runs under the seccomp filter zygote "
+				        "installs, filters are inherited across execve, and "
+				        "the firmware's uClibc uses syscalls it refuses. Start "
+				        "android/native-helper.sh; see android/NOTES-arm32.md."
+				        "\n");
+				ui_status("seccomp");
+			} else
+#endif
 			ui_status("stopped");
 			fps_shown = 0;         /* "stopped" says more than "HLE idle" would */
 			guest_log_close();     /* flush the tail of a boot that just died */
