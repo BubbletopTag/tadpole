@@ -10,6 +10,10 @@
 #                                (native titles too — straight in, no home screen)
 #   ./tadpole.sh --list           list installed apps
 #   ./tadpole.sh --run PROG ...  run any guest binary with the viewer up
+#   ./tadpole.sh --devices       which devices are installed, and which is live
+#   ./tadpole.sh --device ID     switch to another installed device and carry on
+#                                (Options -> Device... does the same from the
+#                                front end; both are just the tree being moved)
 #   ./tadpole.sh --no-viewer     skip the SDL window
 #   ./tadpole.sh --debug         verbose shim logging
 #   ./tadpole.sh --touch-debug   red crosshair where the viewer thinks you tapped
@@ -53,18 +57,6 @@ fi
 # the user set it by hand; setting it ourselves means the answer no longer
 # depends on whether they did.
 export TADPOLE_QEMU="$QEMU"
-# DISCOVER the rootfs rather than hardcoding one firmware version. Whatever
-# install-firmware.sh extracted lands under rootfs/<version>/…/ubi_rfs, and the
-# version is whatever the user's own device shipped with. emmc_rfs is the same
-# thing for an eMMC device (the LeapPad3), whose firmware carries a tar rather
-# than a UBI volume — see runtime/setup-sysroot.sh for why it is not called
-# ubi_rfs anyway.
-ROOTFS=""
-for cand in "$HERE"/rootfs/*/emmc_rfs "$HERE"/rootfs/*/ubi_rfs "$HERE"/rootfs/*/*/ubi_rfs; do
-    [ -d "$cand" ] || continue
-    ROOTFS="$cand"; break
-done
-: "${ROOTFS:=$HERE/rootfs/MISSING/ubi_rfs}"
 # WHICH GUEST FILESYSTEM TO RUN. Normally this checkout's own, but an override
 # lets a freshly built viewer drive a DIFFERENT install's content — the games
 # and profile in ~/.local/share/tadpole, say — without copying either into the
@@ -78,7 +70,101 @@ SYSROOT="${TADPOLE_SYSROOT:-$HERE/runtime/sysroot}"
 # boots AppServer, a Qt application, and keeps AppManager only for cartridges.
 # See runtime/device.sh.
 . "$HERE/runtime/device.sh"
+
+# --device AND --devices ARE READ BEFORE THE MAIN PARSER, and they have to be:
+# which device is live decides the rootfs, the sysroot, the instance directory
+# and the shim's geometry, all of which are settled above the option loop. A
+# second tiny pass is cheaper than moving all of that below it.
+#
+#   ./tadpole.sh --devices           what is installed, and which one is live
+#   ./tadpole.sh --device leappad2   switch to it, then carry on as normal
+#
+# The switch is EXPLICIT ONLY. Passing --device for a device that has firmware
+# but no assembled tree yet points at setup-sysroot.sh rather than quietly
+# spending a minute building one: a flag typed to change a setting should not
+# turn into an install.
+for _a in "$@"; do
+    case "$_a" in
+        --devices)
+            tad_print_devices
+            exit 0 ;;
+    esac
+done
+_want=""
+_rest=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --device)   shift; _want="${1:-}" ;;
+        --device=*) _want="${1#--device=}" ;;
+        *)          _rest+=("$1") ;;
+    esac
+    shift || true
+done
+# ${x+"${x[@]}"} rather than "${x[@]}": under `set -u` an empty array is an
+# unbound variable in bash 4.3 and older, which is what the AppImage's build
+# host still ships.
+set -- ${_rest+"${_rest[@]}"}
+if [ -n "$_want" ]; then
+    if [ "$_want" != "$(tad_active_device)" ]; then
+        tad_activate_device "$_want" || exit 1
+        echo "tadpole: switched to $_want"
+    fi
+    export TADPOLE_DEVICE="$_want"
+fi
+
+# SWITCH TO WHATEVER WAS CHOSEN, before anything reads the tree.
+#
+# The front end writes the chosen device into ui.cfg and nothing else; making
+# the choice real is this line. It is a no-op in the ordinary case — one device
+# installed, or the chosen one already live — and tad_resolve_device() will not
+# name a device that has no firmware, so a stale setting from the wizard cannot
+# move anything. This is what replaced the old
+#     tadpole: ignoring saved device 'leappadultra' — the installed firmware is leappad3
+# which was the launcher correctly refusing to do something it now simply does.
+_res="$(tad_resolve_device)"
+if [ -n "$_res" ] && [ "$_res" != "$(tad_active_device)" ] \
+   && [ "$(tad_device_state "$_res")" = parked ]; then
+    tad_activate_device "$_res" >/dev/null && echo "tadpole: device is now $_res"
+fi
 tad_load_device || exit 1
+
+# STAMP AN OLDER TREE WITH ITS OWN NAME, ONCE.
+#
+# runtime/sysroot/.tadpole-device is written by setup-sysroot.sh, so a tree
+# assembled before that line existed has none — and an upgrade that presented
+# an installed, working LeapPad3 as "no device" until it was rebuilt would be a
+# poor way to ship this. tad_active_device() can still identify such a tree
+# from the rootfs its /bin points into; writing the answer down means the front
+# end, which cannot follow that chain, gets the same answer as the shell.
+#
+# Only when the answer was DERIVED, never when it was defaulted: stamping a
+# guess would turn a recoverable "I do not know" into a confident lie.
+if [ -z "${TADPOLE_SYSROOT:-}" ] && [ -d "$HERE/runtime/sysroot" ] &&
+   [ ! -e "$HERE/runtime/sysroot/.tadpole-device" ]; then
+    _act="$(tad_active_device)"
+    [ -n "$_act" ] &&
+        printf '%s\n' "$_act" > "$HERE/runtime/sysroot/.tadpole-device" 2>/dev/null
+fi
+
+# DISCOVER the rootfs rather than hardcoding one firmware version — and THIS
+# DEVICE's, not merely the first one on disk. Whatever install-firmware.sh
+# extracted lands under rootfs/<version>/…/ubi_rfs, and the version is whatever
+# the user's own device shipped with. emmc_rfs is the same thing for an eMMC
+# device (the LeapPad3), whose firmware carries a tar rather than a UBI volume
+# — see runtime/setup-sysroot.sh for why it is not called ubi_rfs anyway.
+#
+# The bare glob this used to be picked whichever directory sorted first, which
+# was right while only one device could be installed and silently wrong the
+# moment two could: it would hand a LeapPad3 session the Leapster's binaries.
+ROOTFS="$(tad_rootfs_for_device "$DEV_ID")"
+if [ -z "$ROOTFS" ]; then
+    for cand in "$HERE"/rootfs/*/emmc_rfs "$HERE"/rootfs/*/ubi_rfs \
+                "$HERE"/rootfs/*/*/ubi_rfs; do
+        [ -d "$cand" ] || continue
+        ROOTFS="$cand"; break
+    done
+fi
+: "${ROOTFS:=$HERE/rootfs/MISSING/ubi_rfs}"
 # Two shim variants, because targets link different libraries: AppManager and
 # VideoDaemon pull in libdl.so.0, while the display tools (imager-fb etc.) link
 # libz.so.1 and no libdl at all. Both dirs are on the path; whichever the
@@ -184,7 +270,39 @@ else
     [ "$TADPOLE_GL" != 0 ] && LIBS="$HERE/runtime/shimlibs-gl:$LIBS"
 fi
 VIEWER="$HERE/tadpole/viewer/tadpole-view"
-export TADPOLE_DIR="${TADPOLE_DIR:-/tmp/tadpole}"
+
+# THE INSTANCE DIRECTORY IS PER DEVICE, and that is not tidiness.
+#
+# It holds the framebuffer, the input FIFOs, the audio format handshake and the
+# GL command ring — all of them sized and shaped by the device that wrote them.
+# One name shared between devices means a 1024x600 Ultra session can open a
+# 480x272 LeapPad2's leftovers, and the reap at the top of every viewer launch
+# kills "the guest bound to this directory", which with one name is the other
+# device's guest.
+#
+# /tmp/tadpole IS KEPT AS A POINTER TO THE LIVE ONE, because it is the name
+# that is already typed: tools/tap.py, tools/key.py, tools/fbshot.py,
+# tools/nav-label.py and tools/burst.py all default to it, and a dozen
+# documented recipes say -d /tmp/tadpole. Following the link lands on whichever
+# device is running, which is what every one of those callers meant.
+#
+# ONLY WHEN THE NAME IS FREE. A populated real directory of that name belongs
+# to another checkout's live session — and `ln -sfn` into an existing directory
+# creates the link INSIDE it, which would be a silent mess — so leave it alone
+# and say nothing. An EMPTY one is nobody's, the leftover of a session that
+# cleaned up after itself, so take it. Skipped on MSYS, where a symlink is
+# invisible to the native viewer and would be a lie rather than a convenience.
+export TADPOLE_DIR="${TADPOLE_DIR:-/tmp/tadpole-${DEV_ID:-unknown}}"
+case "$(uname -s)" in
+    MSYS*|MINGW*) ;;
+    *) if [ "$TADPOLE_DIR" != /tmp/tadpole ]; then
+           [ -d /tmp/tadpole ] && [ ! -L /tmp/tadpole ] &&
+               rmdir /tmp/tadpole 2>/dev/null
+           if [ ! -e /tmp/tadpole ] || [ -L /tmp/tadpole ]; then
+               ln -sfn "$TADPOLE_DIR" /tmp/tadpole 2>/dev/null || true
+           fi
+       fi ;;
+esac
 
 # The command line as typed, kept before the parser shifts it away, so an error
 # message can hand back something that can actually be pasted.
@@ -401,7 +519,7 @@ if [ "$mode" = front ]; then
 elif [ -e "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
     echo "tadpole: another instance (pid $(cat "$LOCK")) is using $TADPOLE_DIR" >&2
     echo "  stop it first, or run with a separate dir:" >&2
-    echo "    TADPOLE_DIR=/tmp/tadpole-2 $0 ..." >&2
+    echo "    TADPOLE_DIR=${TADPOLE_DIR}-2 $0 ..." >&2
     exit 1
 fi
 if [ -n "$LOCK" ]; then

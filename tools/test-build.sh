@@ -84,6 +84,7 @@ case " $* " in *" --working "*)
     rm -rf "$SRC"; mkdir -p "$SRC"
     tar -C "$PROJ" --exclude=./build --exclude=./rootfs --exclude=./games \
         --exclude=./sources --exclude=./runtime/sysroot --exclude=./runtime/libs \
+        --exclude=./runtime/installs \
         --exclude=./runtime/shimlibs --exclude=./runtime/shimlibs-z \
         --exclude=./.git -cf - . | tar x -C "$SRC"
     echo "NOTE: testing the WORKING TREE (build products excluded)." ;;

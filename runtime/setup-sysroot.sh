@@ -1,20 +1,76 @@
 #!/bin/bash
 # Tadpole — build the guest sysroot.
 #
+#   ./runtime/setup-sysroot.sh            (re)build the device that is live
+#   ./runtime/setup-sysroot.sh leappad2   switch to that device, building it
+#                                         if this is the first time
+#
 # Keeps rootfs/ pristine: the read-only parts of the stock filesystem are
 # symlinked, and everything the guest needs to WRITE or that we have to fake
 # is a real directory here.
 #
 # Every value below was derived from the firmware itself — see
 # docs/device-deps.md for how, and PLAN.txt 1b for the rootfs inventory.
+#
+# THIS IS ALSO THE DEVICE SWITCH, and that is not a second job bolted on. The
+# script's one promise has always been "make runtime/sysroot be the right tree
+# for the installed firmware"; with several firmwares installed the only thing
+# that changes is that "the right tree" has to be named. Parking the live tree
+# and moving another one in is two renames — see tad_activate_device() in
+# runtime/device.sh for why it is renames rather than a symlink — and the
+# expensive part, assembling a tree that has never been built here, is the same
+# work this script already did.
 
 set -eu
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(dirname "$HERE")"
-# DISCOVER the rootfs. A hardcoded version works only for the tree it was
-# written against: install-firmware.sh lays out rootfs/<version>/ubi_rfs, while
-# the original hand-extracted copy had an extra numeric level. Both are valid,
-# and the version depends on whichever device the firmware came from.
+SYSROOT="$HERE/sysroot"
+CACHE="$PROJ/sources/nxp320/LFC_full/LFC_Downloads/cache"
+
+# WHICH DEVICE. Everything below used to be LeapPad2 constants inline. They now
+# come from runtime/devices/<id>.conf, chosen by reading the installed
+# firmware's own Firmware/meta.inf — see runtime/device.sh.
+. "$HERE/device.sh"
+
+# The argument wins, then the environment and the saved setting, then whatever
+# is live. tad_resolve_device() already refuses to name a device with no
+# firmware, so by the time we have an answer it is one we can actually build.
+WANT="${1:-}"
+[ -n "$WANT" ] || WANT="$(tad_resolve_device)"
+ACTIVE="$(tad_active_device)"
+
+if [ -n "$WANT" ] && [ "$WANT" != "$ACTIVE" ]; then
+    case "$(tad_device_state "$WANT")" in
+        parked)
+            # Already assembled once. Swap it in and rebuild it in place, so a
+            # switch also picks up anything this script has learned since.
+            echo "==> switching to $WANT (was ${ACTIVE:-nothing})"
+            tad_activate_device "$WANT" || exit 1 ;;
+        installed)
+            # Firmware but no tree. Park the live one first: everything below
+            # writes into $SYSROOT, and building on top of another device's
+            # tree is how you get a LeapPad3 with a Leapster's /flags.
+            echo "==> first build for $WANT (parking ${ACTIVE:-nothing})"
+            tad_park_active || exit 1 ;;
+        *)
+            echo "no firmware installed for device '$WANT'" >&2
+            echo "  ./tadpole.sh --devices   shows what is here" >&2
+            exit 1 ;;
+    esac
+fi
+
+tad_load_device "$WANT"
+
+# DISCOVER the rootfs — THIS DEVICE's, not merely the first one on disk.
+#
+# A hardcoded version works only for the tree it was written against, and a
+# bare glob works only until a second device is installed: it would hand a
+# LeapPad3 build the Leapster's firmware because that directory sorted first.
+# tad_rootfs_for_device() matches each candidate's own Firmware/meta.inf
+# against the profiles, which is the same test autodetect has always used.
+#
+# install-firmware.sh lays out rootfs/<version>/ubi_rfs, while the original
+# hand-extracted copy had an extra numeric level. Both are valid.
 #
 # emmc_rfs IS A THIRD LAYOUT, AND NOT COSMETIC. The LeapPad2 and the Ultra are
 # NAND devices: their Firmware-Base carries a UBI volume, which has to be
@@ -23,22 +79,23 @@ PROJ="$(dirname "$HERE")"
 # under a path naming a filesystem is a plain GNU tar of the root. So there is
 # no UBI step for it at all, and calling the result ubi_rfs would be a lie that
 # the next person has to disprove.
-ROOTFS=""
-for cand in "$PROJ"/rootfs/*/emmc_rfs "$PROJ"/rootfs/*/ubi_rfs "$PROJ"/rootfs/*/*/ubi_rfs; do
-    [ -d "$cand" ] || continue
-    ROOTFS="$cand"; break
-done
+ROOTFS="$(tad_rootfs_for_device "$DEV_ID")"
+if [ -z "$ROOTFS" ]; then
+    # An unrecognised firmware — no meta.inf, or a Device= no profile claims.
+    # Fall back to the old glob so a hand-extracted tree still builds, and say
+    # what happened rather than silently using someone else's.
+    for cand in "$PROJ"/rootfs/*/emmc_rfs "$PROJ"/rootfs/*/ubi_rfs \
+                "$PROJ"/rootfs/*/*/ubi_rfs; do
+        [ -d "$cand" ] || continue
+        ROOTFS="$cand"; break
+    done
+    [ -n "$ROOTFS" ] && echo "    note: no firmware identifies itself as" \
+                             "$DEV_ID — using $(basename "$(dirname "$ROOTFS")")"
+fi
 : "${ROOTFS:=$PROJ/rootfs/MISSING/ubi_rfs}"
-SYSROOT="$HERE/sysroot"
-CACHE="$PROJ/sources/nxp320/LFC_full/LFC_Downloads/cache"
 
 [ -d "$ROOTFS" ] || { echo "no rootfs at $ROOTFS" >&2; exit 1; }
 
-# WHICH DEVICE. Everything below used to be LeapPad2 constants inline. They now
-# come from runtime/devices/<id>.conf, chosen by reading the installed
-# firmware's own Firmware/meta.inf — see runtime/device.sh.
-. "$HERE/device.sh"
-tad_load_device
 echo "==> device: $DEV_NAME ($DEV_ID, $DEV_LCD) — $(basename "$DEV_CONF")"
 
 # AN ABSOLUTE SYMLINK INSIDE THE ROOTFS RESOLVES ON THE HOST, NOT IN IT.
@@ -792,7 +849,26 @@ for d in /lib /usr/lib /LF/Base/lib /LF/Base/Brio/lib /LF/Base/Flash/lib \
 done
 echo "    $nlib libraries linked"
 
+# WHOSE TREE THIS IS, WRITTEN DOWN RATHER THAN RE-DERIVED.
+#
+# The obvious way to tell which device runtime/sysroot holds is to read its own
+# Firmware/meta.inf, the same file autodetect reads. That works exactly once:
+# package-manager's RebuildPackageDatabase rewrites every meta.inf in the tree
+# and blanks the Device= field, so after the first boot the sysroot says
+# Device="" and identifies nothing. (That is not a new bug — it is why
+# shadow_meta() exists, so the rewrite lands here instead of in rootfs/.)
+#
+# So the answer is recorded at build time and never inferred again. Everything
+# else — which profile loads, which firmware gets rebuilt, which row the front
+# end ticks — reads this one line.
+printf '%s\n' "$DEV_ID" > "$SYSROOT/.tadpole-device"
+
 echo
 echo "sysroot ready: $SYSROOT"
+echo "  device:   $DEV_NAME ($DEV_ID)"
 echo "  LF/Bulk:  $(ls LF/Bulk | tr '\n' ' ')"
-echo "  run with: $HERE/run.sh"
+echo "  run with: $PROJ/tadpole.sh"
+{
+    parked="$(ls "$(tad_installs_dir)" 2>/dev/null | tr '\n' ' ')"
+    [ -n "$parked" ] && echo "  also installed, not live:  $parked"
+} || true

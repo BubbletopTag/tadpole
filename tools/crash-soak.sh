@@ -62,12 +62,23 @@ else
     RUNS="${ARGS[1]:-20}"
 fi
 
+# WHICH BINARY IS THE GUEST. Glasspole is this project's own ARM JIT and is
+# what a default install runs; qemu-arm is the fallback. This asked for
+# qemu-arm by name, so on an ordinary machine `pgrep -x qemu-arm` matched
+# nothing at all — the reap freed no process and the "is it still running"
+# test below always said no, which ends every iteration at the first poll and
+# scores a title that booted fine as if it had died. tools/compat-sweep.sh
+# already reads the name off the engine for exactly this reason.
+EMU_PROC="$(basename "$(PROJ="$PROJ"; . "$HERE/lib-deps.sh"; tad_qemu || echo qemu-arm)")"
+
 # Reap by /proc/<pid>/environ, never `pkill -f`: that pattern also matches the
 # shell running this script, and killing your own parent mid-loop looks exactly
-# like the emulator dying.
+# like the emulator dying. The environ test is also what keeps a soak from
+# reaping ANOTHER device's session — TADPOLE_DIR is per device now — so it is
+# an exact match rather than a prefix.
 reap() {
     local p d
-    for p in $(pgrep -x qemu-arm 2>/dev/null); do
+    for p in $(pgrep -x "$EMU_PROC" 2>/dev/null); do
         d=$(tr '\0' '\n' < "/proc/$p/environ" 2>/dev/null |
             grep '^TADPOLE_DIR=' | cut -d= -f2)
         [ "$d" = "$TDIR" ] && kill -9 "$p" 2>/dev/null
@@ -110,7 +121,7 @@ for t in "${TITLES[@]}"; do
             sleep 2
             [ -s "$out/crash.log" ] && break
             running=0
-            for q in $(pgrep -x qemu-arm 2>/dev/null); do
+            for q in $(pgrep -x "$EMU_PROC" 2>/dev/null); do
                 dd=$(tr '\0' '\n' < "/proc/$q/environ" 2>/dev/null |
                      grep '^TADPOLE_DIR=' | cut -d= -f2)
                 [ "$dd" = "$TDIR" ] && { running=1; break; }

@@ -294,6 +294,12 @@ static int  g_hot_item  = -1;
 
 /* modal */
 enum modal_kind { M_NONE = 0, M_ABOUT, M_UPDATE, M_GFX, M_AUDIO, M_PAD, M_DEBUG, M_SYSTEM,
+                  /* WHICH DEVICE, reachable without walking the wizard. Once
+                   * more than one is installed, "which tablet am I on" stops
+                   * being a setup question and becomes an everyday one — and
+                   * an answer buried on page two of a wizard is not an
+                   * answer. Same list, same rows, same keys. */
+                  M_DEVICE,
                   M_FILES, M_MSG, M_WIZARD, M_PROGRESS, M_GAMES, M_APPS,
                   M_MICROMODS };
 static enum modal_kind g_modal;
@@ -1306,7 +1312,16 @@ struct devinfo {
 	 * above). Left blank when a profile does not name one; nothing is
 	 * invented here. */
 	char plat[16];
-	int  installed;            /* a rootfs for this device is already here */
+	/* DEV_META_DEVICE: the string this device's firmware calls ITSELF by, in
+	 * its Firmware/meta.inf. runtime/device.sh matches on it to decide which
+	 * device an extracted tree is, and devices_survey() below matches on it
+	 * for the same reason — so the front end's idea of what is installed comes
+	 * from the same evidence as the launcher's rather than from a second rule
+	 * that can drift. */
+	char meta[40];
+	int  installed;            /* firmware for this device is extracted here */
+	int  parked;               /* ...and a sysroot for it is built and waiting */
+	int  active;               /* ...and it is the tree runtime/sysroot holds */
 };
 /* HOW MANY PROFILES THE PICKER HOLDS, and why this is not tadpole_ui.h's
  * UI_DEVICES_MAX. That constant is 8 — one more than there were .conf files on
@@ -1318,9 +1333,19 @@ struct devinfo {
 #define WIZ_DEVICES_MAX 24
 static struct devinfo g_devs[WIZ_DEVICES_MAX];
 static int g_ndevs;
+/* THE CURSOR, NOT THE ANSWER. g_dev_sel moves with the arrow keys and the
+ * wheel-free bits of the list; what is CHOSEN is g_cfg.device, and it only
+ * changes when the choice is committed — a click, Return, or leaving the
+ * wizard's page forwards. Keeping them apart is what lets the keyboard drive
+ * the list without writing ui.cfg on every keypress, and it means Cancel
+ * really cancels. */
 static int g_dev_sel;          /* index into g_devs */
 static int g_dev_top;          /* first row drawn — the list scrolls */
 static int g_dev_rows = 4;     /* how many the last draw had room for */
+/* Dragging the scrollbar knob. g_dev_drag_off is where inside the knob it was
+ * grabbed, so the knob does not jump under the pointer on the first motion. */
+static int g_dev_drag;
+static int g_dev_drag_off;
 
 /* One "KEY=value" line out of a profile, unquoted. -> 1 if found. */
 static int conf_get(const char *path, const char *key, char *out, size_t n)
@@ -1345,6 +1370,109 @@ static int conf_get(const char *path, const char *key, char *out, size_t n)
 	return got;
 }
 
+/* Declared here rather than moved: it lives with the app list, which is where
+ * anyone looking for a meta.inf parser will go first. */
+static int meta_field(const char *line, const char *key, char *out, size_t n);
+
+/* -> 1 with the Device="..." string out of an extracted firmware tree. */
+static int rootfs_device(const char *rootfs, char *out, size_t n)
+{
+	char path[PATHMAX * 2], line[512];
+	FILE *f;
+	int got = 0;
+	snprintf(path, sizeof(path), "%s/Firmware/meta.inf", rootfs);
+	if (!(f = fopen(path, "r"))) return 0;
+	while (!got && fgets(line, sizeof(line), f))
+		got = meta_field(line, "Device=\"", out, n);
+	fclose(f);
+	return got;
+}
+
+/* If `rootfs` is a firmware tree, mark whichever profile it belongs to. */
+static void devices_mark_rootfs(const char *rootfs)
+{
+	char dev[40];
+	int i;
+	if (!rootfs_device(rootfs, dev, sizeof(dev))) return;
+	for (i = 0; i < g_ndevs; i++)
+		if (g_devs[i].meta[0] && !strcmp(g_devs[i].meta, dev))
+			g_devs[i].installed = 1;
+}
+
+/* WHAT IS ACTUALLY INSTALLED, and which one is live.
+ *
+ * Three questions, three pieces of evidence, none of them guessed:
+ *
+ *   installed   rootfs/<any>/{ubi_rfs,emmc_rfs}/Firmware/meta.inf says
+ *               Device="<this profile's DEV_META_DEVICE>". The same test
+ *               runtime/device.sh's tad_detect_device() makes.
+ *   parked      runtime/installs/<id>/sysroot exists — assembled, waiting.
+ *   active      runtime/sysroot/.tadpole-device names it.
+ *
+ * WHY THE ACTIVE ONE IS READ FROM A MARKER rather than from the sysroot's own
+ * Firmware/meta.inf, which would be the obvious source: package-manager's
+ * RebuildPackageDatabase rewrites every meta.inf in the tree and blanks the
+ * Device= field, so the sysroot answers Device="" from the first boot onward.
+ * setup-sysroot.sh writes the marker at build time for exactly this reason. */
+static void devices_survey(void)
+{
+	char path[PATHMAX * 2], act[UI_DEVICE_MAX];
+	DIR *d;
+	struct dirent *e;
+	int i;
+
+	act[0] = 0;
+	path_join(path, sizeof(path), g_proj, "runtime/sysroot/.tadpole-device");
+	{
+		FILE *f = fopen(path, "r");
+		if (f) {
+			if (fgets(act, sizeof(act), f)) {
+				size_t n = strlen(act);
+				while (n && (unsigned char)act[n - 1] <= ' ') act[--n] = 0;
+			}
+			fclose(f);
+		}
+	}
+	for (i = 0; i < g_ndevs; i++) {
+		g_devs[i].installed = g_devs[i].parked = g_devs[i].active = 0;
+		g_devs[i].active = act[0] && !strcmp(act, g_devs[i].id);
+		snprintf(path, sizeof(path), "%s/runtime/installs/%s/sysroot",
+		         g_proj, g_devs[i].id);
+		g_devs[i].parked = !g_devs[i].active && access(path, F_OK) == 0;
+		if (g_devs[i].active || g_devs[i].parked) g_devs[i].installed = 1;
+	}
+
+	/* THREE LAYOUTS UNDER rootfs/, ALL VALID, and the same three the shell
+	 * looks for: install-firmware.sh writes <version>/ubi_rfs, the LeapPad3's
+	 * eMMC image extracts to <version>/emmc_rfs, and the original
+	 * hand-extracted copy had an extra numeric level. Missing emmc_rfs is not
+	 * cosmetic — it is the layout a LeapPad3 install has, and leaving it out
+	 * meant a working LeapPad3 was reported as no firmware at all. */
+	path_join(path, sizeof(path), g_proj, "rootfs");
+	if ((d = opendir(path))) {
+		char lvl1[PATHMAX * 2];
+		while ((e = readdir(d))) {
+			DIR *d2;
+			struct dirent *e2;
+			char sub[PATHMAX * 3];
+			if (e->d_name[0] == '.') continue;
+			snprintf(lvl1, sizeof(lvl1), "%s/%s", path, e->d_name);
+			snprintf(sub, sizeof(sub), "%s/ubi_rfs", lvl1);
+			devices_mark_rootfs(sub);
+			snprintf(sub, sizeof(sub), "%s/emmc_rfs", lvl1);
+			devices_mark_rootfs(sub);
+			if (!(d2 = opendir(lvl1))) continue;
+			while ((e2 = readdir(d2))) {
+				if (e2->d_name[0] == '.') continue;
+				snprintf(sub, sizeof(sub), "%s/%s/ubi_rfs", lvl1, e2->d_name);
+				devices_mark_rootfs(sub);
+			}
+			closedir(d2);
+		}
+		closedir(d);
+	}
+}
+
 static void devices_scan(void)
 {
 	char dir[PATHMAX], path[PATHMAX];
@@ -1363,6 +1491,7 @@ static void devices_scan(void)
 		conf_get(path, "DEV_NAME", di->name, sizeof(di->name));
 		conf_get(path, "DEV_LCD", di->lcd, sizeof(di->lcd));
 		conf_get(path, "DEV_PLATFORM", di->plat, sizeof(di->plat));
+		conf_get(path, "DEV_META_DEVICE", di->meta, sizeof(di->meta));
 		if (!di->name[0]) snprintf(di->name, sizeof(di->name), "%s", di->id);
 		g_ndevs++;
 	}
@@ -1376,16 +1505,34 @@ static void devices_scan(void)
 				g_devs[j-1] = g_devs[j]; g_devs[j] = t;
 			}
 	}
-	for (int i = 0; i < g_ndevs; i++)
-		if (!strcmp(g_devs[i].id, g_cfg.device)) g_dev_sel = i;
-	/* OPEN ON THE ONE THAT IS ALREADY CHOSEN. With four rows visible out of a
-	 * dozen, a picker that always started at the top would show a LeapPad
-	 * Explorer owner somebody else's tablet and leave them to find their own.
-	 * Scrolled to, once, here — NOT clamped against the selection every frame
-	 * the way the app launcher does it, because there the selection is a cursor
-	 * the arrow keys drive and here it is a standing answer: following it on
-	 * every draw would snap the view back the moment anyone used the wheel. */
+	devices_survey();
+	/* OPEN ON THE ONE THAT IS ALREADY CHOSEN — and when nothing has been
+	 * chosen, on the one that is RUNNING. A user who has never opened this
+	 * page has no `device` line in ui.cfg, and starting at the top of the list
+	 * would show a LeapPad3 owner somebody else's tablet.
+	 *
+	 * SCROLLED TO ONCE, HERE, and again whenever the selection moves — never
+	 * clamped against the selection every frame the way the app launcher does
+	 * it. That version defeats the wheel and the scrollbar: the view snaps
+	 * back to the cursor on the very next draw, so a drag appears to work for
+	 * one frame and then undoes itself. dev_reveal() is called from the places
+	 * that MOVE the cursor, which is the whole difference. */
+	{
+		int i;
+		for (i = 0; i < g_ndevs; i++)
+			if (g_cfg.device[0] ? !strcmp(g_devs[i].id, g_cfg.device)
+			                    : g_devs[i].active)
+				g_dev_sel = i;
+	}
 	g_dev_top = g_dev_sel;
+}
+
+/* Re-read what is installed without rebuilding the list. Cheap enough to call
+ * whenever a tool has finished. */
+static void devices_refresh(void)
+{
+	if (!g_ndevs) devices_scan();
+	else          devices_survey();
 }
 
 /* ---- the profile being composed on WIZ_PROFILE --------------------------
@@ -1475,6 +1622,16 @@ static void prereq_check(struct prereq *p)
 			struct dirent *e2;
 			if (e->d_name[0] == '.') continue;
 			snprintf(sub, sizeof(sub), "%s/%s/ubi_rfs", path, e->d_name);
+			if (dir_has_entries(sub)) { p->rootfs = 1; break; }
+			/* emmc_rfs IS THE THIRD LAYOUT AND IT WAS MISSING HERE. The
+			 * LeapPad3 is an eMMC device: its firmware is a plain tar and
+			 * extracts to emmc_rfs, never ubi_rfs. Without this line a
+			 * complete, working LeapPad3 install answered "no system files"
+			 * — which disables Run System Menu and Launch App, and pops the
+			 * setup wizard on every launch of an emulator that is already
+			 * set up. runtime/device.sh has looked for all three names for
+			 * as long as the LeapPad3 has been supported. */
+			snprintf(sub, sizeof(sub), "%s/%s/emmc_rfs", path, e->d_name);
 			if (dir_has_entries(sub)) { p->rootfs = 1; break; }
 			snprintf(lvl1, sizeof(lvl1), "%s/%s", path, e->d_name);
 			if (!(d2 = opendir(lvl1))) continue;
@@ -2505,7 +2662,7 @@ struct mitem {
 enum {
 	IT_RUN_UI = 1, IT_SWF, IT_PKG, IT_CART, IT_FW, IT_STOP, IT_QUIT,
 	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE, IT_UPDATE,
-	IT_GAMES, IT_DEBUG, IT_SYSTEM
+	IT_GAMES, IT_DEBUG, IT_SYSTEM, IT_DEVICE
 };
 
 static const struct mitem FILE_ITEMS[] = {
@@ -2533,6 +2690,12 @@ static const struct mitem FILE_ITEMS[] = {
 	{ "Quit",                   IT_QUIT,   0, 0, 0 },
 };
 static const struct mitem OPT_ITEMS[] = {
+	/* FIRST, and idle-only. It is the one setting here that moves files
+	 * around rather than flipping a flag, and switching the guest filesystem
+	 * out from under a running emulator has no sensible outcome — so it is
+	 * greyed while something is up, the same way Erase is. */
+	{ "Device...",              IT_DEVICE, 0, 1, 0 },
+	{ "",                       0,         0, 0, 0 },
 	{ "Graphics Settings...",   IT_GFX,    0, 0, 0 },
 	{ "Audio Settings...",      IT_AUDIO,  0, 0, 0 },
 	{ "Controller Settings...", IT_PAD,    0, 0, 0 },
@@ -2799,7 +2962,16 @@ int ui_modal(void) { return g_modal != M_NONE; }
 void ui_set_running(int r) { g_running = r; }
 
 /* Something may have installed or erased the system files. */
-void ui_invalidate_prereqs(void) { g_sys_ready = -1; }
+void ui_invalidate_prereqs(void)
+{
+	g_sys_ready = -1;
+	/* AND WHICH DEVICE IS LIVE. The tools that change the answer to "are the
+	 * system files here" are the same ones that change "whose system files" —
+	 * installing firmware, erasing it, and switching device all run through
+	 * setup-sysroot.sh — so re-surveying here means the picker cannot go on
+	 * showing the device that was live a minute ago. */
+	devices_refresh();
+}
 
 void ui_profile_get(char *name, size_t namesz, int *grade,
                     char *picture, size_t picsz)
@@ -3003,6 +3175,13 @@ static void activate(int id)
 	case IT_PAD:   g_modal = M_PAD;   break;
 	case IT_DEBUG: g_modal = M_DEBUG; break;
 	case IT_SYSTEM: g_modal = M_SYSTEM; break;
+	case IT_DEVICE:
+		/* Re-survey on the way in: firmware may have been installed, or
+		 * another checkout may have switched the tree, since the list was
+		 * last built. */
+		devices_refresh();
+		g_modal = M_DEVICE;
+		break;
 	case IT_ABOUT: g_modal = M_ABOUT; break;
 	case IT_UPDATE: g_action = UI_ACT_CHECK_UPDATE; break;
 	case IT_GAMES: games_open(); break;
@@ -3082,6 +3261,10 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	case M_PAD:   return dlg_fit(lw, lh, 240, 150);
 	case M_DEBUG: return dlg_fit(lw, lh, 268, 200);
 	case M_SYSTEM: return dlg_fit(lw, lh, 268, 178);
+	/* Room for four 26px rows and a line of explanation. Wider than the
+	 * settings panels because each row carries a name, a resolution, a state
+	 * and a codename. */
+	case M_DEVICE: return dlg_fit(lw, lh, 300, 196);
 	case M_FILES: return dlg_fit(lw, lh, 300, 172);
 	case M_WIZARD: return dlg_fit(lw, lh, 348, 210);
 	case M_PROGRESS: return dlg_fit(lw, lh, 350, 150);
@@ -3232,18 +3415,323 @@ static SDL_Rect wiz_btn(const struct dlg *d, int which)   /* 0 back 1 next 2 can
  * number written down twice. At the wizard's 210px that is four of them; a
  * window too small for the full height gets fewer and still scrolls. */
 #define WIZ_DEV_ROW_H 26
-static int wiz_dev_y(const struct dlg *d) { return d->y + 38 + 26; }
-static int wiz_dev_rows(const struct dlg *d)
+
+/* THE SAME LIST APPEARS ON TWO SCREENS and it is one widget, not two.
+ *
+ * The wizard's "Which device?" page asks the question before there is any
+ * firmware; Options -> Device answers it again afterwards, when the point is
+ * to switch between devices that ARE installed. They want the same rows, the
+ * same marks, the same keys and the same scrollbar, and the only thing that
+ * differs is where the rectangle sits — so the rectangle is the argument and
+ * everything else is shared. Two copies of a list is how the click box and the
+ * drawn row came to disagree the first time. */
+struct devlist { int x, y, w, vis; };
+
+static struct devlist dev_layout(int x, int y, int bottom, int width)
 {
-	int v = (d->y + d->h - 30 - wiz_dev_y(d)) / WIZ_DEV_ROW_H;
-	return v < 1 ? 1 : v;
+	struct devlist L;
+	L.x = x;
+	L.y = y;
+	L.vis = (bottom - y) / WIZ_DEV_ROW_H;
+	if (L.vis < 1) L.vis = 1;
+	/* Never taller than the content: a well with two empty rows under the last
+	 * device reads as "something failed to load". */
+	if (g_ndevs > 0 && L.vis > g_ndevs) L.vis = g_ndevs;
+	/* THE ROW GIVES UP ITS RIGHT-HAND EDGE TO THE SCROLLBAR, so a click near
+	 * it lands on the row rather than in a gap, and the highlight stops short
+	 * of the bar instead of running under it. */
+	L.w = width - (g_ndevs > L.vis ? 10 : 0);
+	return L;
 }
-/* THE ROW GIVES UP ITS RIGHT-HAND EDGE TO THE SCROLLBAR, so a click near it
- * lands on the row rather than in a gap, and the highlight stops short of the
- * bar instead of running under it. */
-static int wiz_dev_w(const struct dlg *d, int vis, int n)
+/* The wizard's rectangle: under two lines of explanation, above Back/Next. */
+static struct devlist dev_layout_wiz(const struct dlg *d)
 {
-	return d->w - 76 - (n > vis ? 10 : 0);
+	return dev_layout(d->x + 62, d->y + 38 + 26, d->y + d->h - 30, d->w - 76);
+}
+/* Options -> Device: the whole panel, above the Close row.
+ *
+ * THE WELL IS WIDER THAN THE ROWS — dev_draw() draws it at x-3 and w+16, to
+ * leave the scrollbar room inside its own edge — so the row width has to leave
+ * that margin or the well hangs over the panel's rounded corner. It did, by
+ * three pixels, which is exactly the sort of thing that only shows up in a
+ * screenshot. */
+static struct devlist dev_layout_modal(const struct dlg *d)
+{
+	return dev_layout(d->x + 10, d->y + 32, d->y + d->h - 34, d->w - 26);
+}
+
+/* The scrollbar track, drawn inside the well and clear of the rows. */
+static SDL_Rect dev_track(const struct devlist *L)
+{
+	SDL_Rect t;
+	t.x = L->x + L->w + 4;
+	t.y = L->y;
+	t.w = 4;
+	t.h = L->vis * WIZ_DEV_ROW_H - 4;
+	return t;
+}
+static int dev_knob_h(const struct devlist *L)
+{
+	SDL_Rect t = dev_track(L);
+	int k = g_ndevs > 0 ? t.h * L->vis / g_ndevs : t.h;
+	return k < 10 ? 10 : k;
+}
+/* KNOB POSITION AS A FRACTION OF ITS OWN TRAVEL, not of the track.
+ *
+ * The launcher and the library both draw `pos = track * top / n` and then clamp
+ * the overflow away, which is close enough when the list is hundreds long. This
+ * one has to be dragged, and a drag needs the exact inverse or the knob creeps
+ * away from the pointer. Mapping top -> [0, track - knob] gives one formula
+ * that is exact in both directions, and it reaches the bottom of the track
+ * precisely when the last row is on screen. */
+static int dev_knob_y(const struct devlist *L)
+{
+	SDL_Rect t = dev_track(L);
+	int span = t.h - dev_knob_h(L);
+	int maxtop = g_ndevs - L->vis;
+	if (maxtop <= 0 || span <= 0) return t.y;
+	return t.y + span * g_dev_top / maxtop;
+}
+static void dev_clamp_top(void)
+{
+	if (g_dev_top > g_ndevs - g_dev_rows) g_dev_top = g_ndevs - g_dev_rows;
+	if (g_dev_top < 0) g_dev_top = 0;
+}
+/* Bring the cursor into view. CALLED WHEN THE CURSOR MOVES, never from the
+ * draw — see the note in devices_scan(). */
+static void dev_reveal(void)
+{
+	if (g_dev_sel < g_dev_top) g_dev_top = g_dev_sel;
+	if (g_dev_sel >= g_dev_top + g_dev_rows)
+		g_dev_top = g_dev_sel - g_dev_rows + 1;
+	dev_clamp_top();
+}
+static void dev_move(int delta)
+{
+	if (!g_ndevs) return;
+	g_dev_sel += delta;
+	if (g_dev_sel < 0) g_dev_sel = 0;
+	if (g_dev_sel > g_ndevs - 1) g_dev_sel = g_ndevs - 1;
+	dev_reveal();
+}
+
+/* -> one word for the state of a row, or NULL when there is nothing to say. */
+static const char *dev_state_label(const struct devinfo *di)
+{
+	if (di->active)    return "active";
+	if (di->parked)    return "installed";
+	if (di->installed) return "firmware only";
+	return NULL;
+}
+
+/* COMMIT THE CHOICE, and make it real if there is anything to make real.
+ *
+ * Two different things happen here and it is worth being clear which is which.
+ * Writing g_cfg.device is always right: it is the answer to "which device do
+ * you own", and the wizard's next page uses it to decide what to download.
+ * SWITCHING is only right when that device is already installed — and then it
+ * is runtime/setup-sysroot.sh's job, which parks the live tree and moves the
+ * wanted one in. The front end asks for it through UI_ACT_BUILD_SYSROOT, the
+ * action that has always meant "make runtime/sysroot right", because with
+ * several devices installed that is exactly what switching is.
+ *
+ * NOT WHILE A GUEST IS RUNNING. The tree would be renamed out from under a
+ * live emulator, and there is no version of that worth seeing. */
+static void dev_commit(void)
+{
+	struct devinfo *di;
+	if (g_dev_sel < 0 || g_dev_sel >= g_ndevs) return;
+	di = &g_devs[g_dev_sel];
+	snprintf(g_cfg.device, sizeof(g_cfg.device), "%s", di->id);
+	ui_cfg_save();
+	if (di->active) return;
+	if (!di->installed) return;         /* nothing installed to switch to */
+	if (g_running) {
+		ui_status("stop the guest first");
+		return;
+	}
+	g_action = UI_ACT_BUILD_SYSROOT;
+	ui_status("switching to %s...", di->name);
+}
+
+static void dev_draw(SDL_Renderer *r, const struct devlist *L)
+{
+	int i;
+
+	/* The well the rows sit in, so the list reads as one object with an edge
+	 * to it rather than as tiles floating on the panel — which is what tells
+	 * you there is more of it below the fold. */
+	chip(r, L->x - 3, L->y - 4, L->w + 16, L->vis * WIZ_DEV_ROW_H + 4, C_VOID, 0);
+
+	for (i = g_dev_top; i < g_ndevs && i - g_dev_top < L->vis; i++) {
+		int ry  = L->y + (i - g_dev_top) * WIZ_DEV_ROW_H;
+		int on  = (i == g_dev_sel);
+		int hot = inside(g_mx, g_my, L->x, ry - 3, L->w, 24);
+		const struct devinfo *di = &g_devs[i];
+		const char *state = dev_state_label(di);
+		char line[96];
+
+		fill(r, L->x, ry - 3, L->w, 24,
+		     hot ? C_BAR_HI : on ? C_PANEL_HI : C_PANEL);
+		/* PLACEHOLDER ART. A screen-shaped box in the panel colour, with the
+		 * device's own aspect ratio — 480x272 is wide and squat, 1024x600 less
+		 * so, the Didj's 320x240 nearly square, so they are already
+		 * distinguishable without a photograph. Real device pictures go in
+		 * runtime/devices/<id>.png; see the README there. The loader is not
+		 * wired up yet, and a box that is visibly a placeholder is better than
+		 * a picture of the wrong tablet. */
+		{
+			int pw = 34, ph = 21, sw, sh, dw = 0, dh = 0;
+			if (sscanf(di->lcd, "%dx%d", &sw, &sh) == 2 && sw > 0 && sh > 0) {
+				dw = pw; dh = pw * sh / sw;
+				if (dh > ph) { dh = ph; dw = ph * sw / sh; }
+			}
+			if (dw <= 0) { dw = pw; dh = ph; }
+			fill(r, L->x + 3, ry, pw, ph, C_VOID);
+			fill(r, L->x + 3 + (pw - dw) / 2, ry + (ph - dh) / 2,
+			     dw, dh, on || hot ? C_EDGE_LT : C_EDGE_DK);
+		}
+		/* A DOT AGAINST THE ONE THAT IS RUNNING. The word "active" is on the
+		 * second line with the resolution, but a mark level with the name is
+		 * what answers "which one am I on" from across the room. */
+		if (di->active)
+			text(r, L->x + 40, ry + 1, GL_DIAMOND, C_ACCENT);
+		text(r, L->x + 48, ry + 1, di->name,
+		     di->active ? C_ACCENT : on || hot ? C_ACCENT : C_TEXT);
+		if (state) snprintf(line, sizeof(line), "%s   %s", di->lcd, state);
+		else       snprintf(line, sizeof(line), "%s", di->lcd);
+		/* ONLY IF THE NAME LEAVES ROOM FOR IT, the same test the launcher
+		 * makes before drawing a package ID beside a title. In portrait the
+		 * rows are 86 pixels narrower and the codename was drawn straight
+		 * through the tail of the name: "LeapPad ExplorerMADRID". */
+		if (di->plat[0] &&
+		    text_w(di->name) + text_w(di->plat) + 12 < L->w - 50)
+			text(r, L->x + L->w - 6 - text_w(di->plat), ry + 1,
+			     di->plat, C_DIMMEST);
+		text(r, L->x + 48, ry + 12, line,
+		     di->active ? C_ACCENT : C_TEXT_DIM);
+	}
+
+	/* Scrollbar, for the same reason the launcher and the library have one:
+	 * with a dozen rows and four of them on screen, "how much of this is
+	 * there" cannot be answered by the rows themselves. */
+	if (g_ndevs > L->vis) {
+		SDL_Rect t = dev_track(L);
+		int knob = dev_knob_h(L), ky = dev_knob_y(L);
+		int over = inside(g_mx, g_my, t.x - 3, t.y, t.w + 6, t.h);
+		rfill(r, t.x, t.y, t.w, t.h, C_SHADOW, 170);
+		rfill(r, t.x, ky, t.w, knob, C_EDGE_LT,
+		      g_dev_drag || over ? 255 : 210);
+	}
+}
+
+/* The footer under the list: where you are, and how to move. */
+static void dev_draw_footer(SDL_Renderer *r, const struct devlist *L)
+{
+	char foot[64];
+	if (g_ndevs <= L->vis) return;
+	/* The range rather than the bare total, for the reason the launcher gives
+	 * — and the hint drops off at the bottom, because "scroll for more" under
+	 * "9-12 of 12" is an instruction to do something that does nothing. */
+	snprintf(foot, sizeof(foot), "%d-%d of %d%s", g_dev_top + 1,
+	         g_dev_top + L->vis < g_ndevs ? g_dev_top + L->vis : g_ndevs,
+	         g_ndevs,
+	         g_dev_top + L->vis < g_ndevs ? " " GL_DIAMOND " arrows or wheel"
+	                                      : "");
+	text(r, L->x, L->y + L->vis * WIZ_DEV_ROW_H + 2, foot, C_TEXT_DIM);
+}
+
+/* -> 1 if the click belonged to the list. */
+static int dev_click(const struct devlist *L, int mx, int my)
+{
+	int i;
+	g_dev_rows = L->vis;
+
+	if (g_ndevs > L->vis) {
+		SDL_Rect t = dev_track(L);
+		int knob = dev_knob_h(L), ky = dev_knob_y(L);
+		/* A FAT HIT BOX FOR A 4px BAR. Three pixels either side, because a
+		 * scrollbar you have to aim at is a scrollbar nobody uses. */
+		if (inside(mx, my, t.x - 3, t.y, t.w + 6, t.h)) {
+			if (my >= ky && my < ky + knob) {
+				g_dev_drag = 1;
+				g_dev_drag_off = my - ky;
+			} else {
+				/* Clicking the track jumps a page, the way every scrollbar
+				 * has since they were invented — not to the exact pixel,
+				 * which loses your place. */
+				g_dev_top += (my < ky ? -L->vis : L->vis);
+				dev_clamp_top();
+			}
+			return 1;
+		}
+	}
+	for (i = g_dev_top; i < g_ndevs && i - g_dev_top < L->vis; i++) {
+		int ry = L->y + (i - g_dev_top) * WIZ_DEV_ROW_H;
+		if (!inside(mx, my, L->x, ry - 3, L->w, 24)) continue;
+		g_dev_sel = i;
+		dev_commit();
+		return 1;
+	}
+	return 0;
+}
+
+/* -> 1 if the key belonged to the list. */
+static int dev_key(SDL_Keycode k)
+{
+	switch (k) {
+	case SDLK_UP:       dev_move(-1); return 1;
+	case SDLK_DOWN:     dev_move(+1); return 1;
+	case SDLK_PAGEUP:   dev_move(-g_dev_rows); return 1;
+	case SDLK_PAGEDOWN: dev_move(+g_dev_rows); return 1;
+	case SDLK_HOME:     dev_move(-g_ndevs); return 1;
+	case SDLK_END:      dev_move(+g_ndevs); return 1;
+	/* THE KEYS THAT COMMIT. Everything above moves a cursor and writes
+	 * nothing; these are where the choice is made, which is what keeps ui.cfg
+	 * off the keyboard's hot path — a file rewritten on every press of Down is
+	 * the reason this list had no keyboard at all. */
+	case SDLK_RETURN:
+	case SDLK_KP_ENTER:
+	case SDLK_SPACE:    dev_commit(); return 1;
+	default:            return 0;
+	}
+}
+
+/* Dragging the knob. -> 1 if the motion belonged to the drag.
+ *
+ * The geometry is recomputed from cur_dlg() rather than remembered from the
+ * button press, because the panel is still rising into place during its
+ * entrance and a remembered rectangle would be a few pixels out for the first
+ * 150ms — the same reason the draw and the hit test both read cur_dlg(). */
+static int dev_drag_motion(int lw, int lh, int my)
+{
+	struct dlg d;
+	struct devlist L;
+	SDL_Rect t;
+	int span, maxtop, rel;
+
+	if (!g_dev_drag) return 0;
+	if (g_modal != M_DEVICE &&
+	    !(g_modal == M_WIZARD && g_wiz_page == WIZ_DEVICE)) {
+		g_dev_drag = 0;             /* the screen went away under the drag */
+		return 0;
+	}
+	d = cur_dlg(lw, lh);
+	L = (g_modal == M_DEVICE) ? dev_layout_modal(&d) : dev_layout_wiz(&d);
+	t = dev_track(&L);
+	span = t.h - dev_knob_h(&L);
+	maxtop = g_ndevs - L.vis;
+	if (span <= 0 || maxtop <= 0) return 1;
+	rel = my - g_dev_drag_off - t.y;
+	if (rel < 0) rel = 0;
+	if (rel > span) rel = span;
+	/* ROUNDED, NOT TRUNCATED. The knob travels in pixels and the list moves in
+	 * rows, so a plain divide leaves the knob trailing the pointer by up to a
+	 * row and never quite reaching the bottom — which reads as a scrollbar
+	 * that does not work rather than as an off-by-half. */
+	g_dev_top = (rel * maxtop + span / 2) / span;
+	dev_clamp_top();
+	return 1;
 }
 
 /* Close button, bottom right of every dialog. */
@@ -3372,6 +3860,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 	case M_UPDATE: title = "Update available"; break;
 	case M_APPS:  title = "Launch App"; break;
 	case M_MICROMODS: title = "Micromods"; break;
+	case M_DEVICE: title = "Device"; break;
 	default: break;
 	}
 
@@ -3420,8 +3909,12 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		 * never had — the wheel worked, and nothing else did. */
 		if (g_ap_sel < 0) g_ap_sel = 0;
 		if (g_ap_sel > g_ap_n - 1) g_ap_sel = g_ap_n - 1;
-		if (g_ap_sel < g_ap_top) g_ap_top = g_ap_sel;
-		if (g_ap_sel >= g_ap_top + vis) g_ap_top = g_ap_sel - vis + 1;
+		/* ONLY THE BOUNDS, NOT THE SELECTION. Two lines here used to drag
+		 * g_ap_top back to g_ap_sel on every frame, which quietly defeated
+		 * this list's own mouse wheel: the wheel moved the view and the next
+		 * draw put it back, so scrolling worked for exactly one frame. The
+		 * view following the cursor is right, but it belongs where the cursor
+		 * MOVES — the arrow-key handler already does it — not in the draw. */
 		if (g_ap_top > g_ap_n - vis) g_ap_top = g_ap_n - vis;
 		if (g_ap_top < 0) g_ap_top = 0;
 
@@ -3815,6 +4308,29 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		     C_TEXT_DIM);
 		break;
 	}
+	case M_DEVICE: {
+		struct devlist L;
+		if (!g_ndevs) devices_scan();
+		L = dev_layout_modal(&d);
+		g_dev_rows = L.vis;
+		dev_clamp_top();
+		/* ONE LINE, AND IT CHANGES WITH THE STATE. With a single device
+		 * installed this screen is informational and saying "click to switch"
+		 * would be an instruction to do nothing; with two it is the whole
+		 * point of the screen. */
+		{
+			int n = 0, i2;
+			for (i2 = 0; i2 < g_ndevs; i2++) if (g_devs[i2].installed) n++;
+			text(r, d.x + 10, d.y + 18,
+			     n > 1 ? "Pick one to switch to it."
+			           : n == 1 ? "One device installed."
+			                    : "No system files installed yet.",
+			     C_TEXT_DIM);
+		}
+		dev_draw(r, &L);
+		dev_draw_footer(r, &L);
+		break;
+	}
 	case M_SYSTEM: {
 		char buf[48];
 		row_check(r, &d, 0, "Boot the system menu at startup",
@@ -4070,47 +4586,16 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		case WIZ_DEVICE: {
 			/* WHICH DEVICE. This decides which firmware the next page
 			 * downloads, so it has to be asked before there is anything
-			 * installed to detect the answer from. Once a rootfs IS
-			 * installed, runtime/device.sh reads the truth out of its
-			 * Firmware/meta.inf and this is only an override — which is why
-			 * the already-installed one is marked and preselected.
+			 * installed to detect the answer from.
 			 *
-			 * ONE ROW PAST THE PROFILES IS THE DIDJ, and it is not one of
-			 * them; see the note above the row loop. */
-			int i3;
-			int vis  = wiz_dev_rows(&d);
-			int ly   = wiz_dev_y(&d);
-			int rows, rw;
-			char foot[64];
-			if (!g_ndevs) devices_scan();
-			rows = g_ndevs;                  /* every row is a real profile now */
-			rw   = wiz_dev_w(&d, vis, rows);
-			g_dev_rows = vis;
-			/* Clamp here rather than at the wheel event: how many rows fit
-			 * depends on the dialog height, which depends on the window, and a
-			 * scroll position that was legal when it was set can stop being
-			 * one when the window is resized under it. */
-			if (g_dev_top > rows - vis) g_dev_top = rows - vis;
-			if (g_dev_top < 0) g_dev_top = 0;
-
-			/* TWO LINES, NOT THREE, AND BOTH INSIDE 32 COLUMNS.
+			 * AND, ONCE SEVERAL ARE INSTALLED, IT IS THE SWITCH. Picking a row
+			 * whose device is already here parks the live tree and moves that
+			 * one in — see dev_commit(). The marks in each row say which is
+			 * which: a diamond and "active" for the one that boots now,
+			 * "installed" for one waiting, "firmware only" for one whose
+			 * sysroot has never been built.
 			 *
-			 * The third line said "system files." on its own and cost a whole row
-			 * of the list to say it. The other two were 38 characters, and in
-			 * portrait this page is 264 logical pixels wide — 32 columns past the
-			 * banner — so both of them ran off the right edge of the panel and had
-			 * done since the page was written. Rewritten to fit rather than
-			 * clipped, because the sentence that gets cut is the one explaining
-			 * what the next page will do. */
-			text(r, bx, by, "Pick the one you own - the next", C_TEXT_DIM);
-			text(r, bx, by + 10, "page fetches its system files.", C_TEXT_DIM);
-
-			/* The well the rows sit in, so the list reads as one object with an
-			 * edge to it rather than as tiles floating on the panel — which is
-			 * what tells you there is more of it below the fold. */
-			chip(r, bx - 3, ly - 4, rw + 16, vis * WIZ_DEV_ROW_H + 4, C_VOID, 0);
-
-			/* EVERY ROW IS A REAL PROFILE. There used to be a synthetic Didj
+			 * EVERY ROW IS A REAL PROFILE. There used to be a synthetic Didj
 			 * row appended past the end of g_devs, which selected nothing and
 			 * jumped to the "Didj support" page instead. It existed because
 			 * there was no didj.conf and "Didj" is the word someone with a
@@ -4132,82 +4617,31 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 			 *
 			 * Conflating them is what the deleted comment did, and it took a
 			 * correction from someone who knew the provenance to catch it. */
+			struct devlist L;
+			if (!g_ndevs) devices_scan();
+			L = dev_layout_wiz(&d);
+			g_dev_rows = L.vis;
+			/* Clamp here rather than at the wheel event: how many rows fit
+			 * depends on the dialog height, which depends on the window, and a
+			 * scroll position that was legal when it was set can stop being one
+			 * when the window is resized under it. THE BOUNDS ONLY — never the
+			 * selection, which is what would defeat the wheel and the drag. */
+			dev_clamp_top();
 
-			for (i3 = g_dev_top; i3 < rows && i3 - g_dev_top < vis; i3++) {
-				int ry  = ly + (i3 - g_dev_top) * WIZ_DEV_ROW_H;
-				int on  = (i3 == g_dev_sel);
-				int hot = inside(g_mx, g_my, bx, ry - 3, rw, 24);
-				const char *nm  = g_devs[i3].name;
-				const char *lcd = g_devs[i3].lcd;
-				char line[96];
+			/* TWO LINES, NOT THREE, AND BOTH INSIDE 32 COLUMNS.
+			 *
+			 * The third line said "system files." on its own and cost a whole row
+			 * of the list to say it. The other two were 38 characters, and in
+			 * portrait this page is 264 logical pixels wide — 32 columns past the
+			 * banner — so both of them ran off the right edge of the panel and had
+			 * done since the page was written. Rewritten to fit rather than
+			 * clipped, because the sentence that gets cut is the one explaining
+			 * what the next page will do. */
+			text(r, bx, by, "Pick the one you own - the next", C_TEXT_DIM);
+			text(r, bx, by + 10, "page fetches its system files.", C_TEXT_DIM);
 
-				fill(r, bx, ry - 3, rw, 24,
-				     hot ? C_BAR_HI : on ? C_PANEL_HI : C_PANEL);
-				/* PLACEHOLDER ART. A screen-shaped box in the panel colour,
-				 * with the device's own aspect ratio — 480x272 is wide and
-				 * squat, 1024x600 less so, the Didj's 320x240 nearly square, so
-				 * they are already distinguishable without a photograph. Real
-				 * device pictures go in runtime/devices/<id>.png; see the README
-				 * there. The loader is not wired up yet, and a box that is
-				 * visibly a placeholder is better than a picture of the wrong
-				 * tablet. */
-				{
-					int pw = 34, ph = 21, sw, sh, dw = 0, dh = 0;
-					if (sscanf(lcd, "%dx%d", &sw, &sh) == 2 &&
-					    sw > 0 && sh > 0) {
-						dw = pw; dh = pw * sh / sw;
-						if (dh > ph) { dh = ph; dw = ph * sw / sh; }
-					}
-					if (dw <= 0) { dw = pw; dh = ph; }
-					fill(r, bx + 3, ry, pw, ph, C_VOID);
-					fill(r, bx + 3 + (pw - dw) / 2, ry + (ph - dh) / 2,
-					     dw, dh, on || hot ? C_EDGE_LT : C_EDGE_DK);
-				}
-				text(r, bx + 44, ry + 1, nm,
-				     on || hot ? C_ACCENT : C_TEXT);
-				{
-					snprintf(line, sizeof(line), "%s%s", lcd,
-					         g_devs[i3].installed ? "   installed" : "");
-					/* ONLY IF THE NAME LEAVES ROOM FOR IT, the same test the
-					 * launcher makes before drawing a package ID beside a
-					 * title. In portrait the rows are 86 pixels narrower and
-					 * the codename was drawn straight through the tail of the
-					 * name: "LeapPad ExplorerMADRID". */
-					if (g_devs[i3].plat[0] &&
-					    text_w(nm) + text_w(g_devs[i3].plat) + 12 < rw - 50)
-						text(r, bx + rw - 6 - text_w(g_devs[i3].plat), ry + 1,
-						     g_devs[i3].plat, C_DIMMEST);
-				}
-				text(r, bx + 44, ry + 12, line, C_TEXT_DIM);
-			}
-
-			/* Scrollbar, for the same reason the launcher and the library have
-			 * one: with a dozen rows and four of them on screen, "how much of
-			 * this is there" cannot be answered by the rows themselves. Drawn
-			 * inside the well and clear of them, so nothing overlaps. */
-			if (rows > vis) {
-				int track = vis * WIZ_DEV_ROW_H - 4;
-				int knob  = track * vis / rows;
-				int pos   = track * g_dev_top / rows;
-				int sx    = bx + rw + 4;
-				if (knob < 10) knob = 10;
-				if (pos > track - knob) pos = track - knob;
-				if (pos < 0) pos = 0;
-				rfill(r, sx, ly, 4, track, C_SHADOW, 170);
-				rfill(r, sx, ly + pos, 4, knob, C_EDGE_LT, 210);
-				/* WHERE YOU ARE, under the list. Only when it scrolls: with
-				 * everything already on screen the line is noise, and this is
-				 * the one page in the wizard with no room going spare. The
-				 * range rather than the bare total, for the reason the launcher
-				 * gives — and the hint drops off at the bottom, because "scroll
-				 * for more" under "9-12 of 12" is an instruction to do something
-				 * that does nothing. */
-				snprintf(foot, sizeof(foot), "%d-%d of %d%s", g_dev_top + 1,
-				         g_dev_top + vis < rows ? g_dev_top + vis : rows, rows,
-				         g_dev_top + vis < rows
-				         ? " " GL_DIAMOND " scroll for more" : "");
-				text(r, bx, ly + vis * WIZ_DEV_ROW_H + 2, foot, C_TEXT_DIM);
-			}
+			dev_draw(r, &L);
+			dev_draw_footer(r, &L);
 			break;
 		}
 		case WIZ_SYSTEM:
@@ -4808,6 +5242,20 @@ void ui_draw_idle(SDL_Renderer *ren, int lw, int lh)
 		text_c(ren, 0, lw, cy + 26, mark, C_ACCENT);
 	}
 	text_c(ren, 0, lw, cy + 40, "File " GL_SUB " Run System Menu", C_TEXT_DIM);
+	/* WHICH DEVICE THIS WILL BOOT, on the one screen that has room to say it.
+	 * With several installed there is no other way to know before pressing
+	 * the button, and "it booted the wrong tablet" is a poor way to find out.
+	 * Silent when nothing is installed: the wizard is what that user needs,
+	 * and it opens by itself. */
+	{
+		int i;
+		if (!g_ndevs) devices_scan();
+		for (i = 0; i < g_ndevs; i++)
+			if (g_devs[i].active) {
+				text_c(ren, 0, lw, cy + 54, g_devs[i].name, C_ACCENT);
+				break;
+			}
+	}
 }
 
 /* The entrance, and the guarantee that it is undone. A modal fades up and
@@ -4988,8 +5436,27 @@ void ui_debug_state(const char *spec)
 		 * otherwise undo this; the draw clamps whatever lands here. */
 		if (g_wiz_page == WIZ_DEVICE && name[4]) {
 			devices_scan();
-			g_dev_top = !strcmp(name + 4, "end") ? g_ndevs + 1
+			g_dev_top = !strcmp(name + 4, "end") ? g_ndevs
 			                                     : atoi(name + 4);
+		}
+	}
+	/* `device` opens Options -> Device. `device<N>` scrolls the list to row N,
+	 * which is how the scrollbar knob gets captured at a known offset —
+	 * XWayland delivers no synthetic button, so a drag cannot be tested by
+	 * clicking and the geometry has to be checked by rendering it. `deviceend`
+	 * scrolls to the bottom. `devicesel<N>` moves the CURSOR to N instead and
+	 * lets the view follow, which is what an arrow key does. */
+	else if (!strncmp(name, "device", 6)) {
+		devices_scan();
+		g_modal = M_DEVICE;
+		if (!strncmp(name + 6, "sel", 3)) {
+			g_dev_sel = atoi(name + 9);
+			if (g_dev_sel < 0) g_dev_sel = 0;
+			if (g_dev_sel > g_ndevs - 1) g_dev_sel = g_ndevs - 1;
+			dev_reveal();
+		} else if (name[6]) {
+			g_dev_top = !strcmp(name + 6, "end") ? g_ndevs : atoi(name + 6);
+			dev_clamp_top();
 		}
 	}
 	/* hovering an item only makes sense once the menu is open */
@@ -5030,6 +5497,7 @@ static void cycle_rotate(void)
  */
 static void modal_dismiss(void)
 {
+	g_dev_drag = 0;
 	/* Only panels that can be opened FROM something consult g_fb_return; a
 	 * value left over from an earlier open must not teleport anyone. */
 	if ((g_modal == M_FILES || g_modal == M_PROGRESS || g_modal == M_MSG) &&
@@ -5138,6 +5606,13 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		for (i = 0; i < 3; i++) {
 			SDL_Rect b = wiz_btn(&d, i);
 			if (!inside(mx, my, b.x, b.y, b.w, b.h)) continue;
+			/* LEAVING THE PAGE FORWARDS IS A COMMIT. The arrow keys move a
+			 * cursor and write nothing — that is what keeps ui.cfg off the
+			 * keyboard's hot path — so somebody who picked their tablet with
+			 * Down, Down, Next would otherwise have chosen nothing at all.
+			 * Back and Cancel do NOT commit, which is what makes Cancel mean
+			 * something. */
+			if (i == 1 && g_wiz_page == WIZ_DEVICE) dev_commit();
 			if (i == 0 && g_wiz_page > 0) g_wiz_page = wiz_step(g_wiz_page, -1);
 			else if (i == 1) {
 				if (g_wiz_page < WIZ_PAGES - 1) g_wiz_page = wiz_step(g_wiz_page, +1);
@@ -5145,22 +5620,11 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			} else if (i == 2) { g_modal = M_NONE; g_wiz_page = 0; }
 			return 1;
 		}
-		/* picking a device */
+		/* picking a device — rows, scrollbar and knob, all in one place so
+		 * this page and Options -> Device cannot drift apart */
 		if (g_wiz_page == WIZ_DEVICE) {
-			int vis  = wiz_dev_rows(&d);
-			int ly   = wiz_dev_y(&d);
-			int rows = g_ndevs + 1;
-			int rw   = wiz_dev_w(&d, vis, rows);
-			int i3;
-			for (i3 = g_dev_top; i3 < rows && i3 - g_dev_top < vis; i3++) {
-				int ry = ly + (i3 - g_dev_top) * WIZ_DEV_ROW_H;
-				if (!inside(mx, my, d.x + 62, ry - 3, rw, 24)) continue;
-				g_dev_sel = i3;
-				snprintf(g_cfg.device, sizeof(g_cfg.device), "%s",
-				         g_devs[i3].id);
-				ui_cfg_save();
-				return 1;
-			}
+			struct devlist L = dev_layout_wiz(&d);
+			if (dev_click(&L, mx, my)) return 1;
 		}
 		/* the per-page Browse buttons */
 		if (g_wiz_page == WIZ_SYSTEM && pq.rootfs && !pq.sysroot &&
@@ -5458,6 +5922,11 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		ui_cfg_save();
 		return 1;
 	}
+	if (g_modal == M_DEVICE) {
+		struct devlist L = dev_layout_modal(&d);
+		dev_click(&L, mx, my);
+		return 1;
+	}
 	if (g_modal == M_SYSTEM) {
 		if (row_hit(&d, 0, mx, my)) g_cfg.boot_on_start = !g_cfg.boot_on_start;
 		else if (row_hit(&d, 1, mx, my)) g_cfg.fast_boot = !g_cfg.fast_boot;
@@ -5484,6 +5953,7 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 	switch (e->type) {
 	case SDL_MOUSEMOTION:
 		g_mx = e->motion.x; g_my = e->motion.y;
+		if (dev_drag_motion(lw, lh, g_my)) return 1;
 		if (g_open_menu >= 0) {
 			const struct menu *m = &MENUS[g_open_menu];
 			int w = menu_width(m), i;
@@ -5537,6 +6007,7 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 	}
 
 	case SDL_MOUSEBUTTONUP:
+		g_dev_drag = 0;
 		if (g_modal != M_NONE) return 1;
 		if (g_open_menu >= 0) return 1;
 		return e->button.y < UI_BAR_H;
@@ -5574,17 +6045,19 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 			if (g_up_scroll < 0) g_up_scroll = 0;
 			return 1;
 		}
-		/* The device picker, which is the only page of the wizard with more
-		 * rows than it can show. One row a notch rather than the two the
-		 * launcher and the library take: those lists are hundreds long and this
-		 * one is a dozen, so a doubled step would cross half of what is on
-		 * screen at a time. Upper bound left to the draw, for the reason
-		 * M_UPDATE gives above. */
-		if (g_modal == M_WIZARD && g_wiz_page == WIZ_DEVICE) {
+		/* The device list, on either of the two screens that show it. One row
+		 * a notch rather than the two the launcher and the library take: those
+		 * lists are hundreds long and this one is a dozen, so a doubled step
+		 * would cross half of what is on screen at a time.
+		 *
+		 * THE CLAMP USED TO BE AGAINST g_ndevs + 1, left over from the
+		 * synthetic Didj row that no longer exists — so the list could scroll
+		 * one row past its own end and show an empty strip. dev_clamp_top()
+		 * is the same bound the draw and the hit test use. */
+		if (g_modal == M_DEVICE ||
+		    (g_modal == M_WIZARD && g_wiz_page == WIZ_DEVICE)) {
 			g_dev_top -= e->wheel.y;
-			if (g_dev_top > g_ndevs + 1 - g_dev_rows)
-				g_dev_top = g_ndevs + 1 - g_dev_rows;
-			if (g_dev_top < 0) g_dev_top = 0;
+			dev_clamp_top();
 			return 1;
 		}
 		return g_modal != M_NONE;
@@ -5622,6 +6095,29 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 				g_prof_focus = 0;
 				return 1;
 			}
+		}
+		/* THE DEVICE LIST, on either screen that shows it. Arrows move the
+		 * cursor and Return commits; Escape closes the modal and leaves the
+		 * wizard's page alone, since the wizard has its own buttons. Nothing
+		 * here writes ui.cfg — see dev_key(). */
+		if (g_modal == M_DEVICE) {
+			if (e->key.keysym.sym == SDLK_ESCAPE) { modal_dismiss(); return 1; }
+			dev_key(e->key.keysym.sym);
+			return 1;              /* the modal swallows the rest */
+		}
+		if (g_modal == M_WIZARD && g_wiz_page == WIZ_DEVICE) {
+			/* RETURN IS "Next", NOT "commit and sit there". Everywhere else
+			 * in this file Return closes the modal — the generic branch at
+			 * the bottom does it — and on a wizard page that meant Return
+			 * abandoned setup. Here it does what the button under the list
+			 * does: takes the highlighted device and moves on. */
+			if (e->key.keysym.sym == SDLK_RETURN ||
+			    e->key.keysym.sym == SDLK_KP_ENTER) {
+				dev_commit();
+				g_wiz_page = wiz_step(g_wiz_page, +1);
+				return 1;
+			}
+			if (dev_key(e->key.keysym.sym)) return 1;
 		}
 		/* THE LAUNCHER HAD NO KEYBOARD AT ALL. Every other list in this file
 		 * has arrows, paging and Home/End; this one fell through to the

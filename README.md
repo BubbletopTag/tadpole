@@ -632,12 +632,40 @@ tools/                  install and diagnostic scripts
 tools/test-build.sh     build from scratch in a clean container, 3 distributions
 tools/compat-sweep.sh   launch every installed title and record what it did
 rootfs/                 firmware you installed          (not distributed)
-runtime/sysroot/        the guest's filesystem view
+runtime/devices/        one .conf per device Tadpole knows how to be
+runtime/sysroot/        the live device's filesystem view
+runtime/installs/<id>/  the other devices you have installed, parked
 docs/HANDOVER.md        engineering notes — how it works and why
 ```
 
 `docs/HANDOVER.md` is the real documentation: every non-obvious decision, every
 bug that took more than a few minutes, and the measurements behind them.
+
+---
+
+## More than one device
+
+Tadpole can hold several devices' system files at once and switch between them.
+Install each one as normal — the firmware says which device it is, so nothing
+has to be told — and then:
+
+```
+./tadpole.sh --devices           what is installed, and which one is live
+./tadpole.sh --device leappad2   switch to it, and carry on
+```
+
+or, in the front end, **Options → Device**. The list marks the one that is
+running; picking another switches to it. The wizard's "Which device?" page is
+the same list and does the same thing.
+
+Saves, installed titles, `/flags` and the profile picture all belong to the
+device they were made on and stay with it: switching parks the live tree under
+`runtime/installs/<id>/` and moves the wanted one into `runtime/sysroot`. It is
+two renames, so it takes no time and copies nothing.
+
+Two firmware trees do share a lot of bytes — the Leapster GS is a LeapPad2 with
+a smaller screen, and 30 of its 31 Brio libraries are byte-identical.
+`./tools/dedupe-rootfs.py` reports how much and `--link` hardlinks it away.
 
 ---
 

@@ -337,8 +337,10 @@ WANT="$(cat "$HERE/app/.build-id" 2>/dev/null || echo unknown)"
 if [ ! -d "$DATA" ] || [ "$(cat "$STAMP" 2>/dev/null || true)" != "$WANT" ]; then
     echo "Tadpole: setting up $DATA"
     mkdir -p "$DATA"
-    # Program parts only. rootfs/, runtime/sysroot/, runtime/libs/ and games/
-    # belong to the user and are never overwritten.
+    # Program parts only. rootfs/, runtime/sysroot/, runtime/installs/,
+    # runtime/libs/ and games/ belong to the user and are never overwritten.
+    # (runtime/installs/ is every device the user has installed but is not
+    # running — the same kind of thing as runtime/sysroot, one per device.)
     cp -a "$HERE/app/tadpole.sh"   "$DATA/"
     cp -a "$HERE/app/tadpole.png"  "$DATA/"
     cp -a "$HERE/app/tools"        "$DATA/"

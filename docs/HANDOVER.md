@@ -3491,7 +3491,81 @@ The backup PRESERVES relative paths (`.erased-<stamp>/rootfs/<ver>`,
 version flattened everything into one directory, which lost where each piece came
 from and made the printed restore command wrong.
 
+It erases ONE DEVICE — the live one — since several can be installed. `--all`
+takes the lot, `--device <id>` names one. The old behaviour walked every
+directory under `rootfs/` and took them all, which with a LeapPad2 and a
+LeapPad3 side by side would have thrown away the one that was not on screen from
+a menu item that says nothing about which. If another device is still installed
+when the live one goes, it is activated, so the emulator is never left with an
+empty `runtime/sysroot` and a perfectly good tree sitting in `runtime/installs`.
+
 Never touches `games/` or `sources/`.
+
+## Several devices at once
+
+`runtime/sysroot` holds exactly ONE device's assembled tree. The others are
+parked:
+
+```
+runtime/sysroot                    the live device's tree
+runtime/libs                       ...and its flat directory of guest libraries
+runtime/installs/<devid>/sysroot   a device that is installed but not running
+runtime/installs/<devid>/libs
+runtime/sysroot/.tadpole-device    one line: the DEV_ID this tree was built for
+```
+
+Switching is `tad_activate_device()` in `runtime/device.sh`: park the live pair
+under `runtime/installs/<id>/`, move the wanted pair out. Two renames per
+direction, so it costs the same whether the tree is 3 MB or 30 GB, and if it is
+ever interrupted both halves are visible on disk rather than merged.
+
+**Why `runtime/sysroot` is still a directory and not a symlink.** Three things
+outside the shell's reach hardcode that literal path — `tadpole_boot.c` reads
+the boot logo out of it, `tadpole_view.c` builds glasspole's Windows command
+line from it and validates `.swf` paths against it, and `tadpole/Makefile` links
+ARM objects against `../runtime/libs/libc.so.0`. A symlink would also be a
+Windows-only trap: MSYS symlinks are invisible to native code, which is exactly
+why `setup-sysroot.sh`'s `lns()` is a copy there. Renaming needs no symlink
+support and leaves every existing path correct.
+
+**Why the live device is recorded rather than detected.** The obvious source is
+the sysroot's own `Firmware/meta.inf`, the same file autodetect reads off a
+rootfs. That works exactly once: package-manager's `RebuildPackageDatabase`
+rewrites every `meta.inf` in the tree and blanks `Device=` — which is why
+`shadow_meta()` exists at all — so from the first boot onward the sysroot
+identifies nothing. `setup-sysroot.sh` writes `.tadpole-device` at build time,
+and `tadpole.sh` stamps a tree assembled before that line existed, once, from
+the rootfs its `/bin` points into.
+
+**What the saved setting means now.** `ui.cfg`'s `device` line used to be an
+override that could contradict the installed firmware, and a stale one written
+by the wizard before any firmware existed once booted a LeapPad2 profile against
+an Ultra rootfs — a working emulator showing a corrupt screen. It now SELECTS
+which installed device is live: naming one that is installed switches to it
+wholesale (rootfs, sysroot, libraries and profile together), and naming one that
+is not prints a line and changes nothing. The pairing that caused the original
+bug is unreachable by construction, because the profile is always loaded for the
+tree that is actually assembled.
+
+**Instance directories are per device** — `/tmp/tadpole-<devid>`. They hold the
+framebuffer, the input FIFOs, the audio handshake and the GL ring, all sized by
+the device that wrote them, and the reap at the top of every viewer launch kills
+"the guest bound to this directory". One shared name means an Ultra session can
+open a LeapPad2's leftovers and kill its guest. `/tmp/tadpole` is kept as a
+symlink to whichever is live, because that is the name `tools/tap.py`,
+`tools/key.py`, `tools/fbshot.py`, `tools/nav-label.py` and `tools/burst.py` all
+default to — taken only when the name is free or the directory there is empty,
+never over another checkout's live session.
+
+**Disk.** A sysroot is mostly symlinks into its own rootfs plus the directories
+the guest writes to, so the marginal cost of a second device is its extracted
+firmware under `rootfs/`. Much of that is shared bytes — the Leapster GS is a
+LeapPad2 with a smaller screen and 30 of its 31 Brio libraries are
+byte-identical — so `tools/dedupe-rootfs.py` reports the overlap and `--link`
+hardlinks it away. Hardlinks rather than a content store because every part of
+Tadpole walks `rootfs/<version>/` as a whole filesystem; a hardlink is invisible
+to all of it. It is opt-in and dry-run by default, because linked files share
+storage and `rootfs/` being read-only is a promise about today's code.
 
 ## AppImage
 

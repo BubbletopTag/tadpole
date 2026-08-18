@@ -4,6 +4,10 @@ games/
 rootfs/
 sources/
 runtime/sysroot/
+# Every device that is installed but not live: runtime/installs/<devid>/ holds
+# the same generated sysroot and libs as the entries above, parked. Same
+# content, same reason never to commit it.
+runtime/installs/
 # The Didj controller overlay, staged by tools/install-didj.sh and reapplied to
 # every Didj game it installs. Downloaded, not ours to commit.
 runtime/didj/

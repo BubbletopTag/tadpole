@@ -43,13 +43,41 @@ is_ancestor() {
     done
     return 1
 }
+# REAP THIS PROBE'S PROCESSES, NOT THE MACHINE'S.
+#
+# This used to finish with two blanket sweeps —
+#     pgrep -x tadpole-view   |  kill
+#     pgrep -x qemu-arm       |  kill -9
+# — which take out EVERY viewer and EVERY guest on the box, including a session
+# somebody is sitting in front of and every worker of a parallel sweep. It was
+# survivable while one emulator could exist at a time; with several devices
+# installed and a viewer per device it is strictly worse, and it has already
+# cost real work.
+#
+# Everything this probe starts inherits TADPOLE_DIR, and that is unique to the
+# run, so /proc/<pid>/environ answers "is this one mine?" exactly. `pgrep -f`
+# on the same string is NOT the same test — it matches the command line, which
+# also matches the shell that launched us, and killing your own parent looks
+# precisely like the emulator dying — hence is_ancestor() above.
+mine() {                                  # $1 = pid -> 0 if it is ours
+    tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null |
+        grep -qx "TADPOLE_DIR=$TADPOLE_DIR"
+}
 reap() {
+    local pid
     for pid in $(pgrep -f "TADPOLE_DIR=$TADPOLE_DIR" 2>/dev/null); do
         is_ancestor "$pid" && continue
         kill -9 "$pid" 2>/dev/null
     done
-    for pid in $(pgrep -x tadpole-view 2>/dev/null); do kill "$pid" 2>/dev/null; done
-    for pid in $(pgrep -x qemu-arm 2>/dev/null); do kill -9 "$pid" 2>/dev/null; done
+    # The viewer is started by this script rather than through tadpole.sh, so
+    # it does not appear in the pattern above — but it does carry the exported
+    # variable, so the environ test finds it and nobody else's.
+    for pid in $(pgrep -x tadpole-view 2>/dev/null); do
+        mine "$pid" && kill "$pid" 2>/dev/null
+    done
+    for pid in $(pgrep -x qemu-arm 2>/dev/null) $(pgrep -x glasspole 2>/dev/null); do
+        mine "$pid" && kill -9 "$pid" 2>/dev/null
+    done
     rm -f "$TADPOLE_DIR/.lock"
 }
 reap; sleep 1

@@ -48,6 +48,12 @@ mkdir -p "$DEST/LF/Bulk" || exit 1
 for d in bin boot etc Firmware lib linuxrc mnt sbin usr erootfs.md5; do
     [ -e "$SRC/$d" ] && ln -sfn "$SRC/$d" "$DEST/$d"
 done
+# WHOSE DEVICE THIS WORKER IS. A copy rather than a link, because it is one
+# line and because a worker tree outliving its master should still be able to
+# say what it was built from. Nothing boots differently without it — the shell
+# reads the master's marker — but a stray /tmp/tadpole-w3 that cannot name its
+# own device is a puzzle nobody needs.
+[ -e "$SRC/.tadpole-device" ] && cp -f "$SRC/.tadpole-device" "$DEST/.tadpole-device"
 ln -sfn "$SRC/LF/Base" "$DEST/LF/Base"
 for d in ProgramFiles Downloads LanguagePack LanguagePack_en Music settings.cfg; do
     [ -e "$SRC/LF/Bulk/$d" ] && ln -sfn "$SRC/LF/Bulk/$d" "$DEST/LF/Bulk/$d"

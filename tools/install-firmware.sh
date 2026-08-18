@@ -252,9 +252,26 @@ fi
 # them the other way round produced
 #     WARNING: no sort file at .../LpadAssets_en/Data/ProgramFileAppOrder.json
 # and content written where nothing would look for it.
+#
+# NAME THE DEVICE WE JUST EXTRACTED. With several devices installable at once,
+# a bare setup-sysroot.sh rebuilds whichever one is LIVE — so installing a
+# LeapPad2 while a LeapPad3 was live would extract the LeapPad2's firmware,
+# rebuild the LeapPad3, and then install the LeapPad2's content packages into
+# it. Everything would appear to succeed. The firmware says what it is in its
+# own Firmware/meta.inf, which is the same answer autodetect uses.
 if [ -x "$PROJ/runtime/setup-sysroot.sh" ]; then
-    echo "==> building the sysroot"
-    "$PROJ/runtime/setup-sysroot.sh" || echo "  setup-sysroot.sh failed" >&2
+    NEWDEV=""
+    if [ -r "$PROJ/runtime/device.sh" ]; then
+        # shellcheck disable=SC1091
+        . "$PROJ/runtime/device.sh"
+        NEWDEV="$(tad_detect_device "$DEST/ubi_rfs" 2>/dev/null)"
+    fi
+    if [ -n "$NEWDEV" ]; then
+        echo "==> building the sysroot for $NEWDEV"
+    else
+        echo "==> building the sysroot"
+    fi
+    "$PROJ/runtime/setup-sysroot.sh" $NEWDEV || echo "  setup-sysroot.sh failed" >&2
 fi
 
 

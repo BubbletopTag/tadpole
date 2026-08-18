@@ -574,7 +574,59 @@ def build_sysroot(rootfs):
         if not os.path.exists(j):
             write_text(j, UIDATA)
 
+    # WHOSE TREE THIS IS. runtime/setup-sysroot.sh writes the same line, and
+    # everything that asks "which device is live" reads it: the shell's
+    # tad_active_device(), the front end's device picker, and the switch that
+    # parks one tree and moves another in. Re-detecting it from the sysroot's
+    # own Firmware/meta.inf does not work — package-manager rewrites every
+    # meta.inf in the tree and blanks Device= — so it is recorded here, once,
+    # while the answer is still known.
+    #
+    # This is the Windows path, where the shell script cannot run. It has to
+    # write the marker itself or a Windows install identifies as no device at
+    # all and the picker has nothing to tick.
+    dev = detect_device(rootfs)
+    if dev:
+        write_text(os.path.join(sysroot, ".tadpole-device"), dev + "\n")
+
     return sysroot
+
+
+def detect_device(rootfs):
+    """-> the DEV_ID this firmware belongs to, by the same test the shell
+    makes: Firmware/meta.inf's Device= against each profile's
+    DEV_META_DEVICE. Empty when nothing matches, which is the honest answer
+    for a firmware there is no profile for."""
+    meta = os.path.join(rootfs, "Firmware", "meta.inf")
+    want = ""
+    try:
+        with open(meta, "r", errors="replace") as f:
+            for line in f:
+                if line.startswith('Device="'):
+                    want = line.split('"')[1]
+                    break
+    except OSError:
+        return ""
+    if not want:
+        return ""
+    devdir = os.path.join(PROJ, "runtime", "devices")
+    try:
+        names = sorted(os.listdir(devdir))
+    except OSError:
+        return ""
+    for name in names:
+        if not name.endswith(".conf"):
+            continue
+        dev_id = meta_dev = ""
+        with open(os.path.join(devdir, name), "r", errors="replace") as f:
+            for line in f:
+                if line.startswith("DEV_ID="):
+                    dev_id = line.split("=", 1)[1].strip().strip('"')
+                elif line.startswith("DEV_META_DEVICE="):
+                    meta_dev = line.split("=", 1)[1].strip().strip('"')
+        if meta_dev and meta_dev == want:
+            return dev_id
+    return ""
 
 
 def link_runtime_libs(rootfs):

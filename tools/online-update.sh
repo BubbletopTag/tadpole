@@ -73,8 +73,30 @@ then
     exit 1
 fi
 
-echo "==> downloading packages"
-"$PY" "$HERE/fetch-firmware.py" --get all -o "$CACHE" || {
+# WHICH DEVICE TO DOWNLOAD, which is the one question this had never asked.
+#
+# fetch-firmware.py defaults to --device leappad2, so Online System Update
+# fetched a LeapPad2 no matter what the wizard's "Which device?" page had been
+# set to — and that page exists for exactly this decision, since which firmware
+# to download is the one thing that cannot be autodetected before there IS any
+# firmware. A Leapster GS owner picked their handheld and was sent a LeapPad2.
+#
+# NOT tad_resolve_device(): that prefers whatever is already installed, which
+# is the right answer for booting and the wrong one here. This is a download,
+# and the user's stated choice outranks what happens to be on disk. $TADPOLE_DEVICE
+# first, then the wizard's saved answer, then whatever is live, then the
+# historical default.
+DEVICE="${TADPOLE_DEVICE:-}"
+if [ -z "$DEVICE" ] && [ -r "$PROJ/runtime/device.sh" ]; then
+    # shellcheck disable=SC1091
+    . "$PROJ/runtime/device.sh"
+    DEVICE="$(tad_ui_cfg_device)"
+    [ -n "$DEVICE" ] || DEVICE="$(tad_active_device)"
+fi
+: "${DEVICE:=leappad2}"
+
+echo "==> downloading packages for $DEVICE"
+"$PY" "$HERE/fetch-firmware.py" --device "$DEVICE" --get all -o "$CACHE" || {
     echo "download failed; nothing has been installed." >&2
     exit 1
 }
