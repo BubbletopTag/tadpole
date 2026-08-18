@@ -68,6 +68,7 @@ final class Tools {
         if (name.equals("install-game"))   return new InstallGame();
         if (name.equals("scan-games"))     return new ScanGames();
         if (name.equals("install-firmware")) return new InstallFirmware();
+        if (name.equals("install-content"))  return new InstallContent();
         return null;
     }
 

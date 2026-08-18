@@ -26,10 +26,12 @@ import java.util.zip.GZIPInputStream;
  * decompressing twice; recording each entry's offset once means the second pass
  * is a seek.
  *
- * <p>GZIP IS DECOMPRESSED TO A TEMPORARY FILE FIRST rather than indexed in
- * place, because an offset into a gzip stream is not something you can seek to.
- * Python's "r:*" auto-detects and hides this; the cost here is one copy of an
- * archive that is usually not compressed at all.
+ * <p>COMPRESSED ARCHIVES ARE DECOMPRESSED TO A TEMPORARY FILE FIRST rather
+ * than indexed in place, because an offset into a gzip or bzip2 stream is not
+ * something you can seek to. Python's "r:*" auto-detects and hides this. Both
+ * are recognised by magic rather than by extension, which matters here: a
+ * LeapFrog .lf2 content pack is a bzip2 tar and says nothing of the sort in its
+ * name.
  */
 final class Tar {
     static final int BLOCK = 512;
@@ -95,17 +97,25 @@ final class Tar {
         File temp = null;
         File plain = path;
 
-        if (isGzip(path)) {
+        int kind = magic(path);
+        if (kind != 0) {
             temp = File.createTempFile("tadpole-tar", ".tar", path.getParentFile());
-            InputStream in = new GZIPInputStream(new FileInputStream(path), 65536);
+            OutputStream out = new java.io.BufferedOutputStream(
+                    new FileOutputStream(temp), 1 << 16);
             try {
-                OutputStream out = new FileOutputStream(temp);
-                try {
-                    byte[] buf = new byte[65536];
-                    int n;
-                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
-                } finally { out.close(); }
-            } finally { in.close(); }
+                if (kind == 1) {
+                    InputStream in = new GZIPInputStream(new FileInputStream(path), 65536);
+                    try {
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                    } finally { in.close(); }
+                } else {
+                    InputStream in = new java.io.BufferedInputStream(
+                            new FileInputStream(path), 1 << 16);
+                    try { Bzip2.decompress(in, out); } finally { in.close(); }
+                }
+            } finally { out.close(); }
             plain = temp;
         }
 
@@ -157,11 +167,14 @@ final class Tar {
         return new Archive(plain, temp, out);
     }
 
-    private static boolean isGzip(File f) throws IOException {
+    /** 0 = plain tar, 1 = gzip, 2 = bzip2. By magic, never by extension. */
+    private static int magic(File f) throws IOException {
         InputStream in = new FileInputStream(f);
         try {
-            int a = in.read(), b = in.read();
-            return a == 0x1f && b == 0x8b;
+            int a = in.read(), b = in.read(), c = in.read();
+            if (a == 0x1f && b == 0x8b) return 1;
+            if (a == 'B' && b == 'Z' && c == 'h') return 2;
+            return 0;
         } finally { in.close(); }
     }
 

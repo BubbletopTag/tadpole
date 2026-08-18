@@ -2742,6 +2742,27 @@ static void fb_scan(void)
  * that makes a directory as a side effect of being opened is a surprise, and
  * the user is about to pick one anyway.
  */
+/* IS THIS A FOLDER SOMEBODY COULD HAVE PUT FILES IN? On Android the app's own
+ * data directory is not one — no file manager shows it and MTP does not export
+ * it — so a remembered path inside it is a leftover rather than a choice, and
+ * honouring it reopens the chooser somewhere nothing can ever appear. That is
+ * exactly what happens after any operation that defaults there once: the value
+ * is saved, and every later browse starts in the wrong place for good.
+ *
+ * A folder the user really did pick — /sdcard/LeapPad, say — is outside the
+ * private directory and is kept. */
+static int browse_usable(const char *p)
+{
+	if (!p || !*p) return 0;
+#ifdef __ANDROID__
+	{
+		size_t n = strlen(g_proj);
+		if (n && !strncmp(p, g_proj, n)) return 0;
+	}
+#endif
+	return access(p, R_OK) == 0;
+}
+
 static void default_browse_dir(char *out, size_t n)
 {
 #ifdef __ANDROID__
@@ -2809,7 +2830,7 @@ static void games_choose_folder(void)
 	if (g_gm_dir[0])            snprintf(start, sizeof(start), "%s", g_gm_dir);
 	else if (g_cfg.games_dir[0]) snprintf(start, sizeof(start), "%s", g_cfg.games_dir);
 	else                        default_browse_dir(start, sizeof(start));
-	if (access(start, R_OK) != 0)
+	if (!browse_usable(start))
 		default_browse_dir(start, sizeof(start));
 	/* No extension filter, so the browser offers "Use folder" — picking the
 	 * folder is the whole point here, not picking a file inside it. */
@@ -3078,7 +3099,7 @@ static void activate(int id)
 			snprintf(start, sizeof(start), "%s", g_cfg.games_dir);
 		else
 			default_browse_dir(start, sizeof(start));
-		if (access(start, R_OK) != 0)
+		if (!browse_usable(start))
 			default_browse_dir(start, sizeof(start));
 		fb_open("Install Package", start, ".tar", UI_ACT_INSTALL_PKG);
 		break;
@@ -3091,7 +3112,7 @@ static void activate(int id)
 			snprintf(start, sizeof(start), "%s", g_cfg.games_dir);
 		else
 			default_browse_dir(start, sizeof(start));
-		if (access(start, R_OK) != 0)
+		if (!browse_usable(start))
 			default_browse_dir(start, sizeof(start));
 		fb_open("Cartridge dump (.bin)", start, ".bin", UI_ACT_CONVERT_CART);
 		break;
@@ -5384,7 +5405,7 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		if (g_wiz_page == WIZ_SYSTEM &&
 		    inside(mx, my, d.x + 62, d.y + 92, 76, ui_btn_h())) {
 			path_join(start, sizeof(start), g_proj, "sources");
-			if (access(start, R_OK) != 0)
+			if (!browse_usable(start))
 				default_browse_dir(start, sizeof(start));
 			if (access(start, R_OK) != 0)
 				path_join(start, sizeof(start), g_proj, "");
@@ -5403,7 +5424,7 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			char dl[PATHMAX * 2];
 			if (home && *home) snprintf(dl, sizeof(dl), "%s/Downloads", home);
 			else               snprintf(dl, sizeof(dl), "%s", g_proj);
-			if (access(dl, R_OK) != 0)
+			if (!browse_usable(dl))
 				default_browse_dir(dl, sizeof(dl));
 			if (access(dl, R_OK) != 0)
 				snprintf(dl, sizeof(dl), "%s", home && *home ? home : g_proj);

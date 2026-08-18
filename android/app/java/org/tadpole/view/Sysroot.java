@@ -247,8 +247,15 @@ final class Sysroot {
                 "ProgramFiles/CameraWidget", "ProgramFiles/PhotoEditor",
                 "ProgramFiles/SneakPeekWidget",
                 "Downloads/PAD2-0x00210008-200000",
-                "Downloads/PADS-0x1F1E0002-300000" })
+                "Downloads/PADS-0x1F1E0002-300000", "Music" })
             mkdirs(new File(bulk, d));
+
+        /* The music library's index, empty. A live device has it as a
+         * zero-length file beside the album packages and the Music app fills it
+         * in on first run, so it is created here for the app to open rather
+         * than left as a missing path. */
+        File musicDb = new File(bulk, "Music/music.db");
+        if (!musicDb.isFile()) write(musicDb, "");
 
         /* Per-profile UI state. AppManager logs "CJSonFile::Load() failed" for
          * UIData.json when it is absent. ProgramFileAppOrder.json is

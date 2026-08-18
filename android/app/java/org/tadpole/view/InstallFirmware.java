@@ -27,21 +27,11 @@ import java.util.zip.ZipInputStream;
  * <ul>
  * <li>.lfp — an ordinary ZIP. The base firmware is one of these, and inside it
  *     is a UBI image: {@code Firmware-Base/5,53477376,C4G-E1M-W4K-erootfs.ubi}.
- * <li>.lf2 — a bzip2 tar despite the extension. NOT read here, because Java
- *     has no bzip2, and THIS IS THE ONE THING STILL MISSING FROM AN ON-DEVICE
- *     INSTALL. They hold the content packs, and the base firmware alone does
- *     not boot without them: AppManager dies with
- *
- *         CMfgData::Init: GetNorPartitionFilename failed
- *         signal SIGSEGV (11)  fault 0x00000068  libLightningBase.so
- *
- *     which names neither the packs nor a missing file. Measured: dropping
- *     just the five base widgets (CameraWidget, KeyboardWidget, PhotoEditor,
- *     SneakPeekWidget, VideoWidget — 5.8 MB in total) into
- *     LF/Bulk/ProgramFiles is enough to make it boot, and they are what the
- *     .lf2 packs carry. So this installs a rootfs that is byte-correct and a
- *     sysroot that is complete, and still needs a bzip2 reader before the
- *     result will start.
+ * <li>.lf2 — a bzip2 tar despite the extension. These are the CONTENT packs,
+ *     and they are not optional: the base image alone does not boot, dying in
+ *     libLightningBase having said only "CMfgData::Init:
+ *     GetNorPartitionFilename failed", because the widgets it wants live in
+ *     them. InstallContent handles them once the rootfs is down.
  * <li>.lf3 — encrypted; skipped without keys, same as the Python.
  * </ul>
  *
@@ -110,19 +100,17 @@ final class InstallFirmware implements Tools.Tool {
         out.println("==> sysroot");
         new Sysroot(Tools.proj(), ubiRfs, Tools.sysroot(), out).build();
 
+        /* THE CONTENT PACKS ARE PART OF THE INSTALL, not an optional extra.
+         * The base firmware on its own does not boot — AppManager dies in
+         * libLightningBase having said only "CMfgData::Init:
+         * GetNorPartitionFilename failed" — and what it wants is the widgets
+         * these carry. Doing them here means one action installs a system that
+         * starts, rather than one that extracts. */
+        out.println("==> content");
+        new InstallContent().install(src, out);
+
         out.println("");
         out.println("Installed. Tadpole can boot the system menu now.");
-        if (!skipped.isEmpty()) {
-            /* SAID AS A WARNING, not as a footnote: the base firmware does not
-             * boot without these, and the failure when they are absent is a
-             * SIGSEGV that names nothing useful. */
-            out.println("");
-            out.println("STILL NEEDED: the content packs — " + join(skipped));
-            out.println("These are bzip2 (.lf2), which is not read here yet, and the");
-            out.println("system will not start without the widgets they carry. Run");
-            out.println("tools/install-firmware.py on a desktop, or copy");
-            out.println("LF/Bulk/ProgramFiles across with android/push-firmware.sh.");
-        }
         return true;
     }
 
@@ -159,7 +147,10 @@ final class InstallFirmware implements Tools.Tool {
     private void classify(File f, List<File> zips, List<String> skipped) {
         String n = f.getName().toLowerCase(Locale.ROOT);
         if (n.endsWith(".lf3")) { skipped.add(f.getName() + " (encrypted)"); return; }
-        if (n.endsWith(".lf2")) { skipped.add(f.getName() + " (bzip2)"); return; }
+        /* .lf2 is a bzip2 tar and Tar reads those now; it is content rather
+         * than firmware, so it is not looked in for a UBI image — installing
+         * it is InstallContent's job, below. */
+        if (n.endsWith(".lf2")) return;
         if (looksLikeZip(f)) zips.add(f);
         else if (n.endsWith(".lfp") || n.endsWith(".zip")) skipped.add(f.getName());
     }
