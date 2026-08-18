@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           package="org.tadpole.view"
-          android:versionCode="3" android:versionName="0.1">
+          android:versionCode="4" android:versionName="0.1">
     <!-- BUMP THIS WHEN SOMETHING THE PLATFORM CACHES ABOUT THE APP CHANGES.
          Android evaluates 16 KB page compatibility once per package version and
          remembers the verdict: after the libraries were re-linked aligned, the
@@ -24,6 +24,13 @@
          SecurityException rather than at install. -->
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-feature android:name="android.hardware.camera" android:required="false"/>
+
+    <!-- AND THE MICROPHONE, WHICH IS PART OF THE SAME FEATURE. The Camera app
+         records video with sound, and libMicrophone.so opens ALSA capture on
+         plughw:0,0 to get it; the firmware has no way to make a silent
+         recording. Also used by the microphone widget on its own. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
 
     <!-- ES 1.1 and not 2.0, which is what SDL's own template declares. The
          viewer's GL is fixed-function because it is replaying the guest's

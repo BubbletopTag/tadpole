@@ -237,8 +237,6 @@ struct camdev {
 	u32  ov_w, ov_h;     /* surface size, from S_FBUF's v4l2_pix_format    */
 	u32  ov_pitch;       /* its bytesperline: the panel pitch, not the width */
 	u32  ov_fourcc;
-	u32  ov_seq;         /* last host frame blitted                        */
-	u32  still_loaded;   /* the camN.raw fallback is already in scratch    */
 
 	/* ONE SCRATCH PER DEVICE, sized when the format is. A fixed array would
 	 * have to be TAD_CAM_MAXFRAME to cover 1600x900, and this library is
@@ -322,7 +320,10 @@ static void geom_set(struct camdev *c)
 	}
 }
 
-static u32 data0(struct camdev *c) { return 2u * c->slot; }
+/* camN.bin holds ONLY the two staging slots now. The V4L2 buffers live in the
+ * arena, because that is where the guest looks for them — see the long note
+ * above capture_blit_mlc(). */
+static u32 stage_bytes(struct camdev *c) { return 2u * c->slot; }
 
 void tad_v4l2_init(const char *dir, struct tad_cam_state *cams,
                    void *arena, u32 arena_bytes,
@@ -409,9 +410,14 @@ int tad_v4l2_open(int idx, int flags)
 	}
 	/* Big enough for the staging slots from the start; the buffer area grows
 	 * when REQBUFS says how many the guest wants. */
-	ftruncate(fd, (long)data0(c));
+	ftruncate(fd, (long)stage_bytes(c));
 
-	if (c->fd >= 0 && g_close)
+	/* NEVER CLOSE A DESCRIPTOR THAT IS THE ONE WE JUST OPENED. The guest
+	 * closes and reopens the node on every DeinitCameraInt/InitCameraInt
+	 * pair, so the kernel hands the same number straight back — and closing
+	 * "the old one" would then close the new one, leaving every later read
+	 * and write on it failing with EBADF for no visible reason. */
+	if (c->fd >= 0 && c->fd != fd && g_close)
 		g_close(c->fd);
 	c->fd = fd;
 	c->streaming = 0;
@@ -439,7 +445,9 @@ int tad_v4l2_close(int fd)
 	if (g_cs) {
 		g_cs[c->idx].open      = 0;
 		g_cs[c->idx].streaming = 0;
+		g_cs[c->idx].ov_on     = 0;
 	}
+	c->ov_on = 0;
 	c->fd = -1;
 	c->streaming = 0;
 	queue_reset(c);
@@ -466,7 +474,7 @@ static u32 stage_read(struct camdev *c, u8 *dst, u32 cap)
 	if (!s || c->fd < 0)
 		return 0;
 	seq = s->seq;
-	if (!seq || seq == c->last_seq)
+	if (!seq)
 		return 0;
 	slot = seq & 1u;
 	n = s->bytes[slot];
@@ -522,7 +530,6 @@ static void scratch_drop(struct camdev *c)
 	if (c->scratch) free(c->scratch);
 	c->scratch = 0;
 	c->scratch_sz = 0;
-	c->still_loaded = 0;
 }
 
 static int scratch_ready(struct camdev *c)
@@ -537,125 +544,133 @@ static int scratch_ready(struct camdev *c)
 	return 1;
 }
 
-/* Copy one frame into V4L2 buffer `bi`. The buffers live in the same file the
- * guest mmapped, so a plain pwrite is visible in its mapping immediately. */
-static u32 fill_buffer(struct camdev *c, u32 bi, u8 *tmp, u32 tmpcap)
-{
-	u32 n;
-	long off;
-
-	n = stage_read(c, tmp, tmpcap);
-	if (!n)
-		n = still_read(c, tmp, tmpcap);
-	if (!n)
-		return 0;
-	off = (long)(data0(c) + bi * c->slot);
-	if (lseek(c->fd, off, 0) != off)
-		return 0;
-	{
-		u32 put = 0;
-		extern long write(int fd, const void *buf, size_t n);
-		while (put < n) {
-			long w = write(c->fd, tmp + put, n - put);
-			if (w <= 0) break;
-			put += (u32)w;
-		}
-		if (put != n) return 0;
-	}
-	return n;
-}
-
-/* ---- the overlay ---------------------------------------------------------
+/* THE CAPTURE BUFFER IS IN VIDEO MEMORY, IN THE MLC's OWN LAYOUT, AND THE
+ * GUEST WORKS OUT ITS PITCH FROM bytesused.
  *
- * THE PLANE LAYOUT IS THE DRIVER'S, and the viewer already implements the
- * reading half of it — blit_layer_yuv420() in tadpole_view.c, quoting
- * lf2000fb.c's nxfb_ops_set_par:
+ * Three facts, all read out of the guest rather than assumed.
  *
- *     soc_dpc_set_vid_address(module, pbase,                      P,
- *                                     pbase + P/2,                P,
- *                                     pbase + P/2 + P*yres/2,     P, 0);
+ * 1. It never mmaps our node. InitCameraBufferInt computes
  *
- * so with P the layer pitch: row y of Y at y*P, row y of Cb at y*P + P/2, row
- * y of Cr at (h/2 + y)*P + P/2. Not planar-contiguous — each row of the
- * buffer carries luma in its first half and chroma in its second. Writing
- * I420 straight in would put the whole chroma block past the end of luma and
- * the picture would come out grey with a coloured band.
+ *        buffer[i] = fb2_mapping + something * i
  *
- * Nearest neighbour on the way down. The camera is 640x480 and the surface is
- * 320x240; a box filter would be nicer and this is a 480x272 panel.
+ *    from the mapping it already has of /dev/fb2, so buffer 0 is the base of
+ *    video memory. Measured — the two addresses in the log are the same:
+ *
+ *        CCameraModule: mmap 82800000: a9fe8000, len 003fc000
+ *        InitCameraBufferInt: i=0, flags=00000000, mapping=0xa9fe8000
+ *
+ *    That is right for hardware whose capture buffers live in the same RAM the
+ *    display scans out of, and it means QUERYBUF's m.offset is never read.
+ *
+ * 2. The layout is the video plane's, not packed planar.
+ *    CVIPCameraModule::GetFrame walks the frame as
+ *
+ *        Y  row y : src + y*P
+ *        Cb row y : src + P/2       + (y/2)*P
+ *        Cr row y : src + P/2 + h*P/2 + (y/2)*P
+ *
+ *    which is exactly lf2000fb.c's soc_dpc_set_vid_address arithmetic, and the
+ *    same shape the viewer's blit_layer_yuv420() already reads. Writing packed
+ *    I420 here produced a photo that plainly contained our test pattern and was
+ *    scrambled — the structure was there, the strides were not.
+ *
+ * 3. AND P COMES FROM US. The same function computes it as
+ *
+ *        P = frameinfo.size / frameinfo.height
+ *
+ *    with size being the bytesused we return from DQBUF. So the pitch is ours
+ *    to choose, and that is worth choosing carefully, because of:
+ *
+ * THE ONE PLACE THIS EMULATION IS NOT LIKE THE HARDWARE. On the device /dev/fb2
+ * is a separate video heap; here all three framebuffers share one arena, because
+ * Brio allocates every surface from a single offset allocator and pans whichever
+ * fb matches the pixel format (see the note in tadpole_shim.c's init). Video
+ * memory offset 0 is therefore the same page as arena offset 0 — and Brio's
+ * allocator hands out its first surface at 0xFF000. So the capture buffer has
+ * 0xFF000 bytes of room before it starts overwriting a page that is on screen.
+ *
+ * The smallest legal pitch is 2*width (luma fills the first half of each row,
+ * chroma the second), which for the 640x480 this widget settles on is 1280 and
+ * a whole frame of 614400 bytes — comfortably under 0xFF000. The hardware's own
+ * 4096 would need 1966080 and would scribble over the viewfinder it is trying
+ * to photograph.
  */
-static void overlay_blit_i420(struct camdev *c, const u8 *src)
+static u32 cap_pitch(struct camdev *c)
 {
-	u32 sw = c->width, sh = c->height;
-	u32 dw = c->ov_w, dh = c->ov_h, P = c->ov_pitch;
-	const u8 *sy = src;
-	const u8 *su = src + sw * sh;
-	const u8 *sv = su + ((sw + 1) / 2) * ((sh + 1) / 2);
-	u32 cw = (sw + 1) / 2;
-	u8 *dst = g_arena + c->ov_off;
-	u32 x, y;
+	u32 p = c->width * 2;
+	return (p + 63u) & ~63u;
+}
 
-	if (!dw || !dh || !P || !sw || !sh)
-		return;
-	/* The tallest thing we write is row (dh/2 + dh/2 - 1) of the chroma half,
-	 * so the surface needs (dh + dh/2) rows of P bytes. Refuse rather than
-	 * scribble past the arena. */
-	if (c->ov_off + (dh + dh / 2) * P > g_arena_bytes)
-		return;
+static u32 cap_size(struct camdev *c)
+{
+	if (c->pixfmt != TAD_FOURCC_YU12)
+		return c->slot;
+	return cap_pitch(c) * c->height;
+}
 
-	for (y = 0; y < dh; y++) {
-		const u8 *r = sy + (u32)((unsigned long long)y * sh / dh) * sw;
-		u8 *o = dst + y * P;
-		for (x = 0; x < dw; x++)
-			o[x] = r[(u32)((unsigned long long)x * sw / dw)];
-	}
-	for (y = 0; y < dh / 2; y++) {
-		u32 cy = (u32)((unsigned long long)y * (sh / 2) / (dh / 2));
-		const u8 *ru = su + cy * cw;
-		const u8 *rv = sv + cy * cw;
-		u8 *ou = dst + y * P + P / 2;
-		u8 *ov = dst + (dh / 2 + y) * P + P / 2;
-		for (x = 0; x < dw / 2; x++) {
-			u32 cx = (u32)((unsigned long long)x * (sw / 2) / (dw / 2));
-			ou[x] = ru[cx];
-			ov[x] = rv[cx];
-		}
+/* Where buffer `bi` lives inside the arena. */
+static u32 cap_off(struct camdev *c, u32 bi)
+{
+	return bi * ((cap_size(c) + 4095u) & ~4095u);
+}
+
+static void capture_blit_mlc(struct camdev *c, const u8 *src, u32 bi)
+{
+	u32 w = c->width, h = c->height, P = cap_pitch(c);
+	u32 cw = (w + 1) / 2, chh = (h + 1) / 2;
+	const u8 *sy = src, *su = src + w * h, *sv = su + cw * chh;
+	u8 *dst = g_arena + cap_off(c, bi);
+	u32 y;
+
+	for (y = 0; y < h; y++)
+		memcpy(dst + y * P, sy + y * w, w);
+	for (y = 0; y < h / 2; y++) {
+		memcpy(dst + y * P + P / 2, su + y * cw, cw);
+		memcpy(dst + (h / 2 + y) * P + P / 2, sv + y * cw, cw);
 	}
 }
 
-/* Called from the framebuffer path on every pan and every vsync wait: the
- * guest's own render loop is the only clock this library has, and a preview
- * that updates once per displayed frame is exactly right. */
-void tad_v4l2_pump(void)
+/* Put one frame where the guest will look for buffer `bi`, and return the
+ * bytesused it should be told — which for planar YUV420 is pitch*height, not
+ * the packed frame size, because that is the division the guest does to
+ * recover the pitch. */
+static u32 fill_buffer(struct camdev *c, u32 bi, u8 *tmp, u32 tmpcap,
+                       int need_new)
 {
-	int i;
+	struct tad_cam_state *s = g_cs ? &g_cs[c->idx] : 0;
+	u32 n;
 
-	if (!g_arena || !g_cs)
-		return;
-	for (i = 0; i < TAD_CAM_N; i++) {
-		struct camdev *c = &g_cam[i];
-		struct tad_cam_state *st = &g_cs[i];
-		u32 n = 0;
-
-		if (!c->ov_on || c->fd < 0 || !c->ov_w)
-			continue;
-		if (!scratch_ready(c))
-			continue;
-		if (st->seq && st->seq != c->ov_seq) {
-			u32 keep = c->last_seq;
-			c->last_seq = c->ov_seq;
-			n = stage_read(c, c->scratch, c->slot);
-			c->ov_seq = c->last_seq;
-			c->last_seq = keep;
-		} else if (!st->seq && !c->still_loaded) {
-			n = still_read(c, c->scratch, c->slot);
-			if (n) c->still_loaded = 1;
-		}
-		if (!n)
-			continue;
-		if (c->pixfmt == TAD_FOURCC_YU12 && n >= c->sizeimage)
-			overlay_blit_i420(c, c->scratch);
+	/* NEED_NEW IS ABOUT WAITING, NOT ABOUT WHETHER THERE IS A FRAME.
+	 *
+	 * The first version returned nothing when the staged sequence had not
+	 * moved, and then fell through to the still — so a camera running slower
+	 * than the guest asks (a dark room drops the front camera to a few frames
+	 * a second) produced photographs of the test pattern. What "no new frame"
+	 * should mean is "wait a moment", and if it still has not moved, hand back
+	 * the most recent one: that is what a real driver's buffer holds. */
+	if (s && s->seq) {
+		if (need_new && s->seq == c->last_seq)
+			return 0;
+		n = stage_read(c, tmp, tmpcap);
+	} else {
+		n = still_read(c, tmp, tmpcap);
 	}
+	if (!n || !g_arena)
+		return 0;
+
+	if (c->pixfmt == TAD_FOURCC_YU12) {
+		if (n < c->sizeimage)
+			return 0;
+		if (cap_off(c, bi) + cap_size(c) > g_arena_bytes)
+			return 0;
+		capture_blit_mlc(c, tmp, bi);
+		return cap_pitch(c) * c->height;
+	}
+	/* Compressed or packed: straight in, and bytesused is the real length. */
+	if (cap_off(c, bi) + n > g_arena_bytes)
+		return 0;
+	memcpy(g_arena + cap_off(c, bi), tmp, n);
+	return n;
 }
 
 /* ---- ioctl -------------------------------------------------------------- */
@@ -792,6 +807,8 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 				         (char)((fourcc >> 24) & 0xff), c->sizeimage);
 				note(m);
 				scratch_drop(c);
+				if (c->fd >= 0)
+					ftruncate(c->fd, (long)stage_bytes(c));
 			} else {
 				c->width = keep_w; c->height = keep_h; c->pixfmt = keep_f;
 				geom_set(c);
@@ -873,7 +890,13 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 			         (char)((c->ov_fourcc >> 24) & 0xff));
 			note(m);
 			if (found < 0)
-				c->ov_w = c->ov_h = 0;      /* not ours: refuse to write */
+				c->ov_w = c->ov_h = 0;      /* not ours: refuse to draw */
+			if (g_cs) {
+				g_cs[c->idx].ov_off   = c->ov_off;
+				g_cs[c->idx].ov_w     = c->ov_w;
+				g_cs[c->idx].ov_h     = c->ov_h;
+				g_cs[c->idx].ov_pitch = c->ov_pitch;
+			}
 		}
 		return 0;
 	}
@@ -881,8 +904,7 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 	case VIDIOC_OVERLAY_: {
 		const u32 *on = arg;
 		c->ov_on = (on && *on) ? 1 : 0;
-		c->ov_seq = 0;
-		c->still_loaded = 0;
+		if (g_cs) g_cs[c->idx].ov_on = c->ov_on;
 		snprintf(m, sizeof(m), "[tadpole] cam%d: OVERLAY %u\n",
 		         c->idx, c->ov_on);
 		note(m);
@@ -901,8 +923,13 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 			r->count = 0;
 			return 0;
 		}
-		if (ftruncate(c->fd, (long)(data0(c) + n * c->slot)) != 0)
-			return fail(EIO_);
+		/* The buffers are in the arena; make sure they fit there. */
+		{
+			u32 stride = (cap_size(c) + 4095u) & ~4095u;
+			if (stride && n > g_arena_bytes / stride)
+				n = g_arena_bytes / stride;
+			if (n == 0) return fail(EIO_);
+		}
 		c->nbuf = n;
 		queue_reset(c);
 		r->count = n;
@@ -921,8 +948,11 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 			b->index  = i;
 			b->type   = V4L2_BUF_TYPE_CAPTURE_;
 			b->memory = V4L2_MEMORY_MMAP_;
-			b->m.offset = data0(c) + i * c->slot;
-			b->length   = c->slot;
+			/* The offset the real driver would report: a byte offset
+			 * into video memory, which is where the guest computes the
+			 * address from anyway. */
+			b->m.offset = cap_off(c, i);
+			b->length   = (cap_size(c) + 4095u) & ~4095u;
 			b->flags    = V4L2_BUF_FLAG_MAPPED_ | (q ? V4L2_BUF_FLAG_QUEUED_ : 0);
 		}
 		return 0;
@@ -961,13 +991,15 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 		if (!scratch_ready(c))
 			return fail(EIO_);
 		for (tries = 0; tries < 40; tries++) {
-			n = fill_buffer(c, bi, c->scratch, c->slot);
+			n = fill_buffer(c, bi, c->scratch, c->slot, 1);
 			if (n) break;
 			{
 				struct tad_ts t; t.tv_sec = 0; t.tv_nsec = 5 * 1000 * 1000;
 				nanosleep(&t, 0);
 			}
 		}
+		if (!n)                        /* nothing new in 200 ms: repeat one */
+			n = fill_buffer(c, bi, c->scratch, c->slot, 0);
 		if (!n)
 			return fail(EAGAIN_);
 
@@ -980,8 +1012,8 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 		b->index     = bi;
 		b->type      = V4L2_BUF_TYPE_CAPTURE_;
 		b->memory    = V4L2_MEMORY_MMAP_;
-		b->m.offset  = data0(c) + bi * c->slot;
-		b->length    = c->slot;
+		b->m.offset  = cap_off(c, bi);
+		b->length    = (cap_size(c) + 4095u) & ~4095u;
 		b->bytesused = n;
 		b->flags     = V4L2_BUF_FLAG_MAPPED_ | V4L2_BUF_FLAG_DONE_;
 		b->field     = V4L2_FIELD_NONE_;

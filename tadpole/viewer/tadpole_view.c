@@ -96,6 +96,7 @@ static int tp_fifo_fd(const char *path, int want_read)
 #endif
 
 #include "../shim/tadpole_cam.h"
+#include "tadpole_cam.h"
 
 /* Mirrors struct tadpole_state in the shim. Keep the two in sync. */
 struct layer_state {
@@ -2096,6 +2097,10 @@ static int try_map(void)
 		g_fb[i]   = g_fb[0];
 		g_fbsz[i] = g_fbsz[0];
 	}
+	/* The camera's viewfinder is drawn straight into this arena — see the
+	 * header of tadpole_cam.c for why it cannot be drawn on the guest side. */
+	if (g_fb[0])
+		tad_cam_init(g_dir, g_state->cam, g_fb[0], g_fbsz[0]);
 	return g_fb[0] != NULL;
 }
 
@@ -4357,6 +4362,11 @@ int main(int argc, char **argv)
 
 		memset(pixels, 0, (size_t)w * h * 4);
 		top_drawn = 0;
+		/* The camera's viewfinder goes into the arena BEFORE the layers are
+		 * composited out of it, so a frame that arrived this tick is the one
+		 * that gets shown rather than the one after. */
+		tad_cam_pump();
+
 		if (g_state) {
 			int drawn = 0;
 			/* Z-ORDER: fb0 is the TOPMOST layer, not the bottom.

@@ -80,9 +80,6 @@ extern void tad_v4l2_init(const char *dir, struct tad_cam_state *cams,
                           int (*ropen)(const char *, int, ...),
                           int (*rclose)(int),
                           void (*dbgfn)(const char *));
-/* Called from the framebuffer path: the guest's own render loop is the only
- * clock the shim has, and the camera overlay needs one. */
-extern void tad_v4l2_pump(void);
 extern int  tad_v4l2_index(const char *path);
 extern int  tad_v4l2_open(int idx, int flags);
 extern int  tad_v4l2_is_fd(int fd);
@@ -1639,7 +1636,6 @@ int ioctl(int fd, ulong req, ...)
 			return 0;
 		case FBIOPAN_DISPLAY: {
 			struct fb_var_screeninfo *v = arg;
-			tad_v4l2_pump();
 			if (g_state && v) {
 				g_state->layer[idx].xoffset = v->xoffset;
 				g_state->layer[idx].yoffset = v->yoffset;
@@ -1662,7 +1658,6 @@ int ioctl(int fd, ulong req, ...)
 			return 0;
 		case FBIO_WAITFORVSYNC:
 			vsync_wait();
-			tad_v4l2_pump();
 			if (g_state)
 				g_state->vsync_count++;
 			return 0;

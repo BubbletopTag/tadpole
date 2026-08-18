@@ -26,6 +26,8 @@ add_library(main SHARED
     ${VIEWER}/tadpole_hle.c
     ${VIEWER}/tadpole_boot.c
     ${VIEWER}/tadpole_pad.c
+    ${VIEWER}/tadpole_cam.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/tadpole_cam_android.c
     ${CMAKE_CURRENT_SOURCE_DIR}/tadpole_gles_compat.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../app/jni/tadpole_jni.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../app/jni/tadpole_probe.c
@@ -48,6 +50,9 @@ target_compile_definitions(main PRIVATE TADPOLE_VERSION="android-dev")
 # (glMatrixMode, glOrthof, glEnableClientState, client-side arrays) because it
 # is replaying the guest's GLES1, so the natural Android target is GLES1 and not
 # a shader port.
+# No camera2ndk: both of this tablet's cameras are HAL 1.0, which the NDK
+# camera API hides. The frames come through Java instead — see the header of
+# android/viewer/tadpole_cam_android.c.
 target_link_libraries(main PRIVATE
     ${SDL_PREFIX}/lib/libSDL2.so
     GLESv1_CM EGL z log android m)

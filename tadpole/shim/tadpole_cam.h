@@ -51,21 +51,41 @@ struct tad_cam_state {
 	unsigned int height;
 	unsigned int pixfmt;      /* fourcc the guest expects us to produce     */
 	unsigned int sizeimage;   /* exact bytes in one frame of that fourcc    */
-	unsigned int slot_size;   /* staging slot / V4L2 buffer stride, paged   */
+	unsigned int slot_size;   /* staging slot stride in camN.bin, paged     */
 	unsigned int fps;         /* frames per second the guest asked for      */
 	unsigned int want;        /* bumped whenever the guest waits in DQBUF   */
 	unsigned int seq;         /* HOST bumps this after staging a frame      */
 	unsigned int bytes[2];    /* staged length, per slot                    */
 	unsigned int host;        /* host backend has a camera bound            */
 	unsigned int host_err;    /* non-zero: host could not open the camera   */
-	/* Counters, because "the viewfinder is green" has four possible causes
-	 * and they are indistinguishable from the outside: the guest never
-	 * queued a buffer, never dequeued one, dequeued and got nothing, or got
-	 * a frame that was wrong. One read of state.bin separates them. */
+
+	/* THE VIEWFINDER, WHICH THE HOST HAS TO DRAW.
+	 *
+	 * On the VIP path the preview is not a stream the guest reads: it points
+	 * VIDIOC_S_FBUF at a display surface, turns on VIDIOC_OVERLAY, and on real
+	 * hardware the capture block then DMAs into the MLC's video plane while
+	 * the application does nothing at all. Measured: with the viewfinder up,
+	 * AppManager is at 3% CPU and state.bin's vsync_count does not move — the
+	 * guest issues no framebuffer ioctl of any kind, so there is no clock on
+	 * the guest side to hang a preview off. The host has one.
+	 *
+	 * These five fields are where to draw and in what shape; the shim fills
+	 * them in from the S_FBUF the guest issued, translating its physical base
+	 * into an offset in the arena both sides map.
+	 */
+	unsigned int ov_on;       /* overlay enabled                            */
+	unsigned int ov_off;      /* byte offset of the surface inside fb0.bin  */
+	unsigned int ov_w, ov_h;  /* surface size                               */
+	unsigned int ov_pitch;    /* its bytesperline: the panel pitch          */
+
+	/* Counters, because "the viewfinder is green" has several possible causes
+	 * and they are indistinguishable from the outside. */
 	unsigned int n_qbuf;      /* QBUFs the guest issued                     */
 	unsigned int n_dqbuf;     /* DQBUFs the guest issued                    */
 	unsigned int n_frames;    /* frames actually handed over                */
-	unsigned int reserved[3];
+	/* Padded to 32 words so the block is a round 128 bytes: fbshot.py and
+	 * anything else that walks state.bin by offset does simpler arithmetic. */
+	unsigned int reserved[10];
 };
 
 #endif

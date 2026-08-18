@@ -173,6 +173,7 @@ public class TadpoleActivity extends SDLActivity {
         }
         goFullscreen();
         askForStorage();
+        askForCameraAndMic();
     }
 
     /* ---- the assets the viewer reads as files ------------------------------
@@ -275,6 +276,37 @@ public class TadpoleActivity extends SDLActivity {
      * which is exactly what it did before this and is not a crash.
      */
     private static final int REQ_STORAGE = 4711;
+    private static final int REQ_CAMERA  = 4712;
+
+    /* THE CAMERA AND THE MICROPHONE, WHICH ARE ONE DIALOG.
+     *
+     * The LeapPad2's Camera app previews, photographs and records video with
+     * sound, and the guest reaches all three through /dev/video0, /dev/video1
+     * and ALSA — none of which exist until this is granted. Asked together
+     * because they are one feature: a video recording with no audio track is
+     * not something the firmware knows how to make.
+     *
+     * Not fatal if refused. tadpole_cam.c serves $TADPOLE_DIR/camN.raw as a
+     * still when no backend produces frames, so the viewfinder shows something
+     * explicable rather than the flat green an unwritten YUV buffer gives. */
+    private void askForCameraAndMic() {
+        try {
+            java.util.ArrayList<String> want = new java.util.ArrayList<String>();
+            if (checkSelfPermission(android.Manifest.permission.CAMERA)
+                    != PackageManager.PERMISSION_GRANTED)
+                want.add(android.Manifest.permission.CAMERA);
+            if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)
+                    != PackageManager.PERMISSION_GRANTED)
+                want.add(android.Manifest.permission.RECORD_AUDIO);
+            if (want.isEmpty()) {
+                Log.i(TAG, "camera/mic: already granted");
+                return;
+            }
+            requestPermissions(want.toArray(new String[0]), REQ_CAMERA);
+        } catch (Throwable t) {
+            Log.e(TAG, "camera/mic: could not ask", t);
+        }
+    }
 
     private void askForStorage() {
         try {

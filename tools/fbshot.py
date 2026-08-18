@@ -31,7 +31,7 @@ TAIL_SIZE = 4 + 4 + 64
 # tadpole/shim/tadpole_cam.h. Counted for the same reason as the tail — so the
 # size check recognises a current state.bin rather than warning about one.
 CAM_N = 2
-CAM_SIZE = 4 * 20
+CAM_SIZE = 4 * 32
 
 
 def check_size(nbytes):
