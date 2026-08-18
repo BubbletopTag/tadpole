@@ -50,6 +50,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PROJ = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
+import musicdb  # noqa: E402  — a sibling tool, not a package
 import pkgtool  # noqa: E402  — a sibling tool, not a package
 
 WINDOWS = os.name == "nt"
@@ -691,6 +692,13 @@ def install_content(pkgs, sysroot):
     for k in sorted(n):
         say("    %-16s %d" % (k, n[k]))
     grant_profile_access(sysroot, bulk)
+    # THE MUSIC DATABASE, WHICH THE ALBUM PACKAGES DO NOT CONTAIN. The Music
+    # app reads LF/Bulk/Music/music.db and never scans the filesystem, so
+    # installing the albums alone leaves the songs on disk and the app empty.
+    # On real hardware LFConnect writes this from a computer; nothing in the
+    # firmware ever does, so the install has to. tools/musicdb.py carries the
+    # reasoning and the measured path rule.
+    musicdb.build(bulk)
 
 
 def grant_profile_access(sysroot, bulk):

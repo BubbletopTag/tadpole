@@ -244,6 +244,24 @@ RTCAccuracy=0x00000001
 CurrProfile=0x00000000
 EOF
 
+# THE MUSIC DATABASE, WHICH THE ALBUM PACKAGES DO NOT CONTAIN.
+#
+# The Music app reads /LF/Bulk/Music/music.db and never scans the filesystem —
+# App.so embeds SQLite and asks it questions. So installing the album packages
+# alone leaves five .ogg files on disk and an empty Music app, which reads as a
+# failed install. On real hardware LFConnect writes this database from a
+# computer, which is what the app's own narration asks for; nothing in the
+# firmware ever writes it, so the install has to.
+#
+# tools/musicdb.py carries the schema, taken from the binary's own SELECTs, and
+# the path rule, measured under TADPOLE_STRACE=1 rather than assumed.
+if command -v python3 >/dev/null 2>&1; then
+    python3 "$HERE/musicdb.py" "$BULK" || \
+        echo "  WARNING: music.db not built — the Music app will be empty" >&2
+else
+    echo "  WARNING: no python3, so no music.db — the Music app will be empty" >&2
+fi
+
 echo
 echo "installed: $n_app apps, $n_dl downloads, $n_lang language packs,"
 echo "           $n_music music, $n_other other, $n_skip skipped (firmware)"
