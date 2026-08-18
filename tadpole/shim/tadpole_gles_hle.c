@@ -42,7 +42,14 @@ extern void *memcpy(void *d, const void *s, u32 n);
 extern char *getenv(const char *name);
 extern int   snprintf(char *s, u32 n, const char *fmt, ...);
 extern long  write(int fd, const void *buf, u32 n);
-extern int   ftruncate(int fd, long length);
+/* ftruncate64, NOT ftruncate, and the reason is a sandbox rather than a size.
+ *
+ * Nothing here ever needs more than 4 GiB. But __NR_ftruncate (93) is one of
+ * the syscalls Android's app seccomp filter refuses — bionic only ever uses
+ * ftruncate64, so the legacy number is not on the generated whitelist — and a
+ * refusal there is not an error return, it is SIGSYS and a dead process. See
+ * android/NOTES-arm32.md, "What the seccomp filter blocks". */
+extern int   ftruncate64(int fd, long long length);
 extern int   usleep(u32 usec);
 extern void  abort(void);
 
@@ -158,7 +165,7 @@ static void hle_attach(void)
 
 	fd = open(path, O_RDWR | O_CREAT, 0666);
 	if (fd < 0) { hle_lost("cannot open glcmd.bin in TADPOLE_DIR"); return; }
-	ftruncate(fd, (long)TADGL_FILE_BYTES);
+	ftruncate64(fd, (long long)TADGL_FILE_BYTES);
 	m = mmap(NULL, TADGL_FILE_BYTES, PROT_RW, MAP_SHARED, fd, 0);
 	close(fd);
 	if (m == (void *)-1) { hle_lost("cannot map glcmd.bin"); return; }

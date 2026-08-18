@@ -46,7 +46,18 @@ typedef unsigned int   size_t_;
 extern int    open(const char *path, int flags, ...);
 extern int    close(int fd);
 extern slong  write(int fd, const void *buf, size_t_ n);
-extern int    mkfifo(const char *path, u32 mode);
+extern int    mknodat(int dirfd, const char *path, u32 mode,
+                      unsigned long long dev);
+/* mknodat, NOT mkfifo, for the same reason ftruncate64 is spelled that way
+ * above: uClibc's mkfifo() is mknod(2) — syscall 14 — and __NR_mknod is on the
+ * list Android's app seccomp filter refuses. bionic only ever uses mknodat, so
+ * the legacy number was never generated into the app whitelist, and a refusal
+ * is SIGSYS rather than an error. Measured: 13 mknod calls in one boot, every
+ * one of them this. AT_FDCWD is -100 and S_IFIFO is 0010000. */
+static int tad_mkfifo(const char *path, u32 mode)
+{
+	return mknodat(-100, path, 0010000u | mode, 0ULL);
+}
 extern int    unlink(const char *path);
 extern slong  read(int fd, void *buf, size_t_ n);
 extern char  *getenv(const char *name);
@@ -200,7 +211,7 @@ static void open_fifo(struct tad_pcm *p)
 		if (n > 0) write(2, b, (size_t_)n);
 	}
 	snprintf(path, sizeof(path), "%s/audio", tad_dir());
-	mkfifo(path, 0666);                       /* harmless if it exists */
+	tad_mkfifo(path, 0666);                       /* harmless if it exists */
 	/* O_NONBLOCK so a missing reader gives -1 instead of blocking here. */
 	p->fd = open(path, O_WRONLY | O_NONBLOCK);
 }
@@ -244,7 +255,7 @@ static void open_mic_fifo(struct tad_pcm *p)
 	snprintf(path, sizeof(path), "%s/mic", tad_dir());
 	p->fd = open(path, O_RDWR | O_NONBLOCK);
 	if (p->fd < 0) {
-		mkfifo(path, 0666);
+		tad_mkfifo(path, 0666);
 		p->fd = open(path, O_RDWR | O_NONBLOCK);
 	}
 }

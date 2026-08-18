@@ -365,3 +365,187 @@ viewer (done), Glasspole built for arm64 with dynarmic's existing backend
 arena moved off `/tmp` (see NOTES-shim.md), and the HLE's second window folded
 into the single Android surface. None of those is research. The research
 finished when `-- Target architecture: arm64` printed.
+
+---
+
+# Rootless: running the guest from inside the app
+
+Added 2026-08-18, after the chroot helper turned out not to be the only way.
+Everything below was measured on the dev tablet (Phh-Treble GSI, Android 8.1
+API 27, armeabi-v7a only, kernel 3.18.79).
+
+## The blocker was one string, and it was one byte wide
+
+`android/native-helper.sh` exists because the guest binaries name
+`/lib/ld-uClibc.so.0` in PT_INTERP and the KERNEL resolves that before any of
+our code runs. `chroot` made the path exist; `chroot` needs CAP_SYS_CHROOT.
+
+Nothing else was in the way. Exec is allowed (the "exec from app files DENIED"
+result above was our own probe's bug). Path translation was already written —
+`tadpole_shim.c` prepends `$TADPOLE_SYSROOT` to absolute guest paths, which is
+how the desktop works under qemu-user with no chroot. And an armeabi-v7a
+process is itself in AArch32, so the guest's instructions need no engine.
+
+**Route 1, invoking the loader directly, is closed.** uClibc says so:
+
+    $ $S/lib/ld-uClibc.so.0 /data/local/tmp/busybox echo hi
+    Standalone execution is not supported yet
+
+**Route 2, a relative PT_INTERP, works.** Linux opens a relative interpreter
+against the CWD of the process calling execve — `fs/binfmt_elf.c` reads the
+string out of the file and hands it to `open_exec()`, an AT_FDCWD lookup. And
+`lib/ld-uClibc.so.0` is one byte shorter than `/lib/ld-uClibc.so.0`, so
+dropping the slash fits in place: same p_offset, same p_filesz, one more
+trailing NUL, same file size. Measured with busybox out of the device's own
+firmware:
+
+    patched   + cd sysroot   ->  ROUTE2_OK, exit 0
+    patched   + cd /         ->  No such file or directory
+    unpatched + cd sysroot   ->  No such file or directory
+
+and from the app's own SELinux domain (`run-as` gives exactly
+`u:r:untrusted_app:s0:c512,c768`): `APP_DOMAIN_EXEC_OK`.
+
+It does not break the chroot path — `chroot(2)` is followed by `chdir("/")`,
+and inside the chroot `/` IS the sysroot.
+
+Namespaces are not an alternative on this class of device:
+
+    $ zcat /proc/config.gz | grep -i namespace
+    # CONFIG_NAMESPACES is not set
+
+`android_relinterp()` in `tadpole_view.c` does the rewrite; `spawn_script()`'s
+child chdir()s to the sysroot before execv.
+
+## What that got: a guest with no root anywhere
+
+From a shell in the app's uid and domain, AppManager boots, the home screen
+composites through the viewer, audio plays, taps reach the guest, and an
+installed title runs:
+
+    u:r:untrusted_app:s0:c512,c768 u0_a86 2824 ... S AppManager
+
+No helper, no chroot, no root. Two shim gaps had to be closed first, both of
+them things a chroot had been hiding — `dlopen` and `opendir` were not putting
+absolute guest paths through the sysroot. See the commit for the two BOOTFAIL
+lines that found them.
+
+## What is still in the way from inside the app PROCESS
+
+**zygote installs a seccomp-bpf filter on every app process, and a seccomp
+filter is inherited across execve.** `/proc/<app pid>/status` says
+`Seccomp: 2`. The guest dies with SIGSYS having printed nothing;
+`aee_core_forwarder` in logcat says `signo 31`, and strace names the syscall.
+
+This is not a permissions problem and there is no way out of it: filters cannot
+be relaxed, only added to, and nothing an app can spawn escapes its own filter.
+
+### What the filter blocks
+
+Measured, not inferred. `seccomp-probe.c` (an NDK armeabi-v7a binary run as a
+child of the app, with a SIGSYS handler and siglongjmp) tried 49 syscalls. The
+app's filter refuses exactly these thirteen:
+
+    link(9)  mknod(14)  chmod(15)  rmdir(40)  signal(48)  select(82)
+    symlink(83)  socketcall(102)  stat(106)  lstat(107)  fstat(108)
+    ipc(117)  sigprocmask(126)
+
+and allows every legacy syscall that bionic happens to also use, including
+`open(5)`, `readlink(85)`, `fcntl(55)`, `sigaction(67)`, `getdents(141)`,
+`_newselect(142)` and `poll(168)`. So the rule is not "modern syscalls only";
+it is bionic's own set plus a compatibility list, and the four `*stat` family
+members bionic reaches through `fstatat64` are simply not on it.
+
+Cross-referenced against a full boot traced with strace, the guest uses four of
+the thirteen: `stat` (38), `fstat` (957), `mknod` (13), `rmdir` (2). Two more
+appear once the boot gets further: `set_robust_list` (338) and `ftruncate` (93).
+
+### What is fixed
+
+In the shim, and correct on every platform rather than an Android special case:
+
+* `ftruncate` -> `ftruncate64`
+* `mkfifo` -> `mknodat(AT_FDCWD, ...)`  (uClibc's mkfifo is mknod(2))
+* `rmdir` -> `unlinkat(AT_FDCWD, path, AT_REMOVEDIR)`, and sysroot-translated,
+  which it never was: the guest rmdir()s `/tmp/cart_events_socket`
+* `stat`, `lstat`, `fstat` answered through `stat64`/`lstat64`/`fstat64` and
+  narrowed in the shim. The two layouts are read off this firmware's own
+  converters rather than guessed — `__xstat_conv` at libuClibc+0x10834 and
+  `__xstat64_conv` at +0x10990; see the comment in `tadpole_shim.c`.
+
+In the firmware, by patching instructions. These are NOT done by the app; they
+were applied by hand to test whether the wall is passable, and the originals
+are kept beside them on the device as `*.orig`:
+
+    ld-uClibc-0.9.32.1-git.so
+      0x22e0   svc #0            -> mvn r0, #0     _dl_map_cache's stat("/etc/ld.so.cache");
+                                                   there is no cache file, so failing is
+                                                   what already happened
+      0x581c   svc #0            -> mvn r0, #0     _dl_get_ready_to_run's stat of the main
+                                                   program; the error path sets errno and
+                                                   rejoins, losing only l_dev/l_ino
+      0x3db4   sub sp,sp,#292    -> #416           _dl_load_elf_shared_library: make room
+      0x3df4   sub r1,r11,#100   -> #432           for a 104-byte struct stat64, above the
+      0x3df8   mov r7,#108       -> #197           outgoing-argument area
+      0x3e30   ldr r0,[r11,#-0x64] -> #-0x1b0      st_dev, same offset in stat64
+      0x3e60   ldr r3,[r11,#-0x60] -> #-0x1a4      st_ino -> __st_ino at +12
+      0x4618   ldr r0,[r11,#-0x64] -> #-0x1b0
+      0x4628   ldr r0,[r11,#-0x60] -> #-0x1a4
+
+    libpthread-0.9.32.1-git.so
+      0x8914   svc #0            -> mov r0, #0     set_robust_list; writes nothing to
+      0xac94   svc #0            -> mov r0, #0     userspace, so "it worked" is exact
+
+With those, the guest gets from "dies in ld.so's first stat" to running for
+several hundred milliseconds of real work. The patched loader and libpthread
+were verified to boot the guest normally outside the filter as well.
+
+### What remains
+
+**One thing: `fstat` called from INSIDE uClibc, by `opendir`.**
+
+    open(".../LF/Base/Brio/Module/", O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC) = 3
+    fstat(3, {st_mode=S_IFDIR|0755, ...})  = 0
+    fcntl(3, F_SETFD, FD_CLOEXEC)
+
+Fifteen calls in a boot, all of them this. The shim exports `fstat` and it is
+never reached: uClibc's `opendir` calls its own `fstat` through a hidden alias
+that never goes through the PLT — the same thing the `fopen` comment in
+`tadpole_shim.c` documents for `open`.
+
+So there are two ways to finish, and both are bigger than a one-line change:
+
+1. **Patch `fstat` in libc.so.0** (libuClibc+0xd020) the way ld.so's was. It
+   needs a kernel_stat64 -> struct stat converter, and uClibc has no such
+   function — `__xstat_conv` takes kernel_stat and `__xstat64_conv` produces
+   stat64 — so this means writing ~60 bytes of ARM into a code cave in a
+   400 KB libc. Precise, but it is code injection into a libc.
+
+2. **Take the directory API over in the shim** — implement `opendir`,
+   `readdir`, `readdir64`, `closedir`, `dirfd`, `rewinddir` on `open` +
+   `getdents64`, with our own DIR. libKernelMPI imports all of them through
+   the PLT, so they are reachable. That is ~150 lines and it changes the
+   desktop's behaviour too, since the shim is one binary for both.
+
+Either way the firmware patches above would also have to be applied by
+something the user runs — `push-firmware.sh` is the natural place, since it
+already re-points every symlink in the sysroot on the device for the same kind
+of reason.
+
+**Until then the helper is still required for "Run System Menu".** It is
+untouched and still wins when it is running, and the rootless code path is
+live behind it: it is what runs on a device with no engine and no helper, and
+it is complete apart from this one syscall.
+
+### One trap worth writing down
+
+A sysroot that has ever been used by the ROOT helper has root-owned files in
+it, and the rootless guest cannot write them. `LF/Bulk/settings.cfg` is 0600
+root, so the guest could not even read its own locale:
+
+    open(".../LF/Bulk/settings.cfg", O_RDONLY) = -1 EACCES
+
+which presents as the first-boot language wizard appearing on every launch.
+`chown -R u0_a86:u0_a86 <files>` fixes it. This is the mirror image of the
+relabelling the helper has to do, and it is worth doing once when switching a
+device from the helper to the rootless path.

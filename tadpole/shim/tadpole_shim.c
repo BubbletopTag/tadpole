@@ -44,11 +44,32 @@ extern void *memcpy(void *d, const void *s, size_t n);
 extern void *memset(void *s, int c, size_t n);
 extern char *getenv(const char *name);
 extern int   mkdir(const char *path, u32 mode);
-extern int   mkfifo(const char *path, u32 mode);
-extern int   ftruncate(int fd, long length);
+extern int   mknodat(int dirfd, const char *path, u32 mode,
+                     unsigned long long dev);
+extern int   unlinkat(int dirfd, const char *path, int flags);
+/* ftruncate64, NOT ftruncate, and the reason is a sandbox rather than a size.
+ *
+ * Nothing here ever needs more than 4 GiB. But __NR_ftruncate (93) is one of
+ * the syscalls Android's app seccomp filter refuses — bionic only ever uses
+ * ftruncate64, so the legacy number is not on the generated whitelist — and a
+ * refusal there is not an error return, it is SIGSYS and a dead process. See
+ * android/NOTES-arm32.md, "What the seccomp filter blocks". */
+extern int   ftruncate64(int fd, long long length);
 extern long  write(int fd, const void *buf, size_t n);
 extern int   getpid(void);
 extern int   fcntl(int fd, int cmd, ...);
+
+/* mknodat, NOT mkfifo, for the same reason ftruncate64 is spelled that way
+ * above: uClibc's mkfifo() is mknod(2) — syscall 14 — and __NR_mknod is on the
+ * list Android's app seccomp filter refuses. bionic only ever uses mknodat, so
+ * the legacy number was never generated into the app whitelist, and a refusal
+ * is SIGSYS rather than an error. Measured: 13 mknod calls in one boot, every
+ * one of them this. AT_FDCWD is -100 and S_IFIFO is 0010000. */
+static int tad_mkfifo(const char *path, u32 mode)
+{
+	return mknodat(-100, path, 0010000u | mode, 0ULL);
+}
+
 
 /* For the vsync timebase. Declared by hand like the rest — no ARM sysroot at
  * build time. struct timespec on this 32-bit target is two longs. */
@@ -355,6 +376,8 @@ static void (*(*real_signal)(int, void (*)(int)))(int);
 static int  (*real_stat)(const char *, void *);
 static int  (*real_stat64)(const char *, void *);
 static int  (*real_lstat)(const char *, void *);
+static int  (*real_lstat64)(const char *, void *);
+static int  (*real_fstat64)(int, void *);
 static int  (*real_access)(const char *, int);
 static long (*real_read)(int, void *, size_t);
 static void *(*real_fopen)(const char *, const char *);
@@ -468,6 +491,8 @@ static void init(void)
 	real_stat   = dlsym(RTLD_NEXT, "stat");
 	real_stat64 = dlsym(RTLD_NEXT, "stat64");
 	real_lstat  = dlsym(RTLD_NEXT, "lstat");
+	real_lstat64= dlsym(RTLD_NEXT, "lstat64");
+	real_fstat64= dlsym(RTLD_NEXT, "fstat64");
 	real_access = dlsym(RTLD_NEXT, "access");
 	real_dlopen = dlsym(RTLD_NEXT, "dlopen");
 	real_dlerror= dlsym(RTLD_NEXT, "dlerror");
@@ -596,7 +621,7 @@ static void init(void)
 	fd = real_open(path, O_RDWR | O_CREAT, 0666);
 	if (fd >= 0) {
 		g_arena_bytes = g_w * g_h * (g_bpp / 8) * NBUF;
-		ftruncate(fd, (long)g_arena_bytes);
+		ftruncate64(fd, (long long)g_arena_bytes);
 		/* MAPPED HERE TOO, not only by whoever opens /dev/fbN.
 		 *
 		 * The camera's viewfinder is not a stream the application reads — the
@@ -623,7 +648,7 @@ static void init(void)
 	snprintf(path, sizeof(path), "%s/state.bin", g_dir);
 	fd = real_open(path, O_RDWR | O_CREAT, 0666);
 	if (fd >= 0) {
-		ftruncate(fd, (long)sizeof(struct tadpole_state));
+		ftruncate64(fd, (long long)sizeof(struct tadpole_state));
 		g_state = real_mmap(0, sizeof(struct tadpole_state), 3 /*RW*/, 1 /*SHARED*/, fd, 0);
 		real_close(fd);
 		if (g_state == (void *)-1)
@@ -675,7 +700,7 @@ static void init(void)
 	/* input FIFOs — viewer writes struct input_event, guest reads */
 	for (i = 0; i < NUM_EV; i++) {
 		snprintf(path, sizeof(path), "%s/ev%d", g_dir, i);
-		mkfifo(path, 0666);
+		tad_mkfifo(path, 0666);
 	}
 
 	dbg("[tadpole] shim initialised\n");
@@ -1343,6 +1368,33 @@ int rename(const char *from, const char *to)
 	return real_rename(from, to);
 }
 
+/* rmdir() — TRANSLATED LIKE unlink(), AND ROUTED AROUND A BLOCKED SYSCALL.
+ *
+ * Two calls in a boot, both of them guest-absolute and both of them cleanup:
+ *
+ *     rmdir("/tmp/cart_events_socket")
+ *     rmdir("/tmp/usb_events_socket")
+ *
+ * Untranslated they operate on the HOST's /tmp, which on Android does not
+ * exist and on a desktop is somebody else's directory — so this belongs here
+ * whatever the platform.
+ *
+ * unlinkat(AT_FDCWD, path, AT_REMOVEDIR) rather than rmdir(2) because
+ * __NR_rmdir (40) is refused by Android's app seccomp filter; bionic reaches
+ * rmdir through unlinkat, so only the modern number is on the whitelist.
+ * AT_FDCWD is -100 and AT_REMOVEDIR is 0x200. */
+int rmdir(const char *path)
+{
+	init();
+	if (path && path[0] == '/' && g_sysroot[0] && !under_gdir(path)) {
+		char full[512];
+		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
+		if (unlinkat(-100, full, 0x200) == 0)
+			return 0;
+	}
+	return unlinkat(-100, path, 0x200);
+}
+
 int unlink(const char *path)
 {
 	char f[512];
@@ -1405,10 +1457,108 @@ int unlink(const char *path)
 		return realfn(path, buf);                                             \
 	}
 
-STAT_WRAPPER(stat,   real_stat,   void *)
 STAT_WRAPPER(stat64, real_stat64, void *)
-STAT_WRAPPER(lstat,  real_lstat,  void *)
 STAT_WRAPPER(access, real_access, int)
+
+/* ---- stat/lstat/fstat: answered through their 64-bit twins ---------------
+ *
+ * NOT AN OPTIMISATION AND NOT A CLEANUP. __NR_stat (106), __NR_lstat (107)
+ * and __NR_fstat (108) are three of the thirteen syscalls Android's app
+ * seccomp filter refuses — bionic reaches all three through fstatat64, so the
+ * legacy numbers were never generated into the whitelist — and a refusal is
+ * not an error return, it is SIGSYS and a dead process. uClibc's stat(),
+ * lstat() and fstat() are exactly those three syscalls plus __xstat_conv, so
+ * calling them from inside an app process kills the guest. Measured: the
+ * rootless launch died at uClibc's fstat, libuClibc+0xd034.
+ *
+ * So this asks the kernel the 64-bit question, which IS allowed, and does the
+ * narrowing itself. The two layouts are not guessed: they are read off this
+ * firmware's own converters. __xstat_conv (libuClibc+0x10834) memsets 88 bytes
+ * and writes its fields at
+ *
+ *     0 st_dev(64)  12 st_ino  16 st_mode  20 st_nlink  24 st_uid  28 st_gid
+ *    32 st_rdev(64) 44 st_size 48 st_blksize 52 st_blocks
+ *    56/60 atime  64/68 mtime  72/76 ctime
+ *
+ * and __xstat64_conv (libuClibc+0x10990) memsets 104 and copies field for
+ * field at the same offsets it read them from — so uClibc's userspace
+ * struct stat64 IS the kernel's ARM struct stat64:
+ *
+ *     0 st_dev(64)  12 __st_ino  16 st_mode  20 st_nlink  24 st_uid
+ *    28 st_gid  32 st_rdev(64)  48 st_size(64)  56 st_blksize
+ *    64 st_blocks(64)  72/76 atime  80/84 mtime  88/92 ctime  96 st_ino(64)
+ *
+ * st_ino narrows to 32 bits, which is what the old syscall did too.
+ *
+ * These also keep the sysroot translation the wrapper above gives everything
+ * else, so nothing is lost by not going through STAT_WRAPPER. */
+#define TAD_STAT_SZ    88
+#define TAD_STAT64_SZ  104
+
+static u32 ld32(const unsigned char *p, unsigned off)
+{
+	return (u32)p[off] | ((u32)p[off+1] << 8) |
+	       ((u32)p[off+2] << 16) | ((u32)p[off+3] << 24);
+}
+static void st32(unsigned char *p, unsigned off, u32 v)
+{
+	p[off] = (unsigned char)v;         p[off+1] = (unsigned char)(v >> 8);
+	p[off+2] = (unsigned char)(v >> 16); p[off+3] = (unsigned char)(v >> 24);
+}
+static void stat64_narrow(const unsigned char *b, unsigned char *s)
+{
+	static const unsigned char map[][2] = {
+		{  0,  0 }, {  4,  4 },        /* st_dev, both words        */
+		{ 96, 12 },                    /* st_ino  (64 -> 32)        */
+		{ 16, 16 }, { 20, 20 },        /* st_mode, st_nlink         */
+		{ 24, 24 }, { 28, 28 },        /* st_uid, st_gid            */
+		{ 32, 32 }, { 36, 36 },        /* st_rdev, both words       */
+		{ 48, 44 },                    /* st_size (64 -> 32)        */
+		{ 56, 48 },                    /* st_blksize                */
+		{ 64, 52 },                    /* st_blocks (64 -> 32)      */
+		{ 72, 56 }, { 76, 60 },        /* atime, atime_nsec         */
+		{ 80, 64 }, { 84, 68 },        /* mtime                     */
+		{ 88, 72 }, { 92, 76 },        /* ctime                     */
+	};
+	unsigned i;
+	memset(s, 0, TAD_STAT_SZ);
+	for (i = 0; i < sizeof(map) / sizeof(map[0]); i++)
+		st32(s, map[i][1], ld32(b, map[i][0]));
+}
+
+/* Sysroot first, literal second — the rule everything else here follows. */
+static int stat_via64(const char *path, void *buf,
+                      int (*real64)(const char *, void *))
+{
+	unsigned char b[TAD_STAT64_SZ];
+	char f[512];
+	unsigned dlen;
+
+	init();
+	if (!real64) return -1;
+	dlen = (unsigned)strlen(g_dir);
+	if (path && path[0] == '/' && g_sysroot[0] &&
+	    !(dlen && strncmp(path, g_dir, dlen) == 0)) {
+		sysrootify(f, sizeof(f), path);
+		if (real64(f, b) == 0) { stat64_narrow(b, buf); return 0; }
+	}
+	if (real64(path, b) != 0) return -1;
+	stat64_narrow(b, buf);
+	return 0;
+}
+
+int stat(const char *path, void *buf)  { return stat_via64(path, buf, real_stat64); }
+int lstat(const char *path, void *buf) { return stat_via64(path, buf, real_lstat64); }
+
+int fstat(int fd, void *buf)
+{
+	unsigned char b[TAD_STAT64_SZ];
+	init();
+	if (!real_fstat64) return -1;
+	if (real_fstat64(fd, b) != 0) return -1;
+	stat64_narrow(b, buf);
+	return 0;
+}
 
 /* signal() — DO NOT LET THE GUEST UNINSTALL THE CRASH REPORTER.
  *

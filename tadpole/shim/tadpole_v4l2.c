@@ -91,7 +91,14 @@ extern size_t strlen(const char *s);
 extern int    strncmp(const char *a, const char *b, size_t n);
 extern long   read(int fd, void *buf, size_t n);
 extern long   lseek(int fd, long off, int whence);
-extern int    ftruncate(int fd, long length);
+/* ftruncate64, NOT ftruncate, and the reason is a sandbox rather than a size.
+ *
+ * Nothing here ever needs more than 4 GiB. But __NR_ftruncate (93) is one of
+ * the syscalls Android's app seccomp filter refuses — bionic only ever uses
+ * ftruncate64, so the legacy number is not on the generated whitelist — and a
+ * refusal there is not an error return, it is SIGSYS and a dead process. See
+ * android/NOTES-arm32.md, "What the seccomp filter blocks". */
+extern int    ftruncate64(int fd, long long length);
 extern int   *__errno_location(void);
 extern char  *getenv(const char *name);
 
@@ -440,7 +447,7 @@ int tad_v4l2_open(int idx, int flags)
 	}
 	/* Big enough for the staging slots from the start; the buffer area grows
 	 * when REQBUFS says how many the guest wants. */
-	ftruncate(fd, (long)stage_bytes(c));
+	ftruncate64(fd, (long long)stage_bytes(c));
 
 	/* NEVER CLOSE A DESCRIPTOR THAT IS THE ONE WE JUST OPENED. The guest
 	 * closes and reopens the node on every DeinitCameraInt/InitCameraInt
@@ -903,7 +910,7 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 				note(m);
 				scratch_drop(c);
 				if (c->fd >= 0)
-					ftruncate(c->fd, (long)stage_bytes(c));
+					ftruncate64(c->fd, (long long)stage_bytes(c));
 			} else {
 				c->width = keep_w; c->height = keep_h; c->pixfmt = keep_f;
 				geom_set(c);
