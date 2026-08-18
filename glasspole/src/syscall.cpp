@@ -55,6 +55,8 @@ enum : uint32_t {
     /* Threads. */
     SYS_clone = 120, SYS_futex = 240, SYS_gettid = 224,
     SYS_mknod = 14, SYS_ftruncate = 93, SYS_getdents64 = 217, SYS_getdents = 141,
+    /* The *at() forms. uClibc reaches for these, not the plain ones. */
+    SYS_mknodat = 324, SYS_unlinkat = 328,
     /* Descriptor duplication. Missing entirely until it was measured: busybox
      * ash asks for `>&2`, gets ENOSYS, and RETRIES FOREVER — 21.9 MB of
      * "sh: 0: Function not implemented" in twenty seconds. Shell redirection
@@ -366,6 +368,7 @@ const char *name_of(uint32_t nr) {
         case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
         case SYS_truncate64: return "truncate64";
         case SYS_ftruncate64: return "ftruncate64";
+        case SYS_mknodat: return "mknodat";         case SYS_unlinkat: return "unlinkat";
         case SYS_getdents64: return "getdents64";   case SYS_getdents: return "getdents";
         case SYS_mq_open: return "mq_open";         case SYS_mq_unlink: return "mq_unlink";
         case SYS_mq_timedsend: return "mq_timedsend";
@@ -1325,6 +1328,55 @@ void gp_syscall(Thread &t) {
             break;
         }
         ret = gp_mkfifo(m.HostPath(p).c_str(), a1 & 07777);
+        if (ret == GP_EEXIST) ret = 0;   /* a leftover FIFO is not a failure */
+        break;
+    }
+
+    /* THE *at() FORMS, WHICH ARE THE ONES THIS GUEST'S uClibc ACTUALLY CALLS.
+     *
+     * mkfifo() here compiles to mknodat(AT_FDCWD, ...) rather than mknod, so
+     * the case directly above was never reached and the shim's own ev0..evN
+     * input FIFOs were never created. On a FRESH arena directory that is a
+     * title which renders and cannot be played: the viewer writes button
+     * presses into files that do not exist. It went unseen because a
+     * TADPOLE_DIR that has been used before still has its FIFOs from the run
+     * that made them, and /tmp/tadpole almost always has.
+     *
+     * The same reprieve hid the ftruncate64 bug fixed alongside this one, and
+     * for the same reason: the two calls that failed were sizing fb0.bin
+     * (0x3fc000) and state.bin (0x210), which an already-used directory
+     * already has at the right size.
+     *
+     * Only AT_FDCWD is honoured, plus any absolute path, for which a dirfd is
+     * ignored by definition. Nothing here has been seen to pass a real
+     * directory fd, and quietly treating one as the cwd would put files in the
+     * wrong place — so it is refused loudly rather than guessed at.
+     */
+    case SYS_mknodat:
+    case SYS_unlinkat: {
+        constexpr uint32_t AT_FDCWD = 0xffffff9c, AT_REMOVEDIR = 0x200;
+        constexpr uint32_t S_IFMT = 0xf000, S_IFIFO = 0x1000;
+        std::string p = m.Str(a1);
+        if (m.trace) tpath = p;
+        if (a0 != AT_FDCWD && !(!p.empty() && p[0] == '/')) {
+            gp_log("%s(%s): relative to a directory fd, which is not "
+                   "implemented\n", name_of(nr), p.c_str());
+            ret = GP_ENOSYS;
+            break;
+        }
+        std::string h = m.HostPath(p);
+        if (nr == SYS_unlinkat) {
+            ret = (a2 & AT_REMOVEDIR) ? gp_rmdir(h.c_str()) : gp_unlink(h.c_str());
+            break;
+        }
+        if ((a2 & S_IFMT) != S_IFIFO) {
+            gp_log("mknodat(%s, mode %o): not a FIFO, and device nodes are not "
+                   "implemented — the shim is supposed to have absorbed those\n",
+                   p.c_str(), a2);
+            ret = GP_EPERM;
+            break;
+        }
+        ret = gp_mkfifo(h.c_str(), a2 & 07777);
         if (ret == GP_EEXIST) ret = 0;   /* a leftover FIFO is not a failure */
         break;
     }
