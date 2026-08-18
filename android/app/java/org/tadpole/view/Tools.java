@@ -60,9 +60,6 @@ final class Tools {
          *                lines of Python and a lot of network etiquette.
          *   cart2tar     converts a raw cartridge dump, which is a desktop job
          *                — the dump arrives over FTP from a real device.
-         *   install-firmware  needs a UBIFS reader and LZO; its own header
-         *                calls that "a project in itself". push-firmware.sh
-         *                carries a desktop-prepared sysroot across instead.
          *
          * The front end names them and says "not available on Android yet",
          * which is the honest state of a port in progress and better than a
@@ -70,6 +67,7 @@ final class Tools {
         if (name.equals("erase-firmware")) return new EraseFirmware();
         if (name.equals("install-game"))   return new InstallGame();
         if (name.equals("scan-games"))     return new ScanGames();
+        if (name.equals("install-firmware")) return new InstallFirmware();
         return null;
     }
 
