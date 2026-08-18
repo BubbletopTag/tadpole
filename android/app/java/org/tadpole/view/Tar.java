@@ -99,7 +99,18 @@ final class Tar {
 
         int kind = magic(path);
         if (kind != 0) {
-            temp = File.createTempFile("tadpole-tar", ".tar", path.getParentFile());
+            /* THE TEMPORARY FILE GOES SOMEWHERE WE KNOW WE CAN WRITE, not
+             * beside the archive. Archives arrive from shared storage —
+             * /sdcard/LFC_Downloads is where somebody's LFConnect download
+             * lands — and an app can READ there without being able to CREATE
+             * there. Writing the scratch copy next to the source therefore
+             * failed with "Permission denied" on every compressed archive,
+             * while the uncompressed ones sailed through, which reads as the
+             * archives being broken rather than as the temp path being wrong. */
+            File scratch = Tools.proj();
+            if (!scratch.isDirectory() || !scratch.canWrite())
+                scratch = path.getParentFile();
+            temp = File.createTempFile("tadpole-tar", ".tar", scratch);
             OutputStream out = new java.io.BufferedOutputStream(
                     new FileOutputStream(temp), 1 << 16);
             try {
