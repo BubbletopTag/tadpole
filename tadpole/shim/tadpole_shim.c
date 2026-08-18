@@ -64,6 +64,12 @@ extern void tad_crash_install(const char *dir,
  * crash reporter does not manage — in which case signal() falls through. */
 extern void (*tad_crash_take_signal(int sig, void (*h)(int)))(int);
 
+/* tadpole_mqueue.c — POSIX message queues in userspace, because the Android
+ * kernel has CONFIG_POSIX_MQUEUE off and mainline would reject Brio's queue
+ * names anyway. close() needs to recognise their descriptors. */
+extern int tad_mq_is_mqd(int fd);
+extern int tad_mq_close(int mqdes);
+
 #define RTLD_NEXT ((void *)-1L)
 #define RTLD_DEFAULT ((void *)0)
 
@@ -1408,6 +1414,13 @@ int openat(int dirfd, const char *path, int flags, ...)
 int close(int fd)
 {
 	init();
+	/* A MESSAGE-QUEUE DESCRIPTOR IS NOT A FILE DESCRIPTOR HERE. On Linux an
+	 * mqd_t really is an fd and close() on one is legal; ours are made up by
+	 * tadpole_mqueue.c and carry a tag, so passing one to the real close()
+	 * would return EBADF for something that is perfectly valid. Routed rather
+	 * than rejected, so either spelling works. */
+	if (tad_mq_is_mqd(fd))
+		return tad_mq_close(fd);
 	if (fd >= 0 && fd < MAXFD) {
 		g_fb_of_fd[fd] = -1;
 		g_ev_of_fd[fd] = -1;

@@ -49,7 +49,7 @@ SHIMLIBS  := ../runtime/shimlibs
 SHIM_SONAME := libdl.so.0
 REAL_DL     := libdl.so.9
 
-SHIM_SRC := shim/tadpole_shim.c shim/tadpole_crash.c
+SHIM_SRC := shim/tadpole_shim.c shim/tadpole_crash.c shim/tadpole_mqueue.c
 SHIM_OUT := $(SHIMLIBS)/libdl.so.0
 # Second variant: the display tools (imager-fb, drawtext-fb, flipbook-fb,
 # fbtest) link no libdl at all — libz.so.1 is their first NEEDED entry.

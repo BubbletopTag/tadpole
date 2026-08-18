@@ -171,6 +171,53 @@ its own code. Both restrictions miss it completely.)
 
 **Verdict: not viable.** Not "hard" — the engine cannot be built for the ABI.
 
+#### Amended 2026-08-17: not viable *in the app*. From a root shell it runs.
+
+The four objections above are all true and three of them are answers to a
+question this section never asked — "can the app process do it" — rather than
+"can this device do it". With `adb root` on a 32-bit-only tablet:
+
+* **A1 and A2 do not apply at all.** They are about dynarmic and about
+  glasspole's 4 GiB reservation. There is no JIT in this path and no
+  reservation; the guest's instructions are simply the host's instructions.
+* **A3 is what `chroot` is for.** The loader problem is "the ELF names
+  `/lib/ld-uClibc.so.0` and there is no such file" — inside a chroot on the
+  sysroot there is. And the syscall problem is backwards: glasspole's
+  `syscall.cpp` rewrites guest paths in software precisely because it has no
+  kernel willing to do it, and here one is.
+* **A4 is a rule about `untrusted_app`, not about the kernel.** A root shell is
+  not in that domain. It remains an absolute blocker on the app launching this
+  itself, which is why the script needs root and why this is not yet something
+  the front end can do.
+
+What actually stood between "chroot works" and "the system menu boots" was one
+thing, and it was not architectural: **`CONFIG_POSIX_MQUEUE` is off on this GSI**,
+so Brio's event dispatcher died in `mq_open` with ENOSYS before AppManager drew
+anything. Turning that option on would not have helped either — Brio passes
+`eventDispatchQueue` with no leading slash and mainline Linux rejects the name
+with EINVAL, measured. It is implemented in userspace now, in
+`tadpole/shim/tadpole_mqueue.c`, which is the same thing glasspole already does
+for the desktop path.
+
+Measured end to end on the Phh-Treble GSI (Android 8.1, armeabi-v7a only,
+Mali-T720, kernel 3.18.79 `armv7l`), via `android/run-guest-native.sh`:
+AppManager boots, the LeapPad home screen composites through the viewer in
+portrait, the viewer picks up the guest's rotation and its 32 kHz stereo audio
+format, taps on the tablet's own touchscreen reach the guest, and a title —
+*The Solar System* — launches from the menu and runs.
+
+Two smaller things had to be got right and are worth knowing before repeating
+it. The chroot root must be `runtime/sysroot`, not `rootfs/*/ubi_rfs`: the raw
+firmware tree has no `/sys`, and `libDisplay.so` stats `/sys/class/graphics`,
+gets ENOENT and dereferences NULL. And every file the guest creates in the
+arena lands as `app_data_file:s0` with **no MLS categories**, because root made
+it, so the app is denied its own framebuffer — they have to be relabelled to the
+app's `s0:c512,c768` before the viewer maps them.
+
+None of this changes the conclusion for a *64-bit* device, where Option B is
+still the only route. It changes the conclusion for the hardware this port was
+aimed at in the first place.
+
 ### Option B — Glasspole on arm64-v8a
 
 **This turns out to be nearly free, and it is the finding that changes the
