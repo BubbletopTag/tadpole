@@ -633,33 +633,33 @@ static int scratch_ready(struct camdev *c)
  *
  * and AVI_write_frame lays the planes out from the raw capture buffer as
  * data[0] = buf, data[1] = buf + 2048, data[2] = buf + 2048 + height*2048 —
- * the video plane's own arrangement, at a fixed 4096. A frame written with any
- * other pitch encodes to stripes, which is exactly what the first recording
- * produced: nine seconds of correct audio over a video track of coloured
- * bands.
+ * the video plane's own arrangement, at a fixed 4096 whatever the width. A
+ * frame written with any other pitch encodes to stripes, which is what the
+ * first working recording produced: nine seconds of correct audio over a video
+ * track of coloured bands.
  *
- * The still path has no such constraint: CVIPCameraModule::GetFrame recovers
+ * The still path has no such constraint. CVIPCameraModule::GetFrame recovers
  * the pitch as frameinfo.size / frameinfo.height, so it accepts whatever we
- * report. It gets the SMALLEST legal pitch instead — 2*width, luma in the
- * first half of each row and chroma in the second — because of the arena
- * collision described above capture_blit_mlc(): at 4096 a 640x480 photograph
- * covers 1966080 bytes and Brio's first surface is at 0xFF000, so the display
- * and the photograph would be writing over each other. At 2*width it is
- * 614400 and they do not meet.
+ * report, and 4096 is fine there too.
  *
- * Which one is wanted is not guessed. CCameraModule::PollFrame — and nothing
- * else — issues QUERYBUF on a buffer that is already QUEUED, so that is the
- * recorder's frame loop identifying itself. */
+ * SO THE ONLY QUESTION IS WHETHER IT FITS. The capture buffer lives at video
+ * memory offset 0 and there are TAD_CAM_HEADROOM bytes there before Brio's own
+ * allocations start — 240 rows of 4096 fit, 480 do not. Above that, the
+ * smallest legal pitch is used instead (2*width, luma in the first half of
+ * each row and chroma in the second), which keeps a photograph out of the
+ * display's pages; the cost is that a RECORDING at such a size would come out
+ * striped, and 320x240 is what the widget records at.
+ *
+ * (An earlier version of this decided on c->polled — "only PollFrame asks
+ * about a buffer that is already QUEUED, so the recorder identifies itself".
+ * Measured false: taking a photograph sets it too, through the QUERYBUF drain
+ * loop in SetBuffers. The flag is still published, because knowing which path
+ * is running is useful, but nothing depends on it.)
+ */
 static u32 cap_pitch(struct camdev *c)
 {
 	u32 p;
-	/* AND NEVER BIGGER THAN THE HEADROOM ALLOWS. 4096 is what the recorder
-	 * needs, but only a frame short enough for it fits below Brio's first
-	 * surface: 240 rows do, 600 do not. Falling back to the minimum pitch is
-	 * wrong for a recording — the video comes out striped — and writing over
-	 * the picture on screen is wrong for everything, which is worse. The
-	 * sizes the widgets actually record at (320x240) fit. */
-	if (c->polled && c->height * 4096u <= TAD_CAM_HEADROOM)
+	if (c->height && c->height * 4096u <= TAD_CAM_HEADROOM)
 		return 4096;
 	p = c->width * 2;
 	return (p + 63u) & ~63u;

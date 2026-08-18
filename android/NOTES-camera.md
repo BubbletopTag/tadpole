@@ -149,10 +149,14 @@ The layout is the video plane's, the same one `blit_layer_yuv420()` in the
 viewer already reads: with P the pitch, Y row *y* at `y*P`, Cb row *y* at
 `y*P + P/2`, Cr row *y* at `(h/2 + y)*P + P/2`.
 
-**P is 4096 for a recording and free otherwise.** `AVI_set_video` hardcodes
+**P is 4096 whenever the frame fits.** `AVI_set_video` hardcodes
 `frame->linesize[0..2] = 4096`, and `AVI_write_frame` lays the planes out as
-`data[0]=buf, data[1]=buf+2048, data[2]=buf+2048+height*2048`. The still path
-recovers the pitch as `frameinfo.size / frameinfo.height` and accepts anything.
+`data[0]=buf, data[1]=buf+2048, data[2]=buf+2048+height*2048`, so a recording
+must use it. The still path recovers the pitch as
+`frameinfo.size / frameinfo.height` and accepts anything, including 4096. So
+the only question is whether 4096 fits in the headroom below — 240 rows do,
+480 do not — and above that the smallest legal pitch (2*width) is used
+instead.
 
 And here is the one place the emulator differs from the device. On hardware
 `/dev/fb2` is a separate video heap; here all three framebuffers share one
