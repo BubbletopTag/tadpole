@@ -95,6 +95,8 @@ static int tp_fifo_fd(const char *path, int want_read)
 #define TADPOLE_VERSION "dev"
 #endif
 
+#include "../shim/tadpole_cam.h"
+
 /* Mirrors struct tadpole_state in the shim. Keep the two in sync. */
 struct layer_state {
 	uint32_t enabled, xres, yres, bpp, xoffset, yoffset;
@@ -125,6 +127,10 @@ struct tadpole_state {
 	uint32_t screen;
 	uint32_t screen_seq;
 	char     screen_pkg[PKGID_MAX];
+
+	/* /dev/video0 and /dev/video1 — control only; the frames live in
+	 * camN.bin. Same rule as everything above: append, never insert. */
+	struct tad_cam_state cam[TAD_CAM_N];
 };
 
 /* struct input_event as the 32-bit ARM guest sees it: 32-bit time_t. NOT the

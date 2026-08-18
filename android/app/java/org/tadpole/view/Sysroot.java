@@ -188,6 +188,20 @@ final class Sysroot {
         write(new File(sysroot, "sys/devices/platform/lf2000-aclmtr/.keep"), "");
         write(new File(sysroot, "sys/class/graphics/fb0/rotate"), "0");
 
+        /* THE CAMERA'S BACKEND IS CHOSEN BY A DIRECTORY EXISTING.
+         *
+         * libCameraMPI.so stats /sys/devices/platform/vip.0/driver — the
+         * driver symlink the kernel only creates once lf2000_vip has bound —
+         * and loads libCameraVIP.so if it is there and libCameraUSB.so if it
+         * is not. Without it Brio falls through to the USB module, which
+         * reports "USB camera missing 0", leaves mCameraPresent at 0, and then
+         * refuses StartVideoCapture however well /dev/video0 answers.
+         *
+         * It also picks the better of the two paths for us: the VIP module
+         * previews through VIDIOC_S_FBUF + VIDIOC_OVERLAY straight into the
+         * MLC's video plane, which is a plane the viewer already composites. */
+        write(new File(sysroot, "sys/devices/platform/vip.0/driver/.keep"), "");
+
         /* Touchscreen tuning, mirroring /flags/set-ts.sh on the device. */
         String t = "sys/devices/platform/lf2000-touchscreen/";
         write(new File(sysroot, t + "max_tnt_down"),  "23");

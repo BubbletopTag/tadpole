@@ -174,6 +174,14 @@ printf '0'        > sys/devices/platform/lf1000-gpio/board_id
 printf '1'        > sys/devices/platform/lf2000-power/status   # 1 = EXTERNAL
 printf '0'        > sys/class/graphics/fb0/rotate
 
+# THE CAMERA'S BACKEND IS CHOSEN BY A DIRECTORY EXISTING. libCameraMPI.so stats
+# /sys/devices/platform/vip.0/driver — the symlink the kernel only creates once
+# lf2000_vip has bound — and loads libCameraVIP.so if it is there, libCameraUSB
+# if it is not. Without it Brio takes the USB path, says "USB camera missing 0",
+# leaves mCameraPresent at 0 and refuses StartVideoCapture whatever /dev/video0
+# answers. etc/init.d/camera agrees: it modprobes lf2000_vip iff vip.0 exists.
+mkdir -p sys/devices/platform/vip.0/driver
+
 echo "==> device nodes"
 # These must EXIST as directory entries or the guest stops enumerating after
 # event1. The shim intercepts open() on them regardless of content.

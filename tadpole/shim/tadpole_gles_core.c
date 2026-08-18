@@ -720,6 +720,8 @@ static int parse_int(const char **p)
  * middle of layer[0]. Nothing warns; the numbers are just quietly wrong.
  *
  * A layout check runs at map time — see view_update(). */
+#include "tadpole_cam.h"
+
 struct tad_layer_state {
 	u32 enabled, xres, yres, bpp, xoffset, yoffset;
 	u32 nonstd, alpha, blank;
@@ -736,6 +738,10 @@ struct tad_state {
 	 * full panel with only a trace line to say so. */
 	u32 screen, screen_seq;
 	char screen_pkg[64];
+	/* Mirrored for the same reason as the two above: the camera control block
+	 * grew state.bin, and a strict length check that did not know about it
+	 * would decide the layout was wrong and quietly disable the 3D viewport. */
+	struct tad_cam_state cam[TAD_CAM_N];
 };
 
 static const struct tad_state *g_tstate;

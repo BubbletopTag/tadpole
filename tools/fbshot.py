@@ -27,12 +27,17 @@ HDR_SIZE = 20                      # magic, version, width, height, vsync_count
 # the viewer turns the window with. Nothing here needs it; it is counted so the
 # size check below still recognises a state.bin this script can read.
 TAIL_SIZE = 4 + 4 + 64
+# And after that, the camera control block: two devices, twenty u32 each. See
+# tadpole/shim/tadpole_cam.h. Counted for the same reason as the tail — so the
+# size check recognises a current state.bin rather than warning about one.
+CAM_N = 2
+CAM_SIZE = 4 * 20
 
 
 def check_size(nbytes):
     """state.bin is the header, NUM_FB layers, and the screen tail. Anything
     else means this script and the shim disagree about the struct."""
-    want = HDR_SIZE + NUM_FB * LAYER_SIZE + TAIL_SIZE
+    want = HDR_SIZE + NUM_FB * LAYER_SIZE + TAIL_SIZE + CAM_N * CAM_SIZE
     if nbytes != want:
         sys.stderr.write(
             "fbshot: state.bin is %d bytes, expected %d — LAYER_FIELDS is out "

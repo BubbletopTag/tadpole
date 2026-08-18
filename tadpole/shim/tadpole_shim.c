@@ -23,6 +23,7 @@
 
 #define _GNU_SOURCE
 #include <stdarg.h>
+#include "tadpole_cam.h"
 
 typedef unsigned char      u8;
 typedef unsigned short     u16;
@@ -69,6 +70,24 @@ extern void (*tad_crash_take_signal(int sig, void (*h)(int)))(int);
  * names anyway. close() needs to recognise their descriptors. */
 extern int tad_mq_is_mqd(int fd);
 extern int tad_mq_close(int mqdes);
+
+/* tadpole_v4l2.c — /dev/video0 and /dev/video1. Same shape as the framebuffer:
+ * open() returns a descriptor onto a plain host file so the guest's mmap is a
+ * real shared mapping, and only the ioctls are emulated. */
+extern void tad_v4l2_init(const char *dir, struct tad_cam_state *cams,
+                          void *arena, u32 arena_bytes,
+                          const u32 *smem_start, u32 nlayer,
+                          int (*ropen)(const char *, int, ...),
+                          int (*rclose)(int),
+                          void (*dbgfn)(const char *));
+/* Called from the framebuffer path: the guest's own render loop is the only
+ * clock the shim has, and the camera overlay needs one. */
+extern void tad_v4l2_pump(void);
+extern int  tad_v4l2_index(const char *path);
+extern int  tad_v4l2_open(int idx, int flags);
+extern int  tad_v4l2_is_fd(int fd);
+extern int  tad_v4l2_ioctl(int fd, ulong req, void *arg);  /* -2: not ours */
+extern int  tad_v4l2_close(int fd);
 
 #define RTLD_NEXT ((void *)-1L)
 #define RTLD_DEFAULT ((void *)0)
@@ -206,6 +225,10 @@ struct tadpole_state {
 	u32 screen_seq;             /* bumped on every change, so a viewer that
 	                             * was not looking still sees the transition */
 	char screen_pkg[PKGID_MAX]; /* the PackageID when a title is up */
+
+	/* /dev/video0 and /dev/video1. The control block only — the frames travel
+	 * in camN.bin beside fb0.bin. See tadpole_cam.h. */
+	struct tad_cam_state cam[TAD_CAM_N];
 };
 
 /* ---- geometry ---------------------------------------------------------- */
@@ -242,6 +265,19 @@ static long g_vsync_ns;          /* period; 0 = uncapped */
 static long g_vs_sec, g_vs_nsec; /* next deadline */
 
 static struct tadpole_state *g_state;
+
+/* The shared framebuffer arena, mapped once for the camera overlay. */
+static void *g_arena;
+static u32   g_arena_bytes;
+
+/* WHAT THE GUEST IS TOLD THE FRAMEBUFFERS LIVE AT. A non-zero smem_start keeps
+ * callers that sanity-check it happy, and Brio then quotes these addresses back
+ * at us — CreateHandle logs "@ 0x82afc000" and VIDIOC_S_FBUF carries the same
+ * number — so they are the only way to work out which layer a pointer belongs
+ * to. Defined once, used by fill_fix() and by the camera. */
+#define FB_SMEM_BASE   0x82000000u
+#define FB_SMEM_STRIDE 0x400000u
+static u32 g_smem_start[NUM_FB];
 
 /* fd -> device mapping. Small linear tables; opens are rare. */
 #define MAXFD 4096
@@ -560,7 +596,19 @@ static void init(void)
 	snprintf(path, sizeof(path), "%s/fb0.bin", g_dir);
 	fd = real_open(path, O_RDWR | O_CREAT, 0666);
 	if (fd >= 0) {
-		ftruncate(fd, (long)(g_w * g_h * (g_bpp / 8) * NBUF));
+		g_arena_bytes = g_w * g_h * (g_bpp / 8) * NBUF;
+		ftruncate(fd, (long)g_arena_bytes);
+		/* MAPPED HERE TOO, not only by whoever opens /dev/fbN.
+		 *
+		 * The camera's viewfinder is not a stream the application reads — the
+		 * VIP driver DMAs into the display surface and the app never sees a
+		 * frame (measured: one QBUF, zero DQBUFs, with the viewfinder up). To
+		 * emulate that we have to write into the same arena the guest and the
+		 * viewer are both looking at, and the fd handed out by open("/dev/fb2")
+		 * belongs to the guest, not to us. */
+		g_arena = real_mmap(0, g_arena_bytes, 3 /*RW*/, 1 /*SHARED*/, fd, 0);
+		if (g_arena == (void *)-1)
+			g_arena = 0;
 		real_close(fd);
 	} else {
 		char m[420];
@@ -609,6 +657,21 @@ static void init(void)
 			g_state->layer[i].enabled = (i == 0);
 		}
 	}
+
+	/* /dev/video0..1. Handed the shared state so the host side can see that
+	 * the guest has the node open and is streaming, and the real open/close so
+	 * it cannot recurse back through our own. */
+	{
+		/* The same addresses fill_fix() reports, in one place so the camera can
+		 * turn the physical base in a VIDIOC_S_FBUF back into an arena offset
+		 * without duplicating the formula. */
+		u32 k;
+		for (k = 0; k < NUM_FB; k++)
+			g_smem_start[k] = FB_SMEM_BASE + k * FB_SMEM_STRIDE;
+	}
+	tad_v4l2_init(g_dir, g_state ? g_state->cam : 0,
+	              g_arena, g_arena_bytes, g_smem_start, NUM_FB,
+	              real_open, real_close, note);
 
 	/* input FIFOs — viewer writes struct input_event, guest reads */
 	for (i = 0; i < NUM_EV; i++) {
@@ -970,6 +1033,12 @@ static int open_common(const char *path, int flags, int mode)
 		if (fd >= 0 && fd < MAXFD)
 			g_ev_of_fd[fd] = (signed char)idx;
 		if (g_debug) { dbg("[tadpole] open "); dbg(path); dbg(" -> "); dbg(g_ev_names[idx]); dbg("\n"); }
+		return fd;
+	}
+
+	if ((idx = tad_v4l2_index(path)) >= 0) {
+		fd = tad_v4l2_open(idx, flags);
+		if (g_debug) { dbg("[tadpole] open "); dbg(path); dbg("\n"); }
 		return fd;
 	}
 
@@ -1405,7 +1474,8 @@ int openat(int dirfd, const char *path, int flags, ...)
 	va_list ap; int mode = 0;
 	va_start(ap, flags); mode = va_arg(ap, int); va_end(ap);
 	init();
-	if (path && path[0] == '/' && (fb_index(path) >= 0 || ev_index(path) >= 0))
+	if (path && path[0] == '/' && (fb_index(path) >= 0 || ev_index(path) >= 0 ||
+	                               tad_v4l2_index(path) >= 0))
 		return open_common(path, flags, mode);
 	if (!real_openat) return -1;
 	return real_openat(dirfd, path, flags, mode);
@@ -1425,6 +1495,7 @@ int close(int fd)
 		g_fb_of_fd[fd] = -1;
 		g_ev_of_fd[fd] = -1;
 	}
+	tad_v4l2_close(fd);
 	if (!real_close) return -1;
 	return real_close(fd);
 }
@@ -1463,7 +1534,7 @@ static void fill_fix(struct fb_fix_screeninfo *f, int idx)
 	f->id[8] = (char)('0' + idx);
 	/* A non-zero smem_start keeps callers that sanity-check it happy; the
 	 * guest never dereferences it, it mmaps the fd instead. */
-	f->smem_start  = 0x82000000u + (ulong)idx * 0x400000u;
+	f->smem_start  = FB_SMEM_BASE + (ulong)idx * FB_SMEM_STRIDE;
 	f->smem_len    = g_w * g_h * (g_bpp / 8) * NBUF;
 	f->type        = 0;   /* FB_TYPE_PACKED_PIXELS */
 	f->visual      = 2;   /* FB_VISUAL_TRUECOLOR */
@@ -1497,6 +1568,13 @@ int ioctl(int fd, ulong req, ...)
 	va_start(ap, req);
 	arg = va_arg(ap, void *);
 	va_end(ap);
+
+	/* ---------------- camera ---------------- */
+	if (tad_v4l2_is_fd(fd)) {
+		int r = tad_v4l2_ioctl(fd, req, arg);
+		if (r != -2)
+			return r;
+	}
 
 	/* ---------------- framebuffer ---------------- */
 	if (fd >= 0 && fd < MAXFD && (idx = g_fb_of_fd[fd]) >= 0) {
@@ -1561,6 +1639,7 @@ int ioctl(int fd, ulong req, ...)
 			return 0;
 		case FBIOPAN_DISPLAY: {
 			struct fb_var_screeninfo *v = arg;
+			tad_v4l2_pump();
 			if (g_state && v) {
 				g_state->layer[idx].xoffset = v->xoffset;
 				g_state->layer[idx].yoffset = v->yoffset;
@@ -1583,6 +1662,7 @@ int ioctl(int fd, ulong req, ...)
 			return 0;
 		case FBIO_WAITFORVSYNC:
 			vsync_wait();
+			tad_v4l2_pump();
 			if (g_state)
 				g_state->vsync_count++;
 			return 0;
