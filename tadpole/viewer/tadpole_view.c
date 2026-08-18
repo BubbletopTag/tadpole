@@ -575,7 +575,11 @@ static uint16_t map_key(SDL_Keycode k, int rotate)
 	 * them, so a title that wanted L or R could not be given one. */
 	case SDLK_q:      return KEY_L_;
 	case SDLK_w:      return KEY_R_;
-	case SDLK_HOME:   return KEY_M_;
+	/* Both of these are the device's ONE button — see the note in pad_pump.
+	 * The keyboard offers two keys for it because Esc is what a desktop hand
+	 * reaches for and Home is what it is called, not because the hardware has
+	 * two. */
+	case SDLK_HOME:   return KEY_ESC_;
 	case SDLK_ESCAPE: return KEY_ESC_;
 	case SDLK_EQUALS: return KEY_VOLUMEUP_;
 	case SDLK_MINUS:  return KEY_VOLUMEDOWN_;
@@ -637,7 +641,20 @@ static void pad_pump(int rotate)
 		uint16_t code;
 		if (!(changed & PAD_BIT(i)))
 			continue;
-		code = (i < 4) ? rotate_dpad(i, rotate) : KEY_M_;
+		/* HOME IS ESCAPE ON THIS HARDWARE, not M.
+		 *
+		 * The LeapPad2's gpio-keys device advertises exactly six keys, and the
+		 * capture says which — reference/device-capture/.../01-input-bulk.txt:
+		 *
+		 *     B: KEY=c1680 0 0 2
+		 *
+		 * Word 3 bits 7, 9, 10, 12, 18, 19 are KEY_UP, KEY_LEFT, KEY_RIGHT,
+		 * KEY_DOWN, KEY_VOLUMEDOWN and KEY_VOLUMEUP; word 0 bit 1 is KEY_ESC.
+		 * There is no KEY_M anywhere on the device, so the one key this button
+		 * was sending is one the firmware never had a handler for, and the
+		 * button did whatever a stray keycode happens to do rather than what
+		 * the hardware button does. */
+		code = (i < 4) ? rotate_dpad(i, rotate) : KEY_ESC_;
 		send_key(EV_GPIO_KEYS, code, (state & PAD_BIT(i)) != 0);
 	}
 }
@@ -1853,7 +1870,7 @@ static int selftest_pad(int rotate)
 		seen = 0;
 		for (k = 0; k < (int)(sizeof steps / sizeof *steps); k++) {
 			uint16_t want = steps[k].btn < 4
-			              ? rotate_dpad(steps[k].btn, rotate) : KEY_M_;
+			              ? rotate_dpad(steps[k].btn, rotate) : KEY_ESC_;
 			int ok, fresh;
 			pad_debug_press(steps[k].down ? PAD_BIT(steps[k].btn) : 0u);
 			pad_pump(rotate);

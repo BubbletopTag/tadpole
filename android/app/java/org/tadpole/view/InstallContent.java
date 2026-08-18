@@ -147,6 +147,9 @@ final class InstallContent implements Tools.Tool {
                     + " language pack(s), " + music + " music, " + asset
                     + " device asset(s), " + skip + " skipped");
         profileAccess(bulk, out);
+        /* The Music app reads a database, not the filesystem — see MusicDb. */
+        if (music > 0 || new File(bulk, "Music").isDirectory())
+            MusicDb.build(bulk, out);
         return true;
     }
 
