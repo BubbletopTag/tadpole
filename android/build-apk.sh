@@ -50,6 +50,33 @@ do_package() {
 <resources><string name="app_name">Tadpole</string></resources>
 XML
 
+    # THE LAUNCHER ICON, resampled from the SAME tadpole.png the desktop front
+    # end uses, so the two builds cannot drift apart. Generated at build time
+    # rather than committed five times over: the source is one 173x173 file, and
+    # five near-duplicates of it in the tree would be five things to forget about
+    # the day the artwork changes.
+    #
+    # The sizes are Android's launcher densities. 173 is a DOWNSCALE for
+    # everything up to xxhdpi, which is where the sharpness comes from; xxxhdpi
+    # is a 1.11x upscale, small enough to be invisible and much better than
+    # handing the platform one small bitmap and letting it stretch that to 192.
+    if [ -f "$root/tadpole.png" ]; then
+        python3 - "$root/tadpole.png" "$out/res" <<'ICONPY'
+import sys, os
+from PIL import Image
+src, res = sys.argv[1], sys.argv[2]
+im = Image.open(src).convert("RGBA")
+for name, px in (("mdpi", 48), ("hdpi", 72), ("xhdpi", 96),
+                 ("xxhdpi", 144), ("xxxhdpi", 192)):
+    d = os.path.join(res, "mipmap-" + name)
+    os.makedirs(d, exist_ok=True)
+    im.resize((px, px), Image.LANCZOS).save(os.path.join(d, "ic_launcher.png"))
+print("  launcher icon: %s -> 48/72/96/144/192" % os.path.basename(src))
+ICONPY
+    else
+        echo "  no tadpole.png at $root - the APK keeps the stock Android icon" >&2
+    fi
+
     "$BUILD_TOOLS/aapt2" compile --dir "$out/res" -o "$out/res.zip"
     # -A ships android/app/assets verbatim. The viewer reads its logo as a FILE
     # off the project directory rather than as an Android resource, so the PNGs

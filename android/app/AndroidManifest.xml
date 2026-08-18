@@ -52,7 +52,8 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application android:label="Tadpole"
-                 android:icon="@android:drawable/sym_def_app_icon"
+                 android:icon="@mipmap/ic_launcher"
+                 android:roundIcon="@mipmap/ic_launcher"
                  android:hardwareAccelerated="true"
                  android:allowBackup="false"
                  android:extractNativeLibs="true"
