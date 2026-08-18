@@ -242,6 +242,7 @@ struct camdev {
 	u32  ov_pitch;       /* its bytesperline: the panel pitch, not the width */
 	u32  ov_fourcc;
 	u32  polled;         /* the recorder's PollFrame loop has been seen   */
+	u32  warned_big;     /* said once that the frame will not fit         */
 
 	/* ONE SCRATCH PER DEVICE, sized when the format is. A fixed array would
 	 * have to be TAD_CAM_MAXFRAME to cover 1600x900, and this library is
@@ -328,6 +329,8 @@ static u32 bytes_per_line(u32 fourcc, u32 w)
 
 static u32 page_up(u32 n) { return (n + 4095u) & ~4095u; }
 
+static u32 cap_pitch(struct camdev *c);
+
 /* Recompute everything that depends on width/height/pixfmt and publish it. */
 static void geom_set(struct camdev *c)
 {
@@ -336,6 +339,8 @@ static void geom_set(struct camdev *c)
 	if (c->sizeimage > TAD_CAM_MAXFRAME) c->sizeimage = TAD_CAM_MAXFRAME;
 	c->slot = page_up(c->sizeimage);
 	if (g_cs) {
+		g_cs[c->idx].pitch  = cap_pitch(c);
+		g_cs[c->idx].polled = c->polled;
 		g_cs[c->idx].width     = c->width;
 		g_cs[c->idx].height    = c->height;
 		g_cs[c->idx].pixfmt    = c->pixfmt;
@@ -648,7 +653,13 @@ static int scratch_ready(struct camdev *c)
 static u32 cap_pitch(struct camdev *c)
 {
 	u32 p;
-	if (c->polled)
+	/* AND NEVER BIGGER THAN THE HEADROOM ALLOWS. 4096 is what the recorder
+	 * needs, but only a frame short enough for it fits below Brio's first
+	 * surface: 240 rows do, 600 do not. Falling back to the minimum pitch is
+	 * wrong for a recording — the video comes out striped — and writing over
+	 * the picture on screen is wrong for everything, which is worse. The
+	 * sizes the widgets actually record at (320x240) fit. */
+	if (c->polled && c->height * 4096u <= TAD_CAM_HEADROOM)
 		return 4096;
 	p = c->width * 2;
 	return (p + 63u) & ~63u;
@@ -714,8 +725,21 @@ static u32 fill_buffer(struct camdev *c, u32 bi, u8 *tmp, u32 tmpcap,
 	if (c->pixfmt == TAD_FOURCC_YU12) {
 		if (n < c->sizeimage)
 			return 0;
-		if (cap_off(c, bi) + cap_size(c) > g_arena_bytes)
+		/* Refuse rather than scribble. See TAD_CAM_HEADROOM. */
+		if (cap_off(c, bi) + cap_size(c) > TAD_CAM_HEADROOM ||
+		    cap_off(c, bi) + cap_size(c) > g_arena_bytes) {
+			if (!c->warned_big) {
+				char b[192];
+				c->warned_big = 1;
+				snprintf(b, sizeof(b),
+				         "[tadpole] cam%d: %ux%u at pitch %u needs %u bytes of"
+				         " video memory and only %u are free below Brio's first"
+				         " surface — no frame\n", c->idx, c->width, c->height,
+				         cap_pitch(c), cap_size(c), TAD_CAM_HEADROOM);
+				note(b);
+			}
 			return 0;
+		}
 		capture_blit_mlc(c, tmp, bi);
 		return cap_pitch(c) * c->height;
 	}
@@ -1042,9 +1066,12 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 			 * address from anyway. */
 			b->m.offset = cap_off(c, i);
 			b->length   = (cap_size(c) + 4095u) & ~4095u;
-			if (q)
-				c->polled = 1;      /* only PollFrame asks about a queued
-				                     * buffer — see cap_pitch() */
+			if (q && !c->polled) {
+				/* Only PollFrame asks about a buffer that is already
+				 * queued — see cap_pitch(). */
+				c->polled = 1;
+				geom_set(c);
+			}
 			b->flags    = V4L2_BUF_FLAG_MAPPED_
 			            | (q ? V4L2_BUF_FLAG_QUEUED_ : 0)
 			            | (q && frame_ready(c) ? V4L2_BUF_FLAG_DONE_ : 0);
@@ -1126,6 +1153,8 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 		c->streaming = 1;
 		c->sequence  = 0;
 		c->polled    = 0;
+		c->warned_big = 0;
+		geom_set(c);
 		if (g_cs) g_cs[c->idx].streaming = 1;
 		snprintf(m, sizeof(m), "[tadpole] cam%d: STREAMON %ux%u\n",
 		         c->idx, c->width, c->height);

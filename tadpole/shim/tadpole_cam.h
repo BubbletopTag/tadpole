@@ -37,6 +37,17 @@
 #define TAD_CAM_BUFMAX  8              /* most REQBUFS we will honour */
 #define TAD_CAM_MAXFRAME (8u*1024*1024) /* refuse anything sillier than this */
 
+/* HOW MUCH OF THE ARENA THE CAPTURE BUFFER MAY HAVE.
+ *
+ * The VIP capture buffers live at video memory offset 0 — the guest computes
+ * their addresses as fb2_mapping + width*i and never reads QUERYBUF's offset —
+ * and in this emulator all three framebuffers share one arena, so that is
+ * arena offset 0. Brio's own allocator hands out its first surface at 0xFF000,
+ * two full 480x272x32 screens in, and everything on screen is above that. So
+ * this is the whole budget for one captured frame, and writing past it means
+ * writing over the picture. */
+#define TAD_CAM_HEADROOM 0xFF000u
+
 /* The fourccs this pair understands. The guest picks: CVIPCameraModule's
  * built-in default mode is YUV420 and that is what S_FMT actually asks for. */
 #define TAD_FOURCC_YU12  0x32315559u   /* 'Y','U','1','2' — planar I420 */
@@ -85,7 +96,9 @@ struct tad_cam_state {
 	unsigned int n_frames;    /* frames actually handed over                */
 	/* Padded to 32 words so the block is a round 128 bytes: fbshot.py and
 	 * anything else that walks state.bin by offset does simpler arithmetic. */
-	unsigned int reserved[10];
+	unsigned int pitch;       /* the capture pitch actually used            */
+	unsigned int polled;      /* the recorder's PollFrame loop has been seen*/
+	unsigned int reserved[8];
 };
 
 #endif
