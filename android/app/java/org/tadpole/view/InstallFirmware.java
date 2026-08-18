@@ -113,6 +113,12 @@ final class InstallFirmware implements Tools.Tool {
          * GetNorPartitionFilename failed" — and what it wants is the widgets
          * these carry. Doing them here means one action installs a system that
          * starts, rather than one that extracts. */
+        /* AND WHATEVER DIDJ.zip PUT IN LF/Base, which the extraction above has
+         * just removed along with everything else that was there. See
+         * DidjSetup.reapply: the symptom is a Didj title that reaches its own
+         * menu and then exits without a word. */
+        DidjSetup.reapply(out);
+
         out.println("==> content");
         new InstallContent().install(src, out);
 

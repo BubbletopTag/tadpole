@@ -78,16 +78,10 @@ final class DidjSetup implements Tools.Tool {
             if (path == null) { out.println("install-didj: --overlay needs a ControlOverlay.zip"); return false; }
             return overlay(new File(path), out);
         }
-        if (mode.equals("--fetch-compat")) {
-            out.println("==> Downloading the Didj compatibility files");
-            File z = download(DIDJ_URL, new File(cache(), "DIDJ.zip"), out);
-            return z != null && setup(z, out);
-        }
-        if (mode.equals("--fetch-overlay")) {
-            out.println("==> Downloading the Didj controller overlay");
-            File z = download(OVERLAY_URL, new File(cache(), "ControlOverlay.zip"), out);
-            return z != null && overlay(z, out);
-        }
+        if (mode.equals("--fetch-compat"))
+            return fetch(DIDJ_URL, "DIDJ.zip", "DidjPatches/", true, out);
+        if (mode.equals("--fetch-overlay"))
+            return fetch(OVERLAY_URL, "ControlOverlay.zip", "GameInfo.json", false, out);
 
         /* A bare path is a game dump: the conversion half, which is not ported.
          * Said in the same words InstallGame uses so the two agree. */
@@ -95,6 +89,63 @@ final class DidjSetup implements Tools.Tool {
         out.println("  run  tools/install-didj.py --to-tar <dump>  on a computer,");
         out.println("  then install the .tar it writes from the Game Library.");
         return false;
+    }
+
+    /**
+     * Get one of the two archives and install it — from the copy already
+     * downloaded when there is one, and from the network otherwise.
+     *
+     * <p>REUSING THE CACHE IS NOT JUST A SPEED-UP. A firmware install replaces
+     * LF/Base wholesale, which takes the compatibility files with it, so this
+     * runs again on a device that already has the 11 MB sitting on disk. Making
+     * it re-download on a tablet on someone's home wifi, to get bytes it
+     * already has, would be rude. The cached copy is only trusted if it still
+     * contains the marker the installer checks for.
+     */
+    private boolean fetch(String url, String name, String marker, boolean compat,
+                          PrintStream out) {
+        File zip = new File(cache(), name);
+        if (zip.isFile() && zip.length() > 0 && holds(zip, marker)) {
+            out.println("==> Using the copy already downloaded (" + Tools.rel(zip) + ")");
+            return compat ? setup(zip, out) : overlay(zip, out);
+        }
+        out.println("==> Downloading " + name);
+        File got = download(url, zip, out);
+        return got != null && (compat ? setup(got, out) : overlay(got, out));
+    }
+
+    private static boolean holds(File zip, String marker) {
+        Arc a = null;
+        try { a = Arc.open(zip); return a.has(marker); }
+        catch (IOException e) { return false; }
+        finally { if (a != null) a.close(); }
+    }
+
+    /**
+     * Put the compatibility files back after a firmware install has removed
+     * them. Called from InstallFirmware; does nothing if they were never
+     * installed, or if they are somehow still there.
+     *
+     * <p>WHY THIS IS NEEDED AT ALL, and it cost a real debugging session to
+     * find: installing firmware extracts a fresh rootfs and rebuilds the
+     * sysroot, and LF/Base is part of that. Everything DIDJ.zip put there goes.
+     * The symptom is not an error — it is JetPack Heroes reaching its own main
+     * menu, loading its "choose hero" screen, and then quietly exiting:
+     *
+     *     stat64(".../LF/Base/DidjAvatars/") = -1 ENOENT
+     *     exit_group(143)
+     *
+     * A title that starts and then stops with nothing said is exactly the kind
+     * of failure nobody connects back to a firmware update they ran an hour
+     * earlier. The downloaded zip survives, because it lives in sources/, so
+     * putting it back costs nothing and needs no network.
+     */
+    static void reapply(PrintStream out) {
+        File zip = new File(cache(), "DIDJ.zip");
+        if (!zip.isFile()) return;                       /* never installed */
+        if (new File(Tools.base(), "DidjPatches").isDirectory()) return;
+        out.println("==> Didj support (restoring what the install replaced)");
+        new DidjSetup().setup(zip, out);
     }
 
     /* ---- the compatibility files ----------------------------------------- */
@@ -299,8 +350,28 @@ final class DidjSetup implements Tools.Tool {
 
     /* ---- fetching --------------------------------------------------------- */
 
-    /** -> the file, or null. Resumes nothing: these are 11 MB and 55 KB. */
+    /**
+     * -> the file, or null. Resumes nothing: these are 11 MB and 55 KB.
+     *
+     * <p>RETRIED, BECAUSE THE FIRST REAL ATTEMPT ON THE TABLET FAILED AND THE
+     * SECOND WORKED. Measured: SocketTimeoutException connecting to
+     * archive.org, from a device whose shell reached the same address in a
+     * quarter of a second two minutes later. archive.org is simply slow to
+     * answer sometimes, and a setup step that makes someone press the button
+     * again is a setup step that looks broken.
+     */
     private File download(String url, File dest, PrintStream out) {
+        for (int attempt = 1; ; attempt++) {
+            File f = downloadOnce(url, dest, out);
+            if (f != null || attempt >= 3) return f;
+            out.println("    that did not get through; trying again ("
+                        + attempt + " of 2)");
+            try { Thread.sleep(3000L * attempt); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); return null; }
+        }
+    }
+
+    private File downloadOnce(String url, File dest, PrintStream out) {
         File dir = dest.getParentFile();
         if (dir != null && !dir.isDirectory() && !dir.mkdirs()) {
             out.println("install-didj: cannot write to " + Tools.rel(dir));
@@ -312,8 +383,8 @@ final class DidjSetup implements Tools.Tool {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
-            c.setConnectTimeout(15000);
-            c.setReadTimeout(60000);
+            c.setConnectTimeout(45000);
+            c.setReadTimeout(90000);
             c.setInstanceFollowRedirects(true);   /* archive.org always redirects */
             int code = c.getResponseCode();
             if (code != 200) {
