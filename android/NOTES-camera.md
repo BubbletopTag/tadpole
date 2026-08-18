@@ -1,167 +1,231 @@
-# Camera — what the guest actually asks for
+# Camera and microphone — what the guest actually asks for
 
-Tadpole has never had camera support. This is what an afternoon of measuring
-found, so that whoever implements it starts from facts rather than from the
-shape of the problem.
+**Status: working on the tablet.** The viewfinder is live on both cameras,
+the shutter saves a photograph the LeapPad2's own Gallery lists, and the Video
+recorder writes an AVI with MJPEG video and PCM audio from the tablet's
+microphone.
 
-**Short version: it is a V4L2 device on `/dev/video0`, the shim already has the
-exact mechanism it needs, and the hard part is not the interception — it is
-deciding what pixel format to hand back.**
+    LF/Bulk/Data/Local/All/Photos/lf_photo_000009.jpg   800x600, + Preview/ Thumb/
+    LF/Bulk/Data/Local/All/Videos/lf_video_000001.avi   8.04 s
+      Stream #0:0  mjpeg (Baseline), yuvj420p, 320x240, 29.73 fps
+      Stream #0:1  pcm_s16le, 16000 Hz, mono
 
-Everything below was measured with `TADPOLE_STRACE=1` against
-`./tadpole.sh --app CameraWidget`, on the desktop, in August 2026.
+The first half of this file was written before any of it worked and predicted
+the shape of the job. It got the entry point right — it is a V4L2 device on
+`/dev/video0` — and was wrong about almost everything after that, in ways worth
+recording, because each wrong turn is a thing the next person would also
+assume.
 
 ---
 
 ## The chain, from the app down
 
-`CameraWidget/App.so` → `libCameraMPI.so` → one of two backend modules, chosen
-at run time:
+`CameraWidget/App.so` (and `VideoWidget/App.so`) → `libCameraMPI.so` → one of
+two backend modules, chosen at run time by stat'ing
+`/sys/devices/platform/vip.0/driver` — not the device, the **driver symlink**,
+which the kernel only creates once a driver has bound:
 
 | | |
 |---|---|
-| `libCameraVIP.so` | the built-in camera, through the `lf2000_vip` kernel driver |
+| `libCameraVIP.so` | the built-in camera, through the `lf2000_vip` driver |
 | `libCameraUSB.so` | a USB (UVC) camera |
 
-**Which one is picked, and this is the part that is not obvious.** Brio stats
-`/sys/devices/platform/vip.0/driver` — not the device, the **driver symlink**,
-which the kernel only creates once a driver has bound. `etc/init.d/camera`
-agrees:
+Both sysroot builders now create that directory, and it is not optional. It is
+also not optional for the reason the old version of this file gave.
 
-```sh
-if [ -e /sys/devices/platform/vip.0 ]; then
-        modprobe lf2000_vip
-```
+### The USB path is a dead end, but not where it was thought to be
 
-Our sysroot has neither path, so Brio fell through to the USB module every
-time, and the USB module said:
+The old note said the USB module "still reports the camera missing" and stops.
+It does not stop. It opens `/dev/video0` happily and gets all the way to
+`CameraModule::InitCameraInt: completed OK` — and then does nothing for ever,
+because `CCameraModule::StartVideoCapture`'s second line is
 
-```
-CameraModule::CameraListener::Notify: USB camera missing 0
-```
+    if (this->mCameraPresent == 0) return 0;
 
-which reads like "there is no camera" and actually means "I am the wrong
-backend, and there is no USB camera either".
-
-### The USB path is a dead end, and here is how far it goes
-
-Worth writing down so nobody repeats it. `libCameraUSB.so` scans
-`/sys/class/usb_device/`, and for each entry reads
-`<entry>/device/idVendor` and `<entry>/device/idProduct`. Creating a
-plausible entry gets those files opened and read — the trace shows
-`read(18,...) = 5` for `"046d\n"` — and then it still reports the camera
-missing, because it compares the IDs against constants compiled into the
-module. Finding them means disassembling: the strings are at file offsets
-`0x14918`/`0x14956`/`0x149d6` in `libCameraUSB.so`, and the code is PIC, so
-there are no absolute references to grep for.
-
-Do not bother. The VIP path is the real one and it is far simpler.
-
-### The VIP path, which is the whole answer
-
-Create the driver node in the sysroot:
-
-```sh
-mkdir -p runtime/sysroot/sys/devices/platform/vip.0/driver
-```
-
-and the very next thing the guest does is:
-
-```
-open("/dev/video0", O_RDWR|O_NONBLOCK) = -1 errno=2 (No such file or directory)
-```
-
-No USB enumeration, no vendor IDs. It opens the V4L2 node directly, and the
-only reason it fails is that nothing answers.
+and `mCameraPresent` is set only by the USB listener, which is looking for a
+vendor ID under `/sys/class/usb_device`. So the USB path fails silently AFTER
+the camera is fully initialised, which is a far better disguise than "no such
+device". `CVIPCameraModule`'s constructor sets the same field from
+`InitCameraInt`'s return value instead, so on the VIP path a camera that
+answers its ioctls is a camera that is present.
 
 ---
 
-## Why this is a small job and not a large one
+## The format: ENUM_FMT must answer NOTHING
 
-`tadpole_shim.c` already does exactly this shape of work for two other
-devices, and says so in its own header:
+This was the open question — "answer `ENUM_FMT` with only YUYV and see whether
+it proceeds". `ENUM_FMT` is the wrong lever, and offering **any** format
+through it is actively harmful.
 
-> The pixel data path deliberately involves no interception at all: `open()`
-> hands back a descriptor onto a plain host file, so the guest's `mmap()` is a
-> real shared mapping of that file. The native viewer mmaps the same file and
-> both sides see the same pages. **Only the control path (ioctl) is emulated.**
+`CVIPCameraModule::EnumFormats` — the virtual the application actually calls —
+does not use the V4L2 enumeration at all, unless `CCameraModule` has already
+cached one. Its first act is to look at that cache, and only if it is EMPTY
+does it build the list the LeapPad2 really offers, out of eight statics in the
+module itself:
 
-V4L2 mmap streaming is that arrangement exactly, pointing the other way:
-
-| framebuffer (exists) | camera (to write) |
+| always | if within `/flags/high-res` (`"%dx%d"`) |
 |---|---|
-| `fb_index("/dev/fb0")` → host file | `video_index("/dev/video0")` → host file |
-| guest mmaps it, writes pixels | guest mmaps it, **reads** pixels |
-| viewer reads the arena and composites | viewer/Android **writes** frames into it |
-| fb ioctls emulated (`FBIOGET_VSCREENINFO`…) | V4L2 ioctls emulated (below) |
+| QSVGA 400x300, SVGA 800x600, QVGA 320x240, VGA 640x480 | WXGA 1280x800, SXGA 1280x960, HD16 1600x900, UXGA 1600x1200 |
 
-The ioctls a streaming capture client uses are a short list, and the guest
-enumerates before it configures — `v4l2_fmtdesc`, `v4l2_frmsizeenum` and
-`v4l2_frmivalenum` all appear in the module's symbol table, so it calls
-`VIDIOC_ENUM_FMT`, `ENUM_FRAMESIZES` and `ENUM_FRAMEINTERVALS`. Then
-`QUERYCAP`, `S_FMT`/`G_FMT`, `REQBUFS`, `QUERYBUF`, `QBUF`, `DQBUF`,
-`STREAMON`, `STREAMOFF`.
+and every one is `tCaptureMode.fmt` **3** — planar YUV420. That number is what
+makes recording possible: `CameraTaskMain` turns `fmt` into a fourcc for
+`AVI_set_video`, which sets an ffmpeg `pix_fmt` from it —
 
-Because we answer the enumeration, **we choose what the camera can do.** Offer
-exactly one format at one size at one frame rate and there is no negotiation to
-get wrong.
+    '422P' -> 16    'YUYV' -> 1    'YU12' -> 15    anything else -> unset
 
-### The one genuine question: which format
+— and the MJPEG encoder then refuses to open. The only two values a V4L2
+enumeration can ever produce are 1 and 0, because
+`CCameraModule::InitCameraInt` builds its cache with
 
-`libCameraVIP.so` links libjpeg (`jpeg_read_header`, `jpeg_read_scanlines`, and
-a `JPEG_METHOD` argument to `CCameraModule::RenderFrame`), so it expects
-**MJPEG** at least some of the time. Whether it will accept an uncompressed
-format if that is all we advertise is the first thing to measure, and it is
-cheap to measure: answer `ENUM_FMT` with only `YUYV`, and see whether it
-proceeds or refuses.
+    mode->fmt = (frmival.pixel_format == 'MJPG') ? 1 : 0;
 
-That matters because it decides the work on the Android side:
+so advertising MJPEG gives
 
-- **If YUYV or similar is accepted** — Camera2 NDK gives `YUV_420_888`, so the
-  host converts per frame. 480x272-ish at a few fps is nothing.
-- **If it insists on MJPEG** — Camera2 can produce JPEG directly, and the
-  frames could pass through untouched, which is *less* work, not more.
+    [tadpole] cam0: S_FMT 320x240 fourcc 47504a4d
+    [mjpeg @ 0x560020]colorspace not supported in jpeg
+    === tadpole: guest crashed ===  signal SIGFPE (8)
 
-`CCameraModule` also mmaps `/dev/mem` and `/dev/fb2` for the preview path, and
-fb2 is the YUV video layer the viewer **already** emulates and composites (it
-is how in-title FMV works). So the preview may largely fall out for free.
+and advertising anything else gives fourcc 0, which fails the same way — plus a
+garbage mode, because `VideoWidget::setInfo` searches the list for an exact
+size match and leaves its copy uninitialised when it finds none:
+
+    [tadpole] cam0: S_FMT 56308x45910 fourcc 00000000
+
+**`/flags/high-res` does not exist on a real LeapPad2** and does here, holding
+`640x480`. That is an emulator-side cap, for the arena reason below, not
+anything the firmware does.
 
 ---
 
-## What it would take
+## The preview is not a stream, and the recording is not DQBUF-in-a-loop
 
-**On the desktop first, not on Android.** A Linux host has V4L2 already, so the
-host side is `open("/dev/video0")` on the real webcam and a copy into the shared
-buffer — a few hundred lines including the ioctl emulation, with a real camera
-to compare against. Get it right there, where `TADPOLE_STRACE` and a webcam are
-both available, and Android becomes a backend swap rather than a bring-up.
+Two separate surprises, and between them they are most of the work.
 
-**Then Android.** Camera2 NDK (`libcamera2ndk.so`, API 24, so within the API 26
-floor) captures into an `AImageReader` and the frames go into the same shared
-buffer. Needs `android.permission.CAMERA` in the manifest and a runtime grant —
-one more prompt beside the storage one that is already there.
+**The viewfinder never goes through DQBUF at all.**
+`CVIPCameraModule::StartVideoCapture` points `VIDIOC_S_FBUF` at a display
+surface, turns on `VIDIOC_OVERLAY`, and on real hardware the VIP block then
+DMAs into the MLC's video plane while the application waits for a button.
+Measured, with the viewfinder open:
 
-**Rough shape of the work**, in the order that keeps it measurable:
+    AppManager                    3% CPU
+    state.bin vsync_count         13, 13, 13 — frozen
+    cam0 n_qbuf=1 n_dqbuf=0       one buffer queued, not one taken
 
-1. `video_index()` in the shim, beside `fb_index()` and `ev_index()` — an
-   `open("/dev/video0")` that returns a descriptor onto a host file.
-2. Emulate the enumeration ioctls, advertising exactly one mode. Measure what
-   the guest does with it.
-3. A frame buffer in the arena plus `QBUF`/`DQBUF` bookkeeping.
-4. Host side: V4L2 capture on Linux.
-5. Android side: Camera2 NDK into the same buffer.
-6. `runtime/setup-sysroot.sh` should create `sys/devices/platform/vip.0/driver`,
-   because without it the guest never asks in the first place.
+So there is no clock on the guest side to hang a preview off, and the shim
+cannot draw it. It publishes WHERE the surface is instead — translating the
+physical base out of `S_FBUF` into an offset in the arena — and
+`tadpole/viewer/tadpole_cam.c` draws into it off the render loop it already
+has. The base translates because `fill_fix()`'s own `smem_start` is what Brio
+quotes back:
 
-Steps 1–4 are testable on this desktop today. Nothing in them is Android-specific.
+    [tadpole] cam0: S_FBUF base 82afc000 -> fb2 +3129344, 320x240 pitch 1920 YU12
 
-## What is not known yet
+**The recorder polls QUERYBUF for `V4L2_BUF_FLAG_DONE`.** `CameraTaskMain` runs
+`TryLockMutex -> PollFrame(handle) -> ... -> TaskSleep`, and
+`CCameraModule::PollFrame` walks the buffers issuing `QUERYBUF`, looking for
+one whose flags carry DONE; only then does it call `GetFrame`, which dequeues.
+A QUERYBUF that never says DONE produces a recording of the right length with
+the right audio and not one video frame in it, and then a SIGFPE in `AVI_close`
+dividing by a frame count of zero.
 
-- Whether MJPEG is required or merely supported.
-- What resolution the guest requests. The LeapPad2's own camera is low
-  resolution and the panel is 480x272, so this is unlikely to be demanding.
-- Whether `CameraWidget` needs anything beyond capture — it saves photos, so
-  there is a write path into the guest's filesystem, which already works.
-- Whether the abort seen after "USB camera missing" is caused by the missing
-  camera or is a separate fault. It was not investigated; with the VIP path
-  reaching `/dev/video0` it may not survive to matter.
+---
+
+## Where the frames go, and the one place this is not like the hardware
+
+`InitCameraBufferInt` does **not** mmap the video node. It already has the
+whole of video memory mapped from its own open of `/dev/fb2`, and works the
+buffer addresses out arithmetically — the two addresses in the guest's log are
+the same one:
+
+    CCameraModule: mmap 82800000: a9fe8000, len 003fc000
+    InitCameraBufferInt: i=0, flags=00000000, mapping=0xa9fe8000
+
+so `QUERYBUF`'s `m.offset` is never read, and the frame has to be written into
+the arena at video memory offset 0. Buffer *i* is at `mapping + width * i` —
+320 bytes apart for a 320-wide frame, which cannot be three frames, so REQBUFS
+returns 1 however many are asked for.
+
+The layout is the video plane's, the same one `blit_layer_yuv420()` in the
+viewer already reads: with P the pitch, Y row *y* at `y*P`, Cb row *y* at
+`y*P + P/2`, Cr row *y* at `(h/2 + y)*P + P/2`.
+
+**P is 4096 for a recording and free otherwise.** `AVI_set_video` hardcodes
+`frame->linesize[0..2] = 4096`, and `AVI_write_frame` lays the planes out as
+`data[0]=buf, data[1]=buf+2048, data[2]=buf+2048+height*2048`. The still path
+recovers the pitch as `frameinfo.size / frameinfo.height` and accepts anything.
+
+And here is the one place the emulator differs from the device. On hardware
+`/dev/fb2` is a separate video heap; here all three framebuffers share one
+arena, because Brio allocates every surface from a single offset allocator and
+pans whichever fb matches the pixel format. So video memory offset 0 is arena
+offset 0, and Brio's allocator hands out its first surface at `0xFF000` — two
+full 480x272x32 screens in, with everything on screen above that. `0xFF000`
+bytes is therefore the entire budget for one captured frame (`TAD_CAM_HEADROOM`
+in `tadpole/shim/tadpole_cam.h`). A 640x480 frame at pitch 4096 wants 1966080
+and goes through both display pages; that is what turned the panel into
+coloured stripes on the way out of the Camera app.
+
+---
+
+## The microphone
+
+`libMicrophone.so` opens ALSA capture on `plughw:0,0` and reads with the mmap
+interface — `avail_update`, `mmap_begin`, `mmap_commit` — so
+`tadpole/shim/tadpole_asound.c`, which has been a complete replacement for
+libasound since audio worked, now serves capture as well and hands back a real
+memory area. Five symbols were missing, and one of them is fatal in a way that
+reads as a camera fault:
+
+    /LF/Base/bin/AppManager: can't resolve symbol 'snd_pcm_sw_params_malloc'
+
+The guest loader refuses the whole module, so Brio has no microphone at all,
+and the camera reports that as its own problem.
+
+`$TADPOLE_DIR/mic` is the transport and also the switch: a FIFO with no reader
+cannot be opened for writing, so "the viewer can open it" means exactly "the
+guest is capturing". The viewer creates the node, because one made by the guest
+belongs to root and carries the bare `app_data_file:s0` context that an app may
+read but not write.
+
+---
+
+## The Android side
+
+**Not the NDK.** `libcamera2ndk` would keep the frames in C with no Java
+anywhere, and it enumerates nothing on this tablet:
+
+    I/tadpole: camera: 0 device(s) on this tablet
+    $ adb shell dumpsys media.camera | grep 'Camera HAL device'
+    == Camera HAL device device@1.0/internal/0 (v1.0) static information: ==
+    == Camera HAL device device@1.0/internal/1 (v1.0) static information: ==
+
+Both cameras are HAL 1.0, which camera2 presents as hardware level LEGACY, and
+`ACameraManager_getCameraIdList` filters LEGACY devices out on purpose — the
+NDK API is defined against HAL3. So frames come through
+`org.tadpole.view.CameraSource` and `android.hardware.Camera`, whose
+`setPreviewCallbackWithBuffer` delivers NV21 into a buffer we own and re-queue.
+
+**One camera at a time**, because these are HAL1 devices and
+`Camera.open()` on the second while the first is held throws "Fail to connect
+to camera service" — and the guest opens `/dev/video1` before it closes
+`/dev/video0`. `CameraSource.start`/`stop` block until the open or the release
+has actually happened, for the same reason.
+
+`/dev/video0` is the rear camera and `/dev/video1` the front one, which is how
+CameraWidget's switch button is wired. Rotation comes from
+`Camera.CameraInfo.orientation` through the standard display formula at 90
+degrees (the LeapPad2's camera UI is landscape); the front camera is mirrored.
+
+---
+
+## What is still open
+
+* **Video recording above 320x240.** The recorder needs pitch 4096 and a
+  400x300 frame at that pitch does not fit in the headroom, so it falls back to
+  the minimum pitch and the video would come out striped. The widget records at
+  320x240 by default; the other two quality settings are untested.
+* **A separate arena for `/dev/fb2`** would remove the headroom limit entirely
+  and is the real fix. It is not small: Brio's single offset allocator is what
+  makes one arena work today.
+* **`MicroPhoneWidget`** — the standalone microphone widget — has not been
+  driven. The recorder's audio track is the evidence the capture path works.
