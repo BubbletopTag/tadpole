@@ -1727,44 +1727,10 @@ int unlink(const char *path)
 		return realfn(path, buf);                                             \
 	}
 
-STAT_WRAPPER(stat64, real_stat64, void *)
-STAT_WRAPPER(access, real_access, int)
-
-/* ---- stat/lstat/fstat: answered through their 64-bit twins ---------------
- *
- * NOT AN OPTIMISATION AND NOT A CLEANUP. __NR_stat (106), __NR_lstat (107)
- * and __NR_fstat (108) are three of the thirteen syscalls Android's app
- * seccomp filter refuses — bionic reaches all three through fstatat64, so the
- * legacy numbers were never generated into the whitelist — and a refusal is
- * not an error return, it is SIGSYS and a dead process. uClibc's stat(),
- * lstat() and fstat() are exactly those three syscalls plus __xstat_conv, so
- * calling them from inside an app process kills the guest. Measured: the
- * rootless launch died at uClibc's fstat, libuClibc+0xd034.
- *
- * So this asks the kernel the 64-bit question, which IS allowed, and does the
- * narrowing itself. The two layouts are not guessed: they are read off this
- * firmware's own converters. __xstat_conv (libuClibc+0x10834) memsets 88 bytes
- * and writes its fields at
- *
- *     0 st_dev(64)  12 st_ino  16 st_mode  20 st_nlink  24 st_uid  28 st_gid
- *    32 st_rdev(64) 44 st_size 48 st_blksize 52 st_blocks
- *    56/60 atime  64/68 mtime  72/76 ctime
- *
- * and __xstat64_conv (libuClibc+0x10990) memsets 104 and copies field for
- * field at the same offsets it read them from — so uClibc's userspace
- * struct stat64 IS the kernel's ARM struct stat64:
- *
- *     0 st_dev(64)  12 __st_ino  16 st_mode  20 st_nlink  24 st_uid
- *    28 st_gid  32 st_rdev(64)  48 st_size(64)  56 st_blksize
- *    64 st_blocks(64)  72/76 atime  80/84 mtime  88/92 ctime  96 st_ino(64)
- *
- * st_ino narrows to 32 bits, which is what the old syscall did too.
- *
- * These also keep the sysroot translation the wrapper above gives everything
- * else, so nothing is lost by not going through STAT_WRAPPER. */
-#define TAD_STAT_SZ    88
-#define TAD_STAT64_SZ  104
-
+/* Little-endian 32-bit field access on a raw byte buffer. Written for a
+ * struct conversion that is no longer here (see the note above); kept because
+ * the directory code's dirent64 -> dirent32 narrowing uses them, and doing
+ * that by hand is how you get an off-by-four nobody can see. */
 static u32 ld32(const unsigned char *p, unsigned off)
 {
 	return (u32)p[off] | ((u32)p[off+1] << 8) |
@@ -1772,64 +1738,46 @@ static u32 ld32(const unsigned char *p, unsigned off)
 }
 static void st32(unsigned char *p, unsigned off, u32 v)
 {
-	p[off] = (unsigned char)v;         p[off+1] = (unsigned char)(v >> 8);
+	p[off] = (unsigned char)v;           p[off+1] = (unsigned char)(v >> 8);
 	p[off+2] = (unsigned char)(v >> 16); p[off+3] = (unsigned char)(v >> 24);
 }
-static void stat64_narrow(const unsigned char *b, unsigned char *s)
-{
-	static const unsigned char map[][2] = {
-		{  0,  0 }, {  4,  4 },        /* st_dev, both words        */
-		{ 96, 12 },                    /* st_ino  (64 -> 32)        */
-		{ 16, 16 }, { 20, 20 },        /* st_mode, st_nlink         */
-		{ 24, 24 }, { 28, 28 },        /* st_uid, st_gid            */
-		{ 32, 32 }, { 36, 36 },        /* st_rdev, both words       */
-		{ 48, 44 },                    /* st_size (64 -> 32)        */
-		{ 56, 48 },                    /* st_blksize                */
-		{ 64, 52 },                    /* st_blocks (64 -> 32)      */
-		{ 72, 56 }, { 76, 60 },        /* atime, atime_nsec         */
-		{ 80, 64 }, { 84, 68 },        /* mtime                     */
-		{ 88, 72 }, { 92, 76 },        /* ctime                     */
-	};
-	unsigned i;
-	memset(s, 0, TAD_STAT_SZ);
-	for (i = 0; i < sizeof(map) / sizeof(map[0]); i++)
-		st32(s, map[i][1], ld32(b, map[i][0]));
-}
 
-/* Sysroot first, literal second — the rule everything else here follows. */
-static int stat_via64(const char *path, void *buf,
-                      int (*real64)(const char *, void *))
-{
-	unsigned char b[TAD_STAT64_SZ];
-	char f[512];
-	unsigned dlen;
+STAT_WRAPPER(stat,   real_stat,   void *)
+STAT_WRAPPER(stat64, real_stat64, void *)
+STAT_WRAPPER(lstat,  real_lstat,  void *)
+STAT_WRAPPER(access, real_access, int)
 
-	init();
-	if (!real64) return -1;
-	dlen = (unsigned)strlen(g_dir);
-	if (path && path[0] == '/' && g_sysroot[0] &&
-	    !(dlen && strncmp(path, g_dir, dlen) == 0)) {
-		sysrootify(f, sizeof(f), path);
-		if (real64(f, b) == 0) { stat64_narrow(b, buf); return 0; }
-	}
-	if (real64(path, b) != 0) return -1;
-	stat64_narrow(b, buf);
-	return 0;
-}
-
-int stat(const char *path, void *buf)  { return stat_via64(path, buf, real_stat64); }
-int lstat(const char *path, void *buf) { return stat_via64(path, buf, real_lstat64); }
-
-int fstat(int fd, void *buf)
-{
-	unsigned char b[TAD_STAT64_SZ];
-	init();
-	if (!real_fstat64) return -1;
-	if (real_fstat64(fd, b) != 0) return -1;
-	stat64_narrow(b, buf);
-	return 0;
-}
-
+/* ---- stat/lstat/fstat stay uClibc's, and here is what that cost ----------
+ *
+ * These three were briefly answered through stat64/lstat64/fstat64 and
+ * narrowed here, because __NR_stat (106), __NR_lstat (107) and __NR_fstat
+ * (108) are refused by Android's app seccomp filter (see
+ * android/NOTES-arm32.md). That change is OUT, and it is out because it broke
+ * the path people actually use.
+ *
+ * MEASURED, by bisection on the tablet, booting the system menu through the
+ * root helper each time:
+ *
+ *     shim before the syscall work            home screen           OK
+ *     shim with ftruncate64+mknodat+rmdir+
+ *       sysrootify guard, stat conversion IN  SIGSEGV loading the
+ *                                             home screen tiles,
+ *                                             "waiting for load of
+ *                                             the image", fault
+ *                                             0x63696c6f            FAIL
+ *     the same, stat conversion REVERTED      home screen           OK
+ *
+ * So the narrowing is wrong in a way that has not been pinned down — it
+ * survived a full rootless boot and a title launch, and still killed the
+ * chroot boot, which is the difference nobody has explained yet. The layouts
+ * were read off this firmware's own __xstat_conv (libuClibc+0x10834) and
+ * __xstat64_conv (+0x10990) and are recorded in NOTES-arm32.md, so the work is
+ * not lost — but a conversion that cannot be shown to be right does not belong
+ * in the path that boots the emulator.
+ *
+ * Nothing needs it today: the rootless route it was for is blocked further on
+ * by uClibc's opendir calling its own fstat through a hidden alias, which no
+ * interposer can reach. */
 /* signal() — DO NOT LET THE GUEST UNINSTALL THE CRASH REPORTER.
  *
  * AppManager installs its own handlers through this (libLightningBase.so
