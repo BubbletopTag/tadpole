@@ -47,6 +47,10 @@ extern int   mkdir(const char *path, u32 mode);
 extern int   mknodat(int dirfd, const char *path, u32 mode,
                      unsigned long long dev);
 extern int   unlinkat(int dirfd, const char *path, int flags);
+extern int   fchmodat(int dirfd, const char *path, u32 mode, int flags);
+/* getdents64 and lseek are reached through this rather than through uClibc
+ * wrappers, so no *stat can hide inside them — see the directory block. */
+extern long  syscall(long number, ...);
 /* ftruncate64, NOT ftruncate, and the reason is a sandbox rather than a size.
  *
  * Nothing here ever needs more than 4 GiB. But __NR_ftruncate (93) is one of
@@ -384,7 +388,6 @@ static void *(*real_fopen)(const char *, const char *);
 static void *(*real_dlopen)(const char *, int);
 static char *(*real_dlerror)(void);
 static void *(*real_fopen64)(const char *, const char *);
-static void *(*real_opendir)(const char *);
 
 /* Open <TADPOLE_LOG>.<pid>.log and park it on a high fd.
  *
@@ -498,7 +501,6 @@ static void init(void)
 	real_dlerror= dlsym(RTLD_NEXT, "dlerror");
 	real_fopen  = dlsym(RTLD_NEXT, "fopen");
 	real_fopen64= dlsym(RTLD_NEXT, "fopen64");
-	real_opendir= dlsym(RTLD_NEXT, "opendir");
 
 	for (i = 0; i < MAXFD; i++) {
 		g_fb_of_fd[i] = -1;
@@ -1143,14 +1145,18 @@ void *fopen64(const char *path, const char *mode)
 	return fopen_common(path, mode, real_fopen64 ? real_fopen64 : real_fopen);
 }
 
-/* opendir() — THE ONE THAT ASKS ABOUT A DIRECTORY RATHER THAN A FILE, and the
- * second thing a rootless launch trips over.
+/* ---- the directory API, IMPLEMENTED RATHER THAN WRAPPED -------------------
  *
- * Brio finds its modules by listing a directory, not by opening a known name:
- * libModule.so's FindModules() takes the first LD_LIBRARY_PATH entry, tries
- * "<it>/Module/", falls back to /LF/Base/Brio/Module/ and hands that to
- * CBootSafeKernelMPI::GetFilesInDirectory — which is in libKernelMPI.so, and
- * libKernelMPI.so's undefined symbols say exactly how it does it:
+ * opendir() is the one that asks about a directory rather than a file, and it
+ * is the second thing a rootless launch trips over — twice, for two unrelated
+ * reasons. The first was a path, and a wrapper fixed it. The second is a
+ * syscall, and a wrapper cannot.
+ *
+ * THE PATH. Brio finds its modules by listing a directory, not by opening a
+ * known name: libModule.so's FindModules() takes the first LD_LIBRARY_PATH
+ * entry, tries "<it>/Module/", falls back to /LF/Base/Brio/Module/ and hands
+ * that to CBootSafeKernelMPI::GetFilesInDirectory — which is in
+ * libKernelMPI.so, whose undefined symbols say exactly how it does it:
  *
  *     closedir  opendir  readdir64  stat64  dlopen  dlsym  ...
  *
@@ -1160,25 +1166,218 @@ void *fopen64(const char *path, const char *mode)
  *     BOOTFAIL: No modules found in: /LF/Base/Brio/Module/
  *
  * after having successfully dlopen()ed libModule.so from that very directory.
- * readdir/closedir need nothing: they take the DIR* this returns.
  *
- * Under qemu-user and under a chroot this never mattered, because the path was
- * already translated before the guest's libc saw it. */
+ * THE SYSCALL, and why chaining through to uClibc had to stop. uClibc's
+ * opendir() calls fstat(2) on the descriptor it just opened, to size its
+ * buffer from st_blksize:
+ *
+ *     open(".../Brio/Module/", O_RDONLY|O_NONBLOCK|O_DIRECTORY|O_CLOEXEC) = 3
+ *     fstat(3, {st_mode=S_IFDIR|0755, ...})  = 0
+ *
+ * __NR_fstat (108) is one of the thirteen syscalls Android's app seccomp
+ * filter refuses, and a refusal is SIGSYS and a dead process — see the stat
+ * block below. The fstat() this file exports is never reached, because uClibc
+ * calls its own through a hidden alias that never goes through the PLT, the
+ * same way its fopen() reaches its own open(). Fifteen calls in a boot, every
+ * one of them fatal, and no interposition can see any of them.
+ *
+ * So the directory is read here instead, on getdents64(2) — which the filter
+ * allows, being what bionic itself uses — and no fstat happens at all. All
+ * three entry points libKernelMPI, libUtility and the game App.so files import
+ * are provided, plus dirfd() and rewinddir(): nothing may fall through to
+ * uClibc holding one of OUR DIR pointers, which is a different struct.
+ *
+ * THE TWO LAYOUTS ARE READ OFF THIS FIRMWARE, not off a header. Disassembling
+ * its own accessors settles both:
+ *
+ *     readdir   (libuClibc+0x116e0)  ldrh r0, [r5, #8]    d_reclen at 8
+ *     readdir64 (libuClibc+0x11b54)  ldrd r2, r3, [r5]    d_ino 64-bit at 0
+ *                                    ldrh lr, [r5, #16]   d_reclen at 16
+ *
+ *   struct dirent    d_ino 0(32)  d_off 4(32)  d_reclen 8  d_type 10  name 11
+ *   struct dirent64  d_ino 0(64)  d_off 8(64)  d_reclen 16 d_type 18  name 19
+ *
+ * The second of those IS the kernel's struct linux_dirent64, field for field,
+ * so readdir64 — the one the boot path uses — copies a record and converts
+ * nothing. Only readdir(), which one game's App.so imports and the boot never
+ * calls, has to narrow.
+ *
+ * Under qemu-user and under a chroot none of this mattered, because the path
+ * was already translated before the guest's libc saw it and no filter was in
+ * the way. */
+
+/* ARM's O_DIRECTORY is 040000. asm-generic says 0200000 and ARM overrides it —
+ * measured on the device rather than taken from a header, because getting it
+ * wrong would silently pass some other flag. */
+#define TAD_O_NONBLOCK    04000
+#define TAD_O_DIRECTORY   040000
+#define TAD_O_CLOEXEC     02000000
+#define TAD_NR_getdents64 217
+#define TAD_NR_lseek      19
+
+/* NO malloc IN THIS FILE, deliberately, so the pool is fixed. Sixteen is far
+ * past what the guest holds open at once — it lists a directory, reads it and
+ * closes it — and the depth only matters for a recursive scan. */
+#define TAD_DIRS     16
+#define TAD_DIRBUF   4096
+#define TAD_DIRENT64 280         /* 19 + NAME_MAX + 1, rounded             */
+#define TAD_DIRENT32 268         /* 11 + NAME_MAX + 1, rounded             */
+
+struct tad_dir {
+	int used;
+	int fd;
+	u32 pos, len;
+	u8  buf[TAD_DIRBUF];
+	u8  ent[TAD_DIRENT64];
+	u8  ent32[TAD_DIRENT32];
+};
+static struct tad_dir g_dirs[TAD_DIRS];
+
+static u32 ld32(const unsigned char *p, unsigned off);
+static void st32(unsigned char *p, unsigned off, u32 v);
+
+/* CLAIMED ATOMICALLY. The guest is threaded — libpthread is loaded before
+ * anything lists a directory — and two threads scanning at once must not be
+ * handed the same slot. */
+static struct tad_dir *dir_alloc(void)
+{
+	unsigned i;
+	for (i = 0; i < TAD_DIRS; i++)
+		if (__sync_bool_compare_and_swap(&g_dirs[i].used, 0, 1))
+			return &g_dirs[i];
+	return 0;
+}
+
+/* The next kernel record, or 0 at end of directory. Refills on demand. */
+static const u8 *dir_next(struct tad_dir *d, u32 *reclen_out)
+{
+	const u8 *e;
+	u32 reclen;
+
+	if (d->pos >= d->len) {
+		long n = syscall(TAD_NR_getdents64, d->fd, d->buf,
+		                 (long)sizeof(d->buf));
+		if (n <= 0) return 0;          /* 0 = end, <0 = errno already set */
+		d->len = (u32)n;
+		d->pos = 0;
+	}
+	e = d->buf + d->pos;
+	reclen = (u32)e[16] | ((u32)e[17] << 8);
+	/* A ZERO reclen WOULD SPIN FOREVER, and a short one would walk off the
+	 * end. Neither should ever come from the kernel; both are cheap to
+	 * refuse and expensive to debug. */
+	if (reclen < 19 || d->pos + reclen > d->len) { d->pos = d->len; return 0; }
+	d->pos += reclen;
+	if (reclen_out) *reclen_out = reclen;
+	return e;
+}
+
 void *opendir(const char *path)
 {
+	const int flags = TAD_O_NONBLOCK | TAD_O_DIRECTORY | TAD_O_CLOEXEC;
+	struct tad_dir *d;
+	char full[512];
+	int fd = -1;
+
 	init();
-	if (!real_opendir) return 0;
+	if (!real_open || !real_close) return 0;
+
+	/* Sysroot first, literal second — the rule everything else here follows. */
 	if (path && path[0] == '/' && g_sysroot[0] && !under_gdir(path)) {
-		char full[512];
-		void *d;
 		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
-		if ((d = real_opendir(full)) != 0) {
-			if (g_debug) { dbg("[tadpole] opendir(sysroot) "); dbg(path); dbg("\n"); }
-			return d;
+		fd = real_open(full, flags);
+		if (fd >= 0 && g_debug) {
+			dbg("[tadpole] opendir(sysroot) "); dbg(path); dbg("\n");
 		}
 	}
-	if (g_debug) { dbg("[tadpole] opendir(literal) "); dbg(path ? path : "(null)"); dbg("\n"); }
-	return real_opendir(path);
+	if (fd < 0) {
+		fd = real_open(path, flags);
+		if (fd >= 0 && g_debug) {
+			dbg("[tadpole] opendir(literal) ");
+			dbg(path ? path : "(null)"); dbg("\n");
+		}
+	}
+	if (fd < 0) return 0;
+
+	if ((d = dir_alloc()) == 0) { real_close(fd); return 0; }
+	d->fd  = fd;
+	d->pos = 0;
+	d->len = 0;
+	return d;
+}
+
+void *readdir64(void *dirp)
+{
+	struct tad_dir *d = (struct tad_dir *)dirp;
+	const u8 *e;
+	u32 reclen, n;
+
+	if (!d) return 0;
+	if ((e = dir_next(d, &reclen)) == 0) return 0;
+
+	/* COPIED, not returned by pointer into the read buffer: a caller is
+	 * entitled to treat the result as a whole struct dirent64, and the
+	 * kernel's record is only as long as its name. */
+	n = reclen > TAD_DIRENT64 - 1 ? TAD_DIRENT64 - 1 : reclen;
+	memset(d->ent, 0, TAD_DIRENT64);
+	memcpy(d->ent, e, n);
+	return d->ent;
+}
+
+void *readdir(void *dirp)
+{
+	struct tad_dir *d = (struct tad_dir *)dirp;
+	const u8 *e;
+	u32 reclen, nl, rl;
+
+	if (!d) return 0;
+	if ((e = dir_next(d, &reclen)) == 0) return 0;
+
+	memset(d->ent32, 0, TAD_DIRENT32);
+	st32(d->ent32, 0, ld32(e, 0));        /* d_ino, low 32 of the 64        */
+	st32(d->ent32, 4, ld32(e, 8));        /* d_off, low 32 of the 64        */
+	d->ent32[10] = e[18];                 /* d_type                         */
+
+	nl = reclen - 19;                     /* name, plus the kernel's padding */
+	if (nl > 255) nl = 255;
+	memcpy(d->ent32 + 11, e + 19, nl);
+	rl = (11 + nl + 1 + 3) & ~3u;
+	d->ent32[8] = (u8)rl;
+	d->ent32[9] = (u8)(rl >> 8);
+	return d->ent32;
+}
+
+int closedir(void *dirp)
+{
+	struct tad_dir *d = (struct tad_dir *)dirp;
+	int r;
+
+	if (!d) return -1;
+	r = real_close ? real_close(d->fd) : -1;
+	d->fd = -1;
+	/* Released LAST, so no other thread can claim the slot while its
+	 * descriptor is still being closed. */
+	__sync_synchronize();
+	d->used = 0;
+	return r;
+}
+
+/* NOT NEEDED BY ANYTHING THE FIRMWARE IMPORTS, and here anyway: if a title did
+ * import one, uClibc's version would be handed a pointer to OUR struct and
+ * would read whatever it found at its own field offsets. */
+int dirfd(void *dirp)
+{
+	struct tad_dir *d = (struct tad_dir *)dirp;
+	return d ? d->fd : -1;
+}
+
+void rewinddir(void *dirp)
+{
+	struct tad_dir *d = (struct tad_dir *)dirp;
+	if (!d) return;
+	syscall(TAD_NR_lseek, d->fd, 0L, 0 /* SEEK_SET */);
+	d->pos = 0;
+	d->len = 0;
 }
 
 /* SAY WHEN A dlopen FAILS. Debug builds only.
@@ -1410,6 +1609,60 @@ int rmdir(const char *path)
 			return 0;
 	}
 	return unlinkat(-100, path, 0x200);
+}
+
+/* remove() — HERE FOR EXACTLY THE REASON fstat IS, one layer further in.
+ *
+ * uClibc's remove() is rmdir()-then-unlink(), and its rmdir is a direct
+ * internal branch — libuClibc's `remove+0x18` disassembles to `bl <rmdir>`,
+ * not a PLT call — so the rmdir() above can never be reached from it, however
+ * correct it is. __NR_rmdir (40) is on the app filter's refusal list, and a
+ * refusal is SIGSYS and a dead process.
+ *
+ * Measured: with the directory API below in place, the rootless boot got all
+ * the way to Brio's event plumbing and stopped here, clearing a stale
+ * /tmp/cart_events_socket that a previous run had left behind:
+ *
+ *     stat64(".../tmp/cart_events_socket", {st_mode=S_IFSOCK|0777}) = 0
+ *     --- SIGSYS {si_code=SYS_SECCOMP, si_syscall=__NR_rmdir} ---
+ *
+ * libUtility.so, libGalleryIO.so and VideoDaemon all import `remove` through
+ * the PLT, so taking it over here reaches every caller.
+ *
+ * The order is uClibc's own: directory first, everything else second. Which it
+ * is gets settled by trying rather than by reading errno — one extra syscall
+ * on a plain file, and no second opinion about what ENOTDIR meant. */
+static int remove_at(const char *p)
+{
+	if (unlinkat(-100, p, 0x200) == 0) return 0;   /* AT_REMOVEDIR */
+	return unlinkat(-100, p, 0);
+}
+
+int remove(const char *path)
+{
+	init();
+	if (path && path[0] == '/' && g_sysroot[0] && !under_gdir(path)) {
+		char full[512];
+		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
+		if (remove_at(full) == 0) return 0;
+	}
+	return remove_at(path);
+}
+
+/* chmod() — __NR_chmod (15) is refused too, and bionic reaches it through
+ * fchmodat, so only the modern number is on the whitelist. libLightningJSON
+ * imports it: it is how the guest fixes up a file it has just written. Not yet
+ * reached by a boot, and fixed now rather than after the next SIGSYS, because
+ * the whole refusal list is known and this one is two lines. */
+int chmod(const char *path, u32 mode)
+{
+	init();
+	if (path && path[0] == '/' && g_sysroot[0] && !under_gdir(path)) {
+		char full[512];
+		snprintf(full, sizeof(full), "%s%s", g_sysroot, path);
+		if (fchmodat(-100, full, mode, 0) == 0) return 0;
+	}
+	return fchmodat(-100, path, mode, 0);
 }
 
 int unlink(const char *path)
