@@ -20,10 +20,15 @@ import java.util.Locale;
  */
 final class Tools {
     private static String projectDir;
+    private static String home;
 
     private Tools() {}
 
     static synchronized void setProjectDir(String dir) { projectDir = dir; }
+
+    /** What the C side's HOME is set to — see TadpoleActivity. */
+    static synchronized void setHome(String dir) { home = dir; }
+    static synchronized String home() { return home; }
 
     /** The project directory: on Android, the app's own files directory. */
     static synchronized File proj() {
@@ -50,6 +55,8 @@ final class Tools {
         if (dot > 0) name = name.substring(0, dot);   /* .sh and .py are one tool */
 
         if (name.equals("erase-firmware")) return new EraseFirmware();
+        if (name.equals("install-game"))   return new InstallGame();
+        if (name.equals("scan-games"))     return new ScanGames();
         return null;
     }
 

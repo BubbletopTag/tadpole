@@ -129,10 +129,28 @@ public class TadpoleActivity extends SDLActivity {
              * viewer a project it can both read and write. Everything else
              * then falls into place underneath it. */
             nativeSetenv("TADPOLE_PROJECT", dir);
-            /* The Java tools need it too, and cannot read it back out of the
-             * environment: System.getenv() snapshots at process start, and the
-             * setenv above happens after that. Handed over directly instead. */
+
+            /* HOME, WITHOUT WHICH THE CACHE AND THE CONFIG BOTH LAND IN /tmp.
+             *
+             * games_cache_dir() and cfg_path() in tadpole_ui.c walk
+             * XDG_*_HOME, then LOCALAPPDATA, then HOME, and fall back to /tmp
+             * when none is set. An Android app process has NONE of them —
+             * measured, /proc/<pid>/environ has no HOME at all — so both
+             * resolved to /tmp, which this platform does not have: the probe
+             * says so every launch, "/tmp ABSENT (No such file or directory)".
+             *
+             * The visible effects were a game library that stayed empty after
+             * a scan that reported success, and settings that never survived a
+             * restart, and neither looks like a missing environment variable.
+             * Pointed at the app's own directory, both land somewhere writable
+             * and both keep the layout they have everywhere else. */
+            nativeSetenv("HOME", dir);
+
+            /* The Java tools need the same two, and cannot read either back out
+             * of the environment: System.getenv() snapshots at process start,
+             * and these setenv calls happen after that. Handed over directly. */
             TadpoleTools.setProjectDir(dir);
+            TadpoleTools.setHome(dir);
             extractAssets(dir);
             linkEngine(dir);
             nativeProbe(dir, getApplicationInfo().nativeLibraryDir);

@@ -49,6 +49,9 @@ public final class TadpoleTools {
     /** Handed over by the activity — see Tools.proj(). */
     public static void setProjectDir(String dir) { Tools.setProjectDir(dir); }
 
+    /** Kept in step with the HOME the activity sets natively. */
+    public static void setHome(String dir) { Tools.setHome(dir); }
+
     /**
      * Start a tool. Returns the read end of a pipe carrying its output, or -1
      * if the tool is unknown or one is already running.
