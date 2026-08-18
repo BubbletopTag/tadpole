@@ -51,9 +51,108 @@ install_didj = _load_didj()
 
 
 def field(meta, name):
-    """Name="value" out of a meta.inf, first match, empty when absent."""
-    m = re.search(r'%s="([^"]*)"' % re.escape(name), meta)
+    """Name="value" out of a meta.inf, first match, empty when absent.
+
+    ANCHORED TO A LINE START — see install-game.sh. Unanchored, asking for Icon
+    matched inside LargeIcon="preview.png", which meta.inf lists first, so the
+    icon lookup returned a store banner."""
+    m = re.search(r'^\s*%s="([^"]*)"' % re.escape(name), meta, re.M)
     return m.group(1) if m else ""
+
+
+def json_str(text, name):
+    """"Key" : "value" out of a JSON object, first match."""
+    m = re.search(r'"%s"\s*:\s*"([^"]*)"' % re.escape(name), text)
+    return m.group(1) if m else ""
+
+
+def product_of(pid):
+    """`LST3-0x00180002-000000` -> `0x00180002` — see install-game.sh."""
+    parts = (pid or "").split("-")
+    return parts[1].lower() if len(parts) > 1 else ""
+
+
+def purge_same_product(pid):
+    """Remove any OTHER Application for the same title. See install-game.sh:
+    the same game ships under several PackageID prefixes, and installing two of
+    them puts the one game on the home screen twice and makes the two entries
+    share one save directory."""
+    prod = product_of(pid)
+    if not prod:
+        return
+    pf = os.path.join(BULK, "ProgramFiles")
+    for entry in sorted(os.listdir(pf)) if os.path.isdir(pf) else []:
+        mi = os.path.join(pf, entry, "meta.inf")
+        if not os.path.isfile(mi):
+            continue
+        try:
+            with open(mi, "r", encoding="utf-8", errors="replace") as f:
+                meta = f.read()
+        except OSError:
+            continue
+        opid = field(meta, "PackageID")
+        if field(meta, "Type") != "Application" or not opid or opid == pid:
+            continue
+        if product_of(opid) != prod:
+            continue
+        shutil.rmtree(os.path.join(pf, entry), ignore_errors=True)
+        print("  %-12s %-26s %s" % ("replaced", opid, field(meta, "Name")),
+              flush=True)
+
+
+ICON_KEYS = ('"IconPADS"', '"IconPHRS"', '"IconTHDS"', '"IconTHD1"')
+ICON_NAMES = ("BaseImage.png", "BaseIcon.png", "icon.png", "icon64.png",
+              "82x88.png", "PopUpIcon.png")
+
+
+def pick_icon(dest):
+    """A PNG in the package the home screen can draw. See install-game.sh."""
+    try:
+        with open(os.path.join(dest, "meta.inf"), "r", encoding="utf-8",
+                  errors="replace") as f:
+            meta = f.read()
+    except OSError:
+        meta = ""
+    try:
+        with open(os.path.join(dest, "GameInfo.json"), "r", encoding="utf-8",
+                  errors="replace") as f:
+            gi = f.read()
+    except OSError:
+        gi = ""
+    # NOT meta.inf's LargeIcon= — see install-game.sh: it names a store banner,
+    # and in the Ni Hao backup that banner is Tinker Bell artwork.
+    cands = [field(meta, "Icon"), json_str(gi, "LargeIcon")] + list(ICON_NAMES)
+    for c in cands:
+        if c and c.lower().endswith(".png") and \
+           os.path.isfile(os.path.join(dest, c)):
+            return c
+    try:
+        for c in sorted(os.listdir(dest)):
+            if "icon" in c.lower() and c.lower().endswith(".png"):
+                return c
+    except OSError:
+        pass
+    return ""
+
+
+def add_icon_key(path, png):
+    """Insert "IconPADS": "<png>" as GameInfo.json's first member.
+
+    A TEXT INSERT, not a reserialise — see install-game.sh for why."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            text = f.read()
+    except OSError:
+        return
+    i = text.find("{")
+    if i < 0:
+        return
+    sep = "," if re.search(r'"[^"]*"\s*:', text) else ""
+    # NO NEWLINE IS INTRODUCED — see install-game.sh. Byte-identical output to
+    # the shell version is the point of this port.
+    new = '%s{"IconPADS": "%s"%s%s' % (text[:i], png, sep, text[i + 1:])
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(new)
 
 
 def safe_members(tar, prefix):
@@ -126,6 +225,9 @@ def install_one(tar, path, metapath):
         print("  %-12s %-26s %s (skipped)" % (typ, pid, name), flush=True)
         return
 
+    if typ == "Application":
+        purge_same_product(pid)
+
     shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest, exist_ok=True)
     extract(tar, prefix, dest)
@@ -157,6 +259,31 @@ def install_one(tar, path, metapath):
                 f.write(nl + 'ProfileAccess=-1,0,1,2,3\n')
         for prof in profiles():
             os.makedirs(os.path.join(prof, pid), exist_ok=True)
+        # THE MANIFEST IS INPUT, NOT STATE — see install-game.sh at length. The
+        # Qt devices' package-manager daemon rewrites every meta.inf at boot
+        # from a model with no room for Device=, and a Leapster title that
+        # loses its device type loses its on-screen A/B/Home ViewFrame with it.
+        # Read-only makes the rewrite fail harmlessly. Only packages that
+        # declare a Device= have anything to protect.
+        if field(meta, "Device"):
+            try:
+                os.chmod(mi, 0o444)
+            except OSError:
+                pass
+        # See pick_icon in install-game.sh: a GameInfo.json naming none of the
+        # icon keys the firmware reads leaves the tile showing a placeholder.
+        gi = os.path.join(dest, "GameInfo.json")
+        if os.path.isfile(gi):
+            try:
+                with open(gi, "r", encoding="utf-8", errors="replace") as f:
+                    have = any(k in f.read() for k in ICON_KEYS)
+            except OSError:
+                have = True
+            if not have:
+                png = pick_icon(dest)
+                if png:
+                    add_icon_key(gi, png)
+                    print("  %-12s %-26s %s" % ("icon", pid, png), flush=True)
 
     print("  %-12s %-26s %s" % (typ, pid, name), flush=True)
     dep = field(meta, "Depends")
@@ -217,8 +344,15 @@ def fix_meta():
             continue
         if not new.endswith("\n"):
             new += "\n"
+        # install_one makes some manifests read-only (see there); this is the
+        # one tool that is supposed to be able to write them anyway.
+        mode = os.stat(mi).st_mode & 0o777
+        if not mode & 0o200:
+            os.chmod(mi, 0o644)
         with open(mi, "w", encoding="utf-8") as f:
             f.write(new)
+        if not mode & 0o200:
+            os.chmod(mi, mode)
         name = ""
         m = re.search(r'^Name="?([^"\n]*)', new, re.M)
         if m:

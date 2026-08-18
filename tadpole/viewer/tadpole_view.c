@@ -688,6 +688,27 @@ static int g_dpad_shift = -1;   /* -1 = derive from the rotation */
  * So the shift is the display correction PLUS that constant. TADPOLE_DPAD_SHIFT
  * (0-3) overrides it, because controls cannot be verified without someone
  * holding the keyboard and a wrong guess is worse than an adjustable default.
+ *
+ * IT IS NOT THE PANEL'S ORIENTATION, WHICH IS THE OBVIOUS READING AND WRONG.
+ *
+ * Every sentence above says "portrait", so making the constant follow the
+ * device profile's DEV_UI_ROTATE — 270 for the LeapPad2's portrait panel, 0
+ * for the LeapPad3's landscape one — looks like the tidy generalisation, and
+ * two people reasoned their way to it independently. Measured on a LeapPad3
+ * running Ni Hao Kai-lan, with the title's own menu as the read-out:
+ *
+ *     physical RIGHT  ->  the game moves DOWN
+ *     physical LEFT   ->  the game moves UP
+ *     physical DOWN   ->  nothing (the game's left/right; the menu is vertical)
+ *
+ * Both axes, so this is a rotation and not a reflection, and it is the SAME
+ * quarter turn the LeapPad2 needed. The turn does not belong to the panel: the
+ * D-pad codes reach the title from the shim's gpio-keys device, which emits
+ * the same codes on every device, and the title's own axes are what the
+ * constant compensates for. A landscape case does not change either one.
+ *
+ * So it stays a constant, and the derivation is written down here as measured
+ * and rejected rather than left to be re-invented a third time.
  */
 #define DPAD_GAME_TURN 3
 

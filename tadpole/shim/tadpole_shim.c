@@ -1589,6 +1589,38 @@ int execve(const char *path, char *const argv[], char *const envp[])
 			}
 		}
 	}
+	/* TADPOLE_NO_TSLIB=<substring> — TURN TSLIB OFF FOR BRIO, PROCESS BY
+	 * PROCESS, BECAUSE THE SHELL AND THE TITLES WANT OPPOSITE ANSWERS.
+	 *
+	 * On a Qt device the shell has exactly one mouse driver, the tslib plugin,
+	 * so tslib MUST initialise or nothing on the home screen can be touched.
+	 * A Brio title wants the reverse: when tslib initialises, Brio takes the
+	 * tslib path ("LoadTSLib: use_tslib=1") and the taps go nowhere; when it
+	 * fails, Brio falls back to reading the touchscreen itself ("Falling back
+	 * on touchscreen interface") and they land. The LeapPad2 gets that for
+	 * free because tadpole.sh sabotages TSLIB_CONFFILE globally there — it has
+	 * no Qt to keep happy.
+	 *
+	 * One environment cannot be both, and they are separate processes, so the
+	 * choice has to be made at the exec: the shell keeps /etc/ts.conf and
+	 * whatever it launches whose path matches gets a file that is not there.
+	 * Which binary that is belongs to the device, not here — leappad3.conf
+	 * names BrioWrapper in DEV_ENV.
+	 */
+	{
+		const char *m = getenv("TADPOLE_NO_TSLIB");
+		if (m && *m) {
+			const char *h = path;
+			size_t ml = strlen(m);
+			for (; *h; h++)
+				if (strncmp(h, m, ml) == 0) {
+					newargv[n++] = (char *)"-E";
+					newargv[n++] = (char *)"TSLIB_CONFFILE=/nonexistent-ts.conf";
+					dbg("[tadpole] execve: tslib off for this one\n");
+					break;
+				}
+		}
+	}
 	newargv[n++] = (char *)"-L";
 	newargv[n++] = g_sysroot;
 	newargv[n++] = real;

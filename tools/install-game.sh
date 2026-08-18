@@ -38,10 +38,136 @@ BASE="${TADPOLE_BASE:-$PROJ/runtime/sysroot/LF/Base}"
 
 [ $# -gt 0 ] || { echo "usage: $0 <game.tar> [...]" >&2; exit 2; }
 
-field() { grep -oE "$2=\"[^\"]*\"" <<<"$1" | head -1 | cut -d'"' -f2; }
+# ANCHORED TO THE START OF A LINE, and that is not tidiness.
+#
+# Unanchored, `field "$meta" Icon` matches inside `LargeIcon="preview.png"` —
+# grep -o is happy to start a match in the middle of a word — and meta.inf
+# happens to list LargeIcon FIRST, so asking for the icon returned the store
+# banner. The same trap is set for Name inside ShortName and Version inside
+# MetaVersion; those two only work today because the shorter key happens to
+# come first in the files we have. meta.inf is line-oriented, so anchor it.
+field() { grep -oE "^[[:space:]]*$2=\"[^\"]*\"" <<<"$1" | head -1 | cut -d'"' -f2; }
+
+# The same read out of a JSON object: "Key" : "value", any spacing.
+json_str() { grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$1" 2>/dev/null |
+             head -1 | sed 's/.*:[[:space:]]*"//; s/"$//'; }
+
+# THE PRODUCT ID, OUT OF THE PACKAGE ID. `LST3-0x00180002-000000` -> `0x00180002`.
+#
+# It is the middle field, and it is the one thing about a package that names the
+# TITLE rather than the release: the device keys a game's save directory, its
+# CaboCompatibility entry and its GameViewFrame on this and nothing else. Read
+# from the PackageID rather than from ProductID= because the two are written
+# inconsistently across real packages — `0x00180002`, `"00180013"`, plain
+# decimal — while the PackageID's middle field never varies.
+product_of() { printf '%s' "$1" | cut -d- -f2 | tr 'A-Z' 'a-z'; }
+
+# ONE PRODUCT, ONE APPLICATION — remove any OTHER package for the same title.
+#
+# The same game exists as several SKUs with different PackageID prefixes: Ni Hao
+# Kai-lan is `LST3-0x00180002-000000` as a Leapster Explorer release and
+# `MHRS-0x00180002-000000` as the LeapPad one, same product id, same App.so,
+# different wrappers. Installing both is not installing two things: it is the
+# same title twice, and the home screen shows it twice — measured, two tiles for
+# one game, because the package-manager daemon builds a row per meta.inf and
+# neither package knows about the other.
+#
+# It is worse than cosmetic. Saves live in Data/Local/<profile>/<ProductID>/,
+# keyed on the product id alone, so the two entries also SHARE A SAVE FILE and
+# write over each other's progress.
+#
+# So the one being installed replaces the one that is there, and says so. Only
+# Applications: expansion packs share a product id with their game and are
+# always Type=MicroDownload, which lands somewhere else entirely.
+purge_same_product() {              # $1=PackageID being installed
+    local newpid="$1" prod other obase ometa opid otype oname
+    prod="$(product_of "$newpid")"
+    [ -n "$prod" ] || return 0
+    for other in "$BULK"/ProgramFiles/*/; do
+        [ -f "$other/meta.inf" ] || continue
+        obase="$(basename "$other")"
+        ometa="$(cat "$other/meta.inf" 2>/dev/null)" || continue
+        opid="$(field "$ometa" PackageID)"
+        otype="$(field "$ometa" Type)"
+        [ "$otype" = Application ] || continue
+        [ -n "$opid" ] || continue
+        [ "$opid" = "$newpid" ] && continue          # the same package: rm -rf has it
+        [ "$(product_of "$opid")" = "$prod" ] || continue
+        oname="$(field "$ometa" Name)"
+        [ -n "$obase" ] && rm -rf "$BULK/ProgramFiles/$obase"
+        printf "  %-12s %-26s %s\n" "replaced" "$opid" "$oname"
+    done
+}
+
+# A PNG THE HOME SCREEN CAN ACTUALLY DRAW.
+#
+# The picker asks liblfp for a preview icon and liblfp reads GameInfo.json's
+# IconPADS / IconPHRS / IconTHDS / IconTHD1 — a PNG path relative to the package.
+# meta.inf's Icon= is only the fallback for a package with NO GameInfo.json.
+#
+# A Leapster Explorer title has a GameInfo.json in the OLDER shape —
+# Title / Subtitle / LargeIcon / Audio — with none of those four keys, and its
+# meta.inf says `Icon="icon.swf"` because the Leapster's and the LeapPad2's home
+# screens are Flash and render a Flash icon. The Qt picker on the newer devices
+# cannot, so it stores an EMPTY preview icon and draws the Adobe placeholder in
+# the tile. Measured on Ni Hao Kai-lan: LocalPackageInfo.db holds
+# PreviewIcon='' for it, against 'BaseImage.png' for every title that works.
+#
+# The artwork is already in the package — icon64.png, nihao_icon_large.png —
+# so this points the key the firmware reads at the file the package already
+# ships. Nothing is invented and nothing is downloaded.
+pick_icon() {                       # $1=package dir -> a PNG in it, or nothing
+    local d="$1" meta c
+    meta="$(cat "$d/meta.inf" 2>/dev/null)"
+    # THE PACKAGE'S OWN CHOICE FIRST — but only the fields that mean "tile".
+    #
+    # meta.inf's LargeIcon= is deliberately NOT consulted: it names a wide
+    # store banner, not an icon, and in the Ni Hao backup it names preview.png,
+    # which in that package is TINKER BELL ARTWORK. Somebody at LeapFrog shipped
+    # the wrong file and nothing on the Leapster ever drew it, so the mistake
+    # went unnoticed for sixteen years. GameInfo.json's LargeIcon is the
+    # Leapster home screen's own tile art and is the right one.
+    for c in "$(field "$meta" Icon)" "$(json_str "$d/GameInfo.json" LargeIcon)" \
+             BaseImage.png BaseIcon.png icon.png icon64.png 82x88.png \
+             PopUpIcon.png; do
+        case "$c" in
+            *.png|*.PNG) [ -f "$d/$c" ] && { printf '%s\n' "$c"; return 0; } ;;
+        esac
+    done
+    for c in "$d"/*[iI]con*.png; do
+        [ -f "$c" ] && { basename "$c"; return 0; }
+    done
+    return 0
+}
+
+# Add "IconPADS": "<png>" as the first member of GameInfo.json.
+#
+# A TEXT INSERT, NOT A REWRITE. The file belongs to the title and its other keys
+# are none of our business; re-serialising it through a JSON library would also
+# reformat it, which makes every later diff of a package unreadable. The only
+# case needing care is an object with no members, where a trailing comma would
+# be invalid JSON — hence the test for an existing "key": pair.
+add_icon_key() {                    # $1=GameInfo.json  $2=png
+    local sep=""
+    grep -qE '"[^"]*"[[:space:]]*:' "$1" && sep=","
+    # NO NEWLINE IS INTRODUCED. These files are CRLF as often as LF, and a
+    # helpfully-added "\n" leaves one line in the other style — harmless to a
+    # JSON parser, and enough to make this and install-game.py produce files
+    # that differ, which is the one thing the port must never do.
+    awk -v png="$2" -v sep="$sep" '
+        !ins && index($0, "{") {
+            i = index($0, "{")
+            printf "%s{\"IconPADS\": \"%s\"%s%s\n",
+                   substr($0, 1, i - 1), png, sep, substr($0, i + 1)
+            ins = 1
+            next
+        }
+        { print }
+    ' "$1" > "$1.tadpole" && mv "$1.tadpole" "$1"
+}
 
 install_one() {                     # $1=tar  $2=meta.inf path inside it
-    local tar="$1" metapath="$2" prefix meta type pid name dest
+    local tar="$1" metapath="$2" prefix meta type pid name dest icon
     prefix="$(dirname "$metapath")"
     meta="$(tar xOf "$tar" "$metapath" 2>/dev/null)" || return 0
     type="$(field "$meta" Type)"
@@ -55,6 +181,8 @@ install_one() {                     # $1=tar  $2=meta.inf path inside it
         Download|MicroDownload) dest="$BULK/Downloads/$pid" ;;
         *)           printf "  %-12s %-26s %s (skipped)\n" "$type" "$pid" "$name"; return 0 ;;
     esac
+
+    [ "$type" = Application ] && purge_same_product "$pid"
 
     rm -rf "$dest"; mkdir -p "$dest"
     if [ "$prefix" = "." ]; then
@@ -84,6 +212,55 @@ install_one() {                     # $1=tar  $2=meta.inf path inside it
         [ -s "$dest/meta.inf" ] && [ -n "$(tail -c 1 "$dest/meta.inf")" ] &&
             printf '\n' >> "$dest/meta.inf"
         printf 'ProfileAccess=-1,0,1,2,3\n' >> "$dest/meta.inf"
+    fi
+
+    # THE MANIFEST IS INPUT, NOT STATE — SO STOP THE DAEMON REWRITING IT.
+    #
+    # On a Qt device (LeapPad3, Ultra) the package-manager daemon's
+    # RebuildPackageDatabase parses every meta.inf at boot and WRITES EACH ONE
+    # BACK from its own parsed model. That model has no room for Device=, so it
+    # writes `Device=""`, and a quoted ProductID comes back as 0x00000000.
+    # Measured by diffing the pristine rootfs against the sysroot after one
+    # boot: `-Device="LeapsterExplorer"` `+Device=""`, `+Size=0`.
+    #
+    # THAT COSTS THE TITLE ITS ON-SCREEN CONTROLS. A Leapster Explorer game is
+    # played inside a GameViewFrame — the border with A, B, Home, Pause and
+    # Hint drawn around a 320x240 window — and BrioWrapper decides whether to
+    # put one up from the package's device type. Measured on Ni Hao Kai-lan:
+    # with Device="" the game gets the whole 480x272 panel and no buttons and
+    # the log never mentions a ViewFrame; with Device="LeapsterExplorer"
+    # restored it logs
+    #     PushEnterApp: loading ViewFrame /LF/Bulk/Downloads/PADS-0x00210008-
+    #                   210000/LST3-0x00180002-000000/ViewFrame.json
+    #     CGameViewFrame::Enter
+    # the game is given its 320x240 box at (17,16), and tapping where the JSON
+    # puts A, B and Home drives the game.
+    #
+    # A read-only meta.inf makes the rewrite fail. The daemon says so twice and
+    # carries on: the package still registers, the tile still appears, and the
+    # title still launches — all three checked on a booted device, not assumed.
+    # What it loses is bookkeeping it recomputes anyway (`Size=0`).
+    #
+    # ONLY PACKAGES WITH SOMETHING TO LOSE. A LeapPad-native backup declares no
+    # Device= at all, so the rewrite takes nothing from it and there is no
+    # reason to make its manifest immutable. `rm -rf` above still replaces a
+    # read-only file on reinstall, because the DIRECTORY stays writable.
+    if [ "$type" = Application ] && [ -n "$(field "$meta" Device)" ]; then
+        chmod 0444 "$dest/meta.inf" 2>/dev/null || true
+    fi
+
+    # See pick_icon: a GameInfo.json that names none of the icon keys the
+    # firmware reads leaves the tile with a placeholder, and the older Leapster
+    # shape names none of them. Only ever ADDS a key, and only when there is a
+    # real PNG in the package to point it at, so a package that already declares
+    # its icon properly is left alone.
+    if [ "$type" = Application ] && [ -f "$dest/GameInfo.json" ] &&
+       ! grep -qE '"Icon(PADS|PHRS|THDS|THD1)"' "$dest/GameInfo.json"; then
+        icon="$(pick_icon "$dest")"
+        if [ -n "$icon" ]; then
+            add_icon_key "$dest/GameInfo.json" "$icon"
+            printf "  %-12s %-26s %s\n" "icon" "$pid" "$icon"
+        fi
     fi
 
     # THE SAVE AREA HAS TO EXIST BEFORE FIRST LAUNCH, and nothing creates it.

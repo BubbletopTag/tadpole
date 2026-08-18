@@ -38,7 +38,15 @@ KEYS = {
 #
 #     physical up -> game left, right -> up, down -> right, left -> down
 #
-# so to ASK for a game direction, send the physical button that produces it:
+# so to ASK for a game direction, send the physical button that produces it.
+#
+# AND IT IS NOT ONLY THE LEAPPAD2, THOUGH THE PARAGRAPH ABOVE READS THAT WAY.
+# Measured on a LeapPad3 — a LANDSCAPE device, where the turn ought to have
+# disappeared — with Ni Hao Kai-lan's own menu as the read-out: physical RIGHT
+# moves the game DOWN and physical LEFT moves it UP, exactly as on the
+# LeapPad2. The turn belongs to the title and to the key codes the shim emits,
+# not to the shape of the case. Same table everywhere; see the longer note in
+# tadpole/viewer/tadpole_view.c.
 GAME_TO_PHYSICAL = {
     "left":  "up",
     "up":    "right",
