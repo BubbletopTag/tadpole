@@ -160,6 +160,32 @@ probe: exec from app files   DENIED (execve refused — SELinux/noexec)
 probe: exec from APK lib     OK — a packaged binary CAN be executed
 ```
 
+> **Corrected 2026-08-17: that measurement was wrong, and it was our bug.**
+> The probe copied `/system/bin/true` and exec'd it as `probe.bin`. On Android
+> `/system/bin/true` is a SYMLINK TO TOYBOX, which looks at `argv[0]`, does not
+> recognise `probe.bin` as an applet, prints `toybox: Unknown command
+> probe.bin` — a line that was sitting in the middle of the probe output the
+> whole time — and exits **127**. The probe treated 127 as "execve refused".
+> The exec had already succeeded. It now reports the failure from the child
+> down a close-on-exec pipe, so nothing a program chooses to exit with can be
+> mistaken for a failed `execve`, and the same device says:
+>
+> ```
+> probe: exec from app files   OK — execve succeeded (program exit 127)
+> ```
+>
+> **This does not make Option A viable, and it does not generalise.** The W^X
+> rule for `untrusted_app` arrived in **Android 10 (API 29)** and binds apps
+> targeting 29 or later; this tablet is API 27, which is precisely why Termux
+> can ship a Python and run it, and precisely why Termux cannot raise its own
+> `targetSdkVersion` past 28. On a current phone the denial would be real. And
+> A3 still stands whatever the exec rule says: the guest needs `chroot`, which
+> needs CAP_SYS_CHROOT, which an app does not have at any API level. The root
+> helper is still required.
+>
+> What it does change is the tooling: on this class of device an interpreter
+> or a helper binary in the app's own directory really can be executed.
+
 An app cannot execute a file it wrote. That is `untrusted_app` losing exec on
 `app_data_file` in Android 10, and it applies regardless of target API. The
 guest binaries come out of the user's own device firmware at runtime — they can
@@ -185,10 +211,7 @@ question this section never asked — "can the app process do it" — rather tha
   sysroot there is. And the syscall problem is backwards: glasspole's
   `syscall.cpp` rewrites guest paths in software precisely because it has no
   kernel willing to do it, and here one is.
-* **A4 is a rule about `untrusted_app`, not about the kernel.** A root shell is
-  not in that domain. It remains an absolute blocker on the app launching this
-  itself, which is why the script needs root and why this is not yet something
-  the front end can do.
+* **A4 was measured wrong, and the measurement was ours.** See below.
 
 What actually stood between "chroot works" and "the system menu boots" was one
 thing, and it was not architectural: **`CONFIG_POSIX_MQUEUE` is off on this GSI**,

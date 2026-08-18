@@ -2726,6 +2726,38 @@ static void fb_scan(void)
 	qsort(g_fb_list, (size_t)g_fb_n, sizeof(*g_fb_list), fcmp);
 }
 
+/* WHERE A FILE CHOOSER SHOULD OPEN, which on Android is not where the files
+ * this program owns live.
+ *
+ * Everywhere else <project>/games is exactly right: it sits beside the viewer
+ * and the user put their backups there themselves. On Android the project
+ * directory is the app's PRIVATE data directory — /data/user/0/<pkg>/files —
+ * which no file manager will show, which MTP does not export, and which a
+ * person plugging the tablet into a computer cannot write to at all. Opening
+ * there offers a folder nobody can put anything into, which reads as the
+ * chooser being broken.
+ *
+ * Shared storage is the answer, and it is spelled two ways depending on how
+ * old the platform is, so both are tried. Nothing is created here: a chooser
+ * that makes a directory as a side effect of being opened is a surprise, and
+ * the user is about to pick one anyway.
+ */
+static void default_browse_dir(char *out, size_t n)
+{
+#ifdef __ANDROID__
+	static const char *shared[] = {
+		"/storage/emulated/0", "/sdcard", "/storage/self/primary"
+	};
+	size_t i;
+	for (i = 0; i < sizeof(shared) / sizeof(shared[0]); i++)
+		if (access(shared[i], R_OK) == 0) {
+			snprintf(out, n, "%s", shared[i]);
+			return;
+		}
+#endif
+	path_join(out, n, g_proj, "games");
+}
+
 static void fb_open(const char *title, const char *start, const char *ext,
                     enum ui_action act)
 {
@@ -2776,9 +2808,9 @@ static void games_choose_folder(void)
 	char start[PATHMAX];
 	if (g_gm_dir[0])            snprintf(start, sizeof(start), "%s", g_gm_dir);
 	else if (g_cfg.games_dir[0]) snprintf(start, sizeof(start), "%s", g_cfg.games_dir);
-	else                        path_join(start, sizeof(start), g_proj, "games");
+	else                        default_browse_dir(start, sizeof(start));
 	if (access(start, R_OK) != 0)
-		path_join(start, sizeof(start), g_proj, "");
+		default_browse_dir(start, sizeof(start));
 	/* No extension filter, so the browser offers "Use folder" — picking the
 	 * folder is the whole point here, not picking a file inside it. */
 	fb_open("Games folder", start, "", UI_ACT_SCAN_GAMES);
@@ -3045,9 +3077,9 @@ static void activate(int id)
 		if (g_cfg.games_dir[0])
 			snprintf(start, sizeof(start), "%s", g_cfg.games_dir);
 		else
-			path_join(start, sizeof(start), g_proj, "games");
+			default_browse_dir(start, sizeof(start));
 		if (access(start, R_OK) != 0)
-			path_join(start, sizeof(start), g_proj, "");
+			default_browse_dir(start, sizeof(start));
 		fb_open("Install Package", start, ".tar", UI_ACT_INSTALL_PKG);
 		break;
 	case IT_CART:
@@ -3058,13 +3090,17 @@ static void activate(int id)
 		if (g_cfg.games_dir[0])
 			snprintf(start, sizeof(start), "%s", g_cfg.games_dir);
 		else
-			path_join(start, sizeof(start), g_proj, "games");
+			default_browse_dir(start, sizeof(start));
 		if (access(start, R_OK) != 0)
-			path_join(start, sizeof(start), g_proj, "");
+			default_browse_dir(start, sizeof(start));
 		fb_open("Cartridge dump (.bin)", start, ".bin", UI_ACT_CONVERT_CART);
 		break;
 	case IT_FW:
-		path_join(start, sizeof(start), g_proj, "");
+		/* The downloads land in shared storage on Android for the same reason
+		 * the backups do — this is the folder a browser saved them into. */
+		default_browse_dir(start, sizeof(start));
+		if (access(start, R_OK) != 0)
+			path_join(start, sizeof(start), g_proj, "");
 		fb_open("Setup System Firmware", start, ".zip", UI_ACT_SETUP_FIRMWARE);
 		break;
 	case IT_AUDIO: g_modal = M_AUDIO; break;

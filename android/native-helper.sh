@@ -7,16 +7,15 @@
 #
 # WHY THERE HAS TO BE A ROOT HALF AT ALL. On this ABI there is no ARM engine —
 # glasspole is arm64-only — and the guest's own code runs natively instead, which
-# needs chroot (CAP_SYS_CHROOT) and needs to execute files in the app's data
-# directory. SELinux forbids untrusted_app the second of those absolutely: the
-# platform probe measures it every launch and prints
+# needs chroot, and chroot needs CAP_SYS_CHROOT, which an app does not have at
+# any API level. `su` is not a way round it — measured, the app gets "Permission
+# denied" reaching for /system/xbin/su. So the app asks, and something already
+# running as root does the work.
 #
-#     probe: exec from app files   DENIED (execve refused — SELinux/noexec)
-#
-# and no amount of root elsewhere changes what the app's own domain may do. `su`
-# is not a way round it either — measured, the app gets "Permission denied"
-# reaching for /system/xbin/su. So the app asks, and something already running as
-# root does the work. See android/NOTES-arm32.md, "Amended".
+# (The exec restriction this comment used to cite as the reason turned out to be
+# a bug in our own probe — see the correction in android/NOTES-arm32.md. On this
+# API 27 device an app CAN execute a file it wrote. It still cannot chroot, so
+# the helper is needed regardless, and on API 29+ the exec rule is real again.)
 #
 # THE PROTOCOL IS A FILE, following the one the viewer already uses for
 # screenshots (write a path into $TADPOLE_DIR/shot.req and the next frame lands

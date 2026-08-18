@@ -3354,9 +3354,20 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 		 * one rather than blaming the platform. */
 		int tfd = android_tool_start(script, argv);
 		if (tfd < 0) {
+			/* NAMED THE WAY A PERSON WOULD NAME IT. "tools/cart2tar.py" is
+			 * how the viewer spells its tools internally and means nothing to
+			 * whoever pressed the button; the bare name is what the menu item
+			 * they just used is about. */
+			const char *bare = strrchr(script, '/');
+			char name[64];
+			size_t k;
+			bare = bare ? bare + 1 : script;
+			snprintf(name, sizeof(name), "%s", bare);
+			for (k = 0; name[k]; k++)
+				if (name[k] == '.') { name[k] = 0; break; }
 			fprintf(stderr, "tadpole-view: %s has no Android version yet\n",
 			        script);
-			ui_status("%s: not on Android yet", script);
+			ui_status("%s: not available on Android yet", name);
 			return -1;
 		}
 		if (outfd) *outfd = tfd; else close(tfd);

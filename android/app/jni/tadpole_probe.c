@@ -157,17 +157,55 @@ static void probe_exec_from(const char *label, const char *dst)
 	close(in); close(outfd);
 	chmod(dst, 0700);
 
-	pid = fork();
-	if (pid == 0) {
-		char *const av[] = { (char *)dst, NULL };
-		execv(dst, av);
-		_exit(127);
+	/* DID execve FAIL, OR DID THE PROGRAM RUN AND EXIT 127? Those are not the
+	 * same thing, and this probe answered "SELinux refused it" for both — for
+	 * two years, in every launch log, and in NOTES-arm32.md's Option A, which
+	 * cites it.
+	 *
+	 * The copied binary is /system/bin/true, which on Android is a SYMLINK TO
+	 * TOYBOX. Copy it to probe.bin, exec it, and toybox looks at argv[0], does
+	 * not recognise "probe.bin" as one of its applets, prints
+	 *
+	 *     toybox: Unknown command probe.bin
+	 *
+	 * — a line sitting in the middle of the probe output the whole time — and
+	 * exits 127. The exec had already succeeded.
+	 *
+	 * So the child reports the failure itself, down a close-on-exec pipe: if
+	 * execve works the pipe closes empty, and if it does not the errno arrives.
+	 * Nothing the program chooses to exit with can be mistaken for either. */
+	{
+		int pfd[2];
+		int err = 0;
+		ssize_t got;
+
+		if (pipe(pfd) != 0) {
+			P("exec from %-11s could not make a pipe", label);
+			unlink(dst);
+			return;
+		}
+		fcntl(pfd[1], F_SETFD, FD_CLOEXEC);
+
+		pid = fork();
+		if (pid == 0) {
+			char *const av[] = { (char *)dst, NULL };
+			close(pfd[0]);
+			execv(dst, av);
+			err = errno;
+			(void)!write(pfd[1], &err, sizeof err);
+			_exit(127);
+		}
+		close(pfd[1]);
+		got = read(pfd[0], &err, sizeof err);
+		close(pfd[0]);
+		waitpid(pid, &st, 0);
+
+		if (got == (ssize_t)sizeof err)
+			P("exec from %-11s DENIED (execve: %s)", label, strerror(err));
+		else
+			P("exec from %-11s OK — execve succeeded (program exit %d)",
+			  label, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
 	}
-	waitpid(pid, &st, 0);
-	if (WIFEXITED(st) && WEXITSTATUS(st) == 127)
-		P("exec from %-11s DENIED (execve refused — SELinux/noexec)", label);
-	else
-		P("exec from %-11s OK (exit %d)", label, WIFEXITED(st) ? WEXITSTATUS(st) : -1);
 	unlink(dst);
 }
 
