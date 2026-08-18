@@ -35,6 +35,7 @@
  * hanging the UI thread.
  */
 
+typedef unsigned char  u8;
 typedef unsigned int   u32;
 typedef unsigned long  ulong;
 typedef long           slong;
@@ -46,9 +47,12 @@ extern int    open(const char *path, int flags, ...);
 extern int    close(int fd);
 extern slong  write(int fd, const void *buf, size_t_ n);
 extern int    mkfifo(const char *path, u32 mode);
+extern int    unlink(const char *path);
+extern slong  read(int fd, void *buf, size_t_ n);
 extern char  *getenv(const char *name);
 extern int    snprintf(char *s, size_t_ n, const char *fmt, ...);
 extern void  *memset(void *s, int c, size_t_ n);
+extern void  *memmove(void *d, const void *s, size_t_ n);
 extern int    usleep(u32 usec);
 extern int   *__errno_location(void);
 
@@ -68,6 +72,7 @@ static unsigned long long now_us(void)
 }
 
 #define O_WRONLY   01
+#define O_RDWR     02
 #define O_NONBLOCK 04000
 #define O_CREAT    0100
 #define O_TRUNC    01000
@@ -94,6 +99,16 @@ struct tad_sw_params {
 	ulong start_threshold, avail_min;
 };
 
+/* CAPTURE STAGING. Two seconds at the 16 kHz mono the microphone module asks
+ * for, which is far more than the period it reads in; it only has to cover the
+ * gap between the viewer's writes and the guest's reads.
+ *
+ * Linear rather than circular, and compacted on commit: snd_pcm_mmap_begin has
+ * to hand back ONE contiguous run, so a ring would need either two areas (the
+ * API allows it, the caller may not expect it) or a copy anyway. The memmove
+ * is a few kilobytes per period. */
+#define CAP_BUF 65536
+
 struct tad_pcm {
 	int   fd;             /* FIFO to the viewer, -1 if unavailable */
 	int   stream;         /* 0 = playback, 1 = capture */
@@ -102,6 +117,12 @@ struct tad_pcm {
 	ulong buffer_size, period_size;
 	/* Virtual playback clock — see pace_pcm(). t0_us is 0 when idle. */
 	unsigned long long t0_us, written;
+	/* Capture only. */
+	u8   *cap;            /* &g_capbuf[slot][0]                          */
+	u32   cap_len;        /* valid bytes                                 */
+	u32   cap_taken;      /* handed out by mmap_begin, not yet committed */
+	int   running;        /* between snd_pcm_start and snd_pcm_drop      */
+	unsigned long long cap_t0_us, cap_read;
 };
 
 #define HW_MAGIC 0x48575041u
@@ -184,6 +205,74 @@ static void open_fifo(struct tad_pcm *p)
 	p->fd = open(path, O_WRONLY | O_NONBLOCK);
 }
 
+/* THE MICROPHONE, WHICH RUNS THE OTHER WAY.
+ *
+ * Same shape as the playback FIFO and the same reasoning behind it: a named
+ * pipe in TADPOLE_DIR, no protocol, one process writing and one reading. Only
+ * the direction changes — the viewer writes what the tablet's microphone heard
+ * and the guest reads it.
+ *
+ * O_RDWR rather than O_RDONLY, and that is not a typo. Opening a FIFO read-only
+ * blocks until a writer appears, and O_RDONLY|O_NONBLOCK succeeds but then
+ * reports end-of-file the moment the writer closes — so a viewer that restarts
+ * would leave the guest's microphone permanently at EOF. Holding a write
+ * descriptor of our own means there is always a writer and read() simply
+ * returns EAGAIN when there is nothing to hear. The same trick the input event
+ * nodes use in tadpole_shim.c.
+ *
+ * AND IT IS OPENED ONLY WHILE RECORDING, which is what tells the host to turn
+ * the microphone on. A FIFO with no reader cannot be opened for writing —
+ * open() gives ENXIO — so "the viewer can open $TADPOLE_DIR/mic" means exactly
+ * "the guest is capturing", with no second channel to keep in step and nothing
+ * for the two sides to disagree about. It also matters that the host does not
+ * hold the microphone when nobody is listening: on Android that is a battery
+ * cost and, on some ROMs, a notification.
+ *
+ * THE HOST MAKES THE NODE, NOT US. A FIFO created here belongs to root — the
+ * guest runs as root inside the chroot — and lands with the plain
+ * app_data_file:s0 context, which an app may read but may not write. The
+ * viewer creates it so it carries the app's own SELinux categories; root can
+ * open anything either way. We only mkfifo as a fallback for the headless case
+ * where there is no viewer to have done it. */
+static void open_mic_fifo(struct tad_pcm *p)
+{
+	char path[512];
+	static unsigned tries;
+
+	if (p->fd < 0 && (tries++ & 0x3F))
+		return;
+	snprintf(path, sizeof(path), "%s/mic", tad_dir());
+	p->fd = open(path, O_RDWR | O_NONBLOCK);
+	if (p->fd < 0) {
+		mkfifo(path, 0666);
+		p->fd = open(path, O_RDWR | O_NONBLOCK);
+	}
+}
+
+/* What the host has to record, published the same way audio.fmt publishes what
+ * it has to play. Removed on close so the viewer knows to let the microphone
+ * go — an app that keeps a recorder open costs battery and, on some ROMs, puts
+ * a notification in the shade. */
+static void publish_mic(struct tad_pcm *p, int on)
+{
+	char path[512], line[64];
+	int fd;
+
+	snprintf(path, sizeof(path), "%s/mic.fmt", tad_dir());
+	if (!on) {
+		unlink(path);
+		return;
+	}
+	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	if (fd < 0)
+		return;
+	snprintf(line, sizeof(line), "%u %u %u %lu\n",
+	         p->rate, p->channels, fmt_bits(p->format),
+	         (ulong)p->period_size);
+	write(fd, line, (size_t_)strlen_(line));
+	close(fd);
+}
+
 /* ---- lifecycle ---------------------------------------------------------- */
 
 int snd_pcm_open(snd_pcm_t **pcmp, const char *name, int stream, int mode)
@@ -210,11 +299,20 @@ int snd_pcm_open(snd_pcm_t **pcmp, const char *name, int stream, int mode)
 	p->buffer_size = 4096;
 	p->period_size = 1024;
 
-	/* Capture (microphone) is not wired up; report success but never hand
-	 * back samples, so Brio's mic path fails soft instead of erroring out
-	 * during init and taking the UI with it. */
-	if (stream == 0)
+	if (stream == 0) {
 		open_fifo(p);
+	} else {
+		/* Capture: 16 kHz mono is what libMicrophone.so asks for, but every
+		 * setter below records what it is actually told. */
+		static u8 g_capbuf[4][CAP_BUF];
+		p->rate        = 16000;
+		p->channels    = 1;
+		p->frame_bytes = 2;
+		p->period_size = 1024;
+		p->cap = g_capbuf[(p - g_pcm) & 3];
+		/* The FIFO is opened by snd_pcm_start, not here: holding it open is
+		 * the signal that recording is happening. */
+	}
 
 	if (g_debug_audio > 0) {
 		char b[160];
@@ -230,6 +328,10 @@ int snd_pcm_open(snd_pcm_t **pcmp, const char *name, int stream, int mode)
 
 int snd_pcm_close(snd_pcm_t *pcm)
 {
+	if (pcm && pcm->stream == 1) {
+		publish_mic(pcm, 0);
+		pcm->running = 0;
+	}
 	if (pcm && pcm->fd >= 0) {
 		close(pcm->fd);
 		pcm->fd = -1;
@@ -239,15 +341,41 @@ int snd_pcm_close(snd_pcm_t *pcm)
 
 int snd_pcm_prepare(snd_pcm_t *pcm)
 {
-	if (pcm && pcm->fd < 0 && pcm->stream == 0)
+	if (!pcm)
+		return 0;
+	if (pcm->fd < 0 && pcm->stream == 0)
 		open_fifo(pcm);           /* viewer may have started since open */
-	if (pcm) { pcm->t0_us = 0; pcm->written = 0; }   /* restart the clock */
+	pcm->t0_us = 0; pcm->written = 0;                /* restart the clock */
+	pcm->cap_len = pcm->cap_taken = 0;
+	pcm->cap_t0_us = 0; pcm->cap_read = 0;
 	return 0;
 }
 
-int snd_pcm_start(snd_pcm_t *pcm) { if (pcm) { pcm->t0_us = 0; pcm->written = 0; } return 0; }
+int snd_pcm_start(snd_pcm_t *pcm)
+{
+	if (!pcm) return 0;
+	pcm->t0_us = 0; pcm->written = 0;
+	pcm->cap_t0_us = 0; pcm->cap_read = 0;
+	if (pcm->stream == 1) {
+		pcm->running = 1;
+		if (pcm->fd < 0) open_mic_fifo(pcm);
+		publish_mic(pcm, 1);       /* tell the host to start recording */
+	}
+	return 0;
+}
 /* drop discards buffered audio, so the virtual buffer is empty again. */
-int snd_pcm_drop(snd_pcm_t *pcm)    { if (pcm) { pcm->t0_us = 0; pcm->written = 0; } return 0; }
+int snd_pcm_drop(snd_pcm_t *pcm)
+{
+	if (!pcm) return 0;
+	pcm->t0_us = 0; pcm->written = 0;
+	pcm->cap_len = pcm->cap_taken = 0;
+	if (pcm->stream == 1) {
+		pcm->running = 0;
+		publish_mic(pcm, 0);
+		if (pcm->fd >= 0) { close(pcm->fd); pcm->fd = -1; }
+	}
+	return 0;
+}
 int snd_pcm_resume(snd_pcm_t *pcm)  { (void)pcm; return 0; }
 int snd_pcm_drain(snd_pcm_t *pcm)   { (void)pcm; return 0; }
 
@@ -410,9 +538,125 @@ slong snd_pcm_writei(snd_pcm_t *pcm, const void *buffer, ulong frames)
 	return snd_pcm_mmap_writei(pcm, buffer, frames);
 }
 
+/* ---- capture ------------------------------------------------------------
+ *
+ * Brio's microphone module reads with the mmap interface, not snd_pcm_readi:
+ *
+ *     avail_update()                   how much is there
+ *     mmap_begin(&areas,&off,&frames)  where it is
+ *     ... copy it out, or sf_write_raw it ...
+ *     mmap_commit(off, frames)         done with it
+ *
+ * so we have to hand back a real memory area, not a count. The staging buffer
+ * is that area; the FIFO is drained into it here.
+ *
+ * PACED AGAINST REAL TIME, for the same reason the playback side is. A capture
+ * that reported everything available the instant it arrived would let the
+ * guest's recording task spin as fast as it could read, and the video recorder
+ * uses the audio clock to decide how many video frames to write — so an
+ * unpaced microphone makes a recording that plays back at the wrong speed.
+ * Never report more than real time has produced. */
+static void cap_fill(struct tad_pcm *p)
+{
+	slong n;
+
+	if (p->fd < 0) {
+		open_mic_fifo(p);
+		if (p->fd < 0)
+			return;
+	}
+	while (p->cap_len < CAP_BUF) {
+		n = read(p->fd, p->cap + p->cap_len, CAP_BUF - p->cap_len);
+		if (n <= 0)
+			break;
+		p->cap_len += (u32)n;
+	}
+	/* Overrun: the guest stopped reading. Keep the NEWEST samples — a
+	 * recording that drops a moment in the middle is better than one that
+	 * falls further and further behind. */
+	if (p->cap_len >= CAP_BUF) {
+		u32 keep = CAP_BUF / 2;
+		memmove(p->cap, p->cap + (p->cap_len - keep), keep);
+		p->cap_len = keep;
+	}
+}
+
 slong snd_pcm_avail_update(snd_pcm_t *pcm)
 {
-	return pcm ? (slong)pcm->period_size : 0;
+	unsigned long long el, due;
+	u32 frames;
+
+	if (!pcm)
+		return 0;
+	if (pcm->stream == 0)
+		return (slong)pcm->period_size;
+
+	cap_fill(pcm);
+	frames = pcm->frame_bytes ? pcm->cap_len / pcm->frame_bytes : 0;
+
+	if (!pcm->cap_t0_us)
+		pcm->cap_t0_us = now_us();
+	el  = now_us() - pcm->cap_t0_us;
+	due = (unsigned long long)pcm->rate * el / 1000000ULL;
+	if (due <= pcm->cap_read)
+		return 0;
+	due -= pcm->cap_read;
+	if (frames > due)
+		frames = (u32)due;
+	return (slong)frames;
+}
+
+/* struct snd_pcm_channel_area: where one channel's samples are, in BITS.
+ * Interleaved S16 stereo is addr=base, first=16*ch, step=32. */
+struct tad_area { void *addr; u32 first; u32 step; };
+static struct tad_area g_areas[8];
+
+int snd_pcm_mmap_begin(snd_pcm_t *pcm, const struct tad_area **areas,
+                       ulong *offset, ulong *frames)
+{
+	u32 have, want, ch, bits;
+
+	if (!pcm || !areas || !offset || !frames)
+		return -22;
+	if (pcm->stream != 1)
+		return -77;                            /* -EBADFD: playback uses writei */
+
+	cap_fill(pcm);
+	bits = fmt_bits(pcm->format);
+	have = pcm->frame_bytes ? pcm->cap_len / pcm->frame_bytes : 0;
+	want = (u32)*frames;
+	if (want > have)
+		want = have;
+
+	for (ch = 0; ch < pcm->channels && ch < 8; ch++) {
+		g_areas[ch].addr  = pcm->cap;
+		g_areas[ch].first = ch * bits;
+		g_areas[ch].step  = pcm->channels * bits;
+	}
+	*areas  = g_areas;
+	*offset = 0;                               /* always the start: see commit */
+	*frames = want;
+	pcm->cap_taken = want * pcm->frame_bytes;
+	return 0;
+}
+
+slong snd_pcm_mmap_commit(snd_pcm_t *pcm, ulong offset, ulong frames)
+{
+	u32 n;
+
+	(void)offset;
+	if (!pcm || pcm->stream != 1)
+		return (slong)frames;
+	n = (u32)frames * pcm->frame_bytes;
+	if (n > pcm->cap_len)
+		n = pcm->cap_len;
+	if (n) {
+		memmove(pcm->cap, pcm->cap + n, pcm->cap_len - n);
+		pcm->cap_len -= n;
+		pcm->cap_read += frames;
+	}
+	pcm->cap_taken = 0;
+	return (slong)frames;
 }
 
 int snd_pcm_set_params(snd_pcm_t *pcm, int format, int access, u32 channels,
@@ -446,6 +690,28 @@ int snd_pcm_hw_params_malloc(snd_pcm_hw_params_t **p)
 }
 void snd_pcm_hw_params_free(snd_pcm_hw_params_t *p) { (void)p; }
 
+/* THE ONE THAT WAS MISSING, AND WHAT IT COST. libMicrophone.so imports
+ * snd_pcm_sw_params_malloc and this library did not define it, so the guest
+ * loader refused the whole module:
+ *
+ *     /LF/Base/bin/AppManager: can't resolve symbol 'snd_pcm_sw_params_malloc'
+ *
+ * one line, in the middle of a boot that otherwise looks fine, and the
+ * consequence is a Brio with no microphone at all — which the camera then
+ * reports as a camera problem. Every symbol libMicrophone.so imports is
+ * defined here now, whether or not it does anything. */
+int snd_pcm_sw_params_malloc(snd_pcm_sw_params_t **p)
+{
+	static struct tad_sw_params pool[4];
+	static int n;
+	if (!p || n >= 4)
+		return -12;
+	*p = &pool[n++];
+	memset(*p, 0, sizeof(**p));
+	(*p)->magic = SW_MAGIC;
+	return 0;
+}
+
 int snd_pcm_hw_params_any(snd_pcm_t *pcm, snd_pcm_hw_params_t *hw)
 {
 	if (!hw)
@@ -467,6 +733,31 @@ int snd_pcm_hw_params_set_access(snd_pcm_t *pcm, snd_pcm_hw_params_t *hw, int a)
 
 int snd_pcm_hw_params_set_format(snd_pcm_t *pcm, snd_pcm_hw_params_t *hw, int f)
 { (void)pcm; if (hw) hw->format = (u32)f; return 0; }
+
+/* The _near setters take a POINTER and write back what they settled on; the
+ * caller reads it. Handing back the requested value is honest here — there is
+ * no hardware to refuse it, and the host records at whatever we publish. */
+int snd_pcm_hw_params_set_channels_near(snd_pcm_t *pcm, snd_pcm_hw_params_t *hw,
+                                        u32 *val)
+{
+	(void)pcm;
+	if (!hw || !val) return -22;
+	if (*val == 0) *val = 1;
+	hw->channels = *val;
+	return 0;
+}
+
+int snd_pcm_hw_params_set_period_size_near(snd_pcm_t *pcm,
+                                           snd_pcm_hw_params_t *hw,
+                                           ulong *val, int *dir)
+{
+	(void)pcm;
+	if (!hw || !val) return -22;
+	if (*val == 0) *val = 1024;
+	hw->period_size = *val;
+	if (dir) *dir = 0;
+	return 0;
+}
 
 int snd_pcm_hw_params_set_channels(snd_pcm_t *pcm, snd_pcm_hw_params_t *hw, u32 c)
 { (void)pcm; if (hw) hw->channels = c; return 0; }
@@ -544,14 +835,78 @@ int snd_pcm_sw_params_current(snd_pcm_t *pcm, snd_pcm_sw_params_t *sw)
 	return 0;
 }
 
+void snd_pcm_sw_params_free(snd_pcm_sw_params_t *p) { (void)p; }
+
 int snd_pcm_sw_params_set_start_threshold(snd_pcm_t *pcm, snd_pcm_sw_params_t *sw, ulong v)
 { (void)pcm; if (sw) sw->start_threshold = v; return 0; }
 
 int snd_pcm_sw_params_set_avail_min(snd_pcm_t *pcm, snd_pcm_sw_params_t *sw, ulong v)
 { (void)pcm; if (sw) sw->avail_min = v; return 0; }
 
+int snd_pcm_sw_params_set_tstamp_mode(snd_pcm_t *pcm, snd_pcm_sw_params_t *sw,
+                                      int mode)
+{ (void)pcm; (void)sw; (void)mode; return 0; }
+
 int snd_pcm_sw_params(snd_pcm_t *pcm, snd_pcm_sw_params_t *sw)
 { (void)pcm; (void)sw; return 0; }
+
+/* ---- status ------------------------------------------------------------
+ *
+ * The microphone module asks for the TRIGGER TIMESTAMP — when capture actually
+ * started — and uses it to line the audio up with the video. A monotonic
+ * reading of our own clock is the right answer: it is the same clock the
+ * capture pacing uses, so the two agree with each other, which is what
+ * matters. */
+struct tad_status { u32 magic; long trig_sec, trig_nsec; };
+#define ST_MAGIC 0x53544154u
+
+size_t_ snd_pcm_status_sizeof(void) { return PARAMS_SIZE; }
+
+int snd_pcm_status_malloc(void **p)
+{
+	static struct tad_status pool[4];
+	static int n;
+	if (!p || n >= 4)
+		return -12;
+	*p = &pool[n++];
+	memset(*p, 0, sizeof(struct tad_status));
+	((struct tad_status *)*p)->magic = ST_MAGIC;
+	return 0;
+}
+void snd_pcm_status_free(void *p) { (void)p; }
+
+int snd_pcm_status(snd_pcm_t *pcm, void *status)
+{
+	struct tad_status *st = status;
+	struct tad_ts t;
+
+	if (!st)
+		return -22;
+	st->magic = ST_MAGIC;
+	if (pcm && pcm->cap_t0_us) {
+		st->trig_sec  = (long)(pcm->cap_t0_us / 1000000ULL);
+		st->trig_nsec = (long)((pcm->cap_t0_us % 1000000ULL) * 1000ULL);
+	} else if (clock_gettime(CLOCK_MONOTONIC_, &t) == 0) {
+		st->trig_sec = t.tv_sec; st->trig_nsec = t.tv_nsec;
+	}
+	return 0;
+}
+
+/* struct timeval out-parameter: two longs on this 32-bit target. */
+void snd_pcm_status_get_trigger_tstamp(const void *status, void *tstamp)
+{
+	const struct tad_status *st = status;
+	long *tv = tstamp;
+
+	if (!tv)
+		return;
+	if (st && st->magic == ST_MAGIC) {
+		tv[0] = st->trig_sec;
+		tv[1] = st->trig_nsec / 1000;
+	} else {
+		tv[0] = 0; tv[1] = 0;
+	}
+}
 
 /* ---- misc --------------------------------------------------------------- */
 

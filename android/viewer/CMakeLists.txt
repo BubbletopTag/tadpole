@@ -27,7 +27,9 @@ add_library(main SHARED
     ${VIEWER}/tadpole_boot.c
     ${VIEWER}/tadpole_pad.c
     ${VIEWER}/tadpole_cam.c
+    ${VIEWER}/tadpole_mic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/tadpole_cam_android.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/tadpole_mic_android.c
     ${CMAKE_CURRENT_SOURCE_DIR}/tadpole_gles_compat.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../app/jni/tadpole_jni.c
     ${CMAKE_CURRENT_SOURCE_DIR}/../app/jni/tadpole_probe.c

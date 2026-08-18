@@ -202,6 +202,19 @@ final class Sysroot {
          * MLC's video plane, which is a plane the viewer already composites. */
         write(new File(sysroot, "sys/devices/platform/vip.0/driver/.keep"), "");
 
+        /* HOW BIG A PHOTOGRAPH THE CAMERA MAY TAKE. This file does not exist
+         * on a real LeapPad2: CVIPCameraModule::EnumFormats reads it with
+         * fscanf("%dx%d") and, absent, defaults to UXGA, so the stock device
+         * offers every mode up to 1600x1200. We cap it because of a
+         * simplification in the emulator, not because of anything the firmware
+         * does — all three framebuffers share ONE arena here, the VIP capture
+         * buffer lives at video memory offset 0, and Brio's own allocator
+         * hands out its first surface at 0xFF000. That leaves 1044480 bytes
+         * for one captured frame; the largest mode still offered below (SVGA,
+         * which the module adds unconditionally) needs 960000, and 1600x1200
+         * would need 3840000 and scribble over the picture on screen. */
+        write(new File(sysroot, "flags/high-res"), "640x480");
+
         /* Touchscreen tuning, mirroring /flags/set-ts.sh on the device. */
         String t = "sys/devices/platform/lf2000-touchscreen/";
         write(new File(sysroot, t + "max_tnt_down"),  "23");

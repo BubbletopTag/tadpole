@@ -17,43 +17,47 @@
  * There is no G_FMT, no TRY_FMT and no S_INPUT: the second camera is a second
  * device node, not an input index.
  *
- * WHICH FORMAT — THE GUEST PICKS, AND IT IS NOT THE ONE WE ADVERTISE
- * ------------------------------------------------------------------
- * NOTES-camera.md left this as the one open question. The answer has two
- * halves and neither is guessable from the outside.
+ * WHICH FORMAT — AND WHY ENUM_FMT ANSWERS NOTHING AT ALL
+ * ------------------------------------------------------
+ * NOTES-camera.md left this as the one open question: "answer ENUM_FMT with
+ * only YUYV and see whether it proceeds". The answer is that ENUM_FMT is the
+ * wrong lever, and offering ANY format through it is actively harmful.
  *
- * 1. ENUM_FMT ADVERTISES MJPEG, because MJPEG is the only fourcc that survives
- *    a round trip through Brio's own enumeration. CCameraModule::InitCameraInt
- *    turns each enumerated format into a tCaptureMode with
+ * CVIPCameraModule::EnumFormats — the virtual the application actually calls —
+ * does not use the V4L2 enumeration at all, unless CCameraModule has cached
+ * one. Its first act is to look at that cache, and only if it is EMPTY does it
+ * build the list the LeapPad2 really offers, out of eight statics in the
+ * module itself:
  *
- *        mode->fmt = (frmival.pixel_format == 'MJPG') ? 1 : 0;
+ *     QSVGA 400x300   SVGA 800x600   QVGA 320x240   VGA 640x480   (always)
+ *     WXGA 1280x800   SXGA 1280x960  HD16 1600x900  UXGA 1600x1200
+ *                                    (if within /flags/high-res, "%dx%d")
  *
- *    and CCameraModule::SetCameraMode turns it back with
+ * and every one of them is fmt 3 — planar YUV420. That number is what makes
+ * video recording possible: CameraTaskMain turns tCaptureMode.fmt into a
+ * fourcc for AVI_set_video, which sets an ffmpeg pix_fmt from it —
+ * '422P' -> 16, 'YUYV' -> 1, 'YU12' -> 15 — and sets NOTHING for anything
+ * else. The MJPEG encoder then refuses to open:
  *
- *        1 -> 'MJPG'   2 -> 'YUYV'   3 -> 'YU12'   otherwise: leaves 0
+ *     [tadpole] cam0: S_FMT 320x240 fourcc 47504a4d
+ *     [mjpeg @ 0x560020]colorspace not supported in jpeg
+ *     === tadpole: guest crashed ===  signal SIGFPE (8)
  *
- *    so an enumerated YUYV comes back as fmt 0 and S_FMT then asks for
- *    pixelformat 0. Advertising MJPEG is the only self-consistent answer to
- *    the enumeration.
+ * That was us advertising MJPEG. CCameraModule::InitCameraInt builds its cache
+ * with `mode->fmt = (pixel_format == 'MJPG') ? 1 : 0`, so the ONLY two values
+ * a V4L2 enumeration can ever produce are 1 (MJPG — no pix_fmt, encoder
+ * refuses) and 0 (no fourcc at all — same outcome, plus a garbage mode where
+ * VideoWidget::setInfo found no size to match and left its copy
+ * uninitialised: "S_FMT 56308x45910 fourcc 00000000").
  *
- * 2. AND THEN THE GUEST ASKS FOR YU12 ANYWAY. Measured on the device:
+ * So the correct emulation of the lf2000_vip driver is one that answers no
+ * formats — which is presumably why the real driver's list is empty too, since
+ * this is the only way the firmware's own video recorder can work. Everything
+ * downstream then comes from the module's statics, in YUV420, at the sizes
+ * CameraWidget::setSize() and VideoWidget::setInfo() already know about.
  *
- *        [tadpole] cam0: S_FMT 640x480 fourcc 32315559
- *
- *    0x32315559 is 'Y','U','1','2' — planar YUV420. CameraWidget does not use
- *    an enumerated mode at all: CVIPCameraModule's constructor seeds the
- *    module's current mode from a static (QVGA, VGA, ... are globals in the
- *    module, all fmt 3), and CameraWidget::setSize() only overwrites its width
- *    and height — from calcMaxSize(), which is where our enumerated frame size
- *    does get used and is why "Setting camera capture mode to: 640x480"
- *    appears in the log.
- *
- * So this file answers the enumeration with MJPEG and then produces whatever
- * S_FMT actually asks for. The fourcc is published in the shared state and the
- * host backend produces that. YU12 is the cheap one on both sides: Camera2
- * hands out YUV_420_888, which is I420 with a plane copy, and the guest needs
- * no JPEG decode for the viewfinder. It is also the one the recorder wants —
- * AVI_set_video maps 'YU12' to PIX_FMT_YUVJ420P before MJPEG-encoding it.
+ * S_FMT still matters, and it is where the real negotiation happens: the guest
+ * asks for one of those sizes and this file produces it.
  *
  * WHERE THE PIXELS LIVE
  * ---------------------
@@ -237,6 +241,7 @@ struct camdev {
 	u32  ov_w, ov_h;     /* surface size, from S_FBUF's v4l2_pix_format    */
 	u32  ov_pitch;       /* its bytesperline: the panel pitch, not the width */
 	u32  ov_fourcc;
+	u32  polled;         /* the recorder's PollFrame loop has been seen   */
 
 	/* ONE SCRATCH PER DEVICE, sized when the format is. A fixed array would
 	 * have to be TAD_CAM_MAXFRAME to cover 1600x900, and this library is
@@ -259,6 +264,26 @@ static char  g_dir[256];
 static int (*g_open)(const char *, int, ...);
 static int (*g_close)(int);
 static void (*g_dbg)(const char *);
+/* WHAT SIZES TO OFFER, AND WHY MORE THAN ONE.
+ *
+ * CameraWidget takes the largest — its calcMaxSize() walks the enumeration and
+ * keeps the maximum width and height — so one entry would do for photographs.
+ * VideoWidget::setInfo() does the opposite: it walks the same list looking for
+ * an EXACT match on a size it has already decided (320x240 by default, or one
+ * from a table for the two other quality settings), copies the matching
+ * tCaptureMode, and if it finds none leaves its copy UNINITIALISED. That is
+ * not a hypothetical:
+ *
+ *     [tadpole] cam0: S_FMT 56308x45910 fourcc 00000000
+ *     [mjpeg @ 0x12b8e10] colorspace not supported in jpeg
+ *     === tadpole: guest crashed ===  signal SIGFPE (8)
+ *
+ * — a garbage mode, an encoder opened with no pixel format, and a division by
+ * zero. Offering the sizes the widget actually looks for is the whole fix.
+ * 400x300 is the second entry in that table; the third is 640x480. */
+#define NSIZES 3
+static const u32 g_sizes[NSIZES][2] = { {320,240}, {400,300}, {640,480} };
+
 static u32  g_defw = 640, g_defh = 480;
 static u32  g_fps  = 15;
 static int  g_ready;
@@ -595,9 +620,37 @@ static int scratch_ready(struct camdev *c)
  * 4096 would need 1966080 and would scribble over the viewfinder it is trying
  * to photograph.
  */
+/* THE RECORDER'S PITCH IS NOT NEGOTIABLE, AND THE SNAPSHOT'S IS.
+ *
+ * AVI_set_video hardcodes the AVFrame linesizes for a planar mode:
+ *
+ *     frame->linesize[0] = linesize[1] = linesize[2] = 4096
+ *
+ * and AVI_write_frame lays the planes out from the raw capture buffer as
+ * data[0] = buf, data[1] = buf + 2048, data[2] = buf + 2048 + height*2048 —
+ * the video plane's own arrangement, at a fixed 4096. A frame written with any
+ * other pitch encodes to stripes, which is exactly what the first recording
+ * produced: nine seconds of correct audio over a video track of coloured
+ * bands.
+ *
+ * The still path has no such constraint: CVIPCameraModule::GetFrame recovers
+ * the pitch as frameinfo.size / frameinfo.height, so it accepts whatever we
+ * report. It gets the SMALLEST legal pitch instead — 2*width, luma in the
+ * first half of each row and chroma in the second — because of the arena
+ * collision described above capture_blit_mlc(): at 4096 a 640x480 photograph
+ * covers 1966080 bytes and Brio's first surface is at 0xFF000, so the display
+ * and the photograph would be writing over each other. At 2*width it is
+ * 614400 and they do not meet.
+ *
+ * Which one is wanted is not guessed. CCameraModule::PollFrame — and nothing
+ * else — issues QUERYBUF on a buffer that is already QUEUED, so that is the
+ * recorder's frame loop identifying itself. */
 static u32 cap_pitch(struct camdev *c)
 {
-	u32 p = c->width * 2;
+	u32 p;
+	if (c->polled)
+		return 4096;
+	p = c->width * 2;
 	return (p + 63u) & ~63u;
 }
 
@@ -673,6 +726,29 @@ static u32 fill_buffer(struct camdev *c, u32 bi, u8 *tmp, u32 tmpcap,
 	return n;
 }
 
+/* IS THERE A FRAME WAITING, AND WHY QUERYBUF HAS TO SAY SO.
+ *
+ * This is how the recorder finds out, and it is not the DQBUF-in-a-loop shape
+ * a V4L2 client usually has. CameraTaskMain polls:
+ *
+ *     TryLockMutex -> PollFrame(handle) -> ... -> TaskSleep
+ *
+ * and CCameraModule::PollFrame walks the buffers issuing QUERYBUF, looking for
+ * one whose flags carry V4L2_BUF_FLAG_DONE. Only then does it call GetFrame,
+ * which is what dequeues. Our QUERYBUF reported MAPPED and QUEUED and never
+ * DONE, so PollFrame answered "nothing yet" for ever: the viewfinder was live,
+ * the microphone was recording, the AVI header was written — and the file that
+ * came out was thirty-two seconds of sound with not one video frame in it, and
+ * then a SIGFPE in AVI_close dividing by a frame count of zero.
+ *
+ * DONE means "a frame the guest has not seen yet", which is also exactly what
+ * paces the recording: no new frame from the host, no DONE, no encode. */
+static int frame_ready(struct camdev *c)
+{
+	struct tad_cam_state *s = g_cs ? &g_cs[c->idx] : 0;
+	return s && s->seq && s->seq != c->last_seq;
+}
+
 /* ---- ioctl -------------------------------------------------------------- */
 
 static int fail(int err) { *__errno_location() = err; return -1; }
@@ -719,30 +795,25 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 		fill_capability(arg, c->idx);
 		return 0;
 
-	case VIDIOC_ENUM_FMT_: {
-		struct v4l2_fmtdesc *d = arg;
-		if (!d) return fail(EINVAL_);
-		if (d->index != 0)
-			return fail(EINVAL_);     /* end of list, which is how it stops */
-		d->flags = V4L2_FMT_FLAG_COMPRESSED_;
-		memset(d->description, 0, sizeof(d->description));
-		memcpy(d->description, "MJPEG", 6);
-		d->pixelformat = V4L2_PIX_FMT_MJPEG_;
-		return 0;
-	}
+	case VIDIOC_ENUM_FMT_:
+		/* NOTHING, ON PURPOSE — see the long note at the top of this file.
+		 * An empty list is what makes CVIPCameraModule::EnumFormats fall
+		 * through to the module's own static YUV420 modes, which are the only
+		 * ones the firmware's video recorder can encode. */
+		return fail(EINVAL_);
 
 	case VIDIOC_ENUM_FRAMESIZES_: {
 		struct v4l2_frmsizeenum *e = arg;
 		if (!e) return fail(EINVAL_);
-		if (e->index != 0)
+		if (e->index >= NSIZES)
 			return fail(EINVAL_);
 		/* DISCRETE OR NOTHING. InitCameraInt drops any entry whose type is
 		 * not V4L2_FRMSIZE_TYPE_DISCRETE and then reports the camera as
 		 * having no modes at all, so a stepwise answer is the same as no
 		 * answer. */
 		e->type = V4L2_FRMSIZE_DISCRETE_;
-		e->u.discrete.width  = g_defw;
-		e->u.discrete.height = g_defh;
+		e->u.discrete.width  = g_sizes[e->index][0];
+		e->u.discrete.height = g_sizes[e->index][1];
 		return 0;
 	}
 
@@ -916,6 +987,24 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 		u32 n;
 		if (!r) return fail(EINVAL_);
 		n = r->count;
+		/* ONE BUFFER, WHATEVER IS ASKED FOR — and a V4L2 driver is allowed to
+		 * say so, because count is an out-parameter.
+		 *
+		 * The reason is in the guest, and it is visible in its own log.
+		 * InitCameraBufferInt does not mmap our node; it computes each
+		 * buffer's address as fb2_mapping + WIDTH * i, which for a 320-wide
+		 * frame means:
+		 *
+		 *     InitCameraBufferInt: i=0, mapping=0xae0e7000
+		 *     InitCameraBufferInt: i=1, mapping=0xae0e7140
+		 *     InitCameraBufferInt: i=2, mapping=0xae0e7280
+		 *
+		 * — 320 bytes apart, which is a fifth of one row. Whatever that
+		 * arithmetic is for, it is not three separate frames, so honouring a
+		 * request for three would have the guest reading three views of the
+		 * same overlapping memory. One buffer is the only self-consistent
+		 * answer, and it is enough: the recorder queues and dequeues it. */
+		if (n > 1) n = 1;
 		if (n > QMAX) n = QMAX;
 		if (n == 0) {                 /* the documented "free them" spelling */
 			c->nbuf = 0;
@@ -953,7 +1042,12 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 			 * address from anyway. */
 			b->m.offset = cap_off(c, i);
 			b->length   = (cap_size(c) + 4095u) & ~4095u;
-			b->flags    = V4L2_BUF_FLAG_MAPPED_ | (q ? V4L2_BUF_FLAG_QUEUED_ : 0);
+			if (q)
+				c->polled = 1;      /* only PollFrame asks about a queued
+				                     * buffer — see cap_pitch() */
+			b->flags    = V4L2_BUF_FLAG_MAPPED_
+			            | (q ? V4L2_BUF_FLAG_QUEUED_ : 0)
+			            | (q && frame_ready(c) ? V4L2_BUF_FLAG_DONE_ : 0);
 		}
 		return 0;
 	}
@@ -1031,6 +1125,7 @@ int tad_v4l2_ioctl(int fd, ulong req, void *arg)
 	case VIDIOC_STREAMON_:
 		c->streaming = 1;
 		c->sequence  = 0;
+		c->polled    = 0;
 		if (g_cs) g_cs[c->idx].streaming = 1;
 		snprintf(m, sizeof(m), "[tadpole] cam%d: STREAMON %ux%u\n",
 		         c->idx, c->width, c->height);

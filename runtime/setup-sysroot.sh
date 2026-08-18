@@ -182,6 +182,19 @@ printf '0'        > sys/class/graphics/fb0/rotate
 # answers. etc/init.d/camera agrees: it modprobes lf2000_vip iff vip.0 exists.
 mkdir -p sys/devices/platform/vip.0/driver
 
+# HOW BIG A PHOTOGRAPH THE CAMERA MAY TAKE, and this file does not exist on a
+# real LeapPad2 — CVIPCameraModule::EnumFormats reads it with fscanf("%dx%d")
+# and, absent, defaults to UXGA, so the stock device offers everything up to
+# 1600x1200. We cap it because of a simplification in the emulator, not because
+# of anything the firmware does: all three framebuffers share ONE arena here
+# (see init() in tadpole_shim.c), the VIP capture buffer lives at video memory
+# offset 0, and Brio's own allocator hands out its first surface at 0xFF000.
+# That leaves 1044480 bytes for a captured frame, and the widest mode still
+# offered below — SVGA, which the module adds unconditionally — needs 960000.
+# 1600x1200 would need 3840000 and would scribble over the picture on screen.
+mkdir -p flags
+printf '640x480' > flags/high-res
+
 echo "==> device nodes"
 # These must EXIST as directory entries or the guest stops enumerating after
 # event1. The shim intercepts open() on them regardless of content.

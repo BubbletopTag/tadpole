@@ -97,6 +97,7 @@ static int tp_fifo_fd(const char *path, int want_read)
 
 #include "../shim/tadpole_cam.h"
 #include "tadpole_cam.h"
+#include "tadpole_mic.h"
 
 /* Mirrors struct tadpole_state in the shim. Keep the two in sync. */
 struct layer_state {
@@ -2099,8 +2100,10 @@ static int try_map(void)
 	}
 	/* The camera's viewfinder is drawn straight into this arena — see the
 	 * header of tadpole_cam.c for why it cannot be drawn on the guest side. */
-	if (g_fb[0])
+	if (g_fb[0]) {
 		tad_cam_init(g_dir, g_state->cam, g_fb[0], g_fbsz[0]);
+		tad_mic_init(g_dir);
+	}
 	return g_fb[0] != NULL;
 }
 
@@ -4366,6 +4369,7 @@ int main(int argc, char **argv)
 		 * composited out of it, so a frame that arrived this tick is the one
 		 * that gets shown rather than the one after. */
 		tad_cam_pump();
+		tad_mic_pump();
 
 		if (g_state) {
 			int drawn = 0;
