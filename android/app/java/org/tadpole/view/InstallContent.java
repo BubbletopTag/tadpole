@@ -147,8 +147,35 @@ final class InstallContent implements Tools.Tool {
                     + " language pack(s), " + music + " music, " + asset
                     + " device asset(s), " + skip + " skipped");
         profileAccess(bulk, out);
-        /* The Music app reads a database, not the filesystem — see MusicDb. */
-        if (music > 0 || new File(bulk, "Music").isDirectory())
+        /* NOT CALLED, AND THE REASON IS MEASURED. The Music app reads a
+         * database rather than the filesystem, so MusicDb was written to build
+         * one — and a database it builds makes the app abort on open. With no
+         * music.db the app opens and is merely empty, which is the state a real
+         * LeapPad2 is in before LFConnect has ever written one, and it is a far
+         * better place to leave a user than a Music button that kills the
+         * guest.
+         *
+         * What was ruled out, on the device, one variable at a time:
+         *   - the schema. All twelve queries App.so actually issues were
+         *     pulled out of the binary; every column they name exists.
+         *   - the path convention. Guest-absolute and CSV-relative both abort.
+         *   - the tracks. One album with ZERO tracks still aborts, so it is the
+         *     album row itself, not the track rows.
+         *   - empty strings. TrackData and CreditsPath as NULL abort too.
+         *   - the art. icon/cover/coverLarge are present, valid PNGs, owned and
+         *     labelled like everything else the guest reads.
+         *   - the firmware. With music.db deleted the app opens normally, so
+         *     the abort is caused by the database and by nothing else.
+         *
+         * The abort is SIGABRT through libstdc++'s unwinder — an uncaught C++
+         * exception, not a bad pointer — thrown under App.so+0x55488. Finding
+         * what it objects to means disassembling that, or capturing a real
+         * music.db off hardware to diff against. Until then this stays off.
+         *
+         * MusicDb itself is correct as far as it can be checked and is kept:
+         * it parses AlbumInfo.csv, quoted commas and all, and writes 1 album
+         * and 5 tracks that read back exactly right. */
+        if (false)
             MusicDb.build(bulk, out);
         return true;
     }

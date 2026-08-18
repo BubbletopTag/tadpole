@@ -94,8 +94,17 @@ final class MusicDb {
              * beside the database, and the guest's SQLite is from 2013 and will
              * not read one — it would open a database that looks empty, which
              * is the exact symptom this whole class exists to fix. DELETE
-             * journalling keeps everything in the one file. */
-            d.execSQL("PRAGMA journal_mode=DELETE;");
+             * journalling keeps everything in the one file.
+             *
+             * AND IT IS A QUERY, NOT AN execSQL. execSQL refuses any statement
+             * that returns a row, and PRAGMA journal_mode returns the mode it
+             * ended up in. Measured on the device: as execSQL it threw on the
+             * very first call, the catch below swallowed it, and music.db was
+             * left holding nothing but the android_metadata table Android
+             * creates itself — a Music app with no music in it, which is the
+             * exact symptom this class exists to remove. */
+            android.database.Cursor jc = d.rawQuery("PRAGMA journal_mode=DELETE;", null);
+            if (jc != null) jc.close();
             d.execSQL("CREATE TABLE Albums (AlbumID INTEGER PRIMARY KEY, Name TEXT,"
                     + " IconPath TEXT, Path TEXT, CoverPath TEXT, CoverPathLarge TEXT,"
                     + " CoverPathLargeLEX TEXT, CreditsPath TEXT);");
@@ -126,7 +135,12 @@ final class MusicDb {
             }
             out.println("  music: " + albums.size() + " album(s), " + nTracks + " track(s)");
         } catch (Throwable e) {
+            /* NAMED, not swallowed. The first version of this printed here and
+             * the line scrolled past inside a long install; the database it
+             * left behind looked plausible from the outside — right name,
+             * right place, non-zero length. */
             out.println("  music: could not build the database: " + e);
+            android.util.Log.w("tadpole", "music.db: " + e, e);
         } finally {
             if (d != null) try { d.close(); } catch (Throwable e) { /* ignore */ }
         }
