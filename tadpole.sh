@@ -516,6 +516,7 @@ guest() {
            ${DEV_HAS_QT:+-E TADPOLE_ABS_PANEL=1} \
            ${DEV_ENV_ARGS[@]+"${DEV_ENV_ARGS[@]}"} \
            $([ "$debug" = 1 ] && echo "-E TADPOLE_DEBUG=1") \
+           ${TADPOLE_AUDIO_DEBUG:+-E TADPOLE_AUDIO_DEBUG=1} \
            ${TADPOLE_LOG:+-E TADPOLE_LOG="$TADPOLE_LOG"} \
            -E TADPOLE_CRASHDIR="$CRASHDIR" \
            "$bin" "$@" )

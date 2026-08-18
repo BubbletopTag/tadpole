@@ -69,6 +69,7 @@ extern int   *__errno_location(void);
  * longs on this 32-bit target. */
 struct tad_ts { long tv_sec; long tv_nsec; };
 extern int clock_gettime(int clk, struct tad_ts *tp);
+extern int getpid(void);
 #define CLOCK_MONOTONIC_ 1
 
 static unsigned long long now_us(void)
@@ -303,6 +304,8 @@ static void dbg_drop(size_t_ now, unsigned long total)
  * to dump a burst afterwards and sound fast all over again.
  */
 static int g_pace_on = -1;
+static int g_pace_dbg = -1;
+static unsigned long long g_dbg_bytes, g_dbg_slept, g_dbg_t0;
 
 static void pace_pcm(struct tad_pcm *p, size_t_ bytes)
 {
@@ -342,6 +345,7 @@ static void pace_pcm(struct tad_pcm *p, size_t_ bytes)
 			unsigned long long us = over * 1000000ULL / rate_b;
 			if (us < 1000) us = 1000;
 			if (us > 100000) us = 100000;     /* never wedge the thread */
+			g_dbg_slept += us;
 			usleep((u32)us);
 		}
 		now = now_us();
@@ -349,6 +353,33 @@ static void pace_pcm(struct tad_pcm *p, size_t_ bytes)
 			break;
 	}
 	p->written += bytes;
+
+	/* WHAT THE PACER ACTUALLY DID, once a second. The arithmetic above looks
+	 * correct on paper — simulate it and a 4096-byte period comes out at one
+	 * write per 32 ms, exactly 128000 B/s — yet the viewer measures the guest
+	 * producing 200% of realtime, flat. When a model and a measurement disagree
+	 * that precisely, the model is missing a caller, so report the inputs
+	 * rather than re-deriving the same result. */
+	if (g_pace_dbg < 0) {
+		const char *e = getenv("TADPOLE_AUDIO_DEBUG");
+		g_pace_dbg = (e && e[0] && e[0] != '0') ? 1 : 0;
+	}
+	if (g_pace_dbg) {
+		g_dbg_bytes += bytes;
+		if (!g_dbg_t0) g_dbg_t0 = now;
+		if (now - g_dbg_t0 >= 1000000ULL) {
+			char b[192];
+			int n = snprintf(b, sizeof(b),
+			        "[tadpole] pace[pid %d]: %llu B/s in (rate=%u fb=%u -> %llu B/s"
+			        " expected) cap=%llu slept=%llu ms/s\n",
+			        (int)getpid(),
+			        g_dbg_bytes * 1000000ULL / (now - g_dbg_t0),
+			        p->rate, p->frame_bytes, rate_b, cap,
+			        g_dbg_slept / 1000ULL);
+			if (n > 0) write(2, b, (size_t_)n);
+			g_dbg_bytes = 0; g_dbg_slept = 0; g_dbg_t0 = now;
+		}
+	}
 }
 
 slong snd_pcm_mmap_writei(snd_pcm_t *pcm, const void *buffer, ulong frames)

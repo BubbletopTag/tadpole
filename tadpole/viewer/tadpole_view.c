@@ -259,6 +259,23 @@ static int      g_afd = -1;
 static int      g_arate, g_achans, g_abits;
 static volatile uint32_t g_abps;        /* bytes/sec, 0 until a device opens */
 static volatile uint32_t g_atrims;      /* how often we have had to trim */
+/* TRIMS AND UNDERRUNS ARE OPPOSITE FAULTS THAT SOUND IDENTICAL. Both are gaps
+ * in the output, so "the audio is choppy" does not say which is happening — and
+ * they want opposite fixes. A trim means the guest ran AHEAD and we discarded
+ * sound it had already made; an underrun means the guest fell BEHIND and we
+ * played silence it never made. Guessing between them is how you end up
+ * enlarging a buffer that was already too full.
+ *
+ * g_atrims existed and was printed nowhere, which made it a counter that could
+ * not answer the one question it counted. TADPOLE_AUDIO_DEBUG=1 reports both,
+ * with the live backlog, once a second. */
+static volatile uint32_t g_aunder;       /* callbacks that ran short */
+static volatile uint32_t g_aunder_bytes; /* silence inserted, in bytes */
+/* Bytes taken out of the guest's FIFO. Compared against g_abps once a second,
+ * this is THE GUEST'S ACTUAL PRODUCTION RATE — the one number that says whether
+ * the shim's pacing is working, rather than being inferred from how much the
+ * trim logic had to throw away. */
+static volatile uint32_t g_apumped;
 
 static void audio_cb(void *ud, Uint8 *stream, int len)
 {
@@ -283,8 +300,11 @@ static void audio_cb(void *ud, Uint8 *stream, int len)
 	n = (int)(avail < (uint32_t)len ? avail : (uint32_t)len);
 	for (i = 0; i < n; i++)
 		stream[i] = g_aring[(tail + i) % ARING_BYTES];
-	if (n < len)
+	if (n < len) {
 		memset(stream + n, 0, (size_t)(len - n));   /* underrun: silence */
+		g_aunder++;
+		g_aunder_bytes += (uint32_t)(len - n);
+	}
 	g_atail = tail + (uint32_t)n;
 }
 
@@ -389,6 +409,32 @@ static void audio_pump(void)
 
 	if (g_afd < 0)
 		return;
+
+	/* CAPPING THIS AT THE INTENDED DEPTH WAS TRIED, AND IT IS WORSE. DO NOT
+	 * REDO IT WITHOUT READING THIS.
+	 *
+	 * The reasoning was sound as far as it went. audio_cb trims the backlog
+	 * whenever it passes 260 ms, and on the LeapPad3 login video that fired
+	 * FIVE TO SIX TIMES A SECOND with not one underrun — the viewer was reading
+	 * seconds of audio out of the FIFO and discarding most of it, and each
+	 * discard is an audible skip. Stopping the pump at the depth we mean to
+	 * keep removes the trims completely: measured, backlog pinned at 260 ms,
+	 * trims 0, underruns 0, which looks like a clean fix in the numbers.
+	 *
+	 * IT SOUNDS WORSE, AND IT MAKES THE VIDEO WORSE. Leaving the audio in the
+	 * FIFO applies back pressure, so snd_pcm_writei blocks in the guest — and
+	 * the thread it blocks is also the one driving video decode. The title
+	 * slows down as a whole. Choppy audio with smooth video became choppy
+	 * audio with stuttering video.
+	 *
+	 * What the experiment did establish, and what any real fix has to start
+	 * from: the backlog sits PERMANENTLY at whatever ceiling it is given, so
+	 * the guest produces audio FASTER THAN REALTIME. The trims are a symptom.
+	 * The guest decodes as fast as qemu lets it because nothing in the shim's
+	 * writei paces it against a clock, and the surplus has to go somewhere.
+	 * Fixing that belongs in the shim's snd_pcm_writei, where a proper wait can
+	 * be made against playback position instead of against a full pipe — not
+	 * here, where the only available lever is which sound to throw away. */
 	for (rounds = 0; rounds < 8; rounds++) {
 		uint32_t space = ARING_BYTES - (g_ahead - g_atail);
 		size_t want = sizeof(tmp);
@@ -405,6 +451,7 @@ static void audio_pump(void)
 		for (i = 0; i < (uint32_t)n; i++)
 			g_aring[(g_ahead + i) % ARING_BYTES] = tmp[i];
 		g_ahead += (uint32_t)n;
+		g_apumped += (uint32_t)n;
 	}
 }
 
@@ -3713,6 +3760,30 @@ int main(int argc, char **argv)
 			Uint32 now = SDL_GetTicks();
 
 			audio_pump();
+			/* Once a second, say whether the gaps are trims or underruns —
+			 * see the note on g_aunder. Deltas rather than totals, because
+			 * what matters is whether it is happening NOW: a title that
+			 * stuttered once while loading and a title stuttering
+			 * continuously have the same running total after a minute. */
+			if (getenv("TADPOLE_AUDIO_DEBUG")) {
+				static Uint32 last_astat;
+				static uint32_t p_trims, p_under, p_ubytes, p_pumped;
+				if (now - last_astat >= 1000) {
+					uint32_t t = g_atrims, u = g_aunder, ub = g_aunder_bytes;
+					uint32_t backlog = g_ahead - g_atail;
+					uint32_t bps = g_abps;
+					uint32_t pm = g_apumped;
+					uint32_t got = pm - p_pumped;
+					fprintf(stderr, "audio: backlog %u B (%u ms)  trims +%u  "
+					        "underruns +%u (+%u B silence)  guest %u B/s "
+					        "(%u%% of realtime)\n",
+					        backlog, bps ? backlog * 1000u / bps : 0u,
+					        t - p_trims, u - p_under, ub - p_ubytes,
+					        got, bps ? got * 100u / bps : 0u);
+					p_trims = t; p_under = u; p_ubytes = ub; p_pumped = pm;
+					last_astat = now;
+				}
+			}
 			/* POLL ON A CLOCK, NOT ON vsync_count.
 			 *
 			 * This used to run only when (vsync_count & 0x1F) == 0. That
