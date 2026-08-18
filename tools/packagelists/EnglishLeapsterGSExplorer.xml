@@ -1,0 +1,99 @@
+<PackageListCollection>
+	<PackageList device="LeapsterGSExplorer" locale="en_us" mandatoryVersion="3.6.2.305">
+		
+		<Package type="optional,noSurgeon"	id="GAM2-0x00210008-900001" description="Connect Message Unlocker"/>
+		
+		<!-- Firmware -->
+		<Package type="magic,update,repair,surgeon"	 id="GAM2-0x00210003-000000" description="Surgeon"/>
+				
+		<!-- Pet App -->
+		<Package type="optional,repair,noSurgeon,hidden"	id="GAM2-0x00180009-000000" description="Pet Pad App"/>		
+		
+		<!-- Required for Repair/Reset and Update -->
+		<Package type="update,repair"	id="GAMS-0x00170030-000000" description="Language Pack"/>
+		<Package type="update,repair"	id="GAMS-0x00170030-000001" description="Language Pack EN"/>
+		
+		<!-- Optional Packages -->
+		
+		<!-- Trailers -->
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00170032-000001" description="Trailer 1"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00170032-000002" description="Trailer 2"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00170032-000003" description="Trailer 3"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00170032-000004" description="Trailer 4"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00170032-000005" description="Trailer 5"/>
+
+		<!-- Widgets -->
+		<Package type="update,repair,noSurgeon"	id="GAM2-0x001E0003-000002" description="Camera Widget"/>
+		<Package type="update,repair,noSurgeon"	id="GAM2-0x001E0003-000004" description="Video Widget"/>
+		<Package type="update,repair,noSurgeon"	id="GAM2-0x001E0003-000005" description="Gallery Widget"/>
+		<Package type="update,repair,noSurgeon"	id="GAM2-0x001E0003-000003" description="Microphone Widget"/>
+		<Package type="update,repair,noSurgeon"	id="GAM2-0x001E0003-000031" description="Photo Editor Widget"/>
+		<Package type="update,repair,noSurgeon"	id="GAM2-0x00210008-200000" description="Lucy Compatibility Data"/>
+		
+		<!-- Base Apps -->
+
+		<Package type="optional,noSurgeon"	id="GAM2-0x00180016-000000" description="Connect Movie"/>
+		<Package type="update,repair,noSurgeon"	id="GAMS-0x001B0048-000000" description="Camera and Video Recorder"/>
+		<Package type="update,repair,noSurgeon"	id="GAMS-0x001B0048-DA0000" description="Device Asset - Camera and Video Recorder"/>
+		<Package type="update,repair,noSurgeon"	id="GAMS-0x00210001-000000" description="My Stuff"/>
+		<Package type="update,repair,noSurgeon"	id="GAMS-0x00210001-DA0000" description="Device Asset - My Stuff"/>
+			
+		<!-- UI Themes -->
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-100001" description="UI Theme 1"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-100002" description="UI Theme 2"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-100003" description="UI Theme 3"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-100004" description="UI Theme 4"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-100005" description="UI Theme 5"/>
+		
+		<!-- Patch Files -->
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-300000" description="Patch List"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-300001" description="MIP Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-300004" description="PXY Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-300005" description="Scooby Doo Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-300006" description="MOU Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="GAMS-0x00210008-300007" description="PP2 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="GAMS-0x00210008-300008" description="fPP2 Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="GAM2-0x00210008-300012" description="PONY Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="MULT-0x00210008-300013" description="LFE Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="MULT-0x00210008-300015" description="HKT Hello Kitty Patch"/>
+		<Package type="optional,repair,noSurgeon"	id="MULT-0x00210008-300016" description="fMIP French Mr Pencil Patch"/>
+		
+		<Package type="optional,repair,noSurgeon"	id="MULT-0x0022000A-PP2000" description="Pet Pals Patch Libs"/>	
+		
+		<!-- Content Packages -->
+		<Package type="content,landing"			id="LFCC-0x001A0001-100008" description="Landing Page SWF"/>
+		<Package type="content,expandables"		id="LFCC-0x001A0003-100002" description="Expandables"/>
+		<Package type="content,deviceManagement" id="LFCC-0x001A0007-100000" description="Device Management" />
+		<Package type="content"	id="LFCC-0x001A0002-100005" description="Required Pkgs List"/>
+		
+	</PackageList>
+	
+	<!-- Model 1 is a default product variant. -->
+	<PackageList device="LeapsterGSExplorer" model="1" locale="en_us" mandatoryVersion="3.6.2.305">
+	</PackageList>
+	
+
+	<!-- Model 2 is a test model for testing the Product Variant feature. All Model 2 devices should get the extra Wheel Works package -->
+	<PackageList device="LeapsterGSExplorer" model="2" locale="en_us" mandatoryVersion="3.6.2.305">
+		<Package type="allowed"	id="MULT-0x00180004-000000" description="Wheel Works"/>
+		<Package type="allowed"	id="GAMS-0x00180004-DA0000" description="Device Asset - Wheel Works"/>
+	</PackageList>
+	
+	<!-- Micron -->
+	<packageList device="LeapsterGSExplorer" locale="en_us" eraseSize="1048576" writeSize="4096">
+		<Package type="magic,update,repair,firmware" id="GAM2-0x00210004-000000" description="Firmware Base"/>
+		<Package type="magic,repair,bulkEmpty"		 id="GAM2-0x00210004-000002" description="Firmware Bulk Empty"/>
+	</packageList>
+	
+	<!-- Samsung -->
+	<packageList device="LeapsterGSExplorer" locale="en_us" eraseSize="1048576" writeSize="8192">
+		<Package type="magic,update,repair,firmware" id="GAM2-0x00210004-001000" description="Firmware Base"/>
+		<Package type="magic,repair,bulkEmpty"		 id="GAM2-0x00210004-001002" description="Firmware Bulk Empty"/>
+	</packageList>
+	
+	<!-- Hynix -->
+	<packageList device="LeapsterGSExplorer" locale="en_us" eraseSize="2097152" writeSize="8192">
+		<Package type="magic,update,repair,firmware" id="GAM2-0x00210004-002000" description="Firmware Base"/>
+		<Package type="magic,repair,bulkEmpty"		 id="GAM2-0x00210004-002002" description="Firmware Bulk Empty"/>
+	</packageList>
+</PackageListCollection>
