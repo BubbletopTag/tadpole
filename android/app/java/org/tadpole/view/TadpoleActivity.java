@@ -185,7 +185,13 @@ public class TadpoleActivity extends SDLActivity {
      * is already the right length is already the right file.
      */
     private void extractAssets(String destDir) {
-        String[] names = { "tadpole.png", "glasspole.png" };
+        /* The two package lists Online System Update needs. The CDN cannot be
+         * asked what exists — see OnlineUpdate — so the IDs ship with the app:
+         * EnglishLeapPad2.xml is the manifest LFConnect itself uses, and
+         * lp2-bundled.txt is the titles that come with the device and appear in
+         * no manifest at all. */
+        String[] names = { "tadpole.png", "glasspole.png",
+                           "EnglishLeapPad2.xml", "lp2-bundled.txt" };
         for (String name : names) {
             File out = new File(destDir, name);
             InputStream in = null;

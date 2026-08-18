@@ -58,6 +58,7 @@ final class Tools {
          *
          *   micromods    fetches per-title packages from LeapFrog's CDN; 1100
          *                lines of Python and a lot of network etiquette.
+         *                (online-update IS ported — see OnlineUpdate.)
          *   cart2tar     converts a raw cartridge dump, which is a desktop job
          *                — the dump arrives over FTP from a real device.
          *
@@ -69,6 +70,7 @@ final class Tools {
         if (name.equals("scan-games"))     return new ScanGames();
         if (name.equals("install-firmware")) return new InstallFirmware();
         if (name.equals("install-content"))  return new InstallContent();
+        if (name.equals("online-update"))    return new OnlineUpdate();
         return null;
     }
 
