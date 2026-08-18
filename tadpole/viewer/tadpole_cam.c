@@ -323,6 +323,5 @@ void tad_cam_pump(void)
 #if !defined(__ANDROID__)
 void tad_cam_plat_start(int idx, int w, int h) { (void)idx; (void)w; (void)h; }
 void tad_cam_plat_stop(int idx) { (void)idx; }
-int  tad_cam_plat_count(void) { return 0; }
 int  tad_cam_plat_running(int idx) { (void)idx; return 0; }
 #endif

@@ -2099,8 +2099,13 @@ static int try_map(void)
 		g_fbsz[i] = g_fbsz[0];
 	}
 	/* The camera's viewfinder is drawn straight into this arena — see the
-	 * header of tadpole_cam.c for why it cannot be drawn on the guest side. */
-	if (g_fb[0]) {
+	 * header of tadpole_cam.c for why it cannot be drawn on the guest side.
+	 *
+	 * GUARDED ON THE MAPPED SIZE, for the reason map_file() records above: an
+	 * arena left behind by an older shim is short by everything appended
+	 * since, and the camera block is at the very end. Touching it would be a
+	 * write past the end of the mapping — a SIGBUS, not a wrong colour. */
+	if (g_fb[0] && g_statesz >= sizeof *g_state) {
 		tad_cam_init(g_dir, g_state->cam, g_fb[0], g_fbsz[0]);
 		tad_mic_init(g_dir);
 	}

@@ -233,7 +233,3 @@ int tad_cam_plat_running(int idx)
 	return g_cam[idx].running;
 }
 
-int tad_cam_plat_count(void)
-{
-	return call_static("count", "()I", 0, 0, 0);
-}

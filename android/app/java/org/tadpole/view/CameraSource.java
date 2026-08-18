@@ -79,8 +79,7 @@ final class CameraSource {
         if (s != null) s.close();
     }
 
-    /** How many cameras the tablet has. */
-    static int count() {
+    private static int cameraCount() {
         try { return Camera.getNumberOfCameras(); }
         catch (Throwable t) { return 0; }
     }
@@ -91,7 +90,7 @@ final class CameraSource {
         int want = (idx == 0) ? Camera.CameraInfo.CAMERA_FACING_BACK
                               : Camera.CameraInfo.CAMERA_FACING_FRONT;
         Camera.CameraInfo info = new Camera.CameraInfo();
-        int n = count();
+        int n = cameraCount();
         for (int i = 0; i < n; i++) {
             Camera.getCameraInfo(i, info);
             if (info.facing == want) return i;

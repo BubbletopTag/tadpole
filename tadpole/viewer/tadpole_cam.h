@@ -28,8 +28,6 @@ void tad_cam_submit(int idx, const unsigned char *i420, int w, int h);
 void tad_cam_plat_start(int idx, int w, int h);
 void tad_cam_plat_stop(int idx);
 
-/* How many cameras the platform backend can actually offer (0 if none). */
-int  tad_cam_plat_count(void);
 
 /* Did the last tad_cam_plat_start() actually leave a camera running? */
 int  tad_cam_plat_running(int idx);
