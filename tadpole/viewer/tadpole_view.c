@@ -71,6 +71,9 @@ static int tp_fifo_fd(const char *path, int want_read)
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <time.h>                /* android_helper_present: the pid file's age */
+#ifdef __ANDROID__
+#include <jni.h>                 /* the tools are Java here — see spawn_script */
+#endif
 #include <unistd.h>
 #ifdef __linux__
 #include <dirent.h>              /* guest_sweep_stragglers walks /proc */
@@ -3216,6 +3219,100 @@ static pid_t android_native_launch(char *const argv[])
 	}
 	return 0;
 }
+
+/* ---- the tools, which are Java here ---------------------------------------
+ *
+ * Every tool under tools/ is a shell script with a Python twin, and Android has
+ * neither and cannot get either — an app may not execute a file it wrote, so
+ * shipping an interpreter would not help. They are written a third time in
+ * Java, in this process, and org.tadpole.view.TadpoleTools is the door.
+ *
+ * IT HANDS BACK A PIPE AND AN EXIT STATUS, which is exactly what fork+exec
+ * hands back everywhere else, so tool_drain() and the progress panel do not
+ * know the difference and nothing in tadpole_ui.c had to change. The Java side
+ * makes the pipe, because ParcelFileDescriptor is the public way to get one a
+ * Java stream can own, and detaches the read end as a plain fd.
+ *
+ * SDL_AndroidGetJNIEnv() rather than a JavaVM cached in JNI_OnLoad: SDL already
+ * holds the VM and already attaches whatever thread asks, and a second copy of
+ * that bookkeeping is a second thing that can be wrong about which thread it is
+ * on.
+ */
+#define TOOL_JAVA_PID 0x7ada7001    /* not a pid; see tool_reap() */
+
+static jclass tool_class(JNIEnv *env)
+{
+	static jclass cls;               /* global ref, kept: FindClass is not cheap */
+	jclass local;
+	if (cls) return cls;
+	local = (*env)->FindClass(env, "org/tadpole/view/TadpoleTools");
+	if (!local) { (*env)->ExceptionClear(env); return NULL; }
+	cls = (*env)->NewGlobalRef(env, local);
+	(*env)->DeleteLocalRef(env, local);
+	return cls;
+}
+
+/* Returns the read fd, or -1. */
+static int android_tool_start(const char *script, char *const argv[])
+{
+	JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+	jclass cls;
+	jmethodID mid;
+	jobjectArray jargv;
+	jstring jscript;
+	jint fd;
+	int n = 0, i;
+
+	if (!env) return -1;
+	if (!(cls = tool_class(env))) return -1;
+	mid = (*env)->GetStaticMethodID(env, cls, "start",
+	                                "(Ljava/lang/String;[Ljava/lang/String;)I");
+	if (!mid) { (*env)->ExceptionClear(env); return -1; }
+
+	/* argv[0] is the script name on every platform; the Java side wants only
+	 * the arguments, so it is skipped rather than passed and ignored. */
+	while (argv[n]) n++;
+	jargv = (*env)->NewObjectArray(env, n > 0 ? n - 1 : 0,
+	                               (*env)->FindClass(env, "java/lang/String"), NULL);
+	for (i = 1; i < n; i++) {
+		jstring a = (*env)->NewStringUTF(env, argv[i]);
+		(*env)->SetObjectArrayElement(env, jargv, i - 1, a);
+		(*env)->DeleteLocalRef(env, a);
+	}
+	jscript = (*env)->NewStringUTF(env, script);
+	fd = (*env)->CallStaticIntMethod(env, cls, mid, jscript, jargv);
+	if ((*env)->ExceptionCheck(env)) {
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		fd = -1;
+	}
+	(*env)->DeleteLocalRef(env, jscript);
+	(*env)->DeleteLocalRef(env, jargv);
+	return (int)fd;
+}
+
+/* 1 when it has finished, with *ok set; 0 while it runs. */
+static int android_tool_poll(int *ok)
+{
+	JNIEnv *env = (JNIEnv *)SDL_AndroidGetJNIEnv();
+	jclass cls;
+	jmethodID mid;
+	jint st;
+
+	if (!env || !(cls = tool_class(env))) { *ok = 0; return 1; }
+	mid = (*env)->GetStaticMethodID(env, cls, "poll", "()I");
+	if (!mid) { (*env)->ExceptionClear(env); *ok = 0; return 1; }
+	st = (*env)->CallStaticIntMethod(env, cls, mid);
+	if ((*env)->ExceptionCheck(env)) {
+		(*env)->ExceptionDescribe(env);
+		(*env)->ExceptionClear(env);
+		*ok = 0;
+		return 1;
+	}
+	if (st == -1) return 0;                 /* RUNNING */
+	*ok = (st == 1);                        /* OK / FAILED; IDLE counts as done */
+	return 1;
+}
 #endif  /* __ANDROID__ */
 
 static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
@@ -3244,14 +3341,26 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 		if (!gav) return -1;
 		argv = gav;
 	} else {
-		/* The tools are shell and Python, and there is neither. Said out loud
-		 * rather than left to fail as a silent "stopped": this is the whole of
-		 * what does not work on Android yet. */
-		fprintf(stderr, "tadpole-view: %s needs a shell or Python, and Android "
-		        "has neither — set up on a desktop and use "
-		        "android/push-firmware.sh\n", script);
-		ui_status("%s: not available on Android", script);
-		return -1;
+		/* A TOOL, AND THERE IS NOTHING HERE TO EXEC IT WITH. This used to be
+		 * an honest refusal —
+		 *
+		 *     %s needs a shell or Python, and Android has neither
+		 *
+		 * — which was true and left the front end with buttons that could not
+		 * work. They are written a third time in Java instead, and this hands
+		 * over to them; the answer is the same pipe and exit status a forked
+		 * script gives, so nothing downstream knows the difference. A tool
+		 * that is not ported yet still returns -1, and the message says which
+		 * one rather than blaming the platform. */
+		int tfd = android_tool_start(script, argv);
+		if (tfd < 0) {
+			fprintf(stderr, "tadpole-view: %s has no Android version yet\n",
+			        script);
+			ui_status("%s: not on Android yet", script);
+			return -1;
+		}
+		if (outfd) *outfd = tfd; else close(tfd);
+		return (pid_t)TOOL_JAVA_PID;
 	}
 #endif
 	if (outfd && pipe(pfd) != 0) { *outfd = -1; outfd = NULL; }
@@ -3292,6 +3401,11 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 static int tool_reap(pid_t pid, int *exited_ok)
 {
 	int st;
+#ifdef __ANDROID__
+	/* Not a process and so not waitpid-able: ask the Java side instead. */
+	if (pid == (pid_t)TOOL_JAVA_PID)
+		return android_tool_poll(exited_ok);
+#endif
 	if (waitpid(pid, &st, WNOHANG) != pid) return 0;
 	*exited_ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
 	return 1;

@@ -129,6 +129,10 @@ public class TadpoleActivity extends SDLActivity {
              * viewer a project it can both read and write. Everything else
              * then falls into place underneath it. */
             nativeSetenv("TADPOLE_PROJECT", dir);
+            /* The Java tools need it too, and cannot read it back out of the
+             * environment: System.getenv() snapshots at process start, and the
+             * setenv above happens after that. Handed over directly instead. */
+            TadpoleTools.setProjectDir(dir);
             extractAssets(dir);
             linkEngine(dir);
             nativeProbe(dir, getApplicationInfo().nativeLibraryDir);
