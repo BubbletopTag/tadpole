@@ -70,6 +70,7 @@ extern int   *__errno_location(void);
 struct tad_ts { long tv_sec; long tv_nsec; };
 extern int clock_gettime(int clk, struct tad_ts *tp);
 extern int getpid(void);
+extern int unlink(const char *path);
 #define CLOCK_MONOTONIC_ 1
 
 static unsigned long long now_us(void)
@@ -170,20 +171,73 @@ static void publish_format(struct tad_pcm *p)
 	close(fd);
 }
 
-/* BACK OFF when there is no reader.
+/* ONE FIFO PER STREAM, NAMED PER PROCESS — because the device MIXES and a pipe
+ * cannot.
+ *
+ * Every stream used to open the one path $TADPOLE_DIR/audio. That is correct
+ * only while exactly one stream exists anywhere in the system, and the LeapPad3
+ * breaks that routinely: the shell holds a stream open for UI sound while a
+ * title, or the login VideoPlayer in a SEPARATE PROCESS, opens its own. Two
+ * writers then interleave their PCM inside one pipe. That is not quiet mixing,
+ * it is noise — and it arrives at twice the byte rate.
+ *
+ * Measured from both ends at the same moment, during the login video:
+ *
+ *     [tadpole] pace: 128000 B/s in (rate=32000 fb=4 -> 128000 expected)
+ *     audio: guest 253952 B/s (198% of realtime)  trims +6  underruns +0
+ *
+ * The pacer was right; the pipe still carried double, because two processes
+ * were each pacing correctly into it. Exactly 2.00x is what two of anything
+ * looks like, and it is why buffer-sizing theories kept failing to explain it.
+ *
+ * The device names its own answer: snd_pcm_open is called with "plugdmix", and
+ * dmix is ALSA's software MIXER, whose entire job is summing concurrent streams
+ * onto one output. So give each stream its own pipe and let the viewer sum
+ * them — the same division of labour the firmware already expects.
+ *
+ * The pid is in the name because slot numbers are per-process: two processes
+ * both start at slot 0, so "audio.0" would collide exactly as "audio" did.
+ *
+ * BACK OFF when there is no reader.
  *
  * With no viewer the FIFO has no reader, open() fails, and this used to be
  * retried on every single write — 2.1 million attempts in one headless boot,
  * enough I/O to stop the guest making progress. Retry occasionally instead: a
  * viewer that starts later is picked up within a second, and one that never
  * starts costs nothing. */
+static void fifo_path(struct tad_pcm *p, char *buf, unsigned long n)
+{
+	snprintf(buf, (size_t_)n, "%s/audio.%d.%d", tad_dir(), (int)getpid(),
+	         (int)(p - g_pcm));
+}
+
 static void open_fifo(struct tad_pcm *p)
 {
 	char path[512];
-	static unsigned tries;
+	/* Per stream, not one counter for all of them: a later stream must not
+	 * inherit an earlier one's back-off and start life already throttled. */
+	static unsigned tries[4];
+	unsigned slot = (unsigned)(p - g_pcm);
 
-	if (p->fd < 0 && (tries++ & 0x3F))
-		return;
+	/* TRY HARD AT FIRST, THEN BACK OFF — the two failure modes want opposite
+	 * behaviour and a single rate serves neither.
+	 *
+	 * A fresh stream normally fails its first open with ENXIO: the shim has
+	 * just made the FIFO and the viewer has not scanned for it yet. That
+	 * resolves within a frame, so retrying immediately costs almost nothing and
+	 * saves the opening sound. At a flat 1-in-64 it instead took about two
+	 * seconds of writes — audible as the first second of the login video
+	 * playing silently.
+	 *
+	 * A headless boot has no viewer at all and never will, and that is what the
+	 * back-off is for: retrying every write cost 2.1 million open() attempts in
+	 * one boot, enough I/O to stop the guest making progress. So spend the
+	 * first 32 attempts eagerly, then settle to 1-in-64 forever. */
+	if (slot < 4) {
+		unsigned t = tries[slot]++;
+		if (p->fd < 0 && t >= 32 && (t & 0x3F))
+			return;
+	}
 
 	if (g_debug_audio > 0) {
 		char b[96];
@@ -192,9 +246,11 @@ static void open_fifo(struct tad_pcm *p)
 		                 (int)(p - g_pcm));
 		if (n > 0) write(2, b, (size_t_)n);
 	}
-	snprintf(path, sizeof(path), "%s/audio", tad_dir());
+	fifo_path(p, path, sizeof(path));
 	mkfifo(path, 0666);                       /* harmless if it exists */
-	/* O_NONBLOCK so a missing reader gives -1 instead of blocking here. */
+	/* O_NONBLOCK so a missing reader gives -1 instead of blocking here. A FIFO
+	 * the viewer has not opened yet gives ENXIO, which is why this is retried
+	 * from snd_pcm_prepare as well as from the write path. */
 	p->fd = open(path, O_WRONLY | O_NONBLOCK);
 }
 
@@ -245,8 +301,17 @@ int snd_pcm_open(snd_pcm_t **pcmp, const char *name, int stream, int mode)
 int snd_pcm_close(snd_pcm_t *pcm)
 {
 	if (pcm && pcm->fd >= 0) {
+		char path[512];
 		close(pcm->fd);
 		pcm->fd = -1;
+		/* Remove the pipe so the viewer stops mixing a stream that has ended.
+		 * It holds every FIFO open O_RDWR and therefore never sees EOF — that
+		 * is deliberate, so a guest restarting does not look like a hangup —
+		 * which leaves the file's EXISTENCE as the only signal that a stream is
+		 * finished. Without this, a process that came and went would leave a
+		 * silent stream in the mix and its ring pinned forever. */
+		fifo_path(pcm, path, sizeof(path));
+		unlink(path);
 	}
 	return 0;
 }

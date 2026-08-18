@@ -251,11 +251,35 @@ static size_t g_statesz;              /* bytes actually mapped at g_state */
 static volatile int g_adepth_max_ms    = 260;
 static volatile int g_adepth_target_ms = 120;
 
-static uint8_t  g_aring[ARING_BYTES];
-static volatile uint32_t g_ahead;       /* write cursor (main thread) */
-static volatile uint32_t g_atail;       /* read cursor  (audio thread) */
+/* ONE RING PER GUEST STREAM, AND THE CALLBACK SUMS THEM.
+ *
+ * There used to be a single ring fed by a single FIFO, which is right only
+ * while exactly one stream exists anywhere in the system. The LeapPad3 breaks
+ * that whenever the shell holds a stream open for UI sound and a title — or
+ * the login VideoPlayer, a separate process — opens its own. Both wrote into
+ * one pipe, so their PCM interleaved, and interleaved PCM from two sources is
+ * noise arriving at twice the byte rate. Measured during the login video: the
+ * shim paced a correct 128000 B/s while this end pulled 253952 B/s.
+ *
+ * The device does not have this problem because it opens "plugdmix" — ALSA's
+ * software mixer. Mixing is the missing step, not buffering, so do the thing
+ * dmix does: keep the streams apart until the moment of playback and add them.
+ *
+ * MAX_ASTREAMS is 8 rather than the shim's 4-per-process, because the limit
+ * here is across ALL guest processes at once, not within one.
+ */
+#define MAX_ASTREAMS 8
+
+struct astream {
+	int      fd;
+	int      used;
+	char     name[64];                  /* basename in $TADPOLE_DIR */
+	uint8_t  ring[ARING_BYTES];
+	volatile uint32_t head;             /* write cursor (main thread) */
+	volatile uint32_t tail;             /* read cursor  (audio thread) */
+};
+static struct astream g_as[MAX_ASTREAMS];
 static SDL_AudioDeviceID g_adev;
-static int      g_afd = -1;
 static int      g_arate, g_achans, g_abits;
 static volatile uint32_t g_abps;        /* bytes/sec, 0 until a device opens */
 static volatile uint32_t g_atrims;      /* how often we have had to trim */
@@ -279,51 +303,136 @@ static volatile uint32_t g_apumped;
 
 static void audio_cb(void *ud, Uint8 *stream, int len)
 {
-	uint32_t head = g_ahead, tail = g_atail;
-	uint32_t avail = head - tail;          /* unsigned wrap is intended */
 	uint32_t bps = g_abps;
-	int n, i;
+	int s, i, deepest = 0, mixed = 0;
+	int16_t *out = (int16_t *)stream;
+	int samples = len / 2;                 /* S16, so two bytes per sample */
 
 	(void)ud;
 
-	/* Drop the oldest backlog if we have run too far ahead of the speaker.
-	 * Only this callback writes g_atail, so moving it here needs no lock. */
-	if (bps) {
-		uint32_t max = bps * (uint32_t)g_adepth_max_ms / 1000u;
-		if (avail > max) {
-			tail = head - bps * (uint32_t)g_adepth_target_ms / 1000u;
-			avail = head - tail;
-			g_atrims++;
+	memset(stream, 0, (size_t)len);
+
+	for (s = 0; s < MAX_ASTREAMS; s++) {
+		struct astream *a = &g_as[s];
+		uint32_t head, tail, avail;
+		int n;
+
+		if (!a->used)
+			continue;
+		head = a->head; tail = a->tail;
+		avail = head - tail;               /* unsigned wrap is intended */
+
+		/* Trim this stream if it has run too far ahead of the speaker. Per
+		 * stream, not global: one process pausing must not cost another its
+		 * backlog. Only this callback writes tail, so no lock is needed. */
+		if (bps) {
+			uint32_t max = bps * (uint32_t)g_adepth_max_ms / 1000u;
+			if (avail > max) {
+				tail = head - bps * (uint32_t)g_adepth_target_ms / 1000u;
+				avail = head - tail;
+				g_atrims++;
+			}
+		}
+
+		n = (int)(avail < (uint32_t)len ? avail : (uint32_t)len);
+		if (n > 0)
+			mixed++;
+		if ((int)avail > deepest)
+			deepest = (int)avail;
+
+		/* ADD, saturating. Two full-scale streams would wrap to the opposite
+		 * rail without the clamp, and a wrap is a hard click rather than the
+		 * loudness it should have been. n is a byte count and may be odd on a
+		 * short read, so step in samples and stop before the last half. */
+		for (i = 0; i + 1 < n; i += 2) {
+			int16_t v;
+			int sum;
+			uint8_t lo = a->ring[(tail + (uint32_t)i) % ARING_BYTES];
+			uint8_t hi = a->ring[(tail + (uint32_t)i + 1) % ARING_BYTES];
+			v = (int16_t)((uint16_t)lo | ((uint16_t)hi << 8));
+			sum = (int)out[i / 2] + (int)v;
+			if (sum >  32767) sum =  32767;
+			if (sum < -32768) sum = -32768;
+			out[i / 2] = (int16_t)sum;
+		}
+		a->tail = tail + (uint32_t)(n & ~1);
+
+		/* An idle stream contributing nothing is NOT an underrun — that is
+		 * simply an app that is not making sound. Only count a shortfall when
+		 * the stream had something and ran out mid-buffer. */
+		if (n > 0 && n < len) {
+			g_aunder++;
+			g_aunder_bytes += (uint32_t)(len - n);
 		}
 	}
-
-	n = (int)(avail < (uint32_t)len ? avail : (uint32_t)len);
-	for (i = 0; i < n; i++)
-		stream[i] = g_aring[(tail + i) % ARING_BYTES];
-	if (n < len) {
-		memset(stream + n, 0, (size_t)(len - n));   /* underrun: silence */
-		g_aunder++;
-		g_aunder_bytes += (uint32_t)(len - n);
-	}
-	g_atail = tail + (uint32_t)n;
+	(void)samples; (void)deepest; (void)mixed;
 }
 
-static void audio_open_fifo(void)
+/* FIND THE GUEST'S STREAMS, rather than being told about them.
+ *
+ * The shim names each one $TADPOLE_DIR/audio.<pid>.<slot>, and it cannot
+ * announce them: the processes that make sound come and go (the shell, a title,
+ * VideoPlayer) and nothing in the guest knows the whole set. So scan the
+ * directory. It is a handful of entries, a few times a second, on a tmpfs.
+ *
+ * DROPPING a stream is driven by the file disappearing, which the shim does on
+ * snd_pcm_close. Every FIFO is held O_RDWR here so it never reports EOF — that
+ * is deliberate, since a guest restarting would otherwise look like a hangup —
+ * and that leaves the file's existence as the only end-of-stream signal.
+ */
+static void audio_scan_streams(void)
 {
 #ifndef _WIN32
-	char path[512];
+	DIR *d;
+	struct dirent *e;
+	int s;
 
-	snprintf(path, sizeof(path), "%s/audio", g_dir);
-	mkfifo(path, 0666);
-	/* O_RDWR on a FIFO never blocks and never sees EOF, so we can hold the
-	 * read end open whether or not the guest has started writing. */
-	g_afd = open(path, O_RDWR | O_NONBLOCK);
-#else
-	/* The reader end of the audio pipe — we create it, the shim's writer
-	 * connects when it starts (or retries per period if we were late). */
-	char path[512];
-	snprintf(path, sizeof(path), "%s/audio", g_dir);
-	g_afd = tp_fifo_fd(path, 1);
+	if (!(d = opendir(g_dir)))
+		return;
+	while ((e = readdir(d))) {
+		char path[600];
+		int free_slot = -1, known = 0;
+
+		if (strncmp(e->d_name, "audio.", 6) != 0)
+			continue;
+		/* audio.fmt is the format handshake, not a stream. */
+		if (strcmp(e->d_name, "audio.fmt") == 0)
+			continue;
+
+		for (s = 0; s < MAX_ASTREAMS; s++) {
+			if (g_as[s].used && strcmp(g_as[s].name, e->d_name) == 0)
+				{ known = 1; break; }
+			if (!g_as[s].used && free_slot < 0)
+				free_slot = s;
+		}
+		if (known || free_slot < 0)
+			continue;
+
+		snprintf(path, sizeof(path), "%s/%s", g_dir, e->d_name);
+		g_as[free_slot].fd = open(path, O_RDWR | O_NONBLOCK);
+		if (g_as[free_slot].fd < 0)
+			continue;
+		snprintf(g_as[free_slot].name, sizeof(g_as[free_slot].name),
+		         "%s", e->d_name);
+		g_as[free_slot].head = g_as[free_slot].tail = 0;
+		g_as[free_slot].used = 1;
+	}
+	closedir(d);
+
+	/* Retire streams whose FIFO the guest has removed. */
+	for (s = 0; s < MAX_ASTREAMS; s++) {
+		char path[600];
+		struct stat st;
+		if (!g_as[s].used)
+			continue;
+		snprintf(path, sizeof(path), "%s/%s", g_dir, g_as[s].name);
+		if (stat(path, &st) == 0)
+			continue;
+		close(g_as[s].fd);
+		g_as[s].fd = -1;
+		g_as[s].used = 0;
+		g_as[s].name[0] = 0;
+	}
 #endif
 }
 
@@ -393,66 +502,76 @@ static void audio_poll_fmt(void)
 static void audio_discard(void)
 {
 	uint8_t tmp[16384];
-	int rounds;
+	int s, rounds;
 
-	if (g_afd < 0)
-		return;
-	for (rounds = 0; rounds < 8; rounds++)
-		if (read(g_afd, tmp, sizeof tmp) <= 0)
-			return;
+	/* Every stream, not one pipe: with sound off, ANY guest still writing
+	 * must keep draining or it blocks, which is the hang described above. */
+	audio_scan_streams();
+	for (s = 0; s < MAX_ASTREAMS; s++) {
+		if (!g_as[s].used || g_as[s].fd < 0)
+			continue;
+		for (rounds = 0; rounds < 8; rounds++)
+			if (read(g_as[s].fd, tmp, sizeof tmp) <= 0)
+				break;
+	}
 }
 
 static void audio_pump(void)
 {
 	uint8_t tmp[16384];
-	int rounds;
+	int s;
 
-	if (g_afd < 0)
-		return;
+	/* Pick up streams that appeared since the last frame, and retire ones that
+	 * ended. Cheap enough to do every frame on a tmpfs, and doing it here keeps
+	 * discovery on the same thread that reads them. */
+	audio_scan_streams();
 
-	/* CAPPING THIS AT THE INTENDED DEPTH WAS TRIED, AND IT IS WORSE. DO NOT
+	for (s = 0; s < MAX_ASTREAMS; s++) {
+		struct astream *a = &g_as[s];
+		int rounds;
+
+		if (!a->used || a->fd < 0)
+			continue;
+
+		/* NOT CAPPED AT THE INTENDED DEPTH, AND THAT IS DELIBERATE — see the
+		 * long note below; capping this was tried and it stutters the video. */
+		for (rounds = 0; rounds < 8; rounds++) {
+			uint32_t space = ARING_BYTES - (a->head - a->tail);
+			size_t want = sizeof(tmp);
+			ssize_t n;
+			uint32_t i;
+
+			if (space < sizeof(tmp))
+				want = space;
+			if (want == 0)
+				break;                    /* ring full; guest will wait */
+			n = read(a->fd, tmp, want);
+			if (n <= 0)
+				break;
+			for (i = 0; i < (uint32_t)n; i++)
+				a->ring[(a->head + i) % ARING_BYTES] = tmp[i];
+			a->head += (uint32_t)n;
+			g_apumped += (uint32_t)n;
+		}
+	}
+
+	/* CAPPING THE READ AT THE INTENDED DEPTH WAS TRIED, AND IT IS WORSE. DO NOT
 	 * REDO IT WITHOUT READING THIS.
 	 *
-	 * The reasoning was sound as far as it went. audio_cb trims the backlog
-	 * whenever it passes 260 ms, and on the LeapPad3 login video that fired
-	 * FIVE TO SIX TIMES A SECOND with not one underrun — the viewer was reading
-	 * seconds of audio out of the FIFO and discarding most of it, and each
-	 * discard is an audible skip. Stopping the pump at the depth we mean to
-	 * keep removes the trims completely: measured, backlog pinned at 260 ms,
-	 * trims 0, underruns 0, which looks like a clean fix in the numbers.
+	 * The reasoning was sound as far as it went. audio_cb trims a backlog past
+	 * 260 ms, and on the LeapPad3 login video that fired FIVE TO SIX TIMES A
+	 * SECOND with not one underrun, so stopping the pump at the depth we mean
+	 * to keep removes the trims completely — measured, backlog pinned at
+	 * 260 ms, trims 0, underruns 0. It looks like a clean fix in the numbers.
 	 *
-	 * IT SOUNDS WORSE, AND IT MAKES THE VIDEO WORSE. Leaving the audio in the
-	 * FIFO applies back pressure, so snd_pcm_writei blocks in the guest — and
-	 * the thread it blocks is also the one driving video decode. The title
-	 * slows down as a whole. Choppy audio with smooth video became choppy
-	 * audio with stuttering video.
+	 * IT SOUNDS WORSE AND IT MAKES THE VIDEO WORSE. Leaving audio in the FIFO
+	 * applies back pressure, so snd_pcm_writei blocks in the guest — and the
+	 * thread it blocks also drives video decode. Choppy audio with smooth video
+	 * became choppy audio with stuttering video.
 	 *
-	 * What the experiment did establish, and what any real fix has to start
-	 * from: the backlog sits PERMANENTLY at whatever ceiling it is given, so
-	 * the guest produces audio FASTER THAN REALTIME. The trims are a symptom.
-	 * The guest decodes as fast as qemu lets it because nothing in the shim's
-	 * writei paces it against a clock, and the surplus has to go somewhere.
-	 * Fixing that belongs in the shim's snd_pcm_writei, where a proper wait can
-	 * be made against playback position instead of against a full pipe — not
-	 * here, where the only available lever is which sound to throw away. */
-	for (rounds = 0; rounds < 8; rounds++) {
-		uint32_t space = ARING_BYTES - (g_ahead - g_atail);
-		size_t want = sizeof(tmp);
-		ssize_t n;
-		uint32_t i;
-
-		if (space < sizeof(tmp))
-			want = space;
-		if (want == 0)
-			return;                       /* ring full; guest will wait */
-		n = read(g_afd, tmp, want);
-		if (n <= 0)
-			return;
-		for (i = 0; i < (uint32_t)n; i++)
-			g_aring[(g_ahead + i) % ARING_BYTES] = tmp[i];
-		g_ahead += (uint32_t)n;
-		g_apumped += (uint32_t)n;
-	}
+	 * The trims were never the disease anyway. They were the sound of two
+	 * streams sharing one pipe at twice the byte rate; mixing is what fixes
+	 * that, and this stays uncapped so the guest is never throttled by us. */
 }
 
 static void *map_file(const char *path, size_t *len_out)
@@ -3173,7 +3292,7 @@ int main(int argc, char **argv)
 			ui_status("HLE unavailable; software raster");
 	}
 
-	audio_open_fifo();
+	/* Streams are discovered per frame in audio_pump; nothing to open here. */
 
 	/* --boot: start the system menu immediately, so the front end can still
 	 * be a single command for anyone who wants it that way. */
@@ -3770,14 +3889,25 @@ int main(int argc, char **argv)
 				static uint32_t p_trims, p_under, p_ubytes, p_pumped;
 				if (now - last_astat >= 1000) {
 					uint32_t t = g_atrims, u = g_aunder, ub = g_aunder_bytes;
-					uint32_t backlog = g_ahead - g_atail;
+					uint32_t backlog = 0;
+					int s, live = 0;
+					/* Deepest stream, and how many are live. The COUNT is the
+					 * number that matters now: "2 streams" is the whole
+					 * explanation for audio that arrived at twice the rate. */
+					for (s = 0; s < MAX_ASTREAMS; s++) {
+						uint32_t b;
+						if (!g_as[s].used) continue;
+						live++;
+						b = g_as[s].head - g_as[s].tail;
+						if (b > backlog) backlog = b;
+					}
 					uint32_t bps = g_abps;
 					uint32_t pm = g_apumped;
 					uint32_t got = pm - p_pumped;
-					fprintf(stderr, "audio: backlog %u B (%u ms)  trims +%u  "
-					        "underruns +%u (+%u B silence)  guest %u B/s "
-					        "(%u%% of realtime)\n",
-					        backlog, bps ? backlog * 1000u / bps : 0u,
+					fprintf(stderr, "audio: %d stream(s)  deepest %u B (%u ms)"
+					        "  trims +%u  underruns +%u (+%u B silence)  "
+					        "guest %u B/s (%u%% of realtime)\n",
+					        live, backlog, bps ? backlog * 1000u / bps : 0u,
 					        t - p_trims, u - p_under, ub - p_ubytes,
 					        got, bps ? got * 100u / bps : 0u);
 					p_trims = t; p_under = u; p_ubytes = ub; p_pumped = pm;
