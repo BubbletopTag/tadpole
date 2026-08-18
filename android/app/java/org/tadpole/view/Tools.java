@@ -62,6 +62,11 @@ final class Tools {
          *   cart2tar     converts a raw cartridge dump, which is a desktop job
          *                — the dump arrives over FTP from a real device.
          *
+         * install-didj is HALF ported: DidjSetup does the four wizard buttons
+         * (the compatibility files and the controller overlay, from a file or
+         * fetched), and converting a game dump stays a desktop job — see the
+         * note in DidjSetup and InstallGame's message about --to-tar.
+         *
          * The front end names them and says "not available on Android yet",
          * which is the honest state of a port in progress and better than a
          * button that appears to work. */
@@ -71,6 +76,7 @@ final class Tools {
         if (name.equals("install-firmware")) return new InstallFirmware();
         if (name.equals("install-content"))  return new InstallContent();
         if (name.equals("online-update"))    return new OnlineUpdate();
+        if (name.equals("install-didj"))     return new DidjSetup();
         return null;
     }
 

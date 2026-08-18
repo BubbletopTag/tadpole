@@ -97,6 +97,13 @@ final class InstallFirmware implements Tools.Tool {
             ubiFile.delete();                 /* the unpacked copy, not the .lfp */
         }
 
+        /* BEFORE THE SYSROOT IS BUILT ON TOP OF IT. The extraction above
+         * writes a stock 2013 loader, which cannot run inside an Android app's
+         * seccomp filter — so without this, installing firmware would quietly
+         * take the no-helper launch away again. See SeccompPatch. */
+        out.println("==> seccomp");
+        SeccompPatch.apply(new File(ubiRfs, "lib"), out);
+
         out.println("==> sysroot");
         new Sysroot(Tools.proj(), ubiRfs, Tools.sysroot(), out).build();
 
