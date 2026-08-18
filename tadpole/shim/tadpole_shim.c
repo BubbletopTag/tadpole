@@ -1262,7 +1262,24 @@ void *dlopen(const char *path, int flags)
  * .atomic file — which is exactly how /tmp/ui_ready.atomic got stuck. */
 static void sysrootify(char *dst, unsigned dstsz, const char *path)
 {
-	if (path && path[0] == '/' && g_sysroot[0])
+	unsigned rlen = (unsigned)strlen(g_sysroot);
+
+	/* NOT TWICE. A path that is ALREADY under the sysroot is a host path that
+	 * has been through here once, and prefixing it again produces a name that
+	 * cannot exist. Measured on a rootless boot, where TADPOLE_SYSROOT is set
+	 * and this is live (under the root helper it is unset and none of this
+	 * runs):
+	 *
+	 *   rename("<S>/<S>/tmp/ui_ready.atomic", "<S>/<S>/tmp/ui_ready") = EACCES
+	 *   rename("<S>/tmp/ui_ready.atomic",     "<S>/tmp/ui_ready")     = 0
+	 *
+	 * The fallback saved it, so nothing was broken — but the first call is
+	 * pure waste, and an EACCES from a path nobody asked for is exactly the
+	 * kind of line that sends you looking in the wrong place. It also means a
+	 * caller with no fallback would simply fail. */
+	if (path && path[0] == '/' && g_sysroot[0] &&
+	    !(rlen && strncmp(path, g_sysroot, rlen) == 0 &&
+	      (path[rlen] == '\0' || path[rlen] == '/')))
 		snprintf(dst, dstsz, "%s%s", g_sysroot, path);
 	else
 		snprintf(dst, dstsz, "%s", path ? path : "");

@@ -537,15 +537,44 @@ untouched and still wins when it is running, and the rootless code path is
 live behind it: it is what runs on a device with no engine and no helper, and
 it is complete apart from this one syscall.
 
-### One trap worth writing down
+### The trap when switching a device from the helper to rootless
 
-A sysroot that has ever been used by the ROOT helper has root-owned files in
-it, and the rootless guest cannot write them. `LF/Bulk/settings.cfg` is 0600
-root, so the guest could not even read its own locale:
+A sysroot that has ever been used by the ROOT helper has root-owned,
+wrongly-LABELLED files in it, and it takes BOTH a chown and a chcon to undo.
+Getting only half of it produces two different symptoms and the second one
+looks nothing like a permissions problem.
+
+**Owner.** `LF/Bulk/settings.cfg` is 0600 root, so the guest could not even
+read its own locale:
 
     open(".../LF/Bulk/settings.cfg", O_RDONLY) = -1 EACCES
 
-which presents as the first-boot language wizard appearing on every launch.
-`chown -R u0_a86:u0_a86 <files>` fixes it. This is the mirror image of the
-relabelling the helper has to do, and it is worth doing once when switching a
-device from the helper to the rootless path.
+**Label.** After `chown -R`, reading worked and the first-boot language wizard
+STILL came back on every launch, having apparently written nothing — the
+sysroot had no files newer than the boot. What it had was a pile of
+`settings.cfg.XXXXXX`, each one complete and byte-identical to the settings
+file it was meant to become. Brio writes its settings atomically: mkstemp,
+write, rename. `strace -e trace=rename` says why the last step never happened:
+
+    rename(".../LF/Bulk/settings.cfg.pfxga3", ".../LF/Bulk/settings.cfg")
+        = -1 EACCES
+
+Both paths correct, both files owned by the app, the directory writable. The
+answer is `ls -Z`:
+
+    u:object_r:app_data_file:s0            settings.cfg      <- made by root
+    u:object_r:app_data_file:s0:c512,c768  settings.cfg.02kiWD
+
+Android gives each app an MLS category pair. A file ROOT created has none, and
+MLS dominance means the app can READ it and cannot unlink it — and rename(2)
+over an existing file needs to unlink the target. So every atomic write in the
+guest silently failed at the last step, on a file the guest could read
+perfectly well.
+
+    chown -R u0_a86:u0_a86 <files>
+    chcon -R u:object_r:app_data_file:s0:c512,c768 <files>
+
+Take the context from a file the app itself made — the categories differ per
+install — exactly as `native-helper.sh` already does in the other direction.
+With both applied, settings.cfg is written in place, no strays are left, and
+the next boot goes straight to the home screen.
