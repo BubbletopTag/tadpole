@@ -1232,7 +1232,14 @@ enum { WIZ_WELCOME = 0, WIZ_DEVICE, WIZ_SYSTEM, WIZ_DIDJ,
        WIZ_PROFILE, WIZ_GAMES, WIZ_DONE, WIZ_PAGES };
 static int g_wiz_page;
 
-/* ---- the tablets Tadpole knows how to be -------------------------------
+/* ---- the devices Tadpole knows how to be --------------------------------
+ *
+ * NOT "tablets" ANY MORE, which is why the page is now headed "Which device?".
+ * The lineup outgrew the word: the Leapster Explorer and the Leapster GS are
+ * handhelds, the LeapTV is a set-top box that plugs into a television, and the
+ * Didj at the bottom of the list is a 2008 handheld older than any of them.
+ * Barely half of what this page offers is a tablet, and calling them all one
+ * was the sort of wrong that makes a user scroll past the thing they own.
  *
  * Read from runtime/devices/*.conf rather than hardcoded, so adding a device
  * is one file and no C. The shell side reads the same directory the same way
@@ -1247,11 +1254,33 @@ struct devinfo {
 	char id[UI_DEVICE_MAX];
 	char name[48];
 	char lcd[16];
+	/* DEV_PLATFORM: the codename the firmware calls itself by, drawn beside
+	 * each row because LeapFrog's retail names are genuinely ambiguous and the
+	 * codenames are not. "LeapPad3" and "LeapPad Ultra" are two machines, and
+	 * it is the ULTRA whose firmware directory on the CDN is PAD3FW — anyone
+	 * who has read a boot log knows which one they own by its codename long
+	 * before they can work it out from the box.
+	 *
+	 * Confirmed against firmware: Madrid=LeapPad Explorer, Valencia=LeapPad2,
+	 * Cabo=LeapPad3, Rio=LeapPad Ultra, Bogota=LeapPad Platinum,
+	 * Santiago=LeapPad Ultimate, Glasgow=LeapTV. Left blank when a profile
+	 * does not name one; nothing is invented here. */
+	char plat[16];
 	int  installed;            /* a rootfs for this device is already here */
 };
-static struct devinfo g_devs[UI_DEVICES_MAX];
+/* HOW MANY PROFILES THE PICKER HOLDS, and why this is not tadpole_ui.h's
+ * UI_DEVICES_MAX. That constant is 8 — one more than there were .conf files on
+ * the day it was written — and the lineup runs to a dozen now, so scanning
+ * against it would drop the tail of the list on the floor without a word.
+ * g_devs is private to this file and can carry its own cap; the header's is
+ * left alone because nothing outside this file has ever read it, and it wants
+ * retiring rather than raising. */
+#define WIZ_DEVICES_MAX 24
+static struct devinfo g_devs[WIZ_DEVICES_MAX];
 static int g_ndevs;
 static int g_dev_sel;          /* index into g_devs */
+static int g_dev_top;          /* first row drawn — the list scrolls */
+static int g_dev_rows = 4;     /* how many the last draw had room for */
 
 /* One "KEY=value" line out of a profile, unquoted. -> 1 if found. */
 static int conf_get(const char *path, const char *key, char *out, size_t n)
@@ -1284,7 +1313,7 @@ static void devices_scan(void)
 	g_ndevs = 0;
 	path_join(dir, sizeof(dir), g_proj, "runtime/devices");
 	if (!(d = opendir(dir))) return;
-	while ((e = readdir(d)) && g_ndevs < UI_DEVICES_MAX) {
+	while ((e = readdir(d)) && g_ndevs < WIZ_DEVICES_MAX) {
 		size_t l = strlen(e->d_name);
 		struct devinfo *di = &g_devs[g_ndevs];
 		if (l < 6 || strcmp(e->d_name + l - 5, ".conf")) continue;
@@ -1293,6 +1322,7 @@ static void devices_scan(void)
 		if (!conf_get(path, "DEV_ID", di->id, sizeof(di->id))) continue;
 		conf_get(path, "DEV_NAME", di->name, sizeof(di->name));
 		conf_get(path, "DEV_LCD", di->lcd, sizeof(di->lcd));
+		conf_get(path, "DEV_PLATFORM", di->plat, sizeof(di->plat));
 		if (!di->name[0]) snprintf(di->name, sizeof(di->name), "%s", di->id);
 		g_ndevs++;
 	}
@@ -1308,6 +1338,14 @@ static void devices_scan(void)
 	}
 	for (int i = 0; i < g_ndevs; i++)
 		if (!strcmp(g_devs[i].id, g_cfg.device)) g_dev_sel = i;
+	/* OPEN ON THE ONE THAT IS ALREADY CHOSEN. With four rows visible out of a
+	 * dozen, a picker that always started at the top would show a LeapPad
+	 * Explorer owner somebody else's tablet and leave them to find their own.
+	 * Scrolled to, once, here — NOT clamped against the selection every frame
+	 * the way the app launcher does it, because there the selection is a cursor
+	 * the arrow keys drive and here it is a standing answer: following it on
+	 * every draw would snap the view back the moment anyone used the wheel. */
+	g_dev_top = g_dev_sel;
 }
 
 /* ---- the profile being composed on WIZ_PROFILE --------------------------
@@ -3141,6 +3179,33 @@ static SDL_Rect wiz_btn(const struct dlg *d, int which)   /* 0 back 1 next 2 can
 	return r;
 }
 
+/* ---- the device picker's list -------------------------------------------
+ *
+ * ONE SET OF NUMBERS FOR THE DRAW AND THE HIT TEST, for exactly the reason the
+ * app launcher's helpers give above: this list computed its rows inline in two
+ * places from the same three constants, and adding a scrollbar — which takes
+ * width out of the rows — is precisely the change that makes two copies of a
+ * layout disagree about where a row ends.
+ *
+ * The rows start under two lines of explanation and stop short of the
+ * Back/Next row, so how many fit is a property of the dialog rather than a
+ * number written down twice. At the wizard's 210px that is four of them; a
+ * window too small for the full height gets fewer and still scrolls. */
+#define WIZ_DEV_ROW_H 26
+static int wiz_dev_y(const struct dlg *d) { return d->y + 38 + 26; }
+static int wiz_dev_rows(const struct dlg *d)
+{
+	int v = (d->y + d->h - 30 - wiz_dev_y(d)) / WIZ_DEV_ROW_H;
+	return v < 1 ? 1 : v;
+}
+/* THE ROW GIVES UP ITS RIGHT-HAND EDGE TO THE SCROLLBAR, so a click near it
+ * lands on the row rather than in a gap, and the highlight stops short of the
+ * bar instead of running under it. */
+static int wiz_dev_w(const struct dlg *d, int vis, int n)
+{
+	return d->w - 76 - (n > vis ? 10 : 0);
+}
+
 /* Close button, bottom right of every dialog. */
 static SDL_Rect close_rect(const struct dlg *d)
 {
@@ -3855,7 +3920,7 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 		Uint8 wiz_alpha;
 		char welcome[48];
 		const char *TITLES[WIZ_PAGES] = {
-			welcome, "Which tablet?", "System files", "Didj support",
+			welcome, "Which device?", "System files", "Didj support",
 			"Who is playing?", "Games", "Ready"
 		};
 		snprintf(welcome, sizeof(welcome), "Welcome to %s", ui_brand_name());
@@ -3963,32 +4028,114 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 				text(r, bx, by + 88, "  Run ./tools/fetch-deps.sh", C_TEXT_DIM);
 			break;
 		case WIZ_DEVICE: {
-			/* WHICH TABLET. This decides which firmware the next page
+			/* WHICH DEVICE. This decides which firmware the next page
 			 * downloads, so it has to be asked before there is anything
 			 * installed to detect the answer from. Once a rootfs IS
 			 * installed, runtime/device.sh reads the truth out of its
 			 * Firmware/meta.inf and this is only an override — which is why
-			 * the already-installed one is marked and preselected. */
+			 * the already-installed one is marked and preselected.
+			 *
+			 * ONE ROW PAST THE PROFILES IS THE DIDJ, and it is not one of
+			 * them; see the note above the row loop. */
 			int i3;
+			int vis  = wiz_dev_rows(&d);
+			int ly   = wiz_dev_y(&d);
+			int rows, rw;
+			char foot[64];
 			if (!g_ndevs) devices_scan();
-			text(r, bx, by, "Tadpole emulates more than one tablet.", C_TEXT_DIM);
-			text(r, bx, by + 10, "Pick yours; the next page fetches its", C_TEXT_DIM);
-			text(r, bx, by + 20, "system files.", C_TEXT_DIM);
-			for (i3 = 0; i3 < g_ndevs; i3++) {
-				int ry = by + 36 + i3 * 30, on = (i3 == g_dev_sel);
+			rows = g_ndevs + 1;              /* the Didj row rides along */
+			rw   = wiz_dev_w(&d, vis, rows);
+			g_dev_rows = vis;
+			/* Clamp here rather than at the wheel event: how many rows fit
+			 * depends on the dialog height, which depends on the window, and a
+			 * scroll position that was legal when it was set can stop being
+			 * one when the window is resized under it. */
+			if (g_dev_top > rows - vis) g_dev_top = rows - vis;
+			if (g_dev_top < 0) g_dev_top = 0;
+
+			/* TWO LINES, NOT THREE, AND BOTH INSIDE 32 COLUMNS.
+			 *
+			 * The third line said "system files." on its own and cost a whole row
+			 * of the list to say it. The other two were 38 characters, and in
+			 * portrait this page is 264 logical pixels wide — 32 columns past the
+			 * banner — so both of them ran off the right edge of the panel and had
+			 * done since the page was written. Rewritten to fit rather than
+			 * clipped, because the sentence that gets cut is the one explaining
+			 * what the next page will do. */
+			text(r, bx, by, "Pick the one you own - the next", C_TEXT_DIM);
+			text(r, bx, by + 10, "page fetches its system files.", C_TEXT_DIM);
+
+			/* The well the rows sit in, so the list reads as one object with an
+			 * edge to it rather than as tiles floating on the panel — which is
+			 * what tells you there is more of it below the fold. */
+			chip(r, bx - 3, ly - 4, rw + 16, vis * WIZ_DEV_ROW_H + 4, C_VOID, 0);
+
+			/* THE LAST ROW IS THE DIDJ, AND IT IS NOT A DEVICE PROFILE.
+			 *
+			 * Tadpole does not boot a Didj. Its games run on the LeapPad2's
+			 * own firmware, through the compatibility layer LeapFrog shipped
+			 * on the Leapster Explorer — "End Load DidjPatches" is in the log
+			 * of every stock boot — and what a fresh install lacks is only
+			 * the DATA that layer reads. Installing that is what the "Didj
+			 * support" page two steps along already does, so this row is a
+			 * way IN to that page and not a second copy of it: clicking it
+			 * goes there. It never takes the selection and never writes a
+			 * `device` line, because device.sh would have to resolve that to
+			 * a didj.conf, and a profile for a system nothing here can boot
+			 * is a worse lie than an empty list.
+			 *
+			 * It is in the list at all because "Didj" is the word someone
+			 * with a shelf of Didj cartridges will look for, and finding
+			 * nothing under D is how they conclude Tadpole cannot do it.
+			 *
+			 * A NATIVE PORT IS A REAL PROJECT AND THIS IS NOT IT. The Didj
+			 * has firmware of its own on the same CDN, under packages/DIDJ/,
+			 * laid out nothing like a LeapPad's LF/Base:
+			 *
+			 *   DIDJ-0x000E0002-000001  lightning-boot   (no install path)
+			 *   DIDJ-0x000E0003-000001  Firmware        -> /Didj/Base/
+			 *   DIDJ-0x000E0004-000001  Brio            -> /Didj/Base/
+			 *   DIDJ-0x000E0005-000003  Fonts           -> /Didj/Base/
+			 *   DIDJ-0x000E0006-000005  LocalizedAudio  -> /Didj/Base/
+			 *   DIDJ-0x000E0007-000006  Tutorials       -> /Didj/Base/
+			 *   DIDJ-0x000E0008-000007  UniversalArt    -> /Didj/Base/
+			 *   DIDJ-0x000E0009-000008  UniversalAudio  -> /Didj/Base/
+			 *   DIDJ-0x000E000A-000001  bin             -> /Didj/Base/
+			 *   DIDJ-0x000E000B-000004  lib             -> /Didj/Base/
+			 *   DIDJ-0x000E000C-000002  BLT             -> /Didj/Base/
+			 *   DIDJ-0x000E0010-000002  Avatar1         -> /Didj/Data/Avatars/
+			 *   DIDJ-0x000F0001-000000  POW             -> /Didj/ProgramFiles/
+			 *   anything else                           -> /Didj/Data/MDL/
+			 *
+			 * lightning-boot is the only entry with no destination, which
+			 * reads as the bootloader rather than a package installed into
+			 * the tree. Nothing in the tree consumes any of this today —
+			 * tools/install-didj.py does not mention lightning-boot or a
+			 * /Didj path anywhere — so it is written down here rather than
+			 * acted on. Whoever writes didj.conf will want it. */
+
+			for (i3 = g_dev_top; i3 < rows && i3 - g_dev_top < vis; i3++) {
+				int ry  = ly + (i3 - g_dev_top) * WIZ_DEV_ROW_H;
+				int on  = (i3 == g_dev_sel && i3 < g_ndevs);
+				int hot = inside(g_mx, g_my, bx, ry - 3, rw, 24);
+				int didj = (i3 == g_ndevs);   /* the last row; see above */
+				const char *nm  = didj ? "Didj" : g_devs[i3].name;
+				const char *lcd = didj ? "320x240" : g_devs[i3].lcd;
 				char line[96];
-				fill(r, bx, ry - 3, d.w - 76, 27,
-				     on ? C_PANEL_HI : C_PANEL);
+
+				fill(r, bx, ry - 3, rw, 24,
+				     hot ? C_BAR_HI : on ? C_PANEL_HI : C_PANEL);
 				/* PLACEHOLDER ART. A screen-shaped box in the panel colour,
 				 * with the device's own aspect ratio — 480x272 is wide and
-				 * squat, 1024x600 less so, so the two are already
-				 * distinguishable without a photograph. Real device pictures
-				 * go in runtime/devices/<id>.png; see the README there. The
-				 * loader is not wired up yet, and a box that is visibly a
-				 * placeholder is better than a picture of the wrong tablet. */
+				 * squat, 1024x600 less so, the Didj's 320x240 nearly square, so
+				 * they are already distinguishable without a photograph. Real
+				 * device pictures go in runtime/devices/<id>.png; see the README
+				 * there. The loader is not wired up yet, and a box that is
+				 * visibly a placeholder is better than a picture of the wrong
+				 * tablet. */
 				{
 					int pw = 34, ph = 21, sw, sh, dw = 0, dh = 0;
-					if (sscanf(g_devs[i3].lcd, "%dx%d", &sw, &sh) == 2 &&
+					if (sscanf(lcd, "%dx%d", &sw, &sh) == 2 &&
 					    sw > 0 && sh > 0) {
 						dw = pw; dh = pw * sh / sw;
 						if (dh > ph) { dh = ph; dw = ph * sw / sh; }
@@ -3996,13 +4143,68 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 					if (dw <= 0) { dw = pw; dh = ph; }
 					fill(r, bx + 3, ry, pw, ph, C_VOID);
 					fill(r, bx + 3 + (pw - dw) / 2, ry + (ph - dh) / 2,
-					     dw, dh, on ? C_EDGE_LT : C_EDGE_DK);
+					     dw, dh, on || hot ? C_EDGE_LT : C_EDGE_DK);
 				}
-				text(r, bx + 44, ry + 1, g_devs[i3].name,
-				     on ? C_ACCENT : C_TEXT);
-				snprintf(line, sizeof(line), "%s%s", g_devs[i3].lcd,
-				         g_devs[i3].installed ? "   installed" : "");
+				text(r, bx + 44, ry + 1, nm,
+				     on || hot ? C_ACCENT : C_TEXT);
+				if (didj) {
+					/* Says where its games actually run, and carries the same
+					 * arrow the sidebar uses for "this leads somewhere".
+					 *
+					 * Falls back to the bare resolution when the row is too
+					 * narrow for the sentence, which in portrait it is: text()
+					 * does not clip, so the alternative is "the LeapPad2"
+					 * printed across the edge of the panel. The arrow still
+					 * says the row leads somewhere, and the page it leads to
+					 * explains itself. */
+					snprintf(line, sizeof(line), "%s   runs on the LeapPad2",
+					         lcd);
+					if (text_w(line) > rw - 50)
+						snprintf(line, sizeof(line), "%s", lcd);
+					text(r, bx + rw - 6 - text_w(GL_SUB), ry + 1, GL_SUB,
+					     hot ? C_ACCENT : C_TEXT_DIM);
+				} else {
+					snprintf(line, sizeof(line), "%s%s", lcd,
+					         g_devs[i3].installed ? "   installed" : "");
+					/* ONLY IF THE NAME LEAVES ROOM FOR IT, the same test the
+					 * launcher makes before drawing a package ID beside a
+					 * title. In portrait the rows are 86 pixels narrower and
+					 * the codename was drawn straight through the tail of the
+					 * name: "LeapPad ExplorerMADRID". */
+					if (g_devs[i3].plat[0] &&
+					    text_w(nm) + text_w(g_devs[i3].plat) + 12 < rw - 50)
+						text(r, bx + rw - 6 - text_w(g_devs[i3].plat), ry + 1,
+						     g_devs[i3].plat, C_DIMMEST);
+				}
 				text(r, bx + 44, ry + 12, line, C_TEXT_DIM);
+			}
+
+			/* Scrollbar, for the same reason the launcher and the library have
+			 * one: with a dozen rows and four of them on screen, "how much of
+			 * this is there" cannot be answered by the rows themselves. Drawn
+			 * inside the well and clear of them, so nothing overlaps. */
+			if (rows > vis) {
+				int track = vis * WIZ_DEV_ROW_H - 4;
+				int knob  = track * vis / rows;
+				int pos   = track * g_dev_top / rows;
+				int sx    = bx + rw + 4;
+				if (knob < 10) knob = 10;
+				if (pos > track - knob) pos = track - knob;
+				if (pos < 0) pos = 0;
+				rfill(r, sx, ly, 4, track, C_SHADOW, 170);
+				rfill(r, sx, ly + pos, 4, knob, C_EDGE_LT, 210);
+				/* WHERE YOU ARE, under the list. Only when it scrolls: with
+				 * everything already on screen the line is noise, and this is
+				 * the one page in the wizard with no room going spare. The
+				 * range rather than the bare total, for the reason the launcher
+				 * gives — and the hint drops off at the bottom, because "scroll
+				 * for more" under "9-12 of 12" is an instruction to do something
+				 * that does nothing. */
+				snprintf(foot, sizeof(foot), "%d-%d of %d%s", g_dev_top + 1,
+				         g_dev_top + vis < rows ? g_dev_top + vis : rows, rows,
+				         g_dev_top + vis < rows
+				         ? " " GL_DIAMOND " scroll for more" : "");
+				text(r, bx, ly + vis * WIZ_DEV_ROW_H + 2, foot, C_TEXT_DIM);
 			}
 			break;
 		}
@@ -4771,6 +4973,18 @@ void ui_debug_state(const char *spec)
 	else if (!strncmp(name, "wiz", 3)) {
 		g_modal = M_WIZARD;
 		g_wiz_page = (name[3] >= '0' && name[3] <= '9') ? name[3] - '0' : 0;
+		/* `wiz1end` scrolls the device picker to the bottom of its list and
+		 * `wiz1<N>` to row N — the same handles `appsend` and `apps<N>` give the
+		 * launcher, and for the same reason: the wheel is the only other way to
+		 * move this list, and XWayland will not deliver a synthetic one, so
+		 * without this a scrolled picker cannot be captured at all. The scan
+		 * runs first because it sets the scroll from the saved device and would
+		 * otherwise undo this; the draw clamps whatever lands here. */
+		if (g_wiz_page == WIZ_DEVICE && name[4]) {
+			devices_scan();
+			g_dev_top = !strcmp(name + 4, "end") ? g_ndevs + 1
+			                                     : atoi(name + 4);
+		}
 	}
 	/* hovering an item only makes sense once the menu is open */
 	if (g_open_menu >= 0 && at) {
@@ -4925,12 +5139,21 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			} else if (i == 2) { g_modal = M_NONE; g_wiz_page = 0; }
 			return 1;
 		}
-		/* picking a tablet */
+		/* picking a device */
 		if (g_wiz_page == WIZ_DEVICE) {
+			int vis  = wiz_dev_rows(&d);
+			int ly   = wiz_dev_y(&d);
+			int rows = g_ndevs + 1;
+			int rw   = wiz_dev_w(&d, vis, rows);
 			int i3;
-			for (i3 = 0; i3 < g_ndevs; i3++) {
-				int ry = d.y + 20 + 18 + 36 + i3 * 30;
-				if (!inside(mx, my, d.x + 62, ry - 3, d.w - 76, 27)) continue;
+			for (i3 = g_dev_top; i3 < rows && i3 - g_dev_top < vis; i3++) {
+				int ry = ly + (i3 - g_dev_top) * WIZ_DEV_ROW_H;
+				if (!inside(mx, my, d.x + 62, ry - 3, rw, 24)) continue;
+				/* The Didj row goes to the page that installs Didj support
+				 * rather than selecting anything — it is not a device profile,
+				 * and writing `device didj` would leave device.sh looking for a
+				 * didj.conf that must not exist. See the draw. */
+				if (i3 == g_ndevs) { g_wiz_page = WIZ_DIDJ; return 1; }
 				g_dev_sel = i3;
 				snprintf(g_cfg.device, sizeof(g_cfg.device), "%s",
 				         g_devs[i3].id);
@@ -5348,6 +5571,19 @@ int ui_event(const SDL_Event *e, int lw, int lh)
 			 * clamps against the real visible count each frame. */
 			g_up_scroll -= e->wheel.y * 3;
 			if (g_up_scroll < 0) g_up_scroll = 0;
+			return 1;
+		}
+		/* The device picker, which is the only page of the wizard with more
+		 * rows than it can show. One row a notch rather than the two the
+		 * launcher and the library take: those lists are hundreds long and this
+		 * one is a dozen, so a doubled step would cross half of what is on
+		 * screen at a time. Upper bound left to the draw, for the reason
+		 * M_UPDATE gives above. */
+		if (g_modal == M_WIZARD && g_wiz_page == WIZ_DEVICE) {
+			g_dev_top -= e->wheel.y;
+			if (g_dev_top > g_ndevs + 1 - g_dev_rows)
+				g_dev_top = g_ndevs + 1 - g_dev_rows;
+			if (g_dev_top < 0) g_dev_top = 0;
 			return 1;
 		}
 		return g_modal != M_NONE;
