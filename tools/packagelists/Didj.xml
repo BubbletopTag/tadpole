@@ -1,0 +1,39 @@
+<PackageListCollection>
+	<!-- Didj. NOT a LeapFrog-published list — LeapFrog never shipped an
+	     LFConnect XML for the Didj the way it did for the LeapPad and Leapster
+	     lines. This is transcribed from a community-supplied inventory, with
+	     the install destination for each package kept in the comments because
+	     that mapping is the part that is not derivable from the CDN.
+
+	     Every id below was HEAD-checked live at
+	     packages/DIDJ/<id>.lfp and returned 200. -->
+	<PackageList device="Didj" locale="en_us">
+
+		<!-- lightning-boot. The ONLY entry with no install destination, which
+		     is consistent with it being the bootloader rather than something
+		     laid into the filesystem tree. Nothing in tools/install-didj.py or
+		     install-didj.sh mentions lightning-boot or any /Didj path, so
+		     nothing here consumes it yet. -->
+		<Package type="update,repair" id="DIDJ-0x000E0002-000001" description="lightning-boot"/>
+
+		<!-- -> /Didj/Base/ -->
+		<Package type="update,repair" id="DIDJ-0x000E0003-000001" description="Firmware"/>
+		<Package type="update,repair" id="DIDJ-0x000E0004-000001" description="Brio"/>
+		<Package type="update,repair" id="DIDJ-0x000E0005-000003" description="Fonts"/>
+		<Package type="update,repair" id="DIDJ-0x000E0006-000005" description="LocalizedAudio"/>
+		<Package type="update,repair" id="DIDJ-0x000E0007-000006" description="Tutorials"/>
+		<Package type="update,repair" id="DIDJ-0x000E0008-000007" description="UniversalArt"/>
+		<Package type="update,repair" id="DIDJ-0x000E0009-000008" description="UniversalAudio"/>
+		<Package type="update,repair" id="DIDJ-0x000E000A-000001" description="bin"/>
+		<Package type="update,repair" id="DIDJ-0x000E000B-000004" description="lib"/>
+		<Package type="update,repair" id="DIDJ-0x000E000C-000002" description="BLT"/>
+
+		<!-- -> /Didj/Data/Avatars/ -->
+		<Package type="optional" id="DIDJ-0x000E0010-000002" description="Avatar1"/>
+
+		<!-- -> /Didj/ProgramFiles/ -->
+		<Package type="optional" id="DIDJ-0x000F0001-000000" description="POW"/>
+
+		<!-- Anything not listed above goes to /Didj/Data/MDL/ -->
+	</PackageList>
+</PackageListCollection>
