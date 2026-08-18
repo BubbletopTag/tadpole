@@ -30,7 +30,9 @@ enum : uint32_t {
     SYS_brk = 45, SYS_ioctl = 54, SYS_fcntl = 55, SYS_gettimeofday = 78,
     SYS_munmap = 91, SYS_uname = 122, SYS_mprotect = 125, SYS_llseek = 140,
     SYS_writev = 146, SYS_rt_sigaction = 174, SYS_rt_sigprocmask = 175,
-    SYS_ugetrlimit = 191, SYS_mmap2 = 192, SYS_stat64 = 195, SYS_lstat64 = 196,
+    SYS_ugetrlimit = 191, SYS_mmap2 = 192,
+    SYS_truncate64 = 193, SYS_ftruncate64 = 194,
+    SYS_stat64 = 195, SYS_lstat64 = 196,
     SYS_fstat64 = 197,
     SYS_getuid32 = 199, SYS_getgid32 = 200, SYS_geteuid32 = 201,
     SYS_getegid32 = 202, SYS_fcntl64 = 221, SYS_exit_group = 248,
@@ -362,6 +364,8 @@ const char *name_of(uint32_t nr) {
         case SYS_gettid: return "gettid";           case SYS_fcntl64: return "fcntl64";
         case SYS_dup: return "dup";                 case SYS_dup2: return "dup2";
         case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
+        case SYS_truncate64: return "truncate64";
+        case SYS_ftruncate64: return "ftruncate64";
         case SYS_getdents64: return "getdents64";   case SYS_getdents: return "getdents";
         case SYS_mq_open: return "mq_open";         case SYS_mq_unlink: return "mq_unlink";
         case SYS_mq_timedsend: return "mq_timedsend";
@@ -1395,6 +1399,50 @@ void gp_syscall(Thread &t) {
         GuestFd *g = m.Fd((int)a0);
         if (!g || !g->file) { ret = GP_EBADF; break; }
         ret = gp_truncate(g->file, a1);
+        break;
+    }
+
+    /* THE 64-BIT TRUNCATES, AND THE REGISTER PAIR THAT MAKES THEM LOOK ODD.
+     *
+     * Sonic the Hedgehog — the Didj title — died 0s into its first frame with
+     * "GUEST FAULT: 51140000 was never mapped", and the two lines logged just
+     * above the fault were the whole cause:
+     *
+     *   unimplemented syscall 194 (?) — args 00000003 00000000 003fc000 00000000
+     *   unimplemented syscall 194 (?) — args 00000003 00000000 00000210 00000000
+     *
+     * ftruncate64 answered ENOSYS, so the file the title was sizing stayed
+     * empty, and the mapping it then made over that file covered nothing —
+     * which is why the fault landed thousands of instructions away from the
+     * call that caused it, with nothing at the fault site to suggest a missing
+     * syscall. The same binary on qemu-arm, which implements the call, reaches
+     * its title screen and holds 35 fps.
+     *
+     * EABI passes a 64-bit argument in an EVEN-ALIGNED register pair, so the
+     * length is a3:a2 and a1 is padding — exactly the shape of those two trace
+     * lines. Reading a1 as the length, by analogy with the 32-bit ftruncate
+     * directly above, would truncate every file to zero instead.
+     */
+    case SYS_ftruncate64: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        ret = gp_truncate(g->file, (uint64_t)a2 | ((uint64_t)a3 << 32));
+        break;
+    }
+
+    /* The path form of the same call. Nothing has been observed to use it, but
+     * implementing one half of a pair is how the other half went unnoticed for
+     * this long: the failure is silent where it happens and fatal a long way
+     * further on. */
+    case SYS_truncate64: {
+        std::string p = m.Str(a0);
+        std::string h = m.HostPath(p);
+        if (m.trace) tpath = p + " -> " + h;
+        gp_file *f = nullptr;
+        int r0 = gp_open(h.c_str(), GP_O_WRONLY, 0, &f);
+        if (r0 < 0) { ret = r0; break; }
+        ret = gp_truncate(f, (uint64_t)a2 | ((uint64_t)a3 << 32));
+        gp_close(f);
         break;
     }
 
