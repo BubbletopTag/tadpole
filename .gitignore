@@ -21,6 +21,7 @@ tadpole/viewer/tadpole-view
 runtime/tone
 # The fake net.connman, an ARM binary built from tadpole/shim/tadpole_connman.c.
 runtime/tadpole-connman
+runtime/tadpole-avahi
 # what tools/micromods.py wrote into this checkout's Downloads, so it can
 # take exactly that back out again. Local state about a local sysroot.
 runtime/micromods-made.json
