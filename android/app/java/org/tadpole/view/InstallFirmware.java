@@ -27,10 +27,21 @@ import java.util.zip.ZipInputStream;
  * <ul>
  * <li>.lfp — an ordinary ZIP. The base firmware is one of these, and inside it
  *     is a UBI image: {@code Firmware-Base/5,53477376,C4G-E1M-W4K-erootfs.ubi}.
- * <li>.lf2 — a bzip2 tar despite the extension. NOT read here: Java has no
- *     bzip2 and these hold content packs rather than the rootfs, so the base
- *     install does not need them. Named in the report so it is clear they were
- *     seen and skipped rather than missed.
+ * <li>.lf2 — a bzip2 tar despite the extension. NOT read here, because Java
+ *     has no bzip2, and THIS IS THE ONE THING STILL MISSING FROM AN ON-DEVICE
+ *     INSTALL. They hold the content packs, and the base firmware alone does
+ *     not boot without them: AppManager dies with
+ *
+ *         CMfgData::Init: GetNorPartitionFilename failed
+ *         signal SIGSEGV (11)  fault 0x00000068  libLightningBase.so
+ *
+ *     which names neither the packs nor a missing file. Measured: dropping
+ *     just the five base widgets (CameraWidget, KeyboardWidget, PhotoEditor,
+ *     SneakPeekWidget, VideoWidget — 5.8 MB in total) into
+ *     LF/Bulk/ProgramFiles is enough to make it boot, and they are what the
+ *     .lf2 packs carry. So this installs a rootfs that is byte-correct and a
+ *     sysroot that is complete, and still needs a bzip2 reader before the
+ *     result will start.
  * <li>.lf3 — encrypted; skipped without keys, same as the Python.
  * </ul>
  *
@@ -101,9 +112,17 @@ final class InstallFirmware implements Tools.Tool {
 
         out.println("");
         out.println("Installed. Tadpole can boot the system menu now.");
-        if (!skipped.isEmpty())
-            out.println("Content packs not installed here: " + join(skipped)
-                        + " — run tools/install-firmware.py on a desktop for those.");
+        if (!skipped.isEmpty()) {
+            /* SAID AS A WARNING, not as a footnote: the base firmware does not
+             * boot without these, and the failure when they are absent is a
+             * SIGSEGV that names nothing useful. */
+            out.println("");
+            out.println("STILL NEEDED: the content packs — " + join(skipped));
+            out.println("These are bzip2 (.lf2), which is not read here yet, and the");
+            out.println("system will not start without the widgets they carry. Run");
+            out.println("tools/install-firmware.py on a desktop, or copy");
+            out.println("LF/Bulk/ProgramFiles across with android/push-firmware.sh.");
+        }
         return true;
     }
 

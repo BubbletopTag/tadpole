@@ -5385,6 +5385,8 @@ static int dialog_click(int lw, int lh, int mx, int my)
 		    inside(mx, my, d.x + 62, d.y + 92, 76, ui_btn_h())) {
 			path_join(start, sizeof(start), g_proj, "sources");
 			if (access(start, R_OK) != 0)
+				default_browse_dir(start, sizeof(start));
+			if (access(start, R_OK) != 0)
 				path_join(start, sizeof(start), g_proj, "");
 			/* A directory OR a package: install-firmware.sh takes either, and a
 			 * user with a loose .lfp should not have to know the difference. */
@@ -5401,6 +5403,8 @@ static int dialog_click(int lw, int lh, int mx, int my)
 			char dl[PATHMAX * 2];
 			if (home && *home) snprintf(dl, sizeof(dl), "%s/Downloads", home);
 			else               snprintf(dl, sizeof(dl), "%s", g_proj);
+			if (access(dl, R_OK) != 0)
+				default_browse_dir(dl, sizeof(dl));
 			if (access(dl, R_OK) != 0)
 				snprintf(dl, sizeof(dl), "%s", home && *home ? home : g_proj);
 			/* by = d.y + 38, and the two buttons are at by+69 and by+113,
