@@ -2006,7 +2006,43 @@ static void apply_layout(SDL_Renderer *ren, SDL_Window *win, int rotate,
 	if (hle_host_ready() && g_state && g_fb[1])
 		hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
 	set_logical(ren, rotate, w, h);
+#ifndef __ANDROID__
 	SDL_SetWindowSize(win, lw * scale, (lh + UI_BAR_H) * scale);
+#else
+	/* NOT ON ANDROID, WHERE THE WINDOW IS THE SCREEN AND ASKING FOR A SIZE
+	 * SHRINKS THE PICTURE INTO A CORNER OF IT.
+	 *
+	 * There is no window manager to negotiate with here: the surface is the
+	 * whole display and SDL_RenderSetLogicalSize above already letterboxes the
+	 * panel into it, at whatever scale that display happens to afford. Asking
+	 * for a size as well made the renderer's viewport that size instead —
+	 * measured on an 800x1280 tablet, rotating to portrait gave
+	 *
+	 *     272 * 2 = 544 wide, (480 + 22) * 2 = 1004 tall
+	 *
+	 * and the guest came up in a 544x1004 box with black above and to the
+	 * right of it. `scale` is a desktop notion — how many screen pixels to a
+	 * panel pixel in a window you can drag — and it has no meaning for a
+	 * surface that is already as big as it can be.
+	 *
+	 * IT IS NOT COSMETIC. Touches arrive in the display's coordinates and are
+	 * mapped through the renderer's viewport, so a viewport smaller than the
+	 * surface puts every tap in the wrong place — which is what "the touch
+	 * also gets messed up" is, and why this is a rendering bug that presents
+	 * as an input one.
+	 *
+	 * WHY A PHONE GOT AWAY WITH IT. The smaller the display, the closer
+	 * lw*scale comes to filling it, and a phone that reports a display no
+	 * bigger than the requested size is simply told it is already that size.
+	 * A tablet has room to spare, so the shortfall is visible — the bug scales
+	 * with the screen, which is why it showed up here and not on the phone
+	 * this port was developed against.
+	 *
+	 * (void) so scale stays part of the signature: the desktop build needs it,
+	 * and a parameter that exists on one platform only is worse to read than
+	 * an explicit discard.) */
+	(void)scale; (void)lw; (void)lh; (void)win;
+#endif
 	if (hle_host_ready() && g_state && g_fb[1])
 		hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
 }
@@ -3108,6 +3144,33 @@ static pid_t android_native_request(const char *req)
 
 	snprintf(path, sizeof(path), "%s/.lock", g_dir);
 	unlink(path);
+
+	/* THE SETTINGS HAVE TO TRAVEL WITH THE REQUEST, and this is the whole
+	 * reason the guest came up on the deprecated software rasteriser: the
+	 * helper builds its own environment and had no way to know what Graphics
+	 * Settings says, so every title it launched ran without TADPOLE_GL_HLE and
+	 * was slow and wrong in exactly the ways the software path is documented to
+	 * be. The same three variables android_guest_argv() passes to glasspole go
+	 * into a file beside the request.
+	 *
+	 * Written BEFORE guest.req, because the request is what the helper is
+	 * watching for — the other order is a race it would lose about one time in
+	 * four, and losing it means silently reverting to software.
+	 *
+	 * The rule for the pair is guest_setenv()'s: TADPOLE_GL_SOFTWARE is a
+	 * deliberate route to the old rasteriser and TADPOLE_GL_HLE must not be
+	 * sent alongside it, because "both present" is a contradiction to have to
+	 * reason about at the far end. */
+	snprintf(path, sizeof(path), "%s/guest.env", g_dir);
+	if ((f = fopen(path, "w")) != NULL) {
+		const struct ui_settings *c = ui_cfg();
+		if (c->gl || c->gl_hle)             fprintf(f, "TADPOLE_GL=1\n");
+		if (c->gl_hle && !getenv("TADPOLE_GL_SOFTWARE"))
+		                                    fprintf(f, "TADPOLE_GL_HLE=1\n");
+		if (c->debug_level >= 2)            fprintf(f, "TADPOLE_DEBUG=1\n");
+		fclose(f);
+	}
+
 	snprintf(path, sizeof(path), "%s/guest.req", g_dir);
 	if (!(f = fopen(path, "w"))) return 0;
 	fprintf(f, "%s\n", req);

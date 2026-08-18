@@ -70,10 +70,16 @@ mounts() {
     # top of a working one is invisible to mountpoint, and toybox's umount
     # answers EINVAL for every spelling of the path afterwards. The only way
     # back from that is a reboot.
-    [ -x "$S/bin/busybox" ] || mount -o bind "$F" "$S$F"
-    [ -d "$S/proc/self" ]   || mount -t proc proc "$S/proc"
-    [ -x "$S/bin/busybox" ] || {
-        echo "native-helper: $S/bin does not resolve — is the firmware pushed?" >&2
+    # ASKED THROUGH THE CHROOT, because that is the only place the question
+    # means anything. $S/bin is an ABSOLUTE symlink into $F, so testing
+    # $S/bin/busybox from out here follows it to the real file and succeeds
+    # whether or not the bind exists — the guard passed, the mount was skipped,
+    # and the launch died on the error above. Inside, the same path can only
+    # resolve through the bind.
+    chroot "$S" /bin/busybox true 2>/dev/null || mount -o bind "$F" "$S$F"
+    [ -d "$S/proc/self" ] || mount -t proc proc "$S/proc"
+    chroot "$S" /bin/busybox true 2>/dev/null || {
+        echo "native-helper: /bin does not resolve inside $S — is the firmware pushed?" >&2
         return 1
     }
     return 0
@@ -106,14 +112,38 @@ kill_guest() {
     return 0
 }
 
+# What Graphics Settings asked for, written beside the request by the viewer.
+#
+# WITHOUT THIS EVERY TITLE RUNS ON THE SOFTWARE RASTERISER. The shim only
+# encodes to the host GPU when it sees TADPOLE_GL_HLE, and a helper that builds
+# its own environment has no other way to be told — which is not a subtle
+# failure: the software path is deprecated, samples one texture unit and ignores
+# the blend factors, so Clam Prix came out slow AND wrong.
+#
+# WHITELISTED TO TADPOLE_*, because this file is written by the app and read by
+# something running as root. Nothing here should be able to set LD_PRELOAD.
+guest_env() {
+    [ -s "$F/guest.env" ] || return 0
+    while IFS= read -r line; do
+        case "$line" in
+            TADPOLE_*=*) printf '%s ' "$line" ;;
+        esac
+    done < "$F/guest.env"
+}
+
 start_guest() {
     prog=$1
     mounts || return 1
     rm -f "$LOCK"
+    extra=$(guest_env)
+    echo "native-helper: env${extra:+ $extra}"
+    # $extra is deliberately unquoted: it is a list of KEY=VALUE words for env,
+    # and none of the values it is allowed to carry contains a space.
     chroot "$S" /bin/busybox env \
         LD_LIBRARY_PATH=$F/runtime/shimlibs-gl:$F/runtime/shimlibs-z:$F/runtime/shimlibs:$F/runtime/libs \
         TADPOLE_DIR=$F \
         TSLIB_CONFFILE=/nonexistent-ts.conf \
+        $extra \
         "$prog" > /data/local/tmp/tadpole-guest.log 2>&1 &
     gp=$!
     # Wait for the arena before answering, so that by the time the viewer sees a
