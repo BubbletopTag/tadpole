@@ -1033,6 +1033,129 @@ static void layer_window(const struct layer_state *ls, int w, int h,
 	*wx = x; *wy = y; *ww = cw; *wh = ch;
 }
 
+/* IS THIS PAGE A PICTURE, OR JUST A PAGE?
+ *
+ * fb0 is composited colour-keyed on alpha (blit_layer_keyed), so a page with
+ * no opaque pixel anywhere contributes exactly nothing — it is indistinguishable
+ * from a page the guest allocated and never drew into. That distinction is what
+ * the LeapPad3's top layer turns on; see the note beside fb0_pick_page().
+ *
+ * Scanning stops at the first visible pixel, which is the case that matters for
+ * speed: a page with content bails out of the first row. */
+static int page_all_transparent(const unsigned char *p, size_t pitch, int h)
+{
+	int y;
+	size_t x, n = pitch / 4;
+
+	for (y = 0; y < h; y++) {
+		const uint32_t *row = (const uint32_t *)(const void *)
+		                      (p + (size_t)y * pitch);
+		for (x = 0; x < n; x++)
+			if (row[x] >> 24)
+				return 0;
+	}
+	return 1;
+}
+
+/* WHICH PAGE fb0's PICTURE IS ACTUALLY ON, WHICH IS NOT ALWAYS THE PANNED ONE.
+ *
+ * On the LeapPad2 one process owns the display: AppManager allocates a handle
+ * out of the framebuffer heap, pans fb0 to it, and draws the ViewFrame there.
+ * Following the pan is exactly right.
+ *
+ * The LeapPad3 has TWO owners of /dev/fb0 and they disagree. The Qt shell
+ * (AppServer, the QWS server) maps the framebuffer once and paints everything
+ * it ever shows at yoffset 0 — the home screen, and, when a Leapster title is
+ * up, the ViewFrame: a 480x272 image with the A/B/Pause/Home/Hint buttons drawn
+ * into it and a transparent window cut out where the game goes. Measured with
+ * soft-dirty page tracking on a live guest: AppServer is the ONLY process that
+ * ever writes those bytes, and it writes them at offset 0.
+ *
+ * Meanwhile BrioWrapper — the Qt module that hosts a Brio title — brings up
+ * Brio's display stack, which allocates a handle of its own out of the same
+ * heap and pans fb0 to it:
+ *
+ *     fb0 PUT_VSCREEN yoff=0        (the mode)
+ *     fb0 PAN yoff=544              (0xFF000 — the first heap allocation)
+ *
+ * and then never draws a pixel into it, because on this device a Leapster
+ * title's picture goes through GL on fb1 instead. So the recorded pan points at
+ * a page that is empty for the whole life of the title, the compositor drew
+ * that empty page as the top layer, and the bezel — sitting untouched at
+ * offset 0 — was never shown. Symptom: the 320x240 game is perfect and the
+ * frame around it, buttons and all, is simply absent. The buttons still respond
+ * because their hit-boxes come from the title's buttonMap.json, not from
+ * anything drawn, which is what makes it look like a pure rendering fault.
+ *
+ * The rule: an ENTIRELY TRANSPARENT top page is not a picture. Falling back to
+ * offset 0 cannot lose anything — a fully transparent page contributes no
+ * pixels either way — and on a device whose shell paints there it recovers the
+ * whole overlay. When the panned page does hold something, as on the LeapPad2,
+ * nothing changes and the scan stops on the first row.
+ */
+static size_t g_fb0_src;      /* byte offset in the arena fb0 is read from */
+static int    g_fb0_aliases;  /* ...and it is the same page the GL layer uses */
+
+static void fb0_pick_page(int w, int h)
+{
+	static int said = -1;
+	const struct layer_state *l0, *l1;
+	size_t pitch, off, bpp;
+	int wx, wy, ww, wh, fell_back;
+
+	g_fb0_src = 0;
+	g_fb0_aliases = 0;
+	if (!g_state || !g_fb[0])
+		return;
+	l0 = &g_state->layer[0];
+	l1 = &g_state->layer[1];
+	bpp = l0->bpp ? l0->bpp : 32;
+	pitch = (size_t)w * bpp / 8;
+	off = (size_t)l0->yoffset * pitch + (size_t)l0->xoffset * bpp / 8;
+	layer_window(l0, w, h, &wx, &wy, &ww, &wh);
+	if (off + pitch * (size_t)wh > g_fbsz[0])
+		off = 0;
+
+	/* NOT gated on fb0 being enabled and unblanked. A title BLANKS fb0 while it
+	 * sets its layers up, and the shell paints the bezel during exactly that
+	 * window; deciding "no fallback, so the arena page is free" for those few
+	 * frames is enough to let the replayed frame punch an alpha-zero hole
+	 * through the top of the artwork that nothing ever repaints. */
+	fell_back = off != 0 &&
+	            page_all_transparent((const unsigned char *)g_fb[0] + off,
+	                                 pitch, wh);
+	if (fell_back)
+		off = 0;
+	if (fell_back != said) {
+		said = fell_back;
+		fprintf(stderr, "[tadpole] fb0 %s\n", fell_back
+		        ? "panned to a page nothing has drawn into — compositing its "
+		          "base page, which is where the shell paints"
+		        : "compositing the page it panned to");
+	}
+	g_fb0_src = off;
+
+	/* AND WHETHER THE GAME LAYER WOULD LAND ON TOP OF IT.
+	 *
+	 * Every layer shares one arena, so fb0's page and the GL layer's page can be
+	 * the same bytes — and on the LeapPad3, once fb0 falls back to the base,
+	 * they are: the shell's ViewFrame and the title's 3D surface both live at
+	 * offset 0. Presenting the replayed frame there paints the game over the
+	 * bezel, at the buffer's ORIGIN rather than in the window the bezel leaves
+	 * for it, so the picture ends up drawn twice and the frame not at all.
+	 *
+	 * Not gated on fb1 being enabled or fb0 being unblanked either: the title
+	 * blanks fb0 and enables its own layer a few frames after the shell has
+	 * painted the bezel, and one present into those bytes in that window is
+	 * enough to punch an alpha-zero hole through artwork nothing repaints. */
+	{
+		size_t p1 = (size_t)w * (l1->bpp ? l1->bpp : 32) / 8;
+		size_t o1 = (size_t)l1->yoffset * p1
+		          + (size_t)l1->xoffset * (l1->bpp ? l1->bpp : 32) / 8;
+		g_fb0_aliases = (g_fb[0] == g_fb[1]) && (o1 == g_fb0_src);
+	}
+}
+
 /* SAY WHERE A LAYER IS BEING COMPOSITED, once, and again whenever it moves.
  *
  * A misplaced layer is invisible in a log and ambiguous in a screenshot: the
@@ -3076,6 +3199,7 @@ int main(int argc, char **argv)
 	int vid_over_fb1 = 0;             /* MLC video priority puts fb2 above fb1 */
 	int said_vid_order = -1;
 	int g_upd_checked = 0;            /* the silent update check has run */
+	uint32_t *gl_shadow = NULL;       /* the GL layer's page when fb0 wants ours */
 	int gl_have = 0;                  /* tex_gl holds a current frame */
 	Uint32 gl_stamp = 0;              /* when that frame arrived */
 	int gl_rx = 0, gl_ry = 0, gl_rw = 0, gl_rh = 0;   /* where it belongs */
@@ -3356,6 +3480,8 @@ int main(int argc, char **argv)
 			                                     SDL_TEXTUREACCESS_STREAMING, nw, nh);
 			if (np && npt && nt && ntt) {
 				free(pixels); free(pixels_top);
+				/* Panel-sized too; let it be re-made at the new size. */
+				free(gl_shadow); gl_shadow = NULL;
 				if (tex)     SDL_DestroyTexture(tex);
 				if (tex_top) SDL_DestroyTexture(tex_top);
 				pixels = np; pixels_top = npt;
@@ -3529,12 +3655,24 @@ int main(int argc, char **argv)
 			send_event(EV_TOUCH, EV_SYN, SYN_REPORT, 0);
 		}
 
-		/* Replay whatever the guest queued. The finished frame lands in the
-		 * SAME place the software rasteriser writes — fb1's page in the shared
-		 * arena — so the three-layer compositor below needs no changes. */
+		/* Which page fb0 is really showing, and whether the game layer would
+		 * land on the same bytes. Both answers are wanted before the frame is
+		 * presented, so they are worked out once, here. */
+		fb0_pick_page(w, h);
+		/* Replay whatever the guest queued. The finished frame normally lands
+		 * in the SAME place the software rasteriser writes — fb1's page in the
+		 * shared arena — so the three-layer compositor below needs no changes.
+		 * The exception is the aliasing case above. */
 		if (hle_host_ready()) {
 			uint32_t *dst = NULL;
-			if (g_state && g_fb[1]) {
+			if (g_fb0_aliases) {
+				/* A PAGE OF OUR OWN, because the guest's would be the bezel.
+				 * The compositor reads the game layer back out of here — see
+				 * the note in fb0_pick_page(). */
+				if (!gl_shadow)
+					gl_shadow = calloc((size_t)w * h, 4);
+				dst = gl_shadow;
+			} else if (g_state && g_fb[1]) {
 				const struct layer_state *ls = &g_state->layer[1];
 				size_t pitch = (size_t)w * (ls->bpp ? ls->bpp : 32) / 8;
 				size_t off = (size_t)ls->yoffset * pitch;
@@ -3566,7 +3704,8 @@ int main(int argc, char **argv)
 			if (dst) {
 				static const void *last_dst;
 				static int said_scratch = -1;
-				int to_scratch = (g_state && g_fb[1])
+				int to_scratch = g_fb0_aliases ? 0
+				               : (g_state && g_fb[1])
 				               ? ((const void *)dst < g_fb[1] ||
 				                  (const char *)dst >= (const char *)g_fb[1] + g_fbsz[1])
 				               : 1;
@@ -3763,7 +3902,13 @@ int main(int argc, char **argv)
 				      + (size_t)ls->xoffset * (ls->bpp ? ls->bpp : 32) / 8;
 				if (off + pitch * (size_t)wh > g_fbsz[i])
 					off = 0;
+				if (i == 0)
+					off = g_fb0_src;          /* see fb0_pick_page() */
 				base = (const unsigned char *)g_fb[i] + off;
+				/* The game layer was presented into our own page, so read it
+				 * back from there rather than from the bezel underneath. */
+				if (i == 1 && g_fb0_aliases && gl_shadow)
+					base = (const unsigned char *)gl_shadow;
 				say_layer(i, wx, wy, ww, wh);
 
 				/* fb0 is the TOP layer and goes into its own buffer, so the
