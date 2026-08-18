@@ -227,6 +227,14 @@ final class Sysroot {
             + "mtd5: 0a000000 00100000 \"RFS\"\n"
             + "mtd6: f4c00000 00100000 \"Bulk\"\n");
 
+        /* /proc/self/maps, empty. The shim's crash reporter reads it to turn a
+         * faulting address into "libFoo.so+0x1234"; on the desktop glasspole
+         * writes it, and here nothing does. An empty file makes the reporter
+         * degrade to bare addresses instead of failing, and — the reason it is
+         * here at all — it is what a sysroot prepared on a desktop has, so a
+         * tree built on the device has the same shape as one pushed onto it. */
+        write(new File(sysroot, "proc/self/maps"), "");
+
         /* Sparse: the sizes are the documented partition table, and nothing
          * should materialise RFS or Bulk. */
         sparse(new File(sysroot, "dev/mtd0"), 0x7e000);

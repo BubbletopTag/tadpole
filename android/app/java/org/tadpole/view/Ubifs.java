@@ -99,6 +99,8 @@ final class Ubifs {
             if (got <= 0) continue;
             lebs++;
             scanLeb(leb, got, ubi.offsetOf(vol, lnum, 0));
+            if (lebs % 10 == 0)
+                out.println("    scanned " + lebs + " of " + vol.lebs.size() + " blocks...");
         }
         out.println("  read " + lebs + " logical blocks: " + inodes.size()
                     + " inodes, " + countDents() + " names, " + countBlocks() + " data blocks");
@@ -186,14 +188,32 @@ final class Ubifs {
 
     /* ---- pass two: write it out ------------------------------------------- */
 
+    /* SAYING SOMETHING WHILE IT WORKS. Extracting the volume is sixteen hundred
+     * files and several minutes on the hardware this is for, and it used to
+     * print nothing at all between "read 49 logical blocks" and the summary —
+     * which on a slow tablet is a progress panel that has visibly stopped. */
+    private PrintStream progressOut;
+    private int progressAt;
+
     /** Extracts the tree under `dest`. Returns how many files were written. */
     int extract(File dest, PrintStream out) throws IOException {
         int[] counts = new int[2];              /* files, dirs */
         if (!dest.isDirectory() && !dest.mkdirs())
             throw new IOException("cannot create " + dest);
+        progressOut = out;
+        progressAt = 0;
         walk(ROOT_INO, dest, counts, 0);
+        progressOut = null;
         out.println("  wrote " + counts[0] + " files and " + counts[1] + " directories");
         return counts[0];
+    }
+
+    /** Every 200 files, which is often enough to look alive and rare enough
+     * not to fill the panel with a thousand identical-looking lines. */
+    private void tick(int files) {
+        if (progressOut == null || files < progressAt + 200) return;
+        progressAt = files;
+        progressOut.println("    " + files + " files...");
     }
 
     private void walk(long inum, File dir, int[] counts, int depth) throws IOException {
@@ -219,7 +239,12 @@ final class Ubifs {
                 if (ino != null) writeSymlink(child, ino);
                 break;
             case ITYPE_REG:
-                if (ino != null) { writeFile(child, d.inum, ino); counts[0]++; applyMode(child, ino); }
+                if (ino != null) {
+                    writeFile(child, d.inum, ino);
+                    counts[0]++;
+                    applyMode(child, ino);
+                    tick(counts[0]);
+                }
                 break;
             default:
                 /* Device nodes, fifos and sockets. Nothing here can make them

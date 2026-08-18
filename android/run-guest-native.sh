@@ -39,9 +39,11 @@ S=$F/runtime/sysroot
 #    so $F has to appear at its own absolute path inside the chroot for them to
 #    resolve. Guarded, because a second bind stacks and the stack cannot be
 #    unpicked with toybox's umount.
-mkdir -p "$S$F" "$S/proc"
-mountpoint -q "$S/proc" || mount -t proc proc "$S/proc"
-mountpoint -q "$S$F"    || mount -o bind "$F" "$S$F"
+# NO procfs ON $S/proc: the sysroot's /proc is synthesised, and a real one
+# hides proc/mtd, which CMfgData::Init needs or it segfaults. See the long note
+# in android/native-helper.sh.
+mkdir -p "$S$F"
+mountpoint -q "$S$F" || mount -o bind "$F" "$S$F"
 
 # 3. Start the guest. LD_LIBRARY_PATH order matters: the shims must be found
 #    before the real libraries they stand in front of.

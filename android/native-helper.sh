@@ -53,7 +53,7 @@ app_ctx() {
 CTX=$(app_ctx)
 
 mounts() {
-    mkdir -p "$S$F" "$S/proc"
+    mkdir -p "$S$F"
     # TESTED BY WHETHER THE CHROOT RESOLVES, NOT BY WHETHER SOMETHING IS
     # MOUNTED. `mountpoint -q` answered yes on a bind the guest could not see
     # through, and the launch then died on
@@ -76,7 +76,28 @@ mounts() {
     # and the launch died on the error above. Inside, the same path can only
     # resolve through the bind.
     chroot "$S" /bin/busybox true 2>/dev/null || mount -o bind "$F" "$S$F"
-    [ -d "$S/proc/self" ] || mount -t proc proc "$S/proc"
+    # NO procfs ON $S/proc, AND THAT USED TO BE A GUESS THAT HELD BY ACCIDENT.
+    #
+    # The sysroot's /proc is SYNTHESISED — setup-sysroot.sh writes proc/mtd and
+    # proc/asound/card0/id into it, and the guest needs them: CMfgData::Init
+    # parses /proc/mtd for a partition named MfgData0, and without it
+    # CMfgData::Read segfaults inside libc. Mounting a real procfs there hides
+    # both, and the guest dies with
+    #
+    #     GetNorPartitionFilename: Could not find MfgData0 in /proc/mtd
+    #     CMfgData::Init: GetNorPartitionFilename failed
+    #     signal SIGSEGV (11)  fault 0x00000068
+    #
+    # This did mount procfs, guarded on "[ -d $S/proc/self ]", and the guard
+    # was load-bearing without anyone meaning it to be: a sysroot prepared on a
+    # desktop HAS proc/self, because glasspole writes /proc/self/maps into it,
+    # so the guard was true and the mount never happened. Build the sysroot on
+    # the device instead and there is no proc/self, the mount fires, and the
+    # firmware stops booting — with an error naming a partition table.
+    #
+    # What is lost is /proc/self/maps, which the shim's crash reporter uses to
+    # turn a faulting address into "libFoo.so+0x1234". A crash report is a
+    # diagnostic; the mtd table is the difference between booting and not.
     chroot "$S" /bin/busybox true 2>/dev/null || {
         echo "native-helper: /bin does not resolve inside $S — is the firmware pushed?" >&2
         return 1

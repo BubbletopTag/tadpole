@@ -212,8 +212,19 @@ final class InstallFirmware implements Tools.Tool {
                 OutputStream os = new java.io.FileOutputStream(tmp);
                 try {
                     byte[] buf = new byte[1 << 16];
+                    long done = 0, mark = 0, total = ubi.getSize();
                     int n;
-                    while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                    while ((n = in.read(buf)) > 0) {
+                        os.write(buf, 0, n);
+                        done += n;
+                        /* Every 8 MB: a 51 MB copy off a tablet's flash is a
+                         * minute of nothing otherwise. */
+                        if (done - mark >= 8L << 20) {
+                            mark = done;
+                            out.println("    " + (done >> 20) + " of "
+                                        + (total >> 20) + " MB...");
+                        }
+                    }
                 } finally { os.close(); }
             } finally { in.close(); }
             f.ubi = tmp;

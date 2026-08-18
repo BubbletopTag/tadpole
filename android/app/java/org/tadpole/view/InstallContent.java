@@ -65,18 +65,48 @@ final class InstallContent implements Tools.Tool {
         File bulk = new File(Tools.sysroot(), "LF/Bulk");
         int app = 0, dl = 0, lang = 0, music = 0, asset = 0, skip = 0;
 
+        /* MANIFESTS FIRST, ONCE EACH, and this is not tidiness. Opening a pack
+         * means decompressing it, and a .lf2 is a bzip2 tar — so asking each
+         * one "what type are you" inside both passes decompressed all seventy
+         * of them TWICE, once to find the non-assets and once to find the
+         * assets, with the answer thrown away each time. On a desktop that is a
+         * slow minute; on the tablet the install sat on "firmware..." for a
+         * quarter of an hour with pass 2 grinding through packages it was about
+         * to skip. Reading the manifest once costs one decompression per pack
+         * and the passes then only open what they are actually going to
+         * extract. */
+        java.util.Map<File, String[]> manifest = new java.util.HashMap<File, String[]>();
+        out.println("  reading " + packs.size() + " manifests...");
+        int read = 0;
+        for (File f : packs) {
+            if (++read % 10 == 0) out.println("    " + read + " of " + packs.size() + "...");
+            Pack p = null;
+            try {
+                p = Pack.open(f);
+                if (p == null || p.field("PackageID").isEmpty()) { skip++; continue; }
+                manifest.put(f, new String[] { p.field("Type"), p.field("PackageID"),
+                                               p.field("Name") });
+            } catch (Exception e) {
+                out.println("  " + f.getName() + ": " + e.getMessage());
+                skip++;
+            } finally {
+                if (p != null) p.close();
+            }
+        }
+
         for (int pass = 1; pass <= 2; pass++) {
             for (File f : packs) {
+                String[] mf = manifest.get(f);
+                if (mf == null) continue;
+                String type = mf[0], pid = mf[1];
+                boolean isAsset = type.equals("DeviceAsset");
+                if (pass == 1 && isAsset) continue;
+                if (pass == 2 && !isAsset) continue;
+
                 Pack p = null;
                 try {
                     p = Pack.open(f);
-                    if (p == null) { if (pass == 1) skip++; continue; }
-                    String type = p.field("Type"), pid = p.field("PackageID");
-                    if (pid.isEmpty()) { if (pass == 1) skip++; continue; }
-
-                    boolean isAsset = type.equals("DeviceAsset");
-                    if (pass == 1 && isAsset) continue;
-                    if (pass == 2 && !isAsset) continue;
+                    if (p == null) continue;
 
                     if (type.equals("Application")) {
                         extractAs(p, new File(bulk, "ProgramFiles/" + pid));
@@ -106,7 +136,8 @@ final class InstallContent implements Tools.Tool {
                         say(out, type, pid, p.field("Name")); dl++;
                     }
                 } catch (Exception e) {
-                    if (pass == 1) { out.println("  " + f.getName() + ": " + e.getMessage()); skip++; }
+                    out.println("  " + f.getName() + ": " + e.getMessage());
+                    skip++;
                 } finally {
                     if (p != null) p.close();
                 }
@@ -145,14 +176,20 @@ final class InstallContent implements Tools.Tool {
         }
     }
 
+    /* The meta.inf files under LF/Bulk, found once. Walking that tree per
+     * asset meant walking twenty thousand files sixteen times over. */
+    private List<File> metaCache;
+
     /** lfpkg's rule for which package a DeviceAsset belongs to. */
     private File findAssetParent(File bulk, String pid) {
         String[] bits = pid.split("-");
         if (bits.length < 3) return null;
         String key = bits[1] + "-" + bits[2].replace("DA", "00");
-        List<File> metas = new ArrayList<File>();
-        findMetas(bulk, metas, 0);
-        for (File m : metas) {
+        if (metaCache == null) {
+            metaCache = new ArrayList<File>();
+            findMetas(bulk, metaCache, 0);
+        }
+        for (File m : metaCache) {
             try {
                 if (Tools.readAll(m).contains(key)) return m.getParentFile();
             } catch (IOException e) { /* unreadable: not it */ }
