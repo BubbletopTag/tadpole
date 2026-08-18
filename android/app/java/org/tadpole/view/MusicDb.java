@@ -43,15 +43,23 @@ import java.util.Locale;
  * number. Fields may be quoted because a track name may hold a comma, and two
  * of these do.
  *
- * <p>ONE THING HERE IS INFERRED RATHER THAN MEASURED, and it is flagged so the
- * next person does not mistake it for established: the CSV's paths are relative
- * ("Art/icon.png"), the album's files live in the sibling Music package rather
- * than beside the CSV, and no capture of a real music.db exists to say which
- * form the database stores. This writes GUEST-ABSOLUTE paths —
- * /LF/Bulk/Music/&lt;album package&gt;/Art/icon.png — on the reasoning that the
- * app selects IconPath and Path as separate columns and uses each directly. If
- * the album appears but its art or tracks do not, that inference is where to
- * look first, and the fix is one join away.
+ * <p>THE SCHEMA IS COPIED OFF A REAL DEVICE, and the first version of this
+ * class shows why that was not optional. That version derived the tables from
+ * the twelve queries App.so issues — every column they name was present, the
+ * database read back correctly, and the Music app ABORTED on it: SIGABRT
+ * through libstdc++'s unwinder, an uncaught exception, with no album ever
+ * drawn. What it wanted was {@code Albums.PackageID}, a column that appears in
+ * no query in the binary, so no amount of reading strings could have produced
+ * it. Two more the same: {@code Tracks.Length} is TEXT holding "59", and
+ * {@code CoverPathLargeLex} is spelled with a lowercase "ex" and is NULL.
+ *
+ * <p>The paths were wrong too, and in a way that looked reasonable. A real
+ * database keeps {@code Albums.Path} as the package directory with a trailing
+ * slash — "MULT-0x001B00E2-000000/" — and {@code IconPath} and the covers
+ * exactly as AlbumInfo.csv spells them, "Art/icon.png". This used to write
+ * guest-absolute paths on the reasoning that the app selects IconPath and Path
+ * as separate columns and uses each directly. It does not.
+ *
  */
 final class MusicDb {
 
@@ -93,44 +101,60 @@ final class MusicDb {
             /* NOT write-ahead logging. WAL leaves the content in a -wal file
              * beside the database, and the guest's SQLite is from 2013 and will
              * not read one — it would open a database that looks empty, which
-             * is the exact symptom this whole class exists to fix. DELETE
-             * journalling keeps everything in the one file.
+             * is the exact symptom this whole class exists to fix.
              *
              * AND IT IS A QUERY, NOT AN execSQL. execSQL refuses any statement
              * that returns a row, and PRAGMA journal_mode returns the mode it
-             * ended up in. Measured on the device: as execSQL it threw on the
-             * very first call, the catch below swallowed it, and music.db was
-             * left holding nothing but the android_metadata table Android
-             * creates itself — a Music app with no music in it, which is the
-             * exact symptom this class exists to remove. */
+             * ended up in. Measured: as execSQL it threw on the very first
+             * call, the catch below swallowed it, and music.db was left holding
+             * nothing but the android_metadata table Android creates itself. */
             android.database.Cursor jc = d.rawQuery("PRAGMA journal_mode=DELETE;", null);
             if (jc != null) jc.close();
-            d.execSQL("CREATE TABLE Albums (AlbumID INTEGER PRIMARY KEY, Name TEXT,"
-                    + " IconPath TEXT, Path TEXT, CoverPath TEXT, CoverPathLarge TEXT,"
-                    + " CoverPathLargeLEX TEXT, CreditsPath TEXT);");
-            d.execSQL("CREATE TABLE Tracks (TrackID INTEGER PRIMARY KEY, AlbumID INTEGER,"
-                    + " Name TEXT, Path TEXT, TrackNumber INTEGER, Length INTEGER,"
-                    + " TrackData TEXT);");
+
+            /* THESE THREE STATEMENTS ARE COPIED OFF A REAL DEVICE, not derived
+             * from the queries App.so issues, and the difference mattered.
+             * Deriving them produced a database with every column those queries
+             * name — and the Music app aborted on it, through libstdc++'s
+             * unwinder, with an uncaught exception. What it wanted was
+             * Albums.PackageID: a column NO query in the binary mentions, so no
+             * amount of reading the strings would ever have produced it.
+             *
+             * Two more that reading could not have given: Tracks.Length is
+             * TEXT and holds "59", not an integer; and CoverPathLargeLex is
+             * spelled with a lowercase "ex" and is NULL rather than empty. */
+            d.execSQL("CREATE TABLE Albums ( AlbumID INTEGER PRIMARY KEY,"
+                    + " CoverPath TEXT, CoverPathLarge TEXT, CoverPathLargeLex TEXT,"
+                    + " CreditsPath TEXT, IconPath TEXT, Name TEXT, PackageID TEXT,"
+                    + " Path TEXT)");
+            d.execSQL("CREATE TABLE Tracks ( AlbumID INTEGER, Length TEXT, Name TEXT,"
+                    + " Path TEXT, TrackData TEXT, TrackID INTEGER PRIMARY KEY,"
+                    + " TrackNumber INTEGER)");
             /* Selected with count(*) even when nobody has added anything, so it
              * has to exist or the app asks a question that errors. */
-            d.execSQL("CREATE TABLE UserTracks (TrackID INTEGER PRIMARY KEY, Name TEXT,"
-                    + " Path TEXT, Length INTEGER);");
+            d.execSQL("CREATE TABLE UserTracks ( Album TEXT, Artist TEXT, Length INTEGER,"
+                    + " Name TEXT, Path TEXT, Size INTEGER, TrackID INTEGER PRIMARY KEY,"
+                    + " TrackNumber INTEGER)");
 
             int albumId = 1, trackId = 1, nTracks = 0;
             for (Album a : albums) {
-                d.execSQL("INSERT INTO Albums (AlbumID,Name,IconPath,Path,CoverPath,"
-                        + "CoverPathLarge,CoverPathLargeLEX,CreditsPath)"
-                        + " VALUES (?,?,?,?,?,?,?,?)",
-                        new Object[] { albumId, a.name, a.icon, a.path, a.cover,
-                                       a.coverLarge, a.coverLarge, "" });
+                /* PATHS ARE RELATIVE AND Path IS THE PACKAGE DIRECTORY WITH A
+                 * TRAILING SLASH — "MULT-0x001B00E2-000000/" — with IconPath
+                 * and the covers left exactly as the CSV spells them. The
+                 * guest-absolute form this used to write was a guess, and it
+                 * was wrong. */
+                d.execSQL("INSERT INTO Albums (AlbumID,CoverPath,CoverPathLarge,"
+                        + "CoverPathLargeLex,CreditsPath,IconPath,Name,PackageID,Path)"
+                        + " VALUES (?,?,?,?,?,?,?,?,?)",
+                        new Object[] { albumId, a.cover, a.coverLarge, null,
+                                       "", a.icon, a.name, a.pkg, a.path });
                 for (Track t : a.tracks) {
-                    d.execSQL("INSERT INTO Tracks (TrackID,AlbumID,Name,Path,TrackNumber,"
-                            + "Length,TrackData) VALUES (?,?,?,?,?,?,?)",
-                            new Object[] { trackId++, albumId, t.name, t.path,
-                                           t.number, t.length, "" });
+                    d.execSQL("INSERT INTO Tracks (AlbumID,Length,Name,Path,TrackData,"
+                            + "TrackID,TrackNumber) VALUES (?,?,?,?,?,?,?)",
+                            new Object[] { albumId, t.length, t.name, t.path,
+                                           t.data, trackId++, t.number });
                     nTracks++;
                 }
-                out.println("  music: " + a.name + " (" + a.tracks.size() + " tracks)");
+                out.println("  music: " + a.name.trim() + " (" + a.tracks.size() + " tracks)");
                 albumId++;
             }
             out.println("  music: " + albums.size() + " album(s), " + nTracks + " track(s)");
@@ -149,12 +173,12 @@ final class MusicDb {
     /* ---- the CSV ---------------------------------------------------------- */
 
     private static final class Album {
-        String name = "", icon = "", cover = "", coverLarge = "", path = "";
+        String name = "", icon = "", cover = "", coverLarge = "", path = "", pkg = "";
         final List<Track> tracks = new ArrayList<Track>();
     }
     private static final class Track {
-        String name = "", path = "";
-        int number, length;
+        String name = "", path = "", length = "", data = "";
+        int number;
     }
 
     /**
@@ -166,31 +190,39 @@ final class MusicDb {
      */
     private static Album parse(File csv, File info, File musicDir) throws IOException {
         File audio = sibling(info, musicDir);
-        String base = "/LF/Bulk/Music/" + audio.getName();
-
         Album a = new Album();
-        a.path = base;
-        for (String line : Tools.readAll(csv).split("\r?\n")) {
+        a.pkg  = audio.getName();
+        a.path = a.pkg + "/";
+
+        /* SPLIT ON \n AND KEEP THE \r, and do not trim the fields. That is not
+         * sloppiness, it is fidelity: the database a real device carries has
+         * Name = "LeapFrog Learning Songs\r" and TrackData = "\r", because
+         * whatever wrote it took the CSV's fields verbatim and the file has DOS
+         * line endings. Reproducing that exactly costs nothing and removes a
+         * whole class of question about whether a difference matters. */
+        for (String line : Tools.readAll(csv).split("\n")) {
             if (line.trim().isEmpty()) continue;
             List<String> f = fields(line);
             while (f.size() < 5) f.add("");
             if (f.get(0).trim().isEmpty()) {          /* the album header row */
-                a.icon       = join(base, f.get(1));
-                a.coverLarge = join(base, f.get(2));
-                a.cover      = join(base, f.get(3));
-                a.name       = f.get(4).trim();
+                a.icon       = f.get(1);
+                a.coverLarge = f.get(2);
+                a.cover      = f.get(3);
+                a.name       = f.get(4);
                 continue;
             }
             Track t = new Track();
-            try { t.number = Integer.parseInt(f.get(0).trim()); } catch (NumberFormatException e) { continue; }
-            t.name = f.get(1).trim();
-            t.path = join(base, f.get(2));
-            try { t.length = Integer.parseInt(f.get(3).trim()); } catch (NumberFormatException e) { t.length = 0; }
+            try { t.number = Integer.parseInt(f.get(0).trim()); }
+            catch (NumberFormatException e) { continue; }
+            t.name   = f.get(1);
+            t.path   = f.get(2);
+            t.length = f.get(3).trim();      /* TEXT on the device: "59" */
+            t.data   = f.get(4);             /* "\r", and that is what it holds */
             /* Only tracks whose audio is actually there: an album that lists a
              * song the install did not bring is a row that plays silence. */
-            if (new File(audio, f.get(2).trim()).isFile()) a.tracks.add(t);
+            if (new File(audio, t.path.trim()).isFile()) a.tracks.add(t);
         }
-        if (a.name.isEmpty()) a.name = audio.getName();
+        if (a.name.isEmpty()) a.name = a.pkg;
         return a;
     }
 
@@ -206,13 +238,6 @@ final class MusicDb {
             }
         }
         return info;
-    }
-
-    private static String join(String base, String rel) {
-        rel = rel.trim();
-        if (rel.isEmpty()) return "";
-        if (rel.startsWith("/")) return rel;
-        return base + "/" + rel;
     }
 
     /** Comma-separated, with quoted fields — two track names contain commas. */
