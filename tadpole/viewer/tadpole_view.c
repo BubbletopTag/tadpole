@@ -70,6 +70,7 @@ static int tp_fifo_fd(const char *path, int want_read)
 #include "tadpole_port.h"
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <time.h>                /* android_helper_present: the pid file's age */
 #include <unistd.h>
 #ifdef __linux__
 #include <dirent.h>              /* guest_sweep_stragglers walks /proc */
@@ -2742,10 +2743,25 @@ static int guest_external(void)
 	return 1;
 }
 
+#ifdef __ANDROID__
+/* Defined with the native-helper interface further down, which belongs beside
+ * android_guest_argv() and so lands after the two functions here that need it. */
+static int   g_guest_native;
+static pid_t android_native_request(const char *req);
+#endif
+
 static int guest_alive(void)
 {
 	int st;
 	if (g_guest <= 0) return 0;
+#ifdef __ANDROID__
+	/* NOT OUR CHILD AND NOT OUR UID. The helper's guest runs as root; waitpid
+	 * on it returns -1/ECHILD for ever, which never equals g_guest, so the
+	 * plain path below would call it alive long after it had gone. The lock
+	 * file is what says. */
+	if (g_guest_native)
+		return guest_external();
+#endif
 	if (waitpid(g_guest, &st, WNOHANG) == g_guest) { g_guest = 0; return 0; }
 	return 1;
 }
@@ -2897,6 +2913,18 @@ static void guest_stop(void)
 	 * logo on screen over a dead system, which reads as a hang. */
 	boot_stop();
 
+#ifdef __ANDROID__
+	/* AN APP CANNOT SIGNAL A ROOT PROCESS. The helper's guest is not ours to
+	 * kill — kill() answers EPERM — so Stop Emulation asks the same way it
+	 * started it. The sweep below still runs, and still finds nothing, which
+	 * is the correct outcome rather than a wasted one: it is also what clears
+	 * a guest left behind by a PREVIOUS helper that has since gone away. */
+	if (g_guest_native) {
+		android_native_request("stop");
+		g_guest_native = 0;
+		g_guest = 0;
+	}
+#endif
 	if (g_guest > 0) {
 		kill(-g_guest, SIGTERM);
 		for (i = 0; i < 40; i++) {             /* up to 2s to go quietly */
@@ -3022,6 +3050,109 @@ static char *const *android_guest_argv(char *const argv[], char *path,
 	g_gp_argv[n] = NULL;
 	return g_gp_argv;
 }
+
+/* ---- the guest this device can run without an engine ----------------------
+ *
+ * On armeabi-v7a there IS no engine — dynarmic has no 32-bit host backend, so
+ * the APK carries no libglasspole.so and the branch above can only apologise.
+ * But the app process is itself AArch32 and so is the guest, and the device's
+ * own kernel will run those binaries directly given a chroot on the sysroot.
+ * See android/NOTES-arm32.md, "Amended", for why the objections to that turn
+ * out to be objections to doing it from INSIDE this process.
+ *
+ * ONE OF THEM REALLY IS ABOUT THIS PROCESS, AND IT IS FATAL. SELinux does not
+ * let untrusted_app execute a file it wrote, chroot needs CAP_SYS_CHROOT, and
+ * `su` refuses us — all three measured on the device. So the viewer cannot do
+ * this itself, at all, ever. It asks something that is already root instead:
+ * android/native-helper.sh, which watches for the file written below.
+ *
+ * A FILE RATHER THAN A SOCKET, following the screenshot trigger this file
+ * already has — the thing on the other end is a shell script, and a shell
+ * script can read a file.
+ *
+ * The guest the helper starts is not our child; it is not even our uid. So it
+ * is tracked exactly like the one `tadpole.sh --app` starts beside us — through
+ * the pid in .lock, which guest_external() already reads and which
+ * guest_alive() below defers to. Everything downstream is unchanged, because
+ * try_map() has never cared who started the guest.
+ */
+/* g_guest_native — the guest belongs to the helper, not to us — is declared up
+ * with guest_alive(), which is the first thing that has to ask.
+ *
+ * Is anyone listening? The pid file is rewritten every pass of the helper's
+ * loop, so its AGE is the answer and its existence is not: the arena lives in
+ * the app's data directory and survives a reboot, so a stale one from the last
+ * session would otherwise make every launch wait for a reply that is never
+ * coming. */
+static int android_helper_present(void)
+{
+	char path[600];
+	struct stat st;
+
+	snprintf(path, sizeof(path), "%s/helper.pid", g_dir);
+	if (stat(path, &st) != 0)
+		return 0;
+	return (long)(time(NULL) - st.st_mtime) < 10;
+}
+
+/* Write one request and wait for the helper to name the guest it started.
+ * Returns the pid, or 0. The wait is generous because the helper does not
+ * answer until the guest has built the arena — by the time a pid comes back
+ * there is something to map, which is what stops the front end reporting
+ * "running" over a black window. */
+static pid_t android_native_request(const char *req)
+{
+	char path[600];
+	FILE *f;
+	int i;
+
+	snprintf(path, sizeof(path), "%s/.lock", g_dir);
+	unlink(path);
+	snprintf(path, sizeof(path), "%s/guest.req", g_dir);
+	if (!(f = fopen(path, "w"))) return 0;
+	fprintf(f, "%s\n", req);
+	fclose(f);
+
+	if (!strcmp(req, "stop"))
+		return 0;
+
+	snprintf(path, sizeof(path), "%s/.lock", g_dir);
+	for (i = 0; i < 300; i++) {          /* up to 30s: a cold boot is slow */
+		int pid = 0;
+		if ((f = fopen(path, "r")) != NULL) {
+			if (fscanf(f, "%d", &pid) != 1) pid = 0;
+			fclose(f);
+			if (pid > 0) return (pid_t)pid;
+		}
+		SDL_Delay(100);
+	}
+	return 0;
+}
+
+/* Turn the argv the front end would have handed tadpole.sh into one request
+ * line. Same reading as android_guest_argv's, so the two cannot disagree about
+ * what was asked for. */
+static pid_t android_native_launch(char *const argv[])
+{
+	char req[1100];
+	int i;
+
+	for (i = 1; argv[i]; i++) {
+		if (!strcmp(argv[i], "--boot")) {
+			snprintf(req, sizeof(req), "boot");
+			return android_native_request(req);
+		}
+		if (!strcmp(argv[i], "--run") && argv[i + 1]) {
+			snprintf(req, sizeof(req), "run %s", argv[i + 1]);
+			return android_native_request(req);
+		}
+		if (!strcmp(argv[i], "--app")) {
+			ui_status("launch titles from the home screen on Android");
+			return 0;
+		}
+	}
+	return 0;
+}
 #endif  /* __ANDROID__ */
 
 static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
@@ -3034,7 +3165,19 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 	snprintf(path, sizeof(path), "%s/%s", g_projdir, script);
 #ifdef __ANDROID__
 	if (as_guest) {
-		char *const *gav = android_guest_argv(argv, path, sizeof path);
+		char *const *gav;
+		/* THE HELPER WINS WHEN IT IS THERE, because on this ABI it is the only
+		 * thing that can run a guest at all — and on an ABI that has an engine
+		 * it will not be running. Asked before android_guest_argv() so that
+		 * "no ARM engine" is not reported to somebody who has an answer to it
+		 * loaded and waiting. */
+		if (android_helper_present()) {
+			pid_t np = android_native_launch(argv);
+			if (np > 0) { g_guest_native = 1; return np; }
+			ui_status("the native helper did not start it");
+			return -1;
+		}
+		gav = android_guest_argv(argv, path, sizeof path);
 		if (!gav) return -1;
 		argv = gav;
 	} else {
