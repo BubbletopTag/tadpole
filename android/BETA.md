@@ -1,13 +1,13 @@
-# Tadpole for Android — private beta
+# Tadpole for Android — beta
 
-A LeapPad2 emulator on a phone. This is early: the emulator works, the setup
-tooling does not, so getting your system files onto the device is a job for a
-computer and `adb`.
+A LeapPad2 emulator on a phone or tablet. It now sets itself up: it downloads
+its own system files, installs them, and boots — no computer, no `adb`, and no
+root.
 
 **Tadpole contains no LeapFrog code, and this APK contains none either.** You
-supply the system files and the games, from a device you own. That is not
-paperwork — nothing below will work until you do, because there is nothing in
-the app to fall back on.
+supply the system files and the games. The system files come from LeapFrog's
+own public content server, which is where the device itself got them; games
+come from cartridges or downloads you own.
 
 ---
 
@@ -15,26 +15,38 @@ the app to fall back on.
 
 | | |
 |---|---|
-| A phone | Android 8.0 or newer, **arm64** |
-| On it | Developer options → USB debugging |
-| On a computer | `adb` (your distribution's `android-tools`, or Google's platform-tools) |
-| Also on that computer | A working desktop Tadpole, set up from **your own** LeapPad2's firmware |
+| A device | Android 8.0 or newer |
+| On it | Wi-Fi, and about 1.5 GB free |
+| Optional | A computer with `adb`, only if you want to sideload games |
 
-That last row is the real prerequisite. The phone build cannot install firmware
-itself yet — see [Why the setup screens do not work](#why-the-setup-screens-do-not-work)
-— so it needs a `runtime/sysroot` that a desktop Tadpole has already built.
+**No root.** The guest runs inside the app's own sandbox, under the same
+seccomp filter Android puts every app under. There is a root helper script in
+the repository and it still works, but nothing needs it any more.
 
-**arm64 specifically.** The APK installs on a 32-bit-only device and the
-interface runs, but nothing will emulate: the ARM engine is arm64 and there is
-no 32-bit build of it. If `adb shell getprop ro.product.cpu.abilist64` prints
-nothing, this is not going to work on that phone.
+### About your device's CPU — read this bit
+
+This is the one thing that decides whether it will work for you.
+
+- **32-bit ARM (armeabi-v7a)** — the good case, and the one this beta is tested
+  on. The LeapPad2's own binaries are 32-bit ARM, so on a 32-bit device they
+  run **natively**: there is no emulator in the loop at all, which is why this
+  is usable on cheap hardware.
+- **64-bit ARM (arm64)** — the app installs and the interface runs, but the
+  ARM engine has not been built for Android yet, so the wizard will tell you
+  "No ARM engine installed". Whether the native path also works from a 64-bit
+  app process is **untested** — if you try it, that is exactly the report worth
+  sending.
+
+Check with `adb shell getprop ro.product.cpu.abilist`, or any CPU-info app.
+
+Tested on: an AOSP 8.1 tablet, armeabi-v7a only, Mali-T720.
 
 ---
 
 ## 1. Install
 
 ```sh
-adb install -r Tadpole-android-0.1-beta.apk
+adb install -r Tadpole-android-0.2-beta.apk
 ```
 
 Launch it once. It will send you to a **Settings** page asking for *All files
@@ -47,9 +59,27 @@ no firmware yet.
 
 ---
 
-## 2. Put your firmware on the phone
+## 2. Get the system files
 
-### The easy way
+### On the device, with no computer — do this one
+
+Open **Help → Setup Wizard**, go to *System files*, and press **Online System
+Update**. It downloads the system packages from LeapFrog's own content server
+and installs them: firmware, apps, widgets, language pack, music.
+
+Expect it to take a while — roughly 350 MB and about twenty minutes on slow
+hardware — and expect it to tell you where it is the whole time. Anything it
+has already downloaded is kept, so if it fails part way, press it again and it
+picks up rather than starting over.
+
+When it says *Installed. Tadpole can boot the system menu now*, close the
+panel and use **File → Run System Menu**. The LeapPad's own first-boot flow
+runs: language, date, and a profile.
+
+The wizard's **Didj support** page works the same way, if you want Didj titles:
+two Download buttons, no computer.
+
+### From a desktop Tadpole you already have
 
 If you have this repository checked out beside your desktop Tadpole:
 
@@ -138,17 +168,32 @@ holding it.
 
 ---
 
-## Why the setup screens do not work
+## What is not ported yet
 
-Everything in *File* and *Options* that installs, scans or downloads anything is
-a shell or Python script, and Android has neither — those menu items report that
-rather than pretending. Firmware install additionally needs to read a UBIFS
-volume, which needs a UBIFS reader with LZO decompression that does not exist in
-this codebase on any platform; `tools/install-firmware.py` has always said as
-much.
+The setup tooling used to be shell and Python, which Android has neither of, so
+every menu item that installed anything reported that rather than pretending.
+It has since been rewritten in Java — including a UBIFS reader with LZO and
+bzip2 decompression, which is what reading a LeapPad2 firmware image actually
+requires. Install, erase, scan, content, Didj support and the online update all
+work on the device now.
 
-So for now: **set up on a desktop, play on a phone.** That is the reason this
-document exists.
+Three things still say "not available on Android yet", honestly rather than
+half-working:
+
+- **micromods** — per-title extras; a lot of network etiquette to get right.
+- **cart2tar** — converting a raw cartridge dump, which is a desktop job
+  anyway: the dump arrives over FTP from a real LeapPad.
+- **make-profile** — and this one does not matter much. The guest creates its
+  own profile in its own first-boot flow, which is what you will see.
+
+Known rough edges in this build:
+
+- The progress bar fills, then restarts for the next phase of an install.
+  Honest per phase, slightly odd end to end.
+- If the guest is killed uncleanly, a stale `.lock` can leave *Run System Menu*
+  greyed out as "running". Restart the app.
+- Didj titles need their compatibility files, which the wizard's **Didj
+  support** page downloads for you.
 
 ---
 
