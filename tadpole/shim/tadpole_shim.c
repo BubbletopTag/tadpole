@@ -239,6 +239,25 @@ static u32 g_bpp = 32;
  * from the guest's own mmap2 calls, not chosen. */
 #define LF_VMEM_MIN  (8 * 1024 * 1024)
 
+/* AND THE VIDEO LAYER MAPS AT THE DIDJ'S DRAM BASE, which is 0x20000000.
+ *
+ * libDisplay maps the 2D layer at the offset get_address gave it, plainly —
+ * layer0 comes back at offset 0. The video/GL layer does not: it adds the
+ * physical base of DRAM first, so with get_address answering 0 it asks for
+ * offset 0x20000000 and gets a mapping 512 MB past the end of an 8 MB file.
+ * Nothing fails at that point; the first store into it takes SIGBUS, four
+ * seconds into a boot that had already drawn its copyright screen.
+ *
+ * Proved rather than assumed: making get_address answer 0x600000 for that
+ * layer moved the request to 0x20600000, exactly 0x20000000 higher.
+ *
+ * So the arena reaches past that base, SPARSELY. It is modelling physical
+ * memory and this is where the Didj's physical memory is; a hole costs nothing
+ * until something writes into it, and only the video layer ever does. The
+ * visible planes stay at the bottom, which is what keeps tools/fbshot.py and
+ * the viewer reading a couple of megabytes rather than half a gigabyte. */
+#define LF_VMEM_TOP  0x20100000u
+
 
 static int  g_ready;
 static int  g_debug;
@@ -791,6 +810,11 @@ static void init(void)
 			long want = (long)(g_w * g_h * (g_bpp / 8) * NBUF);
 			if (want < LF_VMEM_MIN)
 				want = LF_VMEM_MIN;
+			/* Only for the device that needs it: half a gigabyte of hole is
+			 * cheap but it is not free of surprise, and no LF2000 maps
+			 * anywhere near there. */
+			if (g_ev == g_ev_lf1000 && want < (long)LF_VMEM_TOP)
+				want = (long)LF_VMEM_TOP;
 			ftruncate(fd, want);
 		}
 		real_close(fd);
@@ -2001,8 +2025,8 @@ static int mlc_ioctl_idx(ulong req, void *arg, int idx, int *handled)
 	if (g_debug) {
 		char b[96];
 		snprintf(b, sizeof(b),
-		         "[tadpole] mlc: accepted ioctl %08lx nr=%lu arg=%lu -> %d\n",
-		         req, req & 0xFF, (ulong)arg, (int)g_mlc_dflt);
+		         "[tadpole] mlc: layer%d nr=%lu arg=%lu -> %d\n",
+		         idx, req & 0xFF, (ulong)arg, (int)g_mlc_dflt);
 		dbg(b);
 	}
 	/* NOT 0. Every _IO('m', n) with a null argument seen so far has been a

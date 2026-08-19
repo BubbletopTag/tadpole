@@ -71,7 +71,7 @@ enum : uint32_t {
      * ash asks for `>&2`, gets ENOSYS, and RETRIES FOREVER — 21.9 MB of
      * "sh: 0: Function not implemented" in twenty seconds. Shell redirection
      * is not exotic; the device's own init scripts are full of it. */
-    SYS_dup = 41, SYS_dup2 = 63,
+    SYS_dup = 41, SYS_dup2 = 63, SYS_pipe = 42,
     /* POSIX message queues. Brio's task communication runs on these. */
     SYS_mq_open = 274, SYS_mq_unlink = 275, SYS_mq_timedsend = 276,
     SYS_mq_timedreceive = 277, SYS_mq_notify = 278, SYS_mq_getsetattr = 279,
@@ -375,6 +375,7 @@ const char *name_of(uint32_t nr) {
         case SYS_clone: return "clone";             case SYS_futex: return "futex";
         case SYS_gettid: return "gettid";           case SYS_fcntl64: return "fcntl64";
         case SYS_dup: return "dup";                 case SYS_dup2: return "dup2";
+        case SYS_pipe: return "pipe";
         case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
         case SYS_getdents64: return "getdents64";   case SYS_getdents: return "getdents";
         case SYS_mq_open: return "mq_open";         case SYS_mq_unlink: return "mq_unlink";
@@ -1141,6 +1142,45 @@ void gp_syscall(Thread &t) {
         GuestFd *g = m.Fd((int)a0);
         if (!g) { ret = GP_EBADF; break; }
         close_fd(g);
+        ret = 0;
+        break;
+    }
+
+    /* pipe(int fds[2]) — the read end first, then the write end.
+     *
+     * ARM's pipe() takes a pointer and returns 0, unlike some architectures
+     * where the pair comes back in two registers. Both descriptors are
+     * installed before either address is written, so a failure part way
+     * through cannot leave the guest holding one usable fd and one number
+     * that means nothing.
+     *
+     * WHAT NEEDED IT: every guest shell pipeline and every $(...), and — the
+     * reason it turned up now — Tadpole's shim, which hands each reader of an
+     * evdev node its own private pipe fed from the shared FIFO. Without this
+     * the Didj could not read its buttons and asserted in
+     * CEventModule::ButtonPowerUSBTask before drawing anything. */
+    case SYS_pipe: {
+        gp_file *rf = nullptr, *wf = nullptr;
+        int r0 = gp_pipe(&rf, &wf);
+        if (r0 < 0) { ret = r0; break; }
+        int rfd = m.AllocFd(rf, nullptr, "pipe:[r]");
+        if (rfd < 0) { gp_close(rf); gp_close(wf); ret = rfd; break; }
+        int wfd = m.AllocFd(wf, nullptr, "pipe:[w]");
+        if (wfd < 0) {
+            if (GuestFd *g = m.Fd(rfd)) close_fd(g);
+            gp_close(wf);
+            ret = wfd;
+            break;
+        }
+        uint32_t *out = (uint32_t *)m.Ptr(a0);
+        if (!out) {
+            if (GuestFd *g = m.Fd(rfd)) close_fd(g);
+            if (GuestFd *g = m.Fd(wfd)) close_fd(g);
+            ret = GP_EFAULT;
+            break;
+        }
+        out[0] = (uint32_t)rfd;
+        out[1] = (uint32_t)wfd;
         ret = 0;
         break;
     }

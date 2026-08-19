@@ -300,7 +300,35 @@ tad_activate_device() {
         "${TADPOLE_PYTHON:-python3}" "$(tad_proj_dir)/tools/real-libs.py" \
             --quiet >/dev/null 2>&1 || true
     fi
+    tad_refresh_shims "$want"
     return 0
+}
+
+# THE SHIM BINARIES ARE PER DEVICE TOO, and unlike the helper libraries they
+# cannot be re-derived from the firmware — they have to be COMPILED. Each links
+# against the live device's libc.so.0, so a checkout that has switched is
+# carrying another machine's shim. The symptom is the worst kind: the guest
+# starts and then does nothing at all. No assert, no crash, no output.
+#
+# tadpole/Makefile stamps runtime/shimlibs/.device on every `make shim`, so
+# this is a string compare and usually a no-op. Rebuild when there is a
+# compiler; say the one command when there is not.
+tad_refresh_shims() {
+    local want="$1" proj stamp have
+    proj="$(tad_proj_dir)"
+    stamp="$proj/runtime/shimlibs/.device"
+    [ -d "$proj/tadpole" ] || return 0
+    have="$(cat "$stamp" 2>/dev/null)"
+    [ "$have" = "$want" ] && return 0
+    if command -v clang >/dev/null 2>&1; then
+        echo "tadpole: rebuilding the shim for $want" >&2
+        ( cd "$proj/tadpole" &&
+          make shim shimz shimegl shimpkg shimpa ) >/dev/null 2>&1 ||
+            echo "tadpole: the shim rebuild failed" >&2
+    else
+        echo "tadpole: runtime/shimlibs was built for ${have:-another device}," >&2
+        echo "  not $want. cd tadpole && make shim shimz shimegl shimpkg shimpa" >&2
+    fi
 }
 
 # Park the live tree without bringing another one in. Used by setup-sysroot.sh

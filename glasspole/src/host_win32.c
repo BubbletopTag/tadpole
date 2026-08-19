@@ -528,6 +528,37 @@ static int fifo_lookup(const char *path)
     return -1;
 }
 
+/* CreatePipe gives a matched pair of HANDLEs with no name and no filesystem
+ * entry, which is exactly the POSIX semantic. The gp_file wrapper is the plain
+ * one — no `pipe` flag and no `serves` index — because those exist for the
+ * NAMED pipes that stand in for FIFOs, and an anonymous pipe needs neither a
+ * lookup table nor a path.
+ *
+ * Not inheritable: both ends are private to this process, matching the
+ * close-on-exec the POSIX side sets. */
+int gp_pipe(gp_file **rd, gp_file **wr)
+{
+    HANDLE hr = NULL, hw = NULL;
+    gp_file *r, *w;
+
+    if (!CreatePipe(&hr, &hw, NULL, 0))
+        return err();
+    r = calloc(1, sizeof *r);
+    w = calloc(1, sizeof *w);
+    if (!r || !w) {
+        free(r); free(w);
+        CloseHandle(hr); CloseHandle(hw);
+        return GP_ENOMEM;
+    }
+    r->h = hr;
+    w->h = hw;
+    InitializeSRWLock(&r->lock);
+    InitializeSRWLock(&w->lock);
+    *rd = r;
+    *wr = w;
+    return 0;
+}
+
 int gp_mkfifo(const char *path, uint32_t mode)
 {
     const char *base = strrchr(path, '/');

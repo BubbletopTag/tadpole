@@ -111,6 +111,27 @@ int gp_open(const char *path, int flags, uint32_t mode, gp_file **out) {
     return 0;
 }
 
+int gp_pipe(gp_file **rd, gp_file **wr) {
+    int fds[2];
+#ifdef __linux__
+    if (pipe2(fds, O_CLOEXEC) != 0) return err();
+#else
+    if (pipe(fds) != 0) return err();
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#endif
+    gp_file *r = calloc(1, sizeof *r), *w = calloc(1, sizeof *w);
+    if (!r || !w) {
+        free(r); free(w); close(fds[0]); close(fds[1]);
+        return GP_ENOMEM;
+    }
+    r->fd = fds[0];
+    w->fd = fds[1];
+    *rd = r;
+    *wr = w;
+    return 0;
+}
+
 int gp_close(gp_file *f) {
     if (!f) return GP_EBADF;
     int r = close(f->fd) == 0 ? 0 : err();

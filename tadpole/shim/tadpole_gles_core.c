@@ -217,8 +217,23 @@ static int g_tint = -1;
  * TADPOLE_GL_VIEW="x,y,w,h" overrides the rectangle; default is the full panel
  * so nothing changes for content that really is full-screen.
  */
+/* THE PANEL, AND IT IS NOT THE SAME PANEL ON EVERY DEVICE.
+ *
+ * 480x272 is the LeapPad2's and the Leapster GS's. The Didj is 320x240, and
+ * its copy of this rasteriser is a separate library — see the
+ * libopengles_lite target in the Makefile — so it is compiled with its own
+ * values rather than either of us learning a runtime size we would then have
+ * to thread through g_back, g_zbuf and every scanline loop.
+ *
+ * Getting it wrong does not fail, it SHEARS: the rasteriser writes rows 1920
+ * bytes apart into a framebuffer whose rows are 1280, and the Didj's country
+ * picker came out as two overlapping copies of itself sliding left. */
+#ifndef FB_W
 #define FB_W 480
+#endif
+#ifndef FB_H
 #define FB_H 272
+#endif
 
 /* The layer rectangle, defined next to the viewport logic further down but
  * declared here because the presenter and the HLE forwarding need it.

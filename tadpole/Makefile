@@ -310,7 +310,17 @@ need-rootfs:
 	  exit 1; \
 	fi
 
-shim: $(SHIM_OUT)
+shim: $(SHIM_OUT) shim-stamp
+
+# WHICH DEVICE THESE WERE BUILT FOR. Every shim here links against
+# $(GUESTLIBS)/libc.so.0, which is the LIVE device's — so the binaries are per
+# device, and a checkout that switches to another one is carrying the wrong
+# ones until this runs again. runtime/setup-sysroot.sh reads this stamp and
+# says so rather than leaving a boot that dies with no message.
+.PHONY: shim-stamp
+shim-stamp:
+	@bash -c '. ../runtime/device.sh 2>/dev/null; tad_active_device' \
+	    > $(SHIMLIBS)/.device 2>/dev/null || true
 
 asound: $(ASOUND_OUT)
 
@@ -513,6 +523,7 @@ $(SHIMLIBS)/libopengles_lite.so: $(GLES_SRC) $(EGL_SRC) shim/tadpole_glcmd.h \
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-Wno-incompatible-library-redeclaration \
 		-fno-stack-protector -fno-builtin \
+		-DFB_W=320 -DFB_H=240 \
 		-fuse-ld=lld -Wl,-soname,libopengles_lite.so -o $@ \
 		$(GLES_SRC) $(EGL_SRC) $(GUESTLIBS)/libc.so.0
 	@echo "built $@"

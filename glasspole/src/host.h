@@ -220,6 +220,21 @@ int   gp_sync(gp_file *f);
  * something does, the symptom will be silence rather than an error. */
 int   gp_mkfifo(const char *utf8_path, uint32_t mode);
 
+/* An ANONYMOUS pipe: *rd reads what is written to *wr, and both are ordinary
+ * gp_files that gp_read/gp_write/gp_close work on.
+ *
+ * WHY IT IS HERE AT ALL, given gp_mkfifo already is: the guest's own shell
+ * needs it for every pipeline and every $(...), and Tadpole's shim needs it
+ * per reader of an evdev node — it hands each opener a private pipe fed from
+ * the shared FIFO so that concurrent readers do not steal each other's events.
+ * Without it the Didj's AppManager cannot read its buttons at all:
+ *     !ASSERT: [6] CEventModule::ButtonPowerUSBTask: reading switch state failed
+ * and the shell dies with "sh: pipe call failed".
+ *
+ * Both ends are close-on-exec, matching gp_open. A guest that wants one to
+ * survive an exec clears the flag itself, which is what execve expects. */
+int   gp_pipe(gp_file **rd, gp_file **wr);
+
 /* chmod(2). The mode is Linux permission bits.
  *
  * ONLY THE WRITE BIT CROSSES. Windows has no owner/group/other and no execute

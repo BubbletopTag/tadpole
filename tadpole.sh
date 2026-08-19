@@ -40,6 +40,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # either way; nothing here needs to know which of the two it got.
 PROJ="$HERE"
 . "$HERE/tools/lib-deps.sh"
+[ -n "${TADPOLE_QEMU:-}" ] && TADPOLE_QEMU_EXPLICIT=1
 QEMU="$(tad_qemu || true)"
 if [ -z "$QEMU" ]; then
     echo "tadpole: no ARM engine — neither glasspole nor qemu-arm." >&2
@@ -127,6 +128,30 @@ if [ -n "$_res" ] && [ "$_res" != "$(tad_active_device)" ] \
     tad_activate_device "$_res" >/dev/null && echo "tadpole: device is now $_res"
 fi
 tad_load_device || exit 1
+
+# EVERY LAUNCH, not only after a switch. tad_activate_device() calls this too,
+# but a checkout can be sitting on the right device with the wrong shim — built
+# for another one and never rebuilt because nothing switched. It is a string
+# compare against runtime/shimlibs/.device and costs nothing when they agree.
+tad_refresh_shims "$DEV_ID"
+
+# A DEVICE MAY NAME THE ENGINE IT NEEDS, and exactly one does.
+#
+# Glasspole runs every LeapPad and the Leapster GS one-to-one with qemu-arm,
+# which is why it is the default. The Didj gets as far as its copyright screen
+# there and then stops, with no assert, no crash and no GL draw calls at all —
+# the same binaries reach the country picker under qemu-arm. That is a
+# glasspole bug worth finding, and until it is found, pretending otherwise
+# would mean shipping a device that looks broken for a reason that is not its.
+#
+# An explicit TADPOLE_QEMU still wins: this is a default, not a lock, and
+# running the Didj on glasspole is exactly how the bug gets chased.
+if [ -n "${DEV_ENGINE:-}" ] && [ -z "${TADPOLE_QEMU_EXPLICIT:-}" ]; then
+    case "$DEV_ENGINE" in
+        qemu) _q="$(command -v qemu-arm 2>/dev/null || true)"
+              [ -n "$_q" ] && QEMU="$_q" && export TADPOLE_QEMU="$QEMU" ;;
+    esac
+fi
 
 # STAMP AN OLDER TREE WITH ITS OWN NAME, ONCE.
 #
@@ -294,8 +319,19 @@ if [ "${DEV_HAS_QT:-0}" = 1 ]; then
     # land in the same process. Checked, not assumed — see the Makefile.
     LIBS="$HERE/runtime/shimlibs-egl:$HERE/runtime/shimlibs-pkg:$HERE/runtime/libs"
 else
-    LIBS="$HERE/runtime/shimlibs-z:$HERE/runtime/shimlibs:$HERE/runtime/libs"
-    [ "$TADPOLE_GL" != 0 ] && LIBS="$HERE/runtime/shimlibs-gl:$LIBS"
+    # DEV_GUEST_LIBS goes in the MIDDLE: after the shim directories, which have
+    # to win for the names they impersonate, and before the flattened
+    # runtime/libs. A device whose system tree is not under /LF declares its own
+    # directories there — see runtime/devices/didj.conf for why they cannot
+    # simply be left in DEV_ENV.
+    LIBS="$HERE/runtime/shimlibs-z:$HERE/runtime/shimlibs"
+    LIBS="$LIBS${DEV_GUEST_LIBS:+:$DEV_GUEST_LIBS}:$HERE/runtime/libs"
+    # NOT WHEN THE DEVICE HAS ONE COMBINED GL LIBRARY. shimlibs-gl holds a
+    # separate libEGL and libGLESv1_CM; a device that wants both in one object
+    # gets it installed into its own tree instead, and adding this directory
+    # would put a second EGL in the process.
+    [ "$TADPOLE_GL" != 0 ] && [ "${DEV_GL_COMBINED:-0}" != 1 ] &&
+        LIBS="$HERE/runtime/shimlibs-gl:$LIBS"
 fi
 VIEWER="$HERE/tadpole/viewer/tadpole-view"
 
@@ -621,8 +657,17 @@ guest() {
     #     qemu-arm: /usr/bin/dbus-daemon: Invalid ELF image for this architecture
     # and the same trap is waiting for every other common name. An absolute
     # path here means a path INSIDE the guest; look there first.
+    # AND THE SYSROOT IS PART OF THE GUEST TOO. The rootfs is the firmware
+    # image; anything that arrived as a PACKAGE lives in the assembled tree
+    # instead, and on the Didj that includes the shell itself —
+    # /Didj/Base/bin/AppManager is in DIDJ-0x000E000A-000001.lfp, not in the
+    # JFFS2 image. Looking only in the rootfs left qemu with a guest path it
+    # tried to open on the host:
+    #     Error while loading /Didj/Base/bin/AppManager: No such file or directory
     case "$bin" in
-        /*) [ -e "$ROOTFS$bin" ] && bin="$ROOTFS$bin" ;;
+        /*) if   [ -e "$ROOTFS$bin"  ]; then bin="$ROOTFS$bin"
+            elif [ -e "$SYSROOT$bin" ]; then bin="$SYSROOT$bin"
+            fi ;;
     esac
     ( cd "$SYSROOT"
       # -s 64MB: qemu-user's default 8MB main stack is not enough. Brio and

@@ -1140,7 +1140,15 @@ def build_sysroot_didj(rootfs):
     # portaudio stat()s /dev/dsp before opening it, so a node that does not
     # exist is never opened and never intercepted. An ordinary file makes the
     # stat succeed; nothing is ever written to it.
-    for f in ("dev/dsp",):
+    # dsp        portaudio stat()s it before opening; the shim answers the
+    #            OSS ioctls and forwards the samples.
+    # layer0..2  the MLC's three planes — the shim maps them onto the same
+    #            arena /dev/fb0..2 use everywhere else.
+    # mlc dpc    the display controller's own nodes, ioctl-only.
+    # gpio ga3d  opened by libDisplay and by the GL stack; without gpio,
+    #            "DisplayModule::InitModule: failed to open GPIO device".
+    for f in ("dev/dsp", "dev/gpio", "dev/mlc", "dev/dpc", "dev/ga3d",
+              "dev/layer0", "dev/layer1", "dev/layer2"):
         touch(os.path.join(sysroot, f))
 
     # THE THREE SYSFS FILES THE FIRMWARE READS, AND ONLY THOSE THREE.
