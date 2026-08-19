@@ -38,9 +38,16 @@ This is the one thing that decides whether it will work for you.
   whether the wizard's welcome page reports an engine or says "No ARM engine
   installed".
 
-There are two downloads for that reason. The **v7a** build is about 7 MB and is
+There are two downloads for that reason. The **v7a** build is about 6 MB and is
 the tested one; the **universal** build is 51 MB, almost all of it that engine,
 and is the one to try on a 64-bit phone.
+
+If the v7a APK refuses to install with **`INSTALL_FAILED_NO_MATCHING_ABIS`**,
+your device has no 32-bit support at all. That is not a packaging mistake — it
+is the answer. Recent flagships (and every ARMv9 core Samsung and Qualcomm ship
+now) removed 32-bit execution from the hardware, so the guest's own binaries
+cannot run there by any means. Use the universal APK if you want to help test
+the emulator path, and expect it to be rough.
 
 Check with `adb shell getprop ro.product.cpu.abilist`, or any CPU-info app.
 
@@ -202,27 +209,87 @@ Known rough edges in this build:
 
 ---
 
-## What to report
+## Reporting a problem
 
-Useful things to say, roughly in order of value:
+### If it does not start at all, this one command answers it
 
-1. **What device**, and `adb shell getprop ro.product.cpu.abilist`.
-2. **Which title**, and what it did — a screenshot beats a description.
-3. **The log.** Everything the emulator prints goes to logcat:
+```sh
+adb logcat -c            # clear
+# now launch Tadpole on the device, and wait for the menu bar
+adb logcat -d | grep "probe:"
+```
 
+Tadpole probes the device on every launch and prints what it found. The line
+that decides whether this device can work at all is:
+
+```
+probe: /system/bin/linker    PRESENT - a 32-bit userspace exists, ARM32 guest binaries CAN be loaded
+probe: /system/bin/linker    ABSENT  - 64-bit-only ROM, nothing 32-bit can execute here at all
+```
+
+**ABSENT means the device cannot run the guest natively, and no amount of
+fixing Tadpole will change that.** The LeapPad2's binaries are 32-bit ARM, and
+a 64-bit-only ROM has no way to execute them — the CPU cores in recent
+flagships dropped 32-bit support outright. Those devices need the emulator
+path, which is shipped in the universal APK and is not proven yet.
+
+Paste the whole `probe:` block. It also reports whether the app can make
+executable memory, exec a file, `mkfifo`, and map shared memory — which is the
+rest of the answer when the first line says PRESENT.
+
+### A full log, for anything else
+
+```sh
+adb logcat -c                       # clear first, or you get hours of noise
+# reproduce the problem on the device
+adb logcat -d > tadpole-log.txt
+```
+
+Send the whole file. `-d` dumps and exits, so this is a clean capture of just
+your reproduction rather than a stream you have to interrupt.
+
+If you only want Tadpole's own lines — smaller, but it drops crashes, which
+are logged by Android under other tags:
+
+```sh
+adb logcat -s tadpole
+```
+
+That is the whole of Tadpole's diagnostic output, the same lines the desktop
+build writes to a terminal, guest included.
+
+### If it crashed rather than misbehaved
+
+Do not filter. The crash is logged by Android, not by Tadpole:
+
+```sh
+adb logcat -d | grep -B 5 -A 40 -E "signal|tombstone|FATAL"
+```
+
+The guest's own crashes are separate and are written on the device, so grab
+that too — it names the guest library and offset:
+
+```sh
+adb shell "run-as org.tadpole.view cat files/crash.log" | tail -40
+```
+
+### What to say alongside it
+
+1. **What device**, plus:
    ```sh
-   adb logcat -s tadpole
+   adb shell getprop ro.product.cpu.abilist
+   adb shell getprop ro.build.version.release
    ```
+2. **Which APK** — the v7a one or the universal one.
+3. **What you were doing**, and what happened. A screenshot beats a
+   description; `adb exec-out screencap -p > shot.png` takes one.
 
-   That is the whole of Tadpole's diagnostic output — the same lines the desktop
-   build writes to a terminal, guest included.
+### Known, and not worth reporting yet
 
-4. If it crashed rather than misbehaved, the tombstone:
-
-   ```sh
-   adb logcat | grep -A 40 "signal 11"
-   ```
-
-Known and not worth reporting yet: the software rasteriser is used for the home
-screen (it encodes no GL); *Launch App* is refused; there is no on-screen
-keyboard, so the wizard's profile-name field needs a hardware one.
+- micromods, cart2tar and make-profile say "not available on Android yet",
+  because they are.
+- The progress bar fills and then restarts for the next phase of an install.
+- After an unclean exit a stale `.lock` can leave *Run System Menu* greyed out
+  as "running" — restart the app.
+- arm64 devices in general: known untested, and reports are wanted, but see the
+  probe section above first.
