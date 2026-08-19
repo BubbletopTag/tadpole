@@ -62,6 +62,22 @@ final class SaveLog implements Tools.Tool {
         /* The guest's own crash report first: when there is one, it is the
          * answer, and it names the guest library and offset. */
         file(b, new File(proj, "crash.log"), 400);
+
+        /* AND THE GUEST'S OWN OUTPUT, WHICH MATTERS MORE THAN THE LOGCAT ABOVE.
+         *
+         * Two reports came back from testers with the interesting part already
+         * gone: Android's per-app log buffer had rotated, and one capture
+         * covered six seconds of the app being resumed. Whether the guest
+         * booted, and what it said if it did not, was simply not in them.
+         *
+         * The viewer has been writing that to a file the whole time — see
+         * guest_log_open() — and keeps the PREVIOUS run beside it as .1, on
+         * the reasoning that the log you want is nearly always the boot that
+         * just went wrong rather than the one after it. Both go in. */
+        File state = new File(home(), ".local/state/tadpole");
+        file(b, new File(state, "tadpole.log"), 600);
+        file(b, new File(state, "tadpole.log.1"), 600);
+
         file(b, new File(proj, "rootless.log"), 400);
         file(b, new File(proj, "gl-warnings.log"), 200);
 
@@ -110,6 +126,12 @@ final class SaveLog implements Tools.Tool {
         b.append('\n');
     }
 
+    /** Where the viewer puts its state, which is $HOME on this platform. */
+    private static File home() {
+        String h = Tools.home();
+        return h != null && !h.isEmpty() ? new File(h) : Tools.proj();
+    }
+
     private static boolean is64() {
         String arch = System.getProperty("os.arch");
         return arch != null && (arch.contains("64"));
@@ -128,6 +150,10 @@ final class SaveLog implements Tools.Tool {
         b.append("packages      ").append(kids == null ? "none" : kids.length + " installed").append('\n');
         b.append("didj support  ").append(new File(Tools.base(), "DidjPatches").isDirectory()
                  ? "installed" : "not installed").append('\n');
+        File gl = new File(home(), ".local/state/tadpole/tadpole.log");
+        b.append("guest log     ").append(gl.isFile()
+                 ? gl.length() + " bytes (included below)"
+                 : "none yet — the guest has not been started").append('\n');
         b.append('\n');
     }
 
