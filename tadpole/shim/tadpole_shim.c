@@ -220,6 +220,26 @@ static u32 g_bpp = 32;
  * virtual display and size the backing file to match. */
 #define NBUF 8
 
+/* WHERE THE LF1000 PUTS ITS FRAMEBUFFERS IN PHYSICAL MEMORY.
+ *
+ * The Didj's libDisplay does not mmap a layer node. It asks the layer where it
+ * lives, opens /dev/mem, and maps that physical address — which on the host is
+ * root-only, so the open failed with EACCES and Brio reported
+ *
+ *     !ASSERT: [5] DisplayModule::InitModule: /dev/mem driver failed
+ *
+ * That is the same base the LeapPad line uses and the same one this shim
+ * already reports in fill_fix(): the arena IS the guest's idea of video
+ * memory. Brio treats it as one address space and allocates every layer inside
+ * it — see the note in init() — so physical 0x82000000 is arena offset 0, and
+ * no per-layer arithmetic is wanted or correct here. */
+#define LF_VMEM_BASE 0x82000000u
+/* The LF1000 maps 1 MB at 0x100000 and 4 MB at 0x400000 out of /dev/mem, so
+ * the arena has to reach 8 MB for the second of those to be backed. Measured
+ * from the guest's own mmap2 calls, not chosen. */
+#define LF_VMEM_MIN  (8 * 1024 * 1024)
+
+
 static int  g_ready;
 static int  g_debug;
 static int  g_logfd = 2;     /* see TADPOLE_LOG in init() */
@@ -368,6 +388,12 @@ static const struct ev_device g_ev_lf1000[] = {
 
 /* Selected by init() from TADPOLE_EVDEV; g_ev_count is how many of the
  * NUM_EV slots are real on this device. */
+/* What get_address answers. Zero — an offset into the arena, not a physical
+ * address — and settable with TADPOLE_MLC25 only because pinning this down
+ * took a sweep and the next device may want a different one. */
+static u32 g_mlc_q25;
+static u32 g_mlc_dflt = 1;  /* answer for an unrecognised _IO('m',n) query */
+
 static const struct ev_device *g_ev = g_ev_lf2000;
 static int g_ev_count = (int)(sizeof(g_ev_lf2000) / sizeof(g_ev_lf2000[0]));
 
@@ -671,6 +697,23 @@ static void init(void)
 	 * from the device profile; anything unrecognised, or nothing at all,
 	 * keeps the LF2000 set that every device used before this was per
 	 * device. Compared by hand because the shim has no string.h. */
+	if ((e = getenv("TADPOLE_MLC25")) != 0) {
+		u32 v = 0; int hex = (e[0] == '0' && e[1] == 'x');
+		if (hex) e += 2;
+		while (*e) {
+			u32 d = (*e >= '0' && *e <= '9') ? (u32)(*e - '0')
+			      : (*e >= 'a' && *e <= 'f') ? (u32)(*e - 'a' + 10)
+			      : (*e >= 'A' && *e <= 'F') ? (u32)(*e - 'A' + 10) : 99;
+			if (d > (hex ? 15u : 9u)) break;
+			v = v * (hex ? 16u : 10u) + d; e++;
+		}
+		g_mlc_q25 = v;
+	}
+	if ((e = getenv("TADPOLE_MLCDFLT")) != 0) {
+		u32 v = 0;
+		while (*e >= '0' && *e <= '9') v = v * 10 + (u32)(*e++ - '0');
+		g_mlc_dflt = v;
+	}
 	if ((e = getenv("TADPOLE_EVDEV")) != 0 &&
 	    e[0] == 'l' && e[1] == 'f' && e[2] == '1' && e[3] == '0' &&
 	    e[4] == '0' && e[5] == '0' && e[6] == '\0') {
@@ -737,7 +780,19 @@ static void init(void)
 	snprintf(path, sizeof(path), "%s/fb0.bin", g_dir);
 	fd = real_open(path, O_RDWR | O_CREAT, 0666);
 	if (fd >= 0) {
-		ftruncate(fd, (long)(g_w * g_h * (g_bpp / 8) * NBUF));
+		/* BIG ENOUGH FOR WHAT THE GUEST ACTUALLY MAPS, not just for the
+		 * planes we compose. w*h*bpp*NBUF covers the LF2000 devices, which
+		 * mmap their fb nodes at small offsets. The Didj maps /dev/mem —
+		 * physical memory — and asks for 4 MB at offset 0x400000, which is
+		 * past the end of that: the mapping SUCCEEDS and the first store into
+		 * it takes SIGBUS, a bus error with nothing in it naming a file or a
+		 * size. A hole costs nothing on any filesystem this runs on. */
+		{
+			long want = (long)(g_w * g_h * (g_bpp / 8) * NBUF);
+			if (want < LF_VMEM_MIN)
+				want = LF_VMEM_MIN;
+			ftruncate(fd, want);
+		}
 		real_close(fd);
 	} else {
 		char m[420];
@@ -797,13 +852,42 @@ static void init(void)
 }
 
 /* /dev/fbN -> N, else -1 */
+/* A LAYER IS A FRAMEBUFFER, and calling it one costs nothing.
+ *
+ * The LF2000 devices expose their display planes as /dev/fb0..2, ordinary
+ * fbdev nodes with a handful of LeapFrog ioctls bolted on. The LF1000 — the
+ * Didj — exposes the same three planes of the same multi-layer controller as
+ * /dev/layer0..2, with a control node /dev/mlc beside them. The pixels are the
+ * pixels either way: one arena, three planes, the guest mmaps a plane and
+ * draws into it, and the viewer composites what it finds.
+ *
+ * So the Didj's layers ARE this shim's framebuffers, under another name. That
+ * is not a shortcut taken to save work — it is why fbshot.py, the viewer's
+ * compositor and the whole state.bin protocol need no Didj-specific anything. */
 static int fb_index(const char *path)
 {
-	if (!path || strncmp(path, "/dev/fb", 7))
+	if (!path)
 		return -1;
-	if (path[7] >= '0' && path[7] < '0' + NUM_FB && path[8] == 0)
-		return path[7] - '0';
+	if (!strncmp(path, "/dev/fb", 7)) {
+		if (path[7] >= '0' && path[7] < '0' + NUM_FB && path[8] == 0)
+			return path[7] - '0';
+		return -1;
+	}
+	if (!strncmp(path, "/dev/layer", 10)) {
+		if (path[10] >= '0' && path[10] < '0' + NUM_FB && path[11] == 0)
+			return path[10] - '0';
+		return -1;
+	}
 	return -1;
+}
+
+/* /dev/mlc, /dev/dpc, /dev/gpio, /dev/ga3d — the LF1000's display CONTROL
+ * nodes, as opposed to the layers, which carry pixels. Nothing is mmapped
+ * through them; they exist to be asked questions with ioctl(). */
+static int mlc_is(const char *path)
+{
+	return path && (!strcmp(path, "/dev/mlc") || !strcmp(path, "/dev/dpc") ||
+	                !strcmp(path, "/dev/gpio") || !strcmp(path, "/dev/ga3d"));
 }
 
 /* /dev/input/eventN -> N, else -1. N >= NUM_EV is a real device we don't have. */
@@ -1367,6 +1451,9 @@ static void screen_note(const char *path)
 #define DSP_FRAGS 8
 
 static signed char g_dsp_of_fd[MAXFD];  /* 1 when this fd is /dev/dsp */
+static signed char g_mlc_of_fd[MAXFD];  /* 1 when this fd is an LF1000 control node */
+static signed char g_mem_of_fd[MAXFD];  /* 1 when this fd is /dev/mem */
+
 static int  g_dsp_fifo = -1;            /* our end of the viewer's FIFO */
 static u32  g_dsp_rate = 32000;
 static u32  g_dsp_ch   = 2;
@@ -1683,6 +1770,15 @@ static int open_common(const char *path, int flags, int mode)
 		}
 	}
 
+	if (path && !strcmp(path, "/dev/mem")) {
+		snprintf(real, sizeof(real), "%s/fb0.bin", g_dir);
+		fd = real_open(real, O_RDWR, 0666);
+		if (fd >= 0 && fd < MAXFD)
+			g_mem_of_fd[fd] = 1;
+		if (g_debug) dbg("[tadpole] open /dev/mem -> the framebuffer arena\n");
+		return fd;
+	}
+
 	if ((idx = fb_index(path)) >= 0) {
 		/* all layers share one arena — see the note in init() */
 		snprintf(real, sizeof(real), "%s/fb0.bin", g_dir);
@@ -1769,6 +1865,154 @@ static int open_common(const char *path, int flags, int mode)
  * open_common(), because open_common has four different returns and the fd is
  * a real one on the placeholder file in every case — there is nothing to
  * decide, only something to remember. */
+
+/* ---- /dev/mlc, /dev/dpc, /dev/gpio — the LF1000 display controller -------
+ *
+ * These carry no pixels. libDisplay.so opens them, asks them about the panel,
+ * and asserts on the first question it cannot get an answer to:
+ *
+ *     !ASSERT: [5] DisplayModule::InitModule: failed to open GPIO device
+ *     !ASSERT: [5] DisplayModule::GetScreenSize: ioctl failed
+ *
+ * THE MAGIC IS 'm', THE SAME AS THE FRAMEBUFFER'S. The LF1000FB_* numbers at
+ * the top of this file come from include/linux/lf1000/lf1000fb.h and run
+ * _IO*('m', 1..6); the MLC control node continues the same series. So these
+ * are not a separate ABI to discover, they are the rest of one we already had
+ * half of.
+ *
+ * WHAT IS NOT KNOWN is the exact meaning of each number beyond 6, because the
+ * header is not in the firmware and nobody here has the LF1000 kernel source.
+ * What IS known is the shape — _IOR('m', n, int) asks a question with a 4-byte
+ * answer — and what the answers have to be, because the panel is 320x240 and
+ * that is not in doubt. So an unrecognised read is answered with the panel's
+ * geometry rather than refused, and every write is accepted: a display that
+ * reports the right size and shrugs at everything else is much closer to the
+ * truth than one that cannot be opened.
+ */
+#define MLC_IOC_MAGIC 0x6du             /* 'm' */
+#define MLC_GETSCREENSIZE 0x80046d07ul  /* _IOR('m', 7, int) — measured */
+/* NAMED, NOT NUMBERED, because usr/bin/imager told us what they are: it prints
+ * "get_address ioctl failed" for the first and "get_fbsize ioctl failed" for
+ * the second, and both are _IO — the answer comes back as the RETURN VALUE,
+ * not in a buffer. */
+#define MLC_GET_ADDRESS 25              /* _IO('m', 25) -> physical base */
+#define MLC_GET_FBSIZE  29              /* _IO('m', 29) -> bytes         */
+#define MLC_GET_RECT    14              /* _IOR('m', 14) -> the four-word rect */
+
+/* `handled` RATHER THAN A SENTINEL RETURN, because one of the answers is an
+ * ADDRESS. 0x82000000 is negative as a signed int, and a caller testing
+ * "r >= 0" throws it away — which is exactly what happened, and it looked like
+ * the ioctl was unimplemented. Linux itself only treats [-4095, -1] as errors
+ * for this reason; anything else, however negative, is a value. */
+static int mlc_ioctl_idx(ulong req, void *arg, int idx, int *handled)
+{
+	u32 *p = (u32 *)arg;
+	u32 dir = (u32)(req >> 30);
+	u32 type = (u32)((req >> 8) & 0xFF);
+
+	*handled = 0;
+	if (type != MLC_IOC_MAGIC)
+		return -1;                       /* not ours; let it fall through */
+	*handled = 1;
+
+	/* The panel, packed the way GetScreenSize wants it: width in the high
+	 * half, height in the low. 320x240 for every Didj — all eight of its boot
+	 * screens in var/screens are that size. */
+	if (req == MLC_GETSCREENSIZE) {
+		if (p) *p = (g_h << 16) | (g_w & 0xFFFF);
+		return 0;
+	}
+	/* THE TWO QUERIES InitModule MAKES OF A LAYER, and they are _IO rather
+	 * than _IOR: the argument is 0 and the answer comes back as the ioctl's
+	 * RETURN VALUE. Returning 0 to both is what produced
+	 *
+	 *     !ASSERT: [5] DisplayModule::InitModule: MLC layer ioctl failed
+	 *
+	 * on two calls that had each returned "success" — libDisplay was reading
+	 * the answer, not the status.
+	 *
+	 * Which is which was settled by the Leapster GS, whose libDisplay is the
+	 * same code against fbdev and prints what it found:
+	 *
+	 *     InitModule: Mapped 82000000 to 0x82000000, size 00258000
+	 *
+	 * at 320x240 — and 0x258000 is exactly w*h*4*NBUF, this shim's arena for
+	 * one plane. So one query is the plane's physical base and the other its
+	 * length, and both answers are ones we already compute for /dev/fb0..2.
+	 * The base is never dereferenced: the guest mmaps the fd. */
+	/* NOT GATED ON arg BEING NULL. These are _IO: there is no third argument
+	 * at all, so what va_arg hands back is whatever was in the register — 0
+	 * from one caller and rubbish from the next. Keying on it made the same
+	 * ioctl answer get_fbsize for AppManager and fall through to the generic
+	 * "accepted" for imager, which then mmapped zero bytes and failed with
+	 * EINVAL. The request number is the whole of the question. */
+	if (dir == 0) {
+		int v = -12345;
+		if ((req & 0xFF) == MLC_GET_ADDRESS)
+			/* ZERO, and that is the whole trick. The answer is an offset
+			 * the caller then mmaps out of this same layer fd, and this
+			 * shim's arena starts at 0. Handing back the hardware's real
+			 * 0x82000000 makes every caller map past the end of the file
+			 * and take SIGBUS on the first store. */
+			v = (int)g_mlc_q25;
+		else if ((req & 0xFF) == MLC_GET_FBSIZE)
+			v = (int)(g_w * g_h * (g_bpp / 8) * NBUF);
+		if (v != -12345) {
+			if (g_debug) {
+				char b[96];
+				snprintf(b, sizeof(b),
+				         "[tadpole] mlc: layer%d nr=%lu -> %d (0x%08x)\n",
+				         idx, req & 0xFF, v, (u32)v);
+				dbg(b);
+			}
+			return v;
+		}
+	}
+	/* GEOMETRY IS A RECTANGLE, NOT A SIZE — {left, top, bottom, right}.
+	 *
+	 * _IOR('m', 14) fills four words, and the layout is not guessed: it was
+	 * read out of usr/bin/imager, which the device ships and which does
+	 *
+	 *     width  = buf[3] - buf[0] + 1
+	 *     height = buf[2] - buf[1] + 1
+	 *
+	 * before comparing them with the PNG it was handed and refusing with
+	 * "Image dimensions don't match screen". Four packings of a width and a
+	 * height had already failed against that test; the disassembly said why,
+	 * which is that it was never a width and a height. This is the kernel's
+	 * mlc_GetLayerInvisibleArea shape — the strings are in the Didj's own
+	 * kernel image. Inclusive bounds, hence the -1. */
+	if (dir & 2) {                       /* _IOR: it wants an answer */
+		if (p) {
+			p[0] = 0;            /* left   */
+			p[1] = 0;            /* top    */
+			p[2] = g_w - 1;      /* right  */
+			p[3] = g_h - 1;      /* bottom */
+		}
+		if (g_debug) {
+			char b[80];
+			snprintf(b, sizeof(b),
+			         "[tadpole] mlc: read ioctl %08lx answered with %ux%u\n",
+			         req, g_w, g_h);
+			dbg(b);
+		}
+		return 0;
+	}
+	if (g_debug) {
+		char b[96];
+		snprintf(b, sizeof(b),
+		         "[tadpole] mlc: accepted ioctl %08lx nr=%lu arg=%lu -> %d\n",
+		         req, req & 0xFF, (ulong)arg, (int)g_mlc_dflt);
+		dbg(b);
+	}
+	/* NOT 0. Every _IO('m', n) with a null argument seen so far has been a
+	 * QUERY whose answer is the return value, and zero reads as "nothing" to
+	 * all of them — libDisplay took a 0 for a buffer address and dereferenced
+	 * it. A small positive number is the answer that got past nr=25, and it
+	 * is a better default than a value the caller treats as failure. */
+	return (int)g_mlc_dflt;
+}
+
 static int dsp_note_open(const char *path, int fd)
 {
 	if (fd >= 0 && fd < MAXFD && dsp_is(path)) {
@@ -1776,6 +2020,10 @@ static int dsp_note_open(const char *path, int fd)
 		dsp_publish();
 		dsp_open_fifo();
 		if (g_debug) dbg("[tadpole] open /dev/dsp\n");
+	}
+	if (fd >= 0 && fd < MAXFD && mlc_is(path)) {
+		g_mlc_of_fd[fd] = 1;
+		if (g_debug) { dbg("[tadpole] open "); dbg(path); dbg("\n"); }
 	}
 	return fd;
 }
@@ -2478,6 +2726,8 @@ int close(int fd)
 		 * come and going would have the viewer see the stream appear and
 		 * vanish repeatedly. One process, one audio stream. */
 		g_dsp_of_fd[fd] = 0;
+		g_mlc_of_fd[fd] = 0;
+		g_mem_of_fd[fd] = 0;
 	}
 	if (!real_close) return -1;
 	return real_close(fd);
@@ -2556,10 +2806,21 @@ int ioctl(int fd, ulong req, ...)
 	if (fd >= 0 && fd < MAXFD && g_dsp_of_fd[fd])
 		return dsp_ioctl(req, arg);
 
+	/* ---------------- LF1000 display control ---------------- */
+	if (fd >= 0 && fd < MAXFD && g_mlc_of_fd[fd]) {
+		int handled = 0;
+		int r = mlc_ioctl_idx(req, arg, 0, &handled);
+		if (handled)
+			return r;
+		/* Not an 'm' ioctl: a terminal query on a node that is a plain file
+		 * here. Fall through to the real one, which says ENOTTY — which is
+		 * what a real device would say too. */
+	}
+
 	/* ---------------- framebuffer ---------------- */
 	if (fd >= 0 && fd < MAXFD && (idx = g_fb_of_fd[fd]) >= 0) {
 		if (g_debug) {
-			char b[80]; const char *n = "fb-ioctl";
+			char b[96]; const char *n = "fb-ioctl";
 			if (req == FBIOPAN_DISPLAY)        n = "PAN";
 			else if (req == FBIOPUT_VSCREENINFO) n = "PUT_VSCREEN";
 			else if (req == FBIOGET_VSCREENINFO) n = "GET_VSCREEN";
@@ -2569,6 +2830,11 @@ int ioctl(int fd, ulong req, ...)
 			if (req == FBIOBLANK) {
 				snprintf(b, sizeof(b), "[tadpole] fb%d BLANK arg=%u\n",
 				         idx, (u32)(ulong)arg);
+				dbg(b);
+			} else
+			if (n[0] == 'f') {          /* unnamed: show the number */
+				snprintf(b, sizeof(b), "[tadpole] fb%d ioctl %08lx arg=%lu\n",
+				         idx, req, (ulong)arg);
 				dbg(b);
 			} else
 			if (req == FBIOPAN_DISPLAY || req == FBIOPUT_VSCREENINFO) {
@@ -2696,6 +2962,29 @@ int ioctl(int fd, ulong req, ...)
 			}
 			return 0;
 		default:
+			/* AN UNKNOWN 'm' IOCTL IS AN LF1000 ONE, and on a layer node
+			 * those are how the Didj asks about the plane. Succeeding
+			 * quietly without filling the caller's buffer is what produced
+			 *
+			 *     !ASSERT: [5] DisplayModule::InitModule: MLC layer ioctl failed
+			 *
+			 * on an ioctl that had returned 0: libDisplay checked the ANSWER,
+			 * not the status. mlc_ioctl answers reads with the panel
+			 * geometry, which is the only thing any of them can sensibly want
+			 * from a layer this shim owns. */
+			{
+				int handled = 0;
+				int r = mlc_ioctl_idx(req, arg, idx, &handled);
+				if (handled)
+					return r;
+			}
+			if (g_debug) {
+				char b[80];
+				snprintf(b, sizeof(b),
+				         "[tadpole] fb%d unknown ioctl %08lx, accepted\n",
+				         idx, req);
+				dbg(b);
+			}
 			return 0;   /* unknown fb ioctl: succeed quietly */
 		}
 	}

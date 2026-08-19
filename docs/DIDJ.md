@@ -130,7 +130,25 @@ After an install:
 The shim directories on `LD_LIBRARY_PATH` are what supply the input devices and
 `/dev/dsp`; without them Brio asserts on the first thing it touches.
 
-    (no assert — it runs, and does not draw)
+    (no assert — it runs; AppManager still does not reach its first frame)
+
+**IT DRAWS.** Not AppManager yet, but the device's own display tool does, which
+means the LF1000 multi-layer controller is emulated well enough to put real
+pixels on a real layer:
+
+    cd runtime/sysroot && qemu-arm -L "$PWD" \
+      -E LD_LIBRARY_PATH=../shimlibs-z:../shimlibs:/Didj/Base/Brio/lib:/Didj/Base/lib:../libs:/lib:/usr/lib \
+      -E TADPOLE_DIR=/tmp/tadpole-didj -E TADPOLE_SYSROOT="$PWD" \
+      -E TADPOLE_W=320 -E TADPOLE_H=240 -E TADPOLE_EVDEV=lf1000 \
+      ./usr/bin/imager /dev/layer0 /test/testimg.rgb
+
+`/test/testimg.rgb` is LeapFrog's own 320x240 test image, dated 22 April 2009
+and shipped in the firmware. `tools/fbshot.py` will not composite it as-is —
+imager writes 24-bit RGB where the arena's state says 32 — but the pixels are
+there and correct.
+
+**The `.png` path hangs**, in libpng, and the raw `.rgb` path does not. That is
+worth chasing before trusting the display further; `display_screen` uses PNGs.
 
 **Both the cartridge and the input asserts are gone.**
 
@@ -200,12 +218,24 @@ loader file to quiet a warning, so it is not done.
 
 ## What is left
 
-1. **The display, and it is the only thing left between here and a picture.**
-   `libDisplay.so` opens `/dev/mlc`, `/dev/layer0..2`, `/dev/dpc`, `/dev/ga3d`
-   and `/dev/mem` — the LF1000's multi-layer controller. The shim fakes
-   `/dev/fb0..2` for every other device, an ordinary fbdev with the
-   `LF1000FB_*` extensions; none of that is reusable as-is. Until it exists the
-   Didj runs and never paints.
+1. **AppManager's first frame.** Display and GL now initialise, and it gets as
+   far as BLT.so scanning `Didj/Data/GameIcons` and `/Cart` to build the home
+   screen — then dies with `memset(-1, -1, 0x4b000)`: a 320x240x4 frame written
+   to a buffer pointer that was never set. One more MLC contract is wrong or
+   missing; `imager` proves the layers themselves work.
+
+   The three the device's own tools pinned down, all read out of `usr/bin/imager`
+   rather than guessed:
+
+   | ioctl | meaning | answer |
+   |---|---|---|
+   | `_IO('m', 25)` | `get_address` | 0 — an offset into the arena, not the hardware's 0x82000000 |
+   | `_IO('m', 29)` | `get_fbsize` | `w*h*4*NBUF` |
+   | `_IOR('m', 14)` | the layer rectangle | four words, `{left, top, right, bottom}`, inclusive |
+
+   The last one took a disassembly: imager computes `width = buf[3]-buf[0]+1`
+   and `height = buf[2]-buf[1]+1`, so it was never a packed width and height,
+   which is what four failed guesses had assumed.
 2. **`/Didj` versus `/LF`** everywhere the emulator assumes the latter.
    `install-firmware.py` knows the difference; `tadpole.sh`, `run.sh` and the
    viewer do not yet, which is why there is no "play" for this device.

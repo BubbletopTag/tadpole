@@ -1189,6 +1189,7 @@ def build_sysroot_didj(rootfs):
     if os.path.exists(shim):
         for d in ("lib", os.path.join("usr", "lib")):
             link_or_copy(shim, os.path.join(sysroot, d, "libdl.so.0"))
+
     else:
         say("    WARNING: the shim's libdl is not built — no input or display")
         say("    until 'cd tadpole && make shim' has run.")
@@ -1197,6 +1198,35 @@ def build_sysroot_didj(rootfs):
     if dev:
         write_text(os.path.join(sysroot, ".tadpole-device"), dev + "\n")
     return sysroot
+
+
+def replace_didj_portaudio(sysroot):
+    """Put our libportaudio and libopengles_lite over the device's own.
+
+    WHY, in one line: the stock one's callback thread runs perfectly and its
+    parent never stops waiting to be told so. shim/tadpole_portaudio.c has the
+    whole account.
+
+    HERE RATHER THAN ON LD_LIBRARY_PATH, because /Didj/Base/Brio/lib is first
+    on that path and has to stay first — it is where the device's own Brio
+    libraries live. AFTER the packages, because that directory is one of them
+    and does not exist until they are installed.
+    """
+    libdir = os.path.join(sysroot, "Didj", "Base", "Brio", "lib")
+    if not os.path.isdir(libdir):
+        return
+    for name, why in (("libportaudio.so",
+                       "audio init will not return and nothing after it runs"),
+                      ("libopengles_lite.so",
+                       "its constructor maps the 3D registers and takes SIGBUS")):
+        src = os.path.join(PROJ, "runtime", "shimlibs", name)
+        if not os.path.exists(src):
+            say("    %s NOT replaced — 'cd tadpole && make shimpa' first, or"
+                % name)
+            say("    %s." % why)
+            continue
+        link_or_copy(src, os.path.join(libdir, name))
+        say("    %s replaced" % name)
 
 
 def park_other_device(dev_id):
@@ -1313,6 +1343,7 @@ def main(argv):
             # runtime/libs/libc.so.0 and refuses without it.
             link_runtime_libs(sysroot, rootfs)
             refresh_real_libs(rootfs)
+            replace_didj_portaudio(sysroot)
         else:
             sysroot = build_sysroot(rootfs)
             link_runtime_libs(rootfs)

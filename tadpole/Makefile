@@ -261,9 +261,9 @@ BOOT_CFLAGS :=
 BOOT_LIBS   :=
 endif
 
-.PHONY: all shim shimz shimegl shimpkg asound gl tone connman avahi viewer hle-probe hle-selftest clean check realdl realz
+.PHONY: all shim shimz shimegl shimpkg shimpa asound gl tone connman avahi viewer hle-probe hle-selftest clean check realdl realz
 
-all: shim shimz shimegl shimpkg asound gl connman avahi viewer
+all: shim shimz shimegl shimpkg shimpa asound gl connman avahi viewer
 
 # THE SHIM CANNOT BE BUILT WITHOUT THE SYSTEM FILES, AND THAT SURPRISES PEOPLE.
 #
@@ -472,7 +472,66 @@ $(SHIMLIBS_EGL)/$(REAL_DL) $(SHIMLIBS_PKG)/$(REAL_DL): | need-rootfs
 realdl:
 	@$(or $(TADPOLE_PYTHON),python3) ../tools/real-libs.py --rootfs '$(ROOTFS)'
 
-shimz: $(SHIM_OUT_Z)
+shimz: $(SHIM_OUT_Z) shimz-links
+
+# THE UNVERSIONED NAME AS WELL, because the Didj asks for it. Its display tools
+# — usr/bin/imager and friends — have libz.so in DT_NEEDED, not libz.so.1, and
+# the loader looks for the literal string. Without this alias the shim is never
+# in those processes at all and /dev/layer0 is a plain file to them.
+.PHONY: shimz-links
+shimz-links: $(SHIM_OUT_Z)
+	@ln -sf libz.so.1 $(SHIMLIBS_Z)/libz.so
+
+# ---- libportaudio, for the Didj -----------------------------------------
+#
+# Not an impersonation variant of the shim like the others here: a small
+# standalone library that implements portaudio's nine entry points Brio uses.
+# See the note at the top of shim/tadpole_portaudio.c for why replacing it beat
+# making the stock one happy. It is installed OVER the copy in the sysroot's
+# /Didj/Base/Brio/lib by tools/install-firmware.py, the same way the shim's
+# libdl is, so nothing has to reorder LD_LIBRARY_PATH.
+#
+# Built only when the live device has one to replace, which is the Didj alone.
+PA_OUT := $(SHIMLIBS)/libportaudio.so
+
+# ---- libopengles_lite, for the Didj -------------------------------------
+#
+# ONE LIBRARY, BOTH APIS, UNDER THE NAME THE DEVICE ASKS FOR. The LF2000 line
+# splits EGL and GLES1 into libEGL.so.1 and libGLESv1_CM.so.1; the Didj ships a
+# single libopengles_lite.so carrying both, and ten of its libraries name it in
+# DT_NEEDED. Our two are freestanding and call nothing but each other, so they
+# link into one object without changing a line.
+#
+# WHY IT HAS TO BE REPLACED AT ALL, given nothing was wrong with GLES: the
+# stock libopengles_lite maps the LF1000's 3D registers at 0xC001A000 out of
+# /dev/mem in its own ELF constructor, before any of its symbols are called.
+# There is no hardware behind that here, so the first store took SIGBUS with a
+# backtrace inside a library the guest had not knowingly used yet.
+$(SHIMLIBS)/libopengles_lite.so: $(GLES_SRC) $(EGL_SRC) shim/tadpole_glcmd.h \
+                                 shim/tadpole_gles_debug.h | need-libs
+	@mkdir -p $(SHIMLIBS)
+	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
+		-Wno-incompatible-library-redeclaration \
+		-fno-stack-protector -fno-builtin \
+		-fuse-ld=lld -Wl,-soname,libopengles_lite.so -o $@ \
+		$(GLES_SRC) $(EGL_SRC) $(GUESTLIBS)/libc.so.0
+	@echo "built $@"
+
+.PHONY: shimpa
+ifeq ($(wildcard $(ROOTFS)/lib/libdl-0.9.29.so),)
+shimpa:
+	@echo "shimpa: skipped — only the Didj's Brio uses portaudio"
+else
+shimpa: $(PA_OUT) $(SHIMLIBS)/libopengles_lite.so
+endif
+
+$(PA_OUT): shim/tadpole_portaudio.c | need-libs
+	@mkdir -p $(SHIMLIBS)
+	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
+		-fno-stack-protector -fno-builtin \
+		-fuse-ld=lld -Wl,-soname,libportaudio.so -o $@ $< \
+		$(GUESTLIBS)/libpthread.so.0 $(GUESTLIBS)/libc.so.0
+	@echo "built $@"
 
 # libgcc_s LAST, AND IT IS NOT OPTIONAL HERE — see the note above
 # check-undefined, which says __aeabi_uidiv "comes from the guest's libgcc at
