@@ -71,8 +71,10 @@ extern void (*tad_crash_take_signal(int sig, void (*h)(int)))(int);
 #define RTLD_DEFAULT ((void *)0)
 
 #define O_RDONLY 00
+#define O_WRONLY 01
 #define O_RDWR   02
 #define O_CREAT  0100
+#define O_TRUNC  01000
 #define O_APPEND 02000
 #define O_NONBLOCK 04000
 
@@ -327,22 +329,41 @@ static const struct ev_device g_ev_lf2000[] = {
 	{ "Power Button",          "lf2000/power_button",    0x03, 0 },
 };
 
-/* THE DIDJ HAS EXACTLY ONE, and both strings are read out of the device's own
- * kernel rather than captured from hardware nobody here has. kernel.bin in
- * DIDJ-0x000E0003-000001.lfp is a container with a gzip'd Linux 2.6.20.1
- * inside, and the driver's two strings sit adjacent in its rodata:
+/* THE DIDJ HAS THREE, read out of the device's own kernel rather than captured
+ * from hardware nobody here has. kernel.bin in DIDJ-0x000E0003-000001.lfp is a
+ * container with a gzip'd Linux 2.6.20.1 inside, and each driver's name and
+ * phys strings sit adjacent in its rodata:
  *
  *     LF1000 Keyboard\0lf1000/input0\0
+ *     Power Button\0lf1000/power_button\0
+ *     LF1000 USB\0lf1000/usb\0
  *
- * which is the same name/phys pair shape as every row above.
+ * which is the same shape, and very nearly the same set, as the LF2000 table
+ * above — one generation of the same vendor's drivers apart.
  *
- * EV_SYN|EV_KEY and no absolute axes. That is what a device called "Keyboard"
- * on a machine with no touchscreen is — runtime/devices/didj.conf records the
- * absence, all eight of its boot screens are fixed 320x240, and the firmware
- * never asks this device for its ABS bits. It is the one field here not taken
- * verbatim from the image; if a Didj capture ever turns up, check it. */
+ * ONE WAS NOT ENOUGH, and the way it failed is worth keeping. With only the
+ * keyboard here Brio found it, stopped asserting, and then span: its
+ * ButtonPowerUSBTask polls THREE descriptors, and having filled only the first
+ * it polled two uninitialised ones — which happened to hold 1, so it asked
+ * about stdout, was told POLLIN every time, read it, got EBADF, and went round
+ * again. Three hundred thousand iterations in twelve seconds, no error message
+ * anywhere. A missing device does not announce itself; it corrupts the poll
+ * set of whatever wanted it.
+ *
+ * THE ORDER IS OURS, and nothing depends on it: the guest opens event0,
+ * event1, ... in turn and matches on the NAME, which is how it found the
+ * keyboard here while the real device may well enumerate them differently.
+ *
+ * The capability bits are the one thing not read out of the image. They are
+ * the LF2000 capture's values for the devices of the same name and purpose:
+ * SYN|KEY for a keyboard and for a power button, SYN|SW for the USB cable,
+ * which reports insertion as a switch. No absolute axes anywhere — the Didj
+ * has no touchscreen and runtime/devices/didj.conf records that. If a Didj
+ * capture ever turns up, this is the line to check. */
 static const struct ev_device g_ev_lf1000[] = {
-	{ "LF1000 Keyboard",       "lf1000/input0",          0x03, 0 },
+	{ "LF1000 Keyboard", "lf1000/input0",       0x03, 0 },
+	{ "Power Button",    "lf1000/power_button", 0x03, 0 },
+	{ "LF1000 USB",      "lf1000/usb",          0x21, 0 },
 };
 
 /* Selected by init() from TADPOLE_EVDEV; g_ev_count is how many of the
@@ -1276,6 +1297,363 @@ static void screen_note(const char *path)
 	}
 }
 
+
+/* ---- /dev/dsp — OSS playback -------------------------------------------
+ *
+ * WHY OSS AT ALL, when there is a whole fake libasound next door.
+ *
+ * Every other device Tadpole runs reaches audio through ALSA, and
+ * shim/tadpole_asound.c replaces libasound.so.2 outright for them. The Didj is
+ * six years older than any of them: its Brio links portaudio, and portaudio's
+ * unix build talks OSS straight to /dev/dsp. There is no libasound anywhere in
+ * that process to replace, so the interception has to be at the device node —
+ * which is where the framebuffer and the evdev nodes are already handled.
+ *
+ * WITHOUT IT APPMANAGER DOES NOT START. Audio init is not best-effort here:
+ *
+ *     !ASSERT: [1] Failed to initalize audio output
+ *
+ * and with a bare file in place of the node it gets one step further and names
+ * the call it wanted, which is what this list was built from:
+ *
+ *     Expression 'ioctl( *odev, SNDCTL_DSP_SETTRIGGER, &enableBits )' failed
+ *     in 'pa_unix_oss.c', line: 830
+ *
+ * WHERE THE SAMPLES GO: $TADPOLE_DIR/audio.<pid>.dsp, a FIFO, exactly like the
+ * ALSA path's audio.<pid>.<slot>. The viewer picks up anything matching
+ * "audio.*" in that directory, so this needed no viewer change at all.
+ *
+ * THE FD THE GUEST GETS IS A REAL ONE, onto the placeholder file the installer
+ * touches at dev/dsp — the same trick /dev/fb0..2 use. That means poll(),
+ * select(), fcntl() and close() all work on it without being intercepted; only
+ * ioctl() and write() are answered here.
+ */
+
+/* From <sys/soundcard.h>, spelled out because there is no ARM sysroot at build
+ * time — the same reason the LF1000FB_* numbers above are literals. All are
+ * _SIO/_SIOR/_SIOW/_SIOWR with magic 'P' (0x50). */
+#define SNDCTL_DSP_RESET       0x00005000ul
+#define SNDCTL_DSP_SYNC        0x00005001ul
+#define SNDCTL_DSP_SPEED       0xC0045002ul
+#define SNDCTL_DSP_STEREO      0xC0045003ul
+#define SNDCTL_DSP_GETBLKSIZE  0xC0045004ul
+#define SNDCTL_DSP_SETFMT      0xC0045005ul
+#define SNDCTL_DSP_CHANNELS    0xC0045006ul
+#define SNDCTL_DSP_POST        0x00005008ul
+#define SNDCTL_DSP_SUBDIVIDE   0xC0045009ul
+#define SNDCTL_DSP_SETFRAGMENT 0xC004500Aul
+#define SNDCTL_DSP_GETFMTS     0x8004500Bul
+#define SNDCTL_DSP_GETOSPACE   0x8010500Cul
+#define SNDCTL_DSP_GETISPACE   0x8010500Dul
+#define SNDCTL_DSP_NONBLOCK    0x0000500Eul
+#define SNDCTL_DSP_GETCAPS     0x8004500Ful
+#define SNDCTL_DSP_GETTRIGGER  0x80045010ul
+#define SNDCTL_DSP_SETTRIGGER  0x40045010ul
+#define SNDCTL_DSP_GETIPTR     0x800C5011ul
+#define SNDCTL_DSP_GETOPTR     0x800C5012ul
+#define SNDCTL_DSP_SETDUPLEX   0x00005016ul
+#define SNDCTL_DSP_GETODELAY   0x80045017ul
+
+#define AFMT_U8       0x00000008
+#define AFMT_S16_LE   0x00000010
+
+#define DSP_CAP_REALTIME 0x00000200
+#define DSP_CAP_TRIGGER  0x00010000
+#define PCM_ENABLE_OUTPUT 0x00000002
+
+/* How much buffer we claim to have. Only GETOSPACE and GETBLKSIZE see it; the
+ * real pacing is done by the FIFO's backpressure, or by dsp_pace() when there
+ * is nothing on the other end. */
+#define DSP_FRAGS 8
+
+static signed char g_dsp_of_fd[MAXFD];  /* 1 when this fd is /dev/dsp */
+static int  g_dsp_fifo = -1;            /* our end of the viewer's FIFO */
+static u32  g_dsp_rate = 32000;
+static u32  g_dsp_ch   = 2;
+static u32  g_dsp_fmt  = AFMT_S16_LE;
+static u32  g_dsp_frag = 4096;
+static unsigned long long g_dsp_played; /* bytes accepted since t0 */
+static long long g_dsp_t0_us;           /* 0 = not started */
+
+static u32 dsp_bits(void)     { return g_dsp_fmt == AFMT_U8 ? 8u : 16u; }
+static u32 dsp_byterate(void) { return g_dsp_rate * g_dsp_ch * (dsp_bits() / 8u); }
+
+static int dsp_is(const char *p)
+{
+	return p && strcmp(p, "/dev/dsp") == 0;
+}
+
+/* The negotiated format, in the one line the viewer reads:
+ * "rate channels bits period". Written on every change, because portaudio sets
+ * them one ioctl at a time and the viewer must not open its device on a half
+ * negotiated answer. */
+static void dsp_publish(void)
+{
+	char path[512], line[64];
+	int fd;
+
+	if (!real_open || !g_dir[0])
+		return;
+	snprintf(path, sizeof(path), "%s/audio.fmt", g_dir);
+	fd = real_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+	if (fd < 0)
+		return;
+	snprintf(line, sizeof(line), "%u %u %u %u\n",
+	         g_dsp_rate, g_dsp_ch, dsp_bits(), g_dsp_frag / (g_dsp_ch * (dsp_bits() / 8u)));
+	if (real_write)
+		real_write(fd, line, strlen(line));
+	if (real_close)
+		real_close(fd);
+}
+
+static void dsp_open_fifo(void)
+{
+	char path[512];
+	static unsigned tries;
+
+	if (g_dsp_fifo >= 0 || !real_open || !g_dir[0])
+		return;
+	/* BACK OFF WHEN NOBODY IS LISTENING, for the reason spelled out beside
+	 * open_fifo() in tadpole_asound.c: a headless boot has no viewer and
+	 * never will, and retrying on every write costs millions of syscalls.
+	 * Eager for the first 32 tries so a viewer that is merely slow to scan
+	 * does not cost the opening sound, then one in 64 forever. */
+	{
+		unsigned t = tries++;
+		if (t >= 32 && (t & 0x3F))
+			return;
+	}
+	snprintf(path, sizeof(path), "%s/audio.%d.dsp", g_dir, getpid());
+	mkfifo(path, 0666);                     /* harmless if it exists */
+	g_dsp_fifo = real_open(path, O_WRONLY | O_NONBLOCK, 0);
+}
+
+/* PACE TO REAL TIME WHEN NOTHING IS DRAINING US.
+ *
+ * With a viewer the FIFO does this for free: it fills, our writes come back
+ * short, and the retry loop below waits. With no viewer there is no
+ * backpressure at all, and a guest whose audio thread never blocks runs that
+ * thread as fast as qemu can go — which is not merely wasteful, it makes the
+ * guest's own idea of elapsed time wrong. So sleep for as long as the samples
+ * we just swallowed would have taken to play. */
+static void dsp_pace(u32 bytes)
+{
+	struct tad_timespec now, nap;
+	long long now_us, due_us;
+	u32 br = dsp_byterate();
+
+	if (!br || clock_gettime(CLOCK_MONOTONIC_, &now) != 0)
+		return;
+	now_us = (long long)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+	if (!g_dsp_t0_us) {
+		g_dsp_t0_us = now_us;
+		g_dsp_played = 0;
+	}
+	g_dsp_played += bytes;
+	due_us = g_dsp_t0_us + (long long)(g_dsp_played * 1000000ull / br);
+	if (due_us > now_us) {
+		long long d = due_us - now_us;
+		if (d > 200000)                  /* never nap more than 0.2 s */
+			d = 200000;
+		nap.tv_sec  = (long)(d / 1000000);
+		nap.tv_nsec = (long)((d % 1000000) * 1000);
+		nanosleep(&nap, 0);
+	} else if (now_us - due_us > 1000000) {
+		/* More than a second behind: the guest was stopped, or qemu was.
+		 * Resync rather than sprint to catch up, which would just burn the
+		 * backlog at full speed and still be late. */
+		g_dsp_t0_us = now_us;
+		g_dsp_played = 0;
+	}
+}
+
+static long dsp_write(const void *buf, size_t n)
+{
+	size_t done = 0;
+	int tries = 0;
+
+	dsp_open_fifo();
+	while (g_dsp_fifo >= 0 && done < n && real_write) {
+		long r = real_write(g_dsp_fifo, (const char *)buf + done, n - done);
+		if (r > 0) {
+			done += (size_t)r;
+			tries = 0;
+			continue;
+		}
+		/* Full pipe, or a reader that has gone away. Wait a little, but
+		 * bounded: dropping audio is always better than stalling the guest,
+		 * which is the same trade tadpole_asound.c makes. */
+		if (++tries > 64)
+			break;
+		{
+			struct tad_timespec s;
+			s.tv_sec = 0;
+			s.tv_nsec = 1000000;         /* 1 ms */
+			nanosleep(&s, 0);
+		}
+	}
+	if (g_debug) {
+		static unsigned long nw, nb;
+		nw++; nb += (unsigned long)n;
+		if ((nw & 0xF) == 1) {
+			char b[96];
+			snprintf(b, sizeof(b), "[tadpole] dsp write #%lu, %lu bytes total%s\n",
+			         nw, nb, g_dsp_fifo < 0 ? " (no viewer)" : "");
+			dbg(b);
+		}
+	}
+	if (g_dsp_fifo < 0)
+		dsp_pace((u32)n);
+	/* ALWAYS CLAIM THE WHOLE BUFFER. A short write from an OSS device means
+	 * something specific to portaudio and none of it is true here. */
+	return (long)n;
+}
+
+/* -> 0 handled, -1 not ours. Unknown 'P' ioctls are ACCEPTED rather than
+ * refused: this device does not exist, so there is nothing an honest ENOTTY
+ * would be honest about, and portaudio turns any failure into a fatal
+ * "Unanticipated host error". Logged under TADPOLE_DEBUG so a call that needs
+ * a real answer shows up as one rather than as silence. */
+static int dsp_ioctl(ulong req, void *arg)
+{
+	int *ip = (int *)arg;
+
+	if (g_debug) {
+		const char *n = "?";
+		switch (req) {
+		case SNDCTL_DSP_RESET: n = "RESET"; break;
+		case SNDCTL_DSP_SYNC: n = "SYNC"; break;
+		case SNDCTL_DSP_SPEED: n = "SPEED"; break;
+		case SNDCTL_DSP_STEREO: n = "STEREO"; break;
+		case SNDCTL_DSP_GETBLKSIZE: n = "GETBLKSIZE"; break;
+		case SNDCTL_DSP_SETFMT: n = "SETFMT"; break;
+		case SNDCTL_DSP_CHANNELS: n = "CHANNELS"; break;
+		case SNDCTL_DSP_POST: n = "POST"; break;
+		case SNDCTL_DSP_SETFRAGMENT: n = "SETFRAGMENT"; break;
+		case SNDCTL_DSP_GETFMTS: n = "GETFMTS"; break;
+		case SNDCTL_DSP_GETOSPACE: n = "GETOSPACE"; break;
+		case SNDCTL_DSP_GETISPACE: n = "GETISPACE"; break;
+		case SNDCTL_DSP_NONBLOCK: n = "NONBLOCK"; break;
+		case SNDCTL_DSP_GETCAPS: n = "GETCAPS"; break;
+		case SNDCTL_DSP_GETTRIGGER: n = "GETTRIGGER"; break;
+		case SNDCTL_DSP_SETTRIGGER: n = "SETTRIGGER"; break;
+		case SNDCTL_DSP_GETIPTR: n = "GETIPTR"; break;
+		case SNDCTL_DSP_GETOPTR: n = "GETOPTR"; break;
+		case SNDCTL_DSP_SETDUPLEX: n = "SETDUPLEX"; break;
+		case SNDCTL_DSP_GETODELAY: n = "GETODELAY"; break;
+		}
+		{
+			char b[96];
+			snprintf(b, sizeof(b), "[tadpole] dsp %s(%08lx) arg=%d\n",
+			         n, req, ip ? *ip : -1);
+			dbg(b);
+		}
+	}
+
+	switch (req) {
+	case SNDCTL_DSP_RESET:
+	case SNDCTL_DSP_SYNC:
+	case SNDCTL_DSP_POST:
+	case SNDCTL_DSP_NONBLOCK:
+	case SNDCTL_DSP_SETDUPLEX:
+	case SNDCTL_DSP_SUBDIVIDE:
+		return 0;
+
+	/* The three that matter, and we accept whatever we are told rather than
+	 * negotiating: there is no hardware to disagree with, and the viewer
+	 * opens its own device to match via audio.fmt. */
+	case SNDCTL_DSP_SPEED:
+		if (ip && *ip > 0) { g_dsp_rate = (u32)*ip; dsp_publish(); }
+		return 0;
+	case SNDCTL_DSP_CHANNELS:
+		if (ip && *ip > 0) { g_dsp_ch = (u32)*ip; dsp_publish(); }
+		return 0;
+	case SNDCTL_DSP_STEREO:
+		if (ip) { g_dsp_ch = *ip ? 2u : 1u; dsp_publish(); }
+		return 0;
+
+	case SNDCTL_DSP_SETFMT:
+		if (ip) {
+			if (*ip == AFMT_U8 || *ip == AFMT_S16_LE)
+				g_dsp_fmt = (u32)*ip;
+			else
+				*ip = (int)(g_dsp_fmt = AFMT_S16_LE);
+			dsp_publish();
+		}
+		return 0;
+	case SNDCTL_DSP_GETFMTS:
+		if (ip) *ip = AFMT_U8 | AFMT_S16_LE;
+		return 0;
+
+	/* arg is (max_fragments << 16) | log2(fragment bytes). */
+	case SNDCTL_DSP_SETFRAGMENT:
+		if (ip) {
+			u32 sz = 1u << ((u32)*ip & 0xFFFFu);
+			if (sz >= 64 && sz <= (1u << 20)) {
+				g_dsp_frag = sz;
+				dsp_publish();
+			}
+		}
+		return 0;
+	case SNDCTL_DSP_GETBLKSIZE:
+		if (ip) *ip = (int)g_dsp_frag;
+		return 0;
+
+	case SNDCTL_DSP_GETCAPS:
+		/* No MMAP and no DUPLEX on purpose: both would have portaudio take
+		 * paths that want a real device underneath. */
+		if (ip) *ip = DSP_CAP_TRIGGER | DSP_CAP_REALTIME;
+		return 0;
+
+	case SNDCTL_DSP_SETTRIGGER:
+		return 0;
+	case SNDCTL_DSP_GETTRIGGER:
+		if (ip) *ip = PCM_ENABLE_OUTPUT;
+		return 0;
+
+	/* audio_buf_info { fragments, fragstotal, fragsize, bytes } — always
+	 * empty, because we never refuse a write. */
+	case SNDCTL_DSP_GETOSPACE:
+		if (arg) {
+			int *b = (int *)arg;
+			b[0] = DSP_FRAGS;
+			b[1] = DSP_FRAGS;
+			b[2] = (int)g_dsp_frag;
+			b[3] = (int)(g_dsp_frag * DSP_FRAGS);
+		}
+		return 0;
+	case SNDCTL_DSP_GETISPACE:
+		if (arg) {
+			int *b = (int *)arg;
+			b[0] = b[1] = b[2] = b[3] = 0;
+		}
+		return 0;
+
+	case SNDCTL_DSP_GETODELAY:
+		if (ip) *ip = 0;                 /* nothing queued: see GETOSPACE */
+		return 0;
+	/* count_info { bytes, blocks, ptr } */
+	case SNDCTL_DSP_GETOPTR:
+	case SNDCTL_DSP_GETIPTR:
+		if (arg) {
+			int *c = (int *)arg;
+			c[0] = (int)(u32)g_dsp_played;
+			c[1] = 0;
+			c[2] = 0;
+		}
+		return 0;
+
+	default:
+		if (g_debug) {
+			char b[80];
+			snprintf(b, sizeof(b),
+			         "[tadpole] dsp: unhandled ioctl %08lx, accepted\n", req);
+			dbg(b);
+		}
+		return 0;
+	}
+}
+
 static int open_common(const char *path, int flags, int mode)
 {
 	char real[320];
@@ -1316,15 +1694,28 @@ static int open_common(const char *path, int flags, int mode)
 	}
 
 	if ((idx = ev_index(path)) >= 0) {
-		if (idx >= g_ev_count)
+		if (idx >= g_ev_count) {
+			if (g_debug) {
+				char b[80];
+				snprintf(b, sizeof(b),
+				         "[tadpole] REFUSED %s (this device has %d)\n",
+				         path, g_ev_count);
+				dbg(b);
+			}
 			return -1;                       /* no such device HERE */
+		}
 		/* NOT the FIFO itself — a private pipe fed from it. Handing the
 		 * shared FIFO to each caller made concurrent readers steal each
 		 * other's events; see the note beside g_ev_fifo. */
 		fd = ev_open(idx);
 		if (fd >= 0 && fd < MAXFD)
 			g_ev_of_fd[fd] = (signed char)idx;
-		if (g_debug) { dbg("[tadpole] open "); dbg(path); dbg(" -> "); dbg(g_ev[idx].name); dbg("\n"); }
+		if (g_debug) {
+			char b[120];
+			snprintf(b, sizeof(b), "[tadpole] open %s -> %s = fd %d\n",
+			         path, g_ev[idx].name, fd);
+			dbg(b);
+		}
 		return fd;
 	}
 
@@ -1372,6 +1763,21 @@ static int open_common(const char *path, int flags, int mode)
 		if (fd >= 0) { screen_note(path); io_pace(path); }
 		return fd;
 	}
+}
+
+/* Tag a freshly opened /dev/dsp. Called from open()/open64() rather than from
+ * open_common(), because open_common has four different returns and the fd is
+ * a real one on the placeholder file in every case — there is nothing to
+ * decide, only something to remember. */
+static int dsp_note_open(const char *path, int fd)
+{
+	if (fd >= 0 && fd < MAXFD && dsp_is(path)) {
+		g_dsp_of_fd[fd] = 1;
+		dsp_publish();
+		dsp_open_fifo();
+		if (g_debug) dbg("[tadpole] open /dev/dsp\n");
+	}
+	return fd;
 }
 
 /* uClibc's stdio calls its own open through a hidden alias that never goes
@@ -2007,18 +2413,45 @@ long read(int fd, void *buf, size_t n)
 	return r;
 }
 
+/* THE ONLY REASON THIS EXISTS IS /dev/dsp, and it is deliberately the whole
+ * function: every other write in the guest has to go straight through. It is
+ * on the hottest path in the process, so it does one bounds check and one
+ * array read before getting out of the way.
+ *
+ * No init() call. A write to a tagged fd can only happen after the open() that
+ * tagged it, which ran init already — and this is also on the crash handler's
+ * path (tadpole_crash.c writes its report through whatever `write` the link map
+ * hands it), where re-entering initialisation would be a poor idea. */
+long write(int fd, const void *buf, size_t n)
+{
+	if (fd >= 0 && fd < MAXFD && g_dsp_of_fd[fd] && buf && n)
+		return dsp_write(buf, n);
+	/* NOT init() UNCONDITIONALLY, but not never either. A write can be the
+	 * very first thing a process does — before it has opened anything, which
+	 * is what normally brings the shim up — and answering -1 there would lose
+	 * the guest's own output. Resolving lazily costs one predictable branch on
+	 * every later call. init() is re-entrant safe (it sets g_ready first), so
+	 * the dbg() inside it landing back here is a bounded, harmless recursion. */
+	if (!real_write) {
+		init();
+		if (!real_write)
+			return -1;
+	}
+	return real_write(fd, buf, n);
+}
+
 int open(const char *path, int flags, ...)
 {
 	va_list ap; int mode = 0;
 	va_start(ap, flags); mode = va_arg(ap, int); va_end(ap);
-	return open_common(path, flags, mode);
+	return dsp_note_open(path, open_common(path, flags, mode));
 }
 
 int open64(const char *path, int flags, ...)
 {
 	va_list ap; int mode = 0;
 	va_start(ap, flags); mode = va_arg(ap, int); va_end(ap);
-	return open_common(path, flags, mode);
+	return dsp_note_open(path, open_common(path, flags, mode));
 }
 
 int openat(int dirfd, const char *path, int flags, ...)
@@ -2040,6 +2473,11 @@ int close(int fd)
 			ev_close(fd);            /* also closes our write end */
 		g_fb_of_fd[fd] = -1;
 		g_ev_of_fd[fd] = -1;
+		/* The FIFO stays open across a close of /dev/dsp. portaudio opens
+		 * and closes the device around stream setup, and letting the FIFO
+		 * come and going would have the viewer see the stream appear and
+		 * vanish repeatedly. One process, one audio stream. */
+		g_dsp_of_fd[fd] = 0;
 	}
 	if (!real_close) return -1;
 	return real_close(fd);
@@ -2113,6 +2551,10 @@ int ioctl(int fd, ulong req, ...)
 	va_start(ap, req);
 	arg = va_arg(ap, void *);
 	va_end(ap);
+
+	/* ---------------- /dev/dsp ---------------- */
+	if (fd >= 0 && fd < MAXFD && g_dsp_of_fd[fd])
+		return dsp_ioctl(req, arg);
 
 	/* ---------------- framebuffer ---------------- */
 	if (fd >= 0 && fd < MAXFD && (idx = g_fb_of_fd[fd]) >= 0) {

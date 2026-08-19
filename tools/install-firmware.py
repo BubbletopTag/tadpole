@@ -1133,6 +1133,16 @@ def build_sysroot_didj(rootfs):
               "dev/input", "sys", "proc", "tmp", "flags"):
         os.makedirs(os.path.join(sysroot, d), exist_ok=True)
 
+    # THE DEVICE NODES THE SHIM ANSWERS FOR, as empty files.
+    #
+    # Exactly the trick the LeapPad sysroot uses for /dev/fb0..2: the shim
+    # intercepts open() by path, but only if the guest gets that far — and
+    # portaudio stat()s /dev/dsp before opening it, so a node that does not
+    # exist is never opened and never intercepted. An ordinary file makes the
+    # stat succeed; nothing is ever written to it.
+    for f in ("dev/dsp",):
+        touch(os.path.join(sysroot, f))
+
     # THE THREE SYSFS FILES THE FIRMWARE READS, AND ONLY THOSE THREE.
     #
     # Brio's libUtility.so and libDisplay.so between them name every /sys path
@@ -1189,6 +1199,62 @@ def build_sysroot_didj(rootfs):
     return sysroot
 
 
+def park_other_device(dev_id):
+    """Move the live tree aside if it belongs to a DIFFERENT device.
+
+    THIS IS NOT TIDINESS, IT IS DATA LOSS. Everything that builds a sysroot
+    writes to runtime/sysroot, and installing device B while device A is live
+    overwrites A's tree in place — including LF/Bulk, which holds A's installed
+    CONTENT and exists nowhere else. runtime/setup-sysroot.sh has parked the
+    live tree before building another since devices became switchable; the
+    installer never learned to, so the one path that can destroy a working
+    install was the one that did not check.
+
+    Found by doing it: a Leapster GS that booted to its sign-in screen was
+    reduced to a crash in libLightningJSON by a Didj install run beside it, and
+    the only way back was a full reinstall of its packages.
+
+    Parking is two renames — see tad_park_active() in runtime/device.sh, which
+    is what actually does it, so the layout stays defined in one place.
+    """
+    script = ('. "%s/device.sh"; a="$(tad_active_device)"; '
+              '[ -n "$a" ] && [ "$a" != "%s" ] && { echo "$a"; tad_park_active; }'
+              % (os.path.join(PROJ, "runtime"), dev_id))
+    try:
+        out = subprocess.run(["bash", "-c", script], capture_output=True,
+                             text=True, timeout=120)
+    except Exception:
+        return
+    other = out.stdout.strip().splitlines()
+    if other and other[0]:
+        say("==> parked %s (its tree is at runtime/installs/%s)"
+            % (other[0], other[0]))
+
+
+def refresh_real_libs(rootfs):
+    """Re-derive the shim's helper libraries from THIS firmware.
+
+    THE OTHER HALF OF THE FIX IN tools/real-libs.py. runtime/setup-sysroot.sh
+    refreshes them on every build and every device switch — but it refuses the
+    Didj outright, because it cannot build a /Didj tree, so for that device
+    nothing here would ever have run it. Installing a Didj beside a Leapster GS
+    then left the GS's libdl in front of it, which is a spin in the loader on
+    one device and a NULL dlsym table on the other.
+
+    Every device, not only the Didj: an install is exactly the moment the
+    answer changes, whichever tree is being laid down.
+    """
+    tool = os.path.join(HERE, "real-libs.py")
+    if not os.path.exists(tool):
+        return
+    say("==> shim helper libraries")
+    try:
+        subprocess.run([sys.executable, tool, "--rootfs", rootfs], check=False)
+    except Exception as e:
+        say("    WARNING: could not refresh them (%s) — a guest may crash on" % e)
+        say("    launch if they belong to another device")
+
+
 # ---- main -------------------------------------------------------------------
 
 def main(argv):
@@ -1223,10 +1289,18 @@ def main(argv):
         say("==> firmware version %s" % version)
         _dest, rootfs = extract_rootfs(fw, version, stage, kind)
 
+        # BEFORE ANYTHING WRITES TO runtime/sysroot. detect_device reads the
+        # tree we just extracted, so this is the first moment we know whose
+        # install this is — and the last moment before build_sysroot* starts
+        # overwriting whatever is there.
+        installing = detect_device(rootfs)
+        if installing:
+            park_other_device(installing)
+
         # THE SYSROOT BEFORE THE CONTENT. Content installs INTO the sysroot,
         # and the sort file that decides what appears on the home screen lives
         # there. The other order leaves content where nothing looks for it.
-        if detect_device(rootfs) == "didj":
+        if installing == "didj":
             sysroot = build_sysroot_didj(rootfs)
             if not args.no_content:
                 install_didj_content(pkgs, sysroot, fw)
@@ -1238,9 +1312,11 @@ def main(argv):
             # this: tadpole/Makefile links the shim against
             # runtime/libs/libc.so.0 and refuses without it.
             link_runtime_libs(sysroot, rootfs)
+            refresh_real_libs(rootfs)
         else:
             sysroot = build_sysroot(rootfs)
             link_runtime_libs(rootfs)
+            refresh_real_libs(rootfs)
             if not args.no_content:
                 install_content(pkgs, sysroot)
 

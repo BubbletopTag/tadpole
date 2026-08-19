@@ -181,13 +181,17 @@ fi
 # device works and is worth doing — the firmware is extracted, the sysroot is
 # assembled, and its shell starts under qemu by hand — so this points at where
 # that stands rather than calling it an error.
+# IT WARNS AND CARRIES ON, rather than refusing. This was an exit(1) when the
+# Didj could not start Brio at all; now it starts Brio, finds its keyboard and
+# opens its audio device, and the useful thing is to let someone watch how far
+# it gets. What still does not work is the DRAWING — libDisplay.so wants
+# /dev/mlc and /dev/layer0..2, which nothing here provides — so expect a
+# session that runs and never paints, not a home screen.
 if [ -d "$ROOTFS" ] && [ ! -d "$ROOTFS/LF/Base" ]; then
-    echo "tadpole: $DEV_NAME ($DEV_ID) is installed but cannot be run yet." >&2
-    echo "  Its system lives under /Didj rather than /LF, and this script" >&2
-    echo "  assumes /LF throughout. See docs/DIDJ.md for how far it gets." >&2
+    echo "tadpole: $DEV_NAME ($DEV_ID) has no /LF tree — this script assumes" >&2
+    echo "  one throughout, so most of what follows will find nothing. It will" >&2
+    echo "  run; it will not draw. See docs/DIDJ.md for where that stands." >&2
     echo "  ./tadpole.sh --devices        what else is installed here" >&2
-    echo "  ./runtime/setup-sysroot.sh <device>   switch to one of them" >&2
-    exit 1
 fi
 # Two shim variants, because targets link different libraries: AppManager and
 # VideoDaemon pull in libdl.so.0, while the display tools (imager-fb etc.) link

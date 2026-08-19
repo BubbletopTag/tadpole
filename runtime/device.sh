@@ -285,6 +285,21 @@ tad_activate_device() {
     mv "$inst/$want/sysroot" "$here/sysroot" || return 1
     [ -d "$inst/$want/libs" ] && mv "$inst/$want/libs" "$here/libs"
     rmdir "$inst/$want" 2>/dev/null || true
+
+    # THE SHIM'S HELPER LIBRARIES FOLLOW THE DEVICE, and this is the function
+    # that changes which device it is — so this is where they have to be
+    # refreshed. Putting it only in setup-sysroot.sh was not enough: tadpole.sh
+    # calls tad_activate_device() directly when the saved device is not the
+    # live one, and that path left a Didj's libdl in front of a Leapster GS.
+    #
+    #     AppManager: can't resolve symbol '_dl_find_hash_mod'
+    #
+    # which is uClibc 0.9.29's libdl asking 0.9.32's loader for something it
+    # does not have. See tools/real-libs.py for the whole story.
+    if [ -f "$(tad_proj_dir)/tools/real-libs.py" ]; then
+        "${TADPOLE_PYTHON:-python3}" "$(tad_proj_dir)/tools/real-libs.py" \
+            --quiet >/dev/null 2>&1 || true
+    fi
     return 0
 }
 

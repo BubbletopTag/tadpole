@@ -119,13 +119,47 @@ because the CDN cannot.
 
 After an install:
 
-    cd runtime/sysroot && qemu-arm -L . \
-      -E LD_LIBRARY_PATH=/Didj/Base/Brio/lib:/Didj/Base/lib:/lib:/usr/lib \
+    cd runtime/sysroot && qemu-arm -L "$PWD" \
+      -E LD_LIBRARY_PATH=/Didj/Base/Brio/lib:/Didj/Base/lib:\
+../shimlibs:../libs:/lib:/usr/lib \
+      -E TADPOLE_DIR=/tmp/tadpole-didj -E TADPOLE_SYSROOT="$PWD" \
+      -E TADPOLE_W=320 -E TADPOLE_H=240 -E TADPOLE_EVDEV=lf1000 \
       ./Didj/Base/bin/AppManager
 
-    !ASSERT: [6] CEventModule::ButtonPowerUSBTask: reading switch state failed
+(or `./tadpole.sh`, which passes all of that and warns that it will not draw.)
+The shim directories on `LD_LIBRARY_PATH` are what supply the input devices and
+`/dev/dsp`; without them Brio asserts on the first thing it touches.
 
-**The cart assert is gone, and what replaced it is one step further in.** Brio
+    (no assert — it runs, and does not draw)
+
+**Both the cartridge and the input asserts are gone.**
+
+Brio finds its keyboard by opening `/dev/input/event0..` in turn and asking
+`EVIOCGNAME`, and it wants three devices, not one. All three name/phys pairs
+are read out of the device's own kernel — `kernel.bin` is a container with a
+gzip'd Linux 2.6.20.1 inside, and each driver's strings sit adjacent in its
+rodata:
+
+| name | phys |
+|---|---|
+| `LF1000 Keyboard` | `lf1000/input0` |
+| `Power Button` | `lf1000/power_button` |
+| `LF1000 USB` | `lf1000/usb` |
+
+**Serving only the first was worse than serving none.** Brio's
+`ButtonPowerUSBTask` polls three descriptors; having filled only one it polled
+two uninitialised ones, which held `1`, so it asked about stdout, was told
+`POLLIN` every time, read it, got `EBADF`, and went round again — three hundred
+thousand times in twelve seconds, with no error anywhere. A missing device does
+not announce itself; it corrupts the poll set of whatever wanted it.
+
+Audio is portaudio over OSS, which no other device here uses, so the shim
+answers `/dev/dsp` directly: the format ioctls, and writes forwarded to
+`$TADPOLE_DIR/audio.<pid>.dsp` where the viewer already looks. The guest
+negotiates **32000 Hz, stereo, S16_LE, 2048-byte fragments** and produces
+16 KB buffers on time.
+
+ Brio
 names every `/sys` path this device uses in `libUtility.so` and
 `libDisplay.so`, and there are three; the installer writes them, with each
 value read out of the firmware rather than guessed:
@@ -166,28 +200,23 @@ loader file to quiet a warning, so it is not done.
 
 ## What is left
 
-1. **Input.** `CEventModule::ButtonPowerUSBTask` opens `/dev/input/event0` and
-   asks `EVIOCGNAME(32)` for its name, looking for **`LF1000 Keyboard`**; it
-   asserts when nothing answers. The shim already matches evdev nodes by name
-   and serves them from FIFOs the viewer writes — but its table is the
-   LeapPad2's (`LF2000 USB`, `gpio-keys`, `touchscreen interface`, …),
-   transcribed from a live device's `/proc/bus/input/devices`, along with the
-   per-device `EV_KEY`/`EV_ABS` bitmaps that tslib reads.
-
-   So this is not a value to fill in, it is a **second device capture**: the
-   Didj's names, phys strings and capability bitmaps. Inventing them would put
-   guesses exactly where the LeapPad2's are measured. Nobody has run
-   `/proc/bus/input/devices` on a Didj yet.
-
-   (The cartridge assert that used to be first on this list is fixed — see the
-   sysfs table above.)
+1. **The display, and it is the only thing left between here and a picture.**
+   `libDisplay.so` opens `/dev/mlc`, `/dev/layer0..2`, `/dev/dpc`, `/dev/ga3d`
+   and `/dev/mem` — the LF1000's multi-layer controller. The shim fakes
+   `/dev/fb0..2` for every other device, an ordinary fbdev with the
+   `LF1000FB_*` extensions; none of that is reusable as-is. Until it exists the
+   Didj runs and never paints.
 2. **`/Didj` versus `/LF`** everywhere the emulator assumes the latter.
    `install-firmware.py` knows the difference; `tadpole.sh`, `run.sh` and the
    viewer do not yet, which is why there is no "play" for this device.
-3. **The display is a different stack.** `libDisplay.so` opens `/dev/mlc`,
-   `/dev/layer0..2`, `/dev/dpc`, `/dev/ga3d` and `/dev/mem` — the LF1000's
-   multi-layer controller. The shim fakes `/dev/fb0..2` for every other
-   device. Nothing of that is reusable as-is.
+3. **`Pa_StartStream` never returns.** Audio itself works — see below — but
+   Brio's main thread is left in a futex wait after portaudio creates its
+   callback thread, so nothing after audio init runs. The callback thread is
+   healthy and producing 16 KB buffers on time, which is the odd part. The
+   likely answer is the one `tadpole_asound.c` reached for ALSA: replace
+   `libportaudio.so` outright rather than emulate a device well enough for a
+   2008 copy of it. Brio imports only nine `Pa_*` symbols, so the surface is
+   small.
 4. **`pipe` is missing from glasspole** (ARM syscall 42), so any guest shell
    script with a pipeline or a `$(…)` fails there with "pipe call failed" —
    and the Didj boots through `usr/bin/launch_main`, which is a shell script.
