@@ -98,8 +98,14 @@ final class OnlineUpdate implements Tools.Tool {
 
         for (int i = 0; i < pkgs.size(); i++) {
             String pid = pkgs.get(i)[0], desc = pkgs.get(i)[1];
-            if ((i % 10) == 0)
-                out.println("    " + i + " of " + pkgs.size() + "...");
+            /* SAID FOR EVERY PACKAGE, not every tenth. Each one costs up to
+             * nine HTTPS HEAD requests and a TLS handshake apiece, which on
+             * this class of tablet is seconds — so a line every tenth package
+             * is a line every minute, and a minute of a still window is what
+             * "it has frozen" looks like. */
+            Tools.progress(out, i, pkgs.size());
+            out.println("  [" + (i + 1) + "/" + pkgs.size() + "] " + pid
+                        + (desc.isEmpty() ? "" : "  " + desc));
 
             String[] hit = locate(pid);
             if (hit == null) { missing++; continue; }
@@ -107,10 +113,14 @@ final class OnlineUpdate implements Tools.Tool {
             long size = Long.parseLong(hit[2]);
 
             File dest = new File(cache, pid + "." + ext);
-            if (dest.isFile() && dest.length() == size) { had++; continue; }
+            if (dest.isFile() && dest.length() == size) {
+                had++;
+                out.println("        already here");
+                continue;
+            }
 
-            out.println("  " + pid + "  " + (size >> 10) + " KB  " + desc);
-            if (download(url, dest, size)) { got++; bytes += size; }
+            out.println("        downloading " + (size >> 10) + " KB");
+            if (download(url, dest, size, out)) { got++; bytes += size; }
             else { failed++; dest.delete(); }
         }
 
@@ -261,7 +271,7 @@ final class OnlineUpdate implements Tools.Tool {
         }
     }
 
-    private boolean download(String url, File dest, long expect) {
+    private boolean download(String url, File dest, long expect, PrintStream out) {
         HttpURLConnection c = null;
         try {
             c = (HttpURLConnection) new URL(url).openConnection();
@@ -273,9 +283,20 @@ final class OnlineUpdate implements Tools.Tool {
                 OutputStream os = new FileOutputStream(dest);
                 try {
                     byte[] buf = new byte[1 << 16];
-                    long done = 0;
+                    long done = 0, mark = 4 << 20;
                     int n;
-                    while ((n = in.read(buf)) > 0) { os.write(buf, 0, n); done += n; }
+                    while ((n = in.read(buf)) > 0) {
+                        os.write(buf, 0, n);
+                        done += n;
+                        /* A 33 MB firmware package over home wifi is a minute
+                         * of nothing being said. Every 4 MB is enough to show
+                         * the thing is alive without filling the panel. */
+                        if (done >= mark) {
+                            out.println("        " + (done >> 20) + " of "
+                                        + (expect >> 20) + " MB");
+                            mark = done + (4 << 20);
+                        }
+                    }
                     /* A TRUNCATED FILE IS THE DANGEROUS OUTCOME: a short .lfp
                      * is still a valid-looking ZIP right up until the member
                      * that was cut off, so it fails much later and somewhere

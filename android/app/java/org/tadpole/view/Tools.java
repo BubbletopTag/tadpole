@@ -157,6 +157,23 @@ final class Tools {
     /** What a tool is — mirrored from TadpoleTools so tools need only this file. */
     interface Tool extends TadpoleTools.Tool {}
 
+    /**
+     * Tell the front end how far along a long job is.
+     *
+     * <p>THE SAME LINE tools/fetch-firmware.py ALREADY PRINTS, deliberately:
+     * the viewer parses "@@PROGRESS done total" in tool_drain() and draws a
+     * measured bar instead of a barber's pole. Java tools printed nothing of
+     * the kind, so every long job on Android showed an indeterminate bar and
+     * a panel that only changed every minute or so — which reads as a hang,
+     * and was reported as one.
+     *
+     * <p>Cheap enough to call per item: it is one short line, and the front
+     * end throws away everything but the two numbers.
+     */
+    static void progress(PrintStream out, long done, long total) {
+        if (total > 0) out.println("@@PROGRESS " + done + " " + total);
+    }
+
     /** Convenience for tools that want the same "  thing" indent the .py ones use. */
     static void say(PrintStream out, String fmt, Object... args) {
         out.println(args.length == 0 ? fmt : String.format(Locale.ROOT, fmt, args));

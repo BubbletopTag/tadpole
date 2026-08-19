@@ -3637,7 +3637,30 @@ static pid_t spawn_script(const char *script, char *const argv[], int as_guest,
 			ui_status("%s: not available on Android yet", name);
 			return -1;
 		}
-		if (outfd) *outfd = tfd; else close(tfd);
+		/* NON-BLOCKING, AND THIS IS NOT A DETAIL — it is the difference
+		 * between a progress panel and an app that looks crashed.
+		 *
+		 * tool_drain() runs once a frame and reads until read() stops giving
+		 * it anything. On the forked path below, the pipe is put into
+		 * O_NONBLOCK straight after pipe(); this branch returns before ever
+		 * reaching that line, so the Java bridge's pipe stayed BLOCKING and
+		 * the UI thread sat inside read() until the tool next printed
+		 * something. Nothing was drawn and no input was handled for as long as
+		 * the tool stayed quiet.
+		 *
+		 * Short, chatty tools hid it: install-didj prints every few hundred
+		 * files, so the window merely stuttered. Online System Update spends
+		 * minutes probing the CDN and minutes extracting a rootfs with almost
+		 * nothing to say, and the whole app froze for both — the wizard
+		 * vanished mid-press and never came back, which is exactly what it was
+		 * reported as.
+		 *
+		 * tool_poll() decides the tool has finished from tool_reap(), never
+		 * from end-of-file, so a read() that now returns EAGAIN costs nothing. */
+		if (outfd) {
+			*outfd = tfd;
+			fcntl(tfd, F_SETFL, O_NONBLOCK);
+		} else close(tfd);
 		return (pid_t)TOOL_JAVA_PID;
 	}
 #endif

@@ -79,7 +79,8 @@ final class InstallContent implements Tools.Tool {
         out.println("  reading " + packs.size() + " manifests...");
         int read = 0;
         for (File f : packs) {
-            if (++read % 10 == 0) out.println("    " + read + " of " + packs.size() + "...");
+            Tools.progress(out, ++read, packs.size());
+            if (read % 5 == 0) out.println("    " + read + " of " + packs.size() + "...");
             Pack p = null;
             try {
                 p = Pack.open(f);
@@ -94,8 +95,14 @@ final class InstallContent implements Tools.Tool {
             }
         }
 
+        int placed = 0, work = packs.size() * 2;
         for (int pass = 1; pass <= 2; pass++) {
             for (File f : packs) {
+                /* THE BAR MOVES THROUGH BOTH PASSES. Extracting seventy-odd
+                 * packages onto slow storage is the longest silent stretch of
+                 * an install, and a bar that sits still through it is the
+                 * thing people read as a hang. */
+                Tools.progress(out, ++placed, work);
                 String[] mf = manifest.get(f);
                 if (mf == null) continue;
                 String type = mf[0], pid = mf[1];
