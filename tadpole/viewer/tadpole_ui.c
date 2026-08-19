@@ -1598,6 +1598,30 @@ static void prereq_check(struct prereq *p)
 		p->qemu = which_exists("qemu-arm");
 	if (!p->fwtools)
 		p->fwtools = which_exists("ubireader_extract_files");
+
+#ifdef __ANDROID__
+	/* THE EXTRACTOR IS BUILT IN HERE, AND LOOKING FOR PYTHON FINDS NOTHING.
+	 *
+	 * Every check above hunts for a Python interpreter, ubi_reader, or an
+	 * lzallright — which is how the firmware extractor is spelled everywhere
+	 * else. On Android it is Java, inside the APK: InstallFirmware, Ubi,
+	 * Ubifs, Lzo, Bzip2. It cannot be missing, because it ships with the
+	 * app.
+	 *
+	 * Reported from a phone: the welcome page said "No firmware extractor.
+	 * Run ./tools/fetch-deps.sh" — wrong about the dependency, and pointing
+	 * at a shell script on a platform with no shell to run it. Worse, it says
+	 * that on the FIRST screen a new user sees, so the app reads as broken
+	 * before it has been asked to do anything.
+	 *
+	 * The engine is bundled too, when it is there at all: it arrives as
+	 * lib/<abi>/libglasspole.so in the APK and TadpoleActivity.linkEngine()
+	 * puts it where the check above looks. So a found engine is by
+	 * definition a bundled one, and the page can say "built in" and mean it.
+	 */
+	p->fwtools = 1;
+	if (p->qemu) p->qemu_bundled = 1;
+#endif
 }
 
 /* ---- font atlas ---------------------------------------------------------- */
@@ -4367,8 +4391,17 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 				text(r, bx, by + 78, GL_CHECK_0 " No ARM engine installed.", C_ACCENT);
 			else
 				text(r, bx, by + 78, GL_CHECK_0 " No firmware extractor.", C_ACCENT);
+			/* fetch-deps.sh is a shell script, and this platform has no
+			 * shell. On Android a missing engine means the wrong APK was
+			 * installed — the 32-bit build on a 64-bit device — which is
+			 * something the person can act on. */
 			if (!pq.qemu || !pq.fwtools)
+#ifdef __ANDROID__
+				text(r, bx, by + 88, "  Install the universal APK",
+				     C_TEXT_DIM);
+#else
 				text(r, bx, by + 88, "  Run ./tools/fetch-deps.sh", C_TEXT_DIM);
+#endif
 			break;
 		case WIZ_SYSTEM:
 			/* ---- the state of the install, as a checklist --------------
