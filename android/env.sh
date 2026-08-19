@@ -38,7 +38,10 @@ export PATH="$ANDROID_HOME/platform-tools:$BUILD_TOOLS:$JAVA_HOME/bin:$GRADLE_HO
 # loader problem". See android/NOTES-arm32.md for what that is worth and what
 # it costs.
 export TADPOLE_ANDROID_API=26
-export TADPOLE_ANDROID_ABIS="armeabi-v7a arm64-v8a"
+# Overridable like everything else here, so a single-ABI build is one
+# variable rather than an edit: TADPOLE_ANDROID_ABIS=armeabi-v7a ./build-apk.sh
+# The v7a-only APK is about 7 MB; the arm64 engine alone is 39 MB of the rest.
+export TADPOLE_ANDROID_ABIS="${TADPOLE_ANDROID_ABIS:-armeabi-v7a arm64-v8a}"
 export TADPOLE_ANDROID_ABI="${TADPOLE_ANDROID_ABI:-armeabi-v7a}"
 export TADPOLE_ANDROID_SDK_TARGET=35
 

@@ -31,11 +31,16 @@ This is the one thing that decides whether it will work for you.
   on. The LeapPad2's own binaries are 32-bit ARM, so on a 32-bit device they
   run **natively**: there is no emulator in the loop at all, which is why this
   is usable on cheap hardware.
-- **64-bit ARM (arm64)** — the app installs and the interface runs, but the
-  ARM engine has not been built for Android yet, so the wizard will tell you
-  "No ARM engine installed". Whether the native path also works from a 64-bit
-  app process is **untested** — if you try it, that is exactly the report worth
-  sending.
+- **64-bit ARM (arm64)** — the full APK carries a 39 MB arm64 build of the
+  Glasspole engine for this case, since a 64-bit process cannot run the
+  guest's 32-bit binaries directly. **It has not been tested on a real arm64
+  device.** If you try it, that is exactly the report worth sending — say
+  whether the wizard's welcome page reports an engine or says "No ARM engine
+  installed".
+
+There are two downloads for that reason. The **v7a** build is about 7 MB and is
+the tested one; the **universal** build is 51 MB, almost all of it that engine,
+and is the one to try on a 64-bit phone.
 
 Check with `adb shell getprop ro.product.cpu.abilist`, or any CPU-info app.
 
