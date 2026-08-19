@@ -190,6 +190,7 @@ enum ui_action {
 	UI_ACT_SCAN_GAMES,       /* path = folder of .tar backups to read */
 	UI_ACT_INSTALL_GAMES,    /* path = file listing the archives to install */
 	UI_ACT_CHECK_UPDATE,     /* ask GitHub whether a newer release exists */
+	UI_ACT_SAVE_LOG,         /* write a diagnostic log somewhere the user can find */
 	UI_ACT_DO_UPDATE,        /* download it; path = where to write */
 	/* path = a ProductID (0x........). Ask LeapFrog which micromods that
 	 * title has; downloads them to the cache and lists them, installs

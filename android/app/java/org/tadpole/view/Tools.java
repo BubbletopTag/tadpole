@@ -26,6 +26,11 @@ final class Tools {
 
     static synchronized void setProjectDir(String dir) { projectDir = dir; }
 
+    /** The app's versionName, for the diagnostic log's header. */
+    private static String version = "unknown";
+    static synchronized void setVersion(String v) { if (v != null) version = v; }
+    static synchronized String version() { return version; }
+
     /** What the C side's HOME is set to — see TadpoleActivity. */
     static synchronized void setHome(String dir) { home = dir; }
     static synchronized String home() { return home; }
@@ -77,6 +82,7 @@ final class Tools {
         if (name.equals("install-content"))  return new InstallContent();
         if (name.equals("online-update"))    return new OnlineUpdate();
         if (name.equals("install-didj"))     return new DidjSetup();
+        if (name.equals("save-log"))         return new SaveLog();
         return null;
     }
 

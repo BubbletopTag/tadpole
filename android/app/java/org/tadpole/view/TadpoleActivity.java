@@ -150,6 +150,10 @@ public class TadpoleActivity extends SDLActivity {
              * of the environment: System.getenv() snapshots at process start,
              * and these setenv calls happen after that. Handed over directly. */
             TadpoleTools.setProjectDir(dir);
+            try {
+                Tools.setVersion(getPackageManager()
+                        .getPackageInfo(getPackageName(), 0).versionName);
+            } catch (Throwable ignored) { /* the log just says "unknown" */ }
             TadpoleTools.setHome(dir);
             extractAssets(dir);
             linkEngine(dir);

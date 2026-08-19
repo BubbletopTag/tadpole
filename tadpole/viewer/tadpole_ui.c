@@ -2559,7 +2559,7 @@ struct mitem {
 
 enum {
 	IT_RUN_UI = 1, IT_SWF, IT_PKG, IT_CART, IT_FW, IT_STOP, IT_QUIT,
-	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE, IT_UPDATE,
+	IT_AUDIO, IT_GFX, IT_PAD, IT_ABOUT, IT_WIZARD, IT_ERASE, IT_UPDATE, IT_SAVELOG,
 	IT_GAMES, IT_DEBUG, IT_SYSTEM
 };
 
@@ -2597,6 +2597,13 @@ static const struct mitem OPT_ITEMS[] = {
 static const struct mitem HELP_ITEMS[] = {
 	{ "Setup Wizard...",        IT_WIZARD, 0, 0, 0 },
 	{ "Check for Updates...",   IT_UPDATE, 0, 0, 0 },
+#ifdef __ANDROID__
+	/* ANDROID ONLY, AND NOT BECAUSE THE OTHERS DO NOT NEED LOGS. On a desktop
+	 * the log is already in the terminal the user started Tadpole from. On a
+	 * phone there is no terminal, and asking a beta tester to install the SDK
+	 * and learn `adb logcat` to report a bug is asking them not to report it. */
+	{ "Save Diagnostic Log",    IT_SAVELOG, 0, 0, 0 },
+#endif
 	{ "About Tadpole",          IT_ABOUT,  0, 0, 0 },
 };
 
@@ -3155,6 +3162,7 @@ static void activate(int id)
 	case IT_SYSTEM: g_modal = M_SYSTEM; break;
 	case IT_ABOUT: g_modal = M_ABOUT; break;
 	case IT_UPDATE: g_action = UI_ACT_CHECK_UPDATE; break;
+	case IT_SAVELOG: g_action = UI_ACT_SAVE_LOG; break;
 	case IT_GAMES: games_open(); break;
 	case IT_WIZARD: g_wiz_page = 0; g_modal = M_WIZARD; break;
 	case IT_ERASE:

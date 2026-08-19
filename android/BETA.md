@@ -64,7 +64,7 @@ Tested on: an AOSP 8.1 tablet, armeabi-v7a only, Mali-T720.
 ## 1. Install
 
 ```sh
-adb install -r Tadpole-android-0.3-beta.apk
+adb install -r Tadpole-android-0.4-beta.apk
 ```
 
 Launch it once. It will send you to a **Settings** page asking for *All files
@@ -216,6 +216,32 @@ Known rough edges in this build:
 ---
 
 ## Reporting a problem
+
+### The easy way: Help -> Save Diagnostic Log
+
+No computer, no `adb`, no cable.
+
+Open **Help -> Save Diagnostic Log**. It writes one file into your **Downloads**
+folder, named like `tadpole-log-20260819-191845.txt`, and tells you the name on
+screen. Attach that to your report — any file manager, chat app or mail client
+can find it in Downloads.
+
+It contains everything anyone will ask you for anyway:
+
+- your device, its Android version and its ABI list;
+- **whether the app is running the 32-bit native path or the 64-bit engine**,
+  which is the first thing that decides how a bug is read;
+- whether the engine linked, whether firmware is installed, how many packages
+  and whether Didj support is there;
+- Tadpole's own log, and the guest's crash report if it left one.
+
+It is Tadpole's output only. Android has filtered the log by app since 4.1, so
+it cannot pick up anything belonging to you or to another app.
+
+### The `adb` way, if you already have it set up
+
+Everything below does the same job from a computer, and is what to use if the
+app will not start far enough to reach its own menu.
 
 ### If it does not start at all, this one command answers it
 

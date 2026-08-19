@@ -5404,6 +5404,9 @@ int main(int argc, char **argv)
 		case UI_ACT_ONLINE_UPDATE:
 			tool_run("online update", "tools/online-update.sh", NULL);
 			break;
+		case UI_ACT_SAVE_LOG:
+			tool_run("diagnostic log", "tools/save-log.sh", NULL);
+			break;
 		case UI_ACT_MAKE_PROFILE: {
 			static char nm[64], gr[16], pic[1024];
 			char *av[7];
