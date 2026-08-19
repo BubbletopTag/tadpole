@@ -31,12 +31,18 @@ This is the one thing that decides whether it will work for you.
   on. The LeapPad2's own binaries are 32-bit ARM, so on a 32-bit device they
   run **natively**: there is no emulator in the loop at all, which is why this
   is usable on cheap hardware.
-- **64-bit ARM (arm64)** — the full APK carries a 39 MB arm64 build of the
-  Glasspole engine for this case, since a 64-bit process cannot run the
-  guest's 32-bit binaries directly. **It has not been tested on a real arm64
-  device.** If you try it, that is exactly the report worth sending — say
-  whether the wizard's welcome page reports an engine or says "No ARM engine
-  installed".
+- **64-bit ARM (arm64)** — works, through the emulator. The full APK carries a
+  39 MB arm64 build of the Glasspole engine, and the app links and runs it for
+  you. Verified on a OnePlus (Android 16, Snapdragon): installed, downloaded
+  its own system files, booted to the LeapPad2 home screen, no computer and no
+  root. Slower than native and the camera does not work yet — see the known
+  list below.
+
+  A 64-bit phone needs the engine even when its CPU still supports 32-bit, and
+  the reason is not the CPU: Android refuses to execute a file the app itself
+  wrote (the W^X rule from API 29), and the guest's binaries come out of your
+  own firmware. The engine sidesteps that by never exec'ing them — it reads
+  them and JITs.
 
 There are two downloads for that reason. The **v7a** build is about 6 MB and is
 the tested one; the **universal** build is 51 MB, almost all of it that engine,
@@ -58,7 +64,7 @@ Tested on: an AOSP 8.1 tablet, armeabi-v7a only, Mali-T720.
 ## 1. Install
 
 ```sh
-adb install -r Tadpole-android-0.2-beta.apk
+adb install -r Tadpole-android-0.3-beta.apk
 ```
 
 Launch it once. It will send you to a **Settings** page asking for *All files
@@ -252,8 +258,8 @@ engine: could not link                      the interesting failure - send this 
 ```
 
 If the link is there and titles still do not run, say so explicitly and include
-the whole log: an arm64 device has never been tested, and "the engine linked
-and then X happened" is the most valuable report anyone can send right now.
+the whole log. The engine path is known to work — so "the engine linked and
+then X happened" is a real bug and worth reporting in full.
 
 Paste the whole `probe:` block. It also reports whether the app can make
 executable memory, exec a file, `mkfifo`, and map shared memory — which is the
@@ -313,5 +319,9 @@ adb shell "run-as org.tadpole.view cat files/crash.log" | tail -40
 - The progress bar fills and then restarts for the next phase of an install.
 - After an unclean exit a stale `.lock` can leave *Run System Menu* greyed out
   as "running" — restart the app.
-- arm64 devices in general: known untested, and reports are wanted, but see the
-  probe section above first.
+- **The camera does not work on 64-bit devices.** It works on 32-bit ones. The
+  viewfinder comes up black or green while the phone's own camera indicator
+  says the camera is live — the frames are captured and never reach the guest.
+  Known, being worked on; no need to report it again.
+- Under the engine, the guest runs noticeably slower than on a 32-bit device,
+  where there is no emulation at all.
