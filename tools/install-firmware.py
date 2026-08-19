@@ -981,6 +981,13 @@ DIDJ_DESTS = {
 }
 DIDJ_OTHER = os.path.join("Didj", "Data", "MDL")
 
+# See the note in build_sysroot_didj for where each value comes from.
+DIDJ_SYSFS = {
+    "sys/devices/platform/lf1000-nand/cartridge": "none\n",
+    "sys/devices/platform/lf1000-usbgadget/vbus": "0\n",
+    "sys/devices/platform/lf1000-power/status": "1\n",
+}
+
 
 def install_didj_content(pkgs, sysroot, fw):
     """Lay the Didj's packages into the sysroot's /Didj tree.
@@ -1106,17 +1113,38 @@ def build_sysroot_didj(rootfs):
               "dev/input", "sys", "proc", "tmp", "flags"):
         os.makedirs(os.path.join(sysroot, d), exist_ok=True)
 
-    # NOTHING IS INVENTED UNDER /sys OR /flags, and that is a decision.
+    # THE THREE SYSFS FILES THE FIRMWARE READS, AND ONLY THOSE THREE.
     #
-    # The LeapPad sysroot writes some thirty sysfs files whose values were read
-    # off real hardware. Nobody here has read a Didj's, so writing plausible
-    # ones would be guessing at the exact place a wrong guess is hardest to
-    # spot later. The directories exist; what the firmware puts in them is what
-    # is in them. The two flags launch_main tests for are absent on a healthy
-    # device, so absent is also correct:
+    # Brio's libUtility.so and libDisplay.so between them name every /sys path
+    # this device uses, and there are three. Each value below is read out of
+    # the firmware rather than guessed, because the firmware documents its own
+    # enumerations in shell scripts that ship beside the binaries:
+    #
+    #   cartridge  usr/bin/cartinfo lists the whole set in its help text —
+    #              production, development, manufacturing, base, none — and
+    #              defaults CART_TYPE to "none". An emulator has an empty slot,
+    #              so "none" is not a placeholder, it is the right answer.
+    #              WITHOUT THIS FILE AppManager does not start: the open fails
+    #              and CButtonModule::LightningButtonTask asserts on it.
+    #   vbus       usr/bin/lftest_usb asserts `vbus = 0` for "cable is
+    #              unplugged" and `= 1` for plugged in. Nothing is plugged in.
+    #   status     etc/init.d/lightning switches on it and treats 3 and 4 as
+    #              low battery, anything else as normal. 1 is what the
+    #              LeapPad2's own capture records for EXTERNAL power (see
+    #              SYSFS above, lf2000-power/status), and this is the same
+    #              driver family one generation earlier.
+    #
+    # NOTHING ELSE IS INVENTED. The LeapPad sysroot writes some thirty sysfs
+    # files whose values were read off real hardware; nobody has read a Didj's,
+    # so the rest of /sys stays empty rather than plausible. The two flags
+    # launch_main tests for are absent on a healthy device, so absent is also
+    # correct:
     #
     #     /flags/needs_repair   set only by a failed update
     #     /flags/vbus           set while USB is plugged in
+    for rel, text in DIDJ_SYSFS.items():
+        write_text(os.path.join(sysroot, rel), text)
+
     dev = detect_device(rootfs)
     if dev:
         write_text(os.path.join(sysroot, ".tadpole-device"), dev + "\n")

@@ -41,6 +41,20 @@ enum : uint32_t {
     SYS_setuid32 = 213, SYS_setgid32 = 214,
     SYS_getgroups32 = 205, SYS_setgroups32 = 206,
     SYS_setuid = 23, SYS_setgid = 46,
+    /* AND THE 16-BIT GETTERS, which is a matched pair with the setters above
+     * and was missing until a device old enough to use them turned up.
+     *
+     * uClibc 0.9.32 and 0.9.33 — the Leapster GS and the LeapPad3 — call
+     * getuid32/getgid32. The Didj is uClibc 0.9.29 and calls the original
+     * 16-bit numbers, so on that firmware EVERY busybox applet died at
+     * startup:
+     *
+     *     cat: setgid: Function not implemented
+     *
+     * naming the setter, which was implemented. busybox does setgid(getgid()),
+     * the getter returned -ENOSYS, and setgid(-1) is the EPERM that gets
+     * printed. The syscall the message names is not the syscall that failed. */
+    SYS_getuid = 24, SYS_getgid = 47, SYS_geteuid = 49, SYS_getegid = 50,
     SYS_set_tid_address = 256, SYS_clock_gettime = 263, SYS_readlink = 85,
     SYS_set_robust_list = 338, SYS_getcwd = 183, SYS_nanosleep = 162,
     SYS_sched_yield = 158, SYS_setitimer = 104,
@@ -385,6 +399,8 @@ const char *name_of(uint32_t nr) {
         case SYS_newselect: return "_newselect";     case SYS_rename: return "rename";
         case SYS_statfs: return "statfs";            case SYS_chdir: return "chdir";
         case SYS_getuid32: return "getuid32";
+        case SYS_getuid: return "getuid";           case SYS_getgid: return "getgid";
+        case SYS_geteuid: return "geteuid";         case SYS_getegid: return "getegid";
         case SYS_setitimer: return "setitimer";
         case SYS_nanosleep: return "nanosleep";     case SYS_lstat: return "lstat";
         case SYS_stat: return "stat";               case SYS_fstat: return "fstat";
@@ -443,9 +459,13 @@ void gp_syscall(Thread &t) {
     /* The same numbers elf.c puts in AT_UID/AT_GID. See GUEST_UID above for
      * what answering 0 here cost. */
     case SYS_getuid32:
-    case SYS_geteuid32: ret = (int32_t)GUEST_UID; break;
+    case SYS_geteuid32:
+    case SYS_getuid:
+    case SYS_geteuid:  ret = (int32_t)GUEST_UID; break;
     case SYS_getgid32:
-    case SYS_getegid32: ret = (int32_t)GUEST_GID; break;
+    case SYS_getegid32:
+    case SYS_getgid:
+    case SYS_getegid:  ret = (int32_t)GUEST_GID; break;
 
     /* Becoming who you already are is the only change an unprivileged process
      * is allowed, and it is the only one anything here asks for: busybox drops

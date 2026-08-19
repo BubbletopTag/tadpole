@@ -123,7 +123,22 @@ After an install:
       -E LD_LIBRARY_PATH=/Didj/Base/Brio/lib:/Didj/Base/lib:/lib:/usr/lib \
       ./Didj/Base/bin/AppManager
 
-    !ASSERT: [3] CButtonModule::LightningButtonTask: cart read failed
+    !ASSERT: [6] CEventModule::ButtonPowerUSBTask: reading switch state failed
+
+**The cart assert is gone, and what replaced it is one step further in.** Brio
+names every `/sys` path this device uses in `libUtility.so` and
+`libDisplay.so`, and there are three; the installer writes them, with each
+value read out of the firmware rather than guessed:
+
+| file | value | where the value comes from |
+|---|---|---|
+| `lf1000-nand/cartridge` | `none` | `usr/bin/cartinfo` lists the whole set in its help text — production, development, manufacturing, base, none — and defaults to none. The slot is empty. |
+| `lf1000-usbgadget/vbus` | `0` | `usr/bin/lftest_usb` asserts `vbus = 0` for "cable is unplugged". |
+| `lf1000-power/status` | `1` | `etc/init.d/lightning` treats 3 and 4 as low battery, anything else as normal; 1 is EXTERNAL in the LeapPad2's own hardware capture. |
+
+Without the first of those, `AppManager` does not start at all. **Both backends
+now reach the same next assert**, which is a good sign in itself: qemu-arm and
+glasspole disagree about nothing here.
 
 **Do not trust an error that names a host path.** qemu's `-L` only redirects
 paths that ALREADY EXIST in the sysroot, so any library missing from the Didj
@@ -151,19 +166,39 @@ loader file to quiet a warning, so it is not done.
 
 ## What is left
 
-1. **The cartridge.** `CButtonModule::LightningButtonTask` reads a cart and
-   asserts when it cannot. Tadpole already fakes a cartridge for the LeapPad2
-   (see `cartridge.sh` and the `cnotify` states in `tadpole.sh`), so this is
-   the nearest thing to a solved problem on the list, and the only thing
-   between `AppManager` starting and `AppManager` running.
+1. **Input.** `CEventModule::ButtonPowerUSBTask` opens `/dev/input/event0` and
+   asks `EVIOCGNAME(32)` for its name, looking for **`LF1000 Keyboard`**; it
+   asserts when nothing answers. The shim already matches evdev nodes by name
+   and serves them from FIFOs the viewer writes — but its table is the
+   LeapPad2's (`LF2000 USB`, `gpio-keys`, `touchscreen interface`, …),
+   transcribed from a live device's `/proc/bus/input/devices`, along with the
+   per-device `EV_KEY`/`EV_ABS` bitmaps that tslib reads.
+
+   So this is not a value to fill in, it is a **second device capture**: the
+   Didj's names, phys strings and capability bitmaps. Inventing them would put
+   guesses exactly where the LeapPad2's are measured. Nobody has run
+   `/proc/bus/input/devices` on a Didj yet.
+
+   (The cartridge assert that used to be first on this list is fixed — see the
+   sysfs table above.)
 2. **`/Didj` versus `/LF`** everywhere the emulator assumes the latter.
    `install-firmware.py` knows the difference; `tadpole.sh`, `run.sh` and the
    viewer do not yet, which is why there is no "play" for this device.
-3. **`runtime/setup-sysroot.sh` cannot build this tree**, and says so rather
+3. **The display is a different stack.** `libDisplay.so` opens `/dev/mlc`,
+   `/dev/layer0..2`, `/dev/dpc`, `/dev/ga3d` and `/dev/mem` — the LF1000's
+   multi-layer controller. The shim fakes `/dev/fb0..2` for every other
+   device. Nothing of that is reusable as-is.
+4. **`pipe` is missing from glasspole** (ARM syscall 42), so any guest shell
+   script with a pipeline or a `$(…)` fails there with "pipe call failed" —
+   and the Didj boots through `usr/bin/launch_main`, which is a shell script.
+   It needs `gp_pipe` in `host.h` and an implementation in BOTH backends;
+   adding it to `host_posix.c` alone is the failure mode that file exists to
+   prevent. qemu-arm has no such gap.
+5. **`runtime/setup-sysroot.sh` cannot build this tree**, and says so rather
    than building nonsense over it — both write to `runtime/sysroot`, and the
    LeapPad layout it assembles would overwrite a working Didj. It still
    *switches* to the Didj; rebuilding means re-running the installer.
-4. **Fields not yet read** out of the image, deliberately absent from
+6. **Fields not yet read** out of the image, deliberately absent from
    `runtime/devices/didj.conf` rather than guessed: `DEV_UIPKG`, `DEV_SPLASH`,
    `DEV_SOUNDS`, `DEV_CODEC`, and the `DEV_*_DEV` node names. Nothing is
    invented under the sysroot's `/sys` or `/flags` either, for the same reason:

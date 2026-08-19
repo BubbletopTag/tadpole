@@ -40,12 +40,49 @@ GUESTLIBS := ../runtime/libs
 # realdl` worked on exactly one machine in the world and failed everywhere else
 # with a Python traceback about a missing file.
 #
-# tadpole.sh, runtime/setup-sysroot.sh and tools/glconform/build.sh all glob for
-# it already; this is the same rule, spelled the same way — INCLUDING emmc_rfs,
-# which is where an eMMC device's root lands (the LeapPad3 ships a tar, not a
-# UBI volume). Keep the four spellings in step.
-ROOTFS := $(firstword $(wildcard ../rootfs/*/emmc_rfs ../rootfs/*/ubi_rfs ../rootfs/*/*/ubi_rfs))
+# THE LIVE DEVICE'S, NOT THE FIRST ONE ON DISK — and that distinction cost a
+# working Leapster GS.
+#
+# This used to be the bare glob
+#
+#     $(firstword $(wildcard ../rootfs/*/emmc_rfs ../rootfs/*/ubi_rfs ...))
+#
+# with a comment promising to keep it in step with tadpole.sh,
+# runtime/setup-sysroot.sh and device.sh. Those three were fixed to ask
+# tad_rootfs_for_device() when a second device became installable; this was
+# not. `emmc_rfs` is first in that list, so installing a LeapPad3 beside a
+# Leapster GS silently repointed every derived library at the LeapPad3 — see
+# ../tools/real-libs.py for what that does to a guest, which is a SIGSEGV with
+# nothing in it naming a library or a device.
+#
+# Ask the same question the same way. The glob stays as the last resort, for a
+# checkout with firmware but no sysroot built yet, where there is no live
+# device to ask about.
+ROOTFS := $(shell bash -c '. ../runtime/device.sh 2>/dev/null; \
+    d="$$(tad_active_device 2>/dev/null)"; \
+    [ -n "$$d" ] && tad_rootfs_for_device "$$d" 2>/dev/null' 2>/dev/null)
+ifeq ($(ROOTFS),)
+ROOTFS := $(firstword $(wildcard ../rootfs/*/emmc_rfs ../rootfs/*/ubi_rfs \
+                                 ../rootfs/*/jffs2_rfs ../rootfs/*/*/ubi_rfs))
+endif
 ROOTFS_LIB := $(ROOTFS)/usr/lib
+
+# THE DERIVED "REAL" LIBRARIES, REFRESHED BEFORE ANY RULE LOOKS AT THEM.
+#
+# libdl.so.9, libz.so.9 and libWebServices.so.9 are the guest's own libraries
+# copied out of $(ROOTFS) with their SONAMEs patched, so a shim can impersonate
+# a name AND chain into the real thing. ../tools/real-libs.py owns all of them
+# and rewrites only what differs from the live device's firmware.
+#
+# AT PARSE TIME, NOT AS A RULE, and the reason is mtimes. The sources are
+# extracted firmware stamped 2013, so they are always older than anything
+# derived from them: a normal prerequisite would decide the output was up to
+# date and keep a LeapPad3's libdl in front of a Leapster GS. Comparing bytes
+# is the only test that works, so it runs unconditionally and stays quiet when
+# there is nothing to do.
+REAL_LIBS_OUT := $(shell $(or $(TADPOLE_PYTHON),python3) ../tools/real-libs.py \
+                    --rootfs '$(ROOTFS)' --quiet 2>&1)
+$(if $(REAL_LIBS_OUT),$(info $(REAL_LIBS_OUT)))
 
 SHIMLIBS  := ../runtime/shimlibs
 SHIM_SONAME := libdl.so.0
@@ -405,18 +442,20 @@ $(SHIM_OUT): $(SHIM_SRC) $(SHIMLIBS)/$(REAL_DL) | need-libs
 # mechanical copy-with-one-string-patched out of the rootfs, there is never a
 # reason to want it and not want it, and "run: make realdl" was one more step
 # between a clone and a build.
-$(SHIMLIBS)/$(REAL_DL): | need-rootfs
-	@$(MAKE) --no-print-directory realdl
+# ALL FIVE ARE WRITTEN BY real-libs.py, which has already run at parse time.
+# These rules exist so that a MISSING one is a sentence rather than a linker
+# error about a file nobody can see was meant to be generated.
+$(SHIMLIBS)/$(REAL_DL) $(SHIMLIBS_Z)/$(REAL_Z) $(SHIMLIBS_PKG)/$(REAL_WS) \
+$(SHIMLIBS_EGL)/$(REAL_DL) $(SHIMLIBS_PKG)/$(REAL_DL): | need-rootfs
+	@[ -e $@ ] || { echo "$@ was not derived from $(ROOTFS)."; \
+	  echo "  ../tools/real-libs.py makes it; run it and read what it says —"; \
+	  echo "  this device's firmware may not have the library that this shim"; \
+	  echo "  variant impersonates, in which case the variant is not for it."; \
+	  exit 1; }
 
 .PHONY: realdl
-realdl: | need-rootfs
-	@mkdir -p $(SHIMLIBS)
-	@python3 -c "import pathlib,sys;\
-c=list(pathlib.Path('$(ROOTFS)/lib').glob('libdl-*.so'));\
-sys.exit('no libdl-*.so in $(ROOTFS)/lib') if not c else None;\
-d=pathlib.Path('$(SHIMLIBS)/$(REAL_DL)');\
-d.write_bytes(c[0].read_bytes().replace(b'libdl.so.0\x00', b'libdl.so.9\x00'));\
-print('wrote', d, 'from', c[0].name)"
+realdl:
+	@$(or $(TADPOLE_PYTHON),python3) ../tools/real-libs.py --rootfs '$(ROOTFS)'
 
 shimz: $(SHIM_OUT_Z)
 
@@ -518,10 +557,6 @@ shimegl-links: $(GLES_OUT) $(ASOUND_OUT)
 # path for it, and shimlibs/libdl.so.9 (which our libEGL has in NEEDED) would
 # then not resolve. A second copy beside the library that needs it keeps
 # shimlibs-egl self-contained.
-$(SHIMLIBS_EGL)/$(REAL_DL): $(SHIMLIBS)/$(REAL_DL)
-	@mkdir -p $(SHIMLIBS_EGL)
-	@cp $< $@ && echo "copied $@"
-
 $(SHIM_OUT_EGL): $(SHIM_SRC) $(EGL_SRC) $(GLES_OUT) $(SHIMLIBS)/$(REAL_DL) \
                  $(SHIMLIBS_EGL)/$(REAL_EGL) | need-libs
 	@mkdir -p $(SHIMLIBS_EGL)
@@ -545,11 +580,21 @@ $(SHIMLIBS_EGL)/$(REAL_EGL): ../tools/make-egl-real.py | need-rootfs
 	@mkdir -p $(SHIMLIBS_EGL)
 	@python3 ../tools/make-egl-real.py $(ROOTFS_LIB)/libEGL.so $@
 
+# A VARIANT ONLY EXISTS FOR THE DEVICES THAT HAVE THE LIBRARY IT IMPERSONATES.
+#
+# libWebServices is the LeapPad3's and the Ultra's; the Leapster GS and the
+# LeapPad2 have no such library, so there is nothing for this shim to stand in
+# front of and nothing that would ever load it. That used to build anyway,
+# because $(ROOTFS) was whichever firmware sorted first and the answer happened
+# to be a LeapPad3 — which is the same accident that put a LeapPad3's libdl in
+# front of a Leapster GS. Now that $(ROOTFS) is the live device's, "this device
+# does not have it" is a real answer and `make all` says so instead of failing.
+ifeq ($(wildcard $(ROOTFS_LIB)/libWebServices.so.1),)
+shimpkg:
+	@echo "shimpkg: skipped — no libWebServices.so.1 in this device's firmware"
+else
 shimpkg: $(SHIM_OUT_PKG) $(SHIMLIBS_PKG)/$(REAL_DL)
-
-$(SHIMLIBS_PKG)/$(REAL_DL): $(SHIMLIBS)/$(REAL_DL)
-	@mkdir -p $(SHIMLIBS_PKG)
-	@cp $< $@ && echo "copied $@"
+endif
 
 $(SHIM_OUT_PKG): $(SHIM_SRC) $(SHIMLIBS)/$(REAL_DL) \
                  $(SHIMLIBS_PKG)/$(REAL_WS) | need-libs
@@ -576,26 +621,6 @@ $(SHIM_OUT_PKG): $(SHIM_SRC) $(SHIMLIBS)/$(REAL_DL) \
 #
 # libWebServices.so.9 is the same length, so it patches in place without
 # shifting a single offset — the same trick as libdl.so.0 -> libdl.so.9.
-$(SHIMLIBS_PKG)/$(REAL_WS): | need-rootfs
-	@mkdir -p $(SHIMLIBS_PKG)
-	@python3 -c "import pathlib,sys;\
-s=(pathlib.Path('$(ROOTFS_LIB)')/'libWebServices.so.1').resolve();\
-sys.exit('no libWebServices.so.1 in $(ROOTFS_LIB)') if not s.exists() else None;\
-d=pathlib.Path('$(SHIMLIBS_PKG)/$(REAL_WS)');\
-b=s.read_bytes().replace(b'libdl.so.0\x00', b'libdl.so.9\x00');\
-b=b.replace(b'libWebServices.so.1\x00', b'libWebServices.so.9\x00');\
-d.write_bytes(b);\
-print('wrote', d, 'from', s.name)"
-
-$(SHIMLIBS_Z)/$(REAL_Z): | need-rootfs
-	@mkdir -p $(SHIMLIBS_Z)
-	@python3 -c "import pathlib;\
-b=pathlib.Path('$(ROOTFS_LIB)');\
-s=(b/'libz.so.1').resolve();\
-d=pathlib.Path('$(SHIMLIBS_Z)/$(REAL_Z)');\
-d.write_bytes(s.read_bytes().replace(b'libz.so.1\x00', b'libz.so.9\x00'));\
-print('wrote', d)"
-
 # Feasibility/regression check for host-GPU replay. Not part of `all`: it needs
 # a GL context, so it cannot run headless in CI.
 # End-to-end round trip: the real encoder and the real replayer in one process,

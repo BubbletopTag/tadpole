@@ -320,6 +320,32 @@ done
 # would put a SECOND copy in the process the moment anything resolves libdl by
 # absolute path. Two shims chain into each other and recurse until the stack
 # is gone (see the note in tadpole.sh). Leave the real libdl alone here.
+# THE SHIM'S "REAL" HELPER LIBRARIES ARE PER DEVICE, AND THIS IS WHERE THE
+# DEVICE CHANGES.
+#
+# Each shim variant chains into the guest's own libdl/libz/libWebServices,
+# copied out of the rootfs with its SONAME patched so two libraries do not
+# answer to one name. Those copies were built once, by `make`, from whichever
+# rootfs a bare glob happened to list first — so installing a second device
+# left them pointing at the wrong firmware, and a device switch never touched
+# them because a switch does not run make.
+#
+# uClibc's libdl is not a standalone library; it reads the loader's own
+# structures. The LeapPad3's is 0.9.33.1, the Leapster GS's 0.9.32.1, the
+# Didj's 0.9.29. Crossed, dlsym does not fail — it returns NULL for every
+# symbol, the shim's whole real_* table is NULL, and the guest dies on the
+# first unchecked one with a bare SIGSEGV before its first line of output.
+# Installing a LeapPad3 stopped the Leapster GS booting, and nothing said so.
+#
+# Refreshed here, every build and every switch, because here is the one place
+# that knows which device is now live. It writes only when the bytes differ.
+if [ -x "$PROJ/tools/real-libs.py" ]; then
+    echo "==> shim helper libraries"
+    "${TADPOLE_PYTHON:-python3}" "$PROJ/tools/real-libs.py" --rootfs "$ROOTFS" \
+        || echo "    WARNING: could not refresh them — a guest may crash on" \
+                "launch if they belong to another device" >&2
+fi
+
 SHIM_DL="$PROJ/runtime/shimlibs/libdl.so.0"
 if [ "${DEV_HAS_QT:-0}" = 1 ]; then
     echo "    libdl left as the device's own ($DEV_NAME injects via libEGL)"
