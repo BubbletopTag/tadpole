@@ -655,6 +655,7 @@ guest() {
            -E TADPOLE_SYSROOT="$SYSROOT" \
            -E TADPOLE_W="${DEV_LCD%x*}" -E TADPOLE_H="${DEV_LCD#*x}" \
            -E TADPOLE_QEMU="$QEMU" \
+           ${DEV_EVDEV:+-E TADPOLE_EVDEV="$DEV_EVDEV"} \
            ${DEV_HAS_QT:+-E TADPOLE_ABS_PANEL=1} \
            ${DEV_ENV_ARGS[@]+"${DEV_ENV_ARGS[@]}"} \
            $([ "$debug" = 1 ] && echo "-E TADPOLE_DEBUG=1") \

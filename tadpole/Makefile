@@ -16,6 +16,21 @@ ARCH_TRIPLE := armv7-unknown-linux-gnueabi
 # pass in core registers. This is NOT armhf — do not "fix" it to hard-float.
 ARMFLAGS := --target=$(ARCH_TRIPLE) -march=armv7-a -mfpu=vfp -mfloat-abi=softfp
 
+# A SysV HASH TABLE AS WELL AS GNU_HASH, and without it the Didj hangs before
+# it runs a single instruction of its own code.
+#
+# lld defaults to emitting ONLY .gnu.hash. That is fine for uClibc 0.9.32 and
+# 0.9.33 — the Leapster GS, the LeapPad2, the LeapPad3 — which understand it.
+# The Didj is uClibc 0.9.29, built in 2008, and predates GNU_HASH entirely: its
+# ld.so looks for DT_HASH, our libraries have none, and the loader spins
+# forever in symbol lookup. No crash, no message, no syscalls at all — an
+# strace stops dead after the last mmap2 and the process sits at 100% CPU.
+# Every library the DEVICE ships has a .hash section; ours did not.
+#
+# --hash-style=both costs a few hundred bytes per object and is what every
+# distribution toolchain does for exactly this reason.
+ARMFLAGS += -Wl,--hash-style=both
+
 # INJECTION: WE CANNOT USE LD_PRELOAD.
 # LeapFrog's uClibc 0.9.32 was built WITHOUT __LDSO_PRELOAD_ENV_SUPPORT__.
 # The guest loader never even opens an LD_PRELOAD path — verified with a

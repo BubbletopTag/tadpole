@@ -795,24 +795,44 @@ def profile_meta_device(dev_id):
     return ""
 
 
-def link_runtime_libs(rootfs):
-    """runtime/libs — every shared object, flat, for LD_LIBRARY_PATH."""
+# WHERE EACH DEVICE KEEPS ITS SHARED OBJECTS, relative to the root it is given.
+#
+# The LeapPad line puts everything under one tree, so one root answers for all
+# of it. The Didj does not: its /Didj/Base comes from PACKAGES and is assembled
+# into the sysroot, while /lib and /usr/lib come out of the firmware image — so
+# it is two roots, and link_runtime_libs takes a list for that reason.
+LIB_DIRS = ("lib", "usr/lib", "LF/Base/lib", "LF/Base/Brio/lib",
+            "LF/Base/Flash/lib",
+            "Didj/Base/lib", "Didj/Base/Brio/lib")
+
+
+def link_runtime_libs(*roots):
+    """runtime/libs — every shared object, flat, for LD_LIBRARY_PATH.
+
+    EARLIER ROOTS WIN. For the Didj the sysroot is passed first, so a library
+    the Brio package ships takes precedence over a same-named one in the
+    firmware image — which is the order the device's own /etc/profile puts
+    them in.
+    """
     libdir = os.path.join(PROJ, "runtime", "libs")
     os.makedirs(libdir, exist_ok=True)
     for f in os.listdir(libdir):
         p = os.path.join(libdir, f)
         if os.path.islink(p):
             os.remove(p)
-    n = 0
-    for d in ("lib", "usr/lib", "LF/Base/lib", "LF/Base/Brio/lib",
-              "LF/Base/Flash/lib"):
-        src = os.path.join(rootfs, d)
-        if not os.path.isdir(src):
-            continue
-        for so in sorted(os.listdir(src)):
-            if ".so" in so and link_or_copy(os.path.join(src, so),
-                                            os.path.join(libdir, so)):
-                n += 1
+    n, seen = 0, set()
+    for root in roots:
+        for d in LIB_DIRS:
+            src = os.path.join(root, d)
+            if not os.path.isdir(src):
+                continue
+            for so in sorted(os.listdir(src)):
+                if ".so" not in so or so in seen:
+                    continue
+                if link_or_copy(os.path.join(src, so),
+                                os.path.join(libdir, so)):
+                    seen.add(so)
+                    n += 1
     say("    %d libraries linked" % n)
 
 
@@ -1145,6 +1165,24 @@ def build_sysroot_didj(rootfs):
     for rel, text in DIDJ_SYSFS.items():
         write_text(os.path.join(sysroot, rel), text)
 
+    # ONE libdl, AND IT MUST BE OURS — the same rule setup-sysroot.sh applies
+    # to every other non-Qt device, for the same reason. AppManager here names
+    # libdl.so.0 in its DT_NEEDED, which is how the shim gets into the process
+    # at all; leaving /lib/libdl.so.0 pointing at the real uClibc one puts a
+    # second dl provider in the link map beside the shim.
+    #
+    # INTO THE SYSROOT, NOT THROUGH IT. sysroot/lib is a real directory here
+    # (see the union above), so this writes where it says it does. On the
+    # LeapPad path the same line lands inside rootfs/ because sysroot/lib is a
+    # symlink to it — worth fixing there, and worth not repeating here.
+    shim = os.path.join(PROJ, "runtime", "shimlibs", "libdl.so.0")
+    if os.path.exists(shim):
+        for d in ("lib", os.path.join("usr", "lib")):
+            link_or_copy(shim, os.path.join(sysroot, d, "libdl.so.0"))
+    else:
+        say("    WARNING: the shim's libdl is not built — no input or display")
+        say("    until 'cd tadpole && make shim' has run.")
+
     dev = detect_device(rootfs)
     if dev:
         write_text(os.path.join(sysroot, ".tadpole-device"), dev + "\n")
@@ -1192,6 +1230,14 @@ def main(argv):
             sysroot = build_sysroot_didj(rootfs)
             if not args.no_content:
                 install_didj_content(pkgs, sysroot, fw)
+            # AFTER THE PACKAGES, not before. Half of what belongs in
+            # runtime/libs is the Brio package's — /Didj/Base/Brio/lib does not
+            # exist until install_didj_content has run, so linking earlier
+            # silently produces a directory with the firmware's libraries and
+            # none of Brio's. Everything that builds against the guest reads
+            # this: tadpole/Makefile links the shim against
+            # runtime/libs/libc.so.0 and refuses without it.
+            link_runtime_libs(sysroot, rootfs)
         else:
             sysroot = build_sysroot(rootfs)
             link_runtime_libs(rootfs)

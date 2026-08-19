@@ -283,61 +283,72 @@ static int g_ev_rd[NUM_EV][EV_MAX_READERS];   /* what the guest reads from */
 static int g_ev_wr[NUM_EV][EV_MAX_READERS];   /* what the pump writes into */
 static volatile int g_ev_pumping;       /* try-lock; see ev_pump() */
 
-/* Exact names, order and phys strings from a live LeapPad2's
- * /proc/bus/input/devices — see reference/device-capture/. Do not "tidy"
- * these: AppManager matches on them, and the real kernel names are
- * "LF2000 USB" / "LF2000 Accelerometer", not the shorter forms that appear
- * in AppManager's log messages. */
-static const char *const g_ev_names[NUM_EV] = {
-	"LF2000 USB",              /* event0  phys lf2000/usb            EV_SYN|SW  */
-	"gpio-keys",               /* event1  phys gpio-keys/input0      SYN|KEY|SW */
-	"touchscreen interface",   /* event2  phys lf2000/touchscreen    SYN|KEY|ABS*/
-	"touchscreen raw",         /* event3  phys lf2000/touchscreen-raw SYN|ABS   */
-	"LF2000 Accelerometer",    /* event4  phys lf2000/aclmtr         SYN|KEY|ABS*/
-	"Power Button",            /* event5  phys lf2000/power_button   SYN|KEY    */
-};
-
-static const char *const g_ev_phys[NUM_EV] = {
-	"lf2000/usb",
-	"gpio-keys/input0",
-	"lf2000/touchscreen",
-	"lf2000/touchscreen-raw",
-	"lf2000/aclmtr",
-	"lf2000/power_button",
-};
-
-/* Per-device EV_KEY and EV_ABS bitmaps, transcribed from the live device's
- * /proc/bus/input/devices. tslib's input-raw module (usr/lib/ts/input.so)
- * REQUIRES EVIOCGBIT(EV_ABS) to report ABS_X and ABS_Y, or it prints
- * "selected device is not a touchscreen I understand" and fails — after which
- * the caller dereferences the null handle and dies. Word 0 = bits 0..31.
- *   touchscreen interface  ABS=1000003 -> ABS_X|ABS_Y|ABS_PRESSURE
- *                          KEY=...400  -> BTN_TOUCH (330)
- *   touchscreen raw        ABS=7ff     -> bits 0..10
- *   accelerometer          ABS=100 107
- */
 #define ABS_X_BIT        (1u << 0)
 #define ABS_Y_BIT        (1u << 1)
 #define ABS_PRESSURE_BIT (1u << 24)
 
-static const u32 g_abs_bits[NUM_EV] = {
-	0,                                        /* USB           */
-	0,                                        /* gpio-keys     */
-	ABS_X_BIT | ABS_Y_BIT | ABS_PRESSURE_BIT, /* touchscreen   */
-	0x7ff,                                    /* touchscreen raw */
-	0x107,                                    /* accelerometer */
-	0,                                        /* power button  */
+/* THE INPUT DEVICES ARE PER DEVICE FAMILY, and the guest matches on the name.
+ *
+ * Brio finds its keyboard by opening /dev/input/event0.. in turn and asking
+ * EVIOCGNAME, then stops at the one it wants. Answer with another machine's
+ * names and it never finds it: on the Didj that is
+ *
+ *     !ASSERT: [6] CEventModule::ButtonPowerUSBTask: reading switch state failed
+ *
+ * before the first frame. So the table is chosen at runtime from
+ * TADPOLE_EVDEV, which the launcher sets from DEV_EVDEV in the device profile.
+ * Unset means the LeapPad2/LF2000 set, which is what every device that worked
+ * before this existed used. */
+struct ev_device {
+	const char *name;   /* EVIOCGNAME — what the guest matches on */
+	const char *phys;   /* EVIOCGPHYS */
+	u32 ev_bits;        /* EVIOCGBIT(0)      capability classes */
+	u32 abs_bits;       /* EVIOCGBIT(EV_ABS) axes, word 0 */
 };
 
-/* EV capability bits each device advertises, straight from the device. */
-static const u32 g_ev_bits[NUM_EV] = {
-	0x21,  /* SYN | SW            */
-	0x23,  /* SYN | KEY | SW      */
-	0x0b,  /* SYN | KEY | ABS     */
-	0x09,  /* SYN | ABS           */
-	0x0b,  /* SYN | KEY | ABS     */
-	0x03,  /* SYN | KEY           */
+/* Exact names, order and phys strings from a live LeapPad2's
+ * /proc/bus/input/devices — see reference/device-capture/. Do not "tidy"
+ * these: AppManager matches on them, and the real kernel names are
+ * "LF2000 USB" / "LF2000 Accelerometer", not the shorter forms that appear
+ * in AppManager's log messages.
+ *
+ * The bitmaps come from the same capture. tslib's input-raw module
+ * (usr/lib/ts/input.so) REQUIRES EVIOCGBIT(EV_ABS) to report ABS_X and ABS_Y,
+ * or it prints "selected device is not a touchscreen I understand" and fails —
+ * after which the caller dereferences the null handle and dies. Word 0 =
+ * bits 0..31. */
+static const struct ev_device g_ev_lf2000[] = {
+	{ "LF2000 USB",            "lf2000/usb",             0x21, 0 },
+	{ "gpio-keys",             "gpio-keys/input0",       0x23, 0 },
+	{ "touchscreen interface", "lf2000/touchscreen",     0x0b,
+	  ABS_X_BIT | ABS_Y_BIT | ABS_PRESSURE_BIT },
+	{ "touchscreen raw",       "lf2000/touchscreen-raw", 0x09, 0x7ff },
+	{ "LF2000 Accelerometer",  "lf2000/aclmtr",          0x0b, 0x107 },
+	{ "Power Button",          "lf2000/power_button",    0x03, 0 },
 };
+
+/* THE DIDJ HAS EXACTLY ONE, and both strings are read out of the device's own
+ * kernel rather than captured from hardware nobody here has. kernel.bin in
+ * DIDJ-0x000E0003-000001.lfp is a container with a gzip'd Linux 2.6.20.1
+ * inside, and the driver's two strings sit adjacent in its rodata:
+ *
+ *     LF1000 Keyboard\0lf1000/input0\0
+ *
+ * which is the same name/phys pair shape as every row above.
+ *
+ * EV_SYN|EV_KEY and no absolute axes. That is what a device called "Keyboard"
+ * on a machine with no touchscreen is — runtime/devices/didj.conf records the
+ * absence, all eight of its boot screens are fixed 320x240, and the firmware
+ * never asks this device for its ABS bits. It is the one field here not taken
+ * verbatim from the image; if a Didj capture ever turns up, check it. */
+static const struct ev_device g_ev_lf1000[] = {
+	{ "LF1000 Keyboard",       "lf1000/input0",          0x03, 0 },
+};
+
+/* Selected by init() from TADPOLE_EVDEV; g_ev_count is how many of the
+ * NUM_EV slots are real on this device. */
+static const struct ev_device *g_ev = g_ev_lf2000;
+static int g_ev_count = (int)(sizeof(g_ev_lf2000) / sizeof(g_ev_lf2000[0]));
 
 /* real libc entry points */
 static int  (*real_pipe)(int *);
@@ -634,6 +645,17 @@ static void init(void)
 	if (!real_close) dbg("[tadpole] WARNING: dlsym(close) failed\n");
 	if (!real_mmap)  dbg("[tadpole] WARNING: dlsym(mmap) failed\n");
 	if (!real_read)  dbg("[tadpole] WARNING: dlsym(read) failed\n");
+
+	/* WHICH INPUT DEVICES THIS MACHINE HAS. The launcher passes DEV_EVDEV
+	 * from the device profile; anything unrecognised, or nothing at all,
+	 * keeps the LF2000 set that every device used before this was per
+	 * device. Compared by hand because the shim has no string.h. */
+	if ((e = getenv("TADPOLE_EVDEV")) != 0 &&
+	    e[0] == 'l' && e[1] == 'f' && e[2] == '1' && e[3] == '0' &&
+	    e[4] == '0' && e[5] == '0' && e[6] == '\0') {
+		g_ev = g_ev_lf1000;
+		g_ev_count = (int)(sizeof(g_ev_lf1000) / sizeof(g_ev_lf1000[0]));
+	}
 
 	e = getenv("TADPOLE_SYSROOT");
 	snprintf(g_sysroot, sizeof(g_sysroot), "%s", e ? e : "");
@@ -1294,15 +1316,15 @@ static int open_common(const char *path, int flags, int mode)
 	}
 
 	if ((idx = ev_index(path)) >= 0) {
-		if (idx >= NUM_EV)
-			return -1;                       /* no such device */
+		if (idx >= g_ev_count)
+			return -1;                       /* no such device HERE */
 		/* NOT the FIFO itself — a private pipe fed from it. Handing the
 		 * shared FIFO to each caller made concurrent readers steal each
 		 * other's events; see the note beside g_ev_fifo. */
 		fd = ev_open(idx);
 		if (fd >= 0 && fd < MAXFD)
 			g_ev_of_fd[fd] = (signed char)idx;
-		if (g_debug) { dbg("[tadpole] open "); dbg(path); dbg(" -> "); dbg(g_ev_names[idx]); dbg("\n"); }
+		if (g_debug) { dbg("[tadpole] open "); dbg(path); dbg(" -> "); dbg(g_ev[idx].name); dbg("\n"); }
 		return fd;
 	}
 
@@ -2242,7 +2264,7 @@ int ioctl(int fd, ulong req, ...)
 
 		if (id == EVIOCGNAME_ID) {
 			u32 len = ((u32)req >> 16) & 0x3FFF;
-			const char *n = g_ev_names[idx];
+			const char *n = g_ev[idx].name;
 			u32 l = strlen(n) + 1;
 			if (l > len) l = len;
 			if (arg) memcpy(arg, n, l);
@@ -2250,7 +2272,7 @@ int ioctl(int fd, ulong req, ...)
 		}
 		if (id == EVIOCGPHYS_ID) {
 			u32 len = ((u32)req >> 16) & 0x3FFF;
-			const char *n = g_ev_phys[idx];
+			const char *n = g_ev[idx].phys;
 			u32 l = strlen(n) + 1;
 			if (l > len) l = len;
 			if (arg) memcpy(arg, n, l);
@@ -2271,10 +2293,10 @@ int ioctl(int fd, ulong req, ...)
 				memset(arg, 0, len);
 				if (ev == 0 && len >= 4) {
 					/* EVIOCGBIT(0, ..) = which event types exist */
-					*(u32 *)arg = g_ev_bits[idx];
+					*(u32 *)arg = g_ev[idx].ev_bits;
 				} else if (ev == 3 && len >= 4) {
 					/* EV_ABS — what tslib actually gates on */
-					*(u32 *)arg = g_abs_bits[idx];
+					*(u32 *)arg = g_ev[idx].abs_bits;
 				} else if (ev == 1 && len >= 44) {
 					/* EV_KEY: BTN_TOUCH is 330 = word 10, bit 10 */
 					if (idx == 2)
