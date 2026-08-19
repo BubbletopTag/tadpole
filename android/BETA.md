@@ -227,11 +227,33 @@ probe: /system/bin/linker    PRESENT - a 32-bit userspace exists, ARM32 guest bi
 probe: /system/bin/linker    ABSENT  - 64-bit-only ROM, nothing 32-bit can execute here at all
 ```
 
-**ABSENT means the device cannot run the guest natively, and no amount of
-fixing Tadpole will change that.** The LeapPad2's binaries are 32-bit ARM, and
-a 64-bit-only ROM has no way to execute them — the CPU cores in recent
-flagships dropped 32-bit support outright. Those devices need the emulator
-path, which is shipped in the universal APK and is not proven yet.
+**ABSENT means the device cannot run the guest NATIVELY**, and nothing in
+Tadpole can change that: the LeapPad2's binaries are 32-bit ARM, and recent
+flagship cores dropped 32-bit execution outright.
+
+That is not the end of the road, though — it is the case the **emulator** is
+for, and it is what the universal APK carries.
+
+### On a 64-bit device: check the engine linked
+
+The engine ships inside the APK as `lib/arm64-v8a/libglasspole.so`, and the app
+symlinks it into place on every launch (a symlink and not a copy, because a
+file the app wrote may not be executed, while one the package installer placed
+may). That either worked or it did not, and it says so:
+
+```sh
+adb logcat -d | grep -i "engine:"
+```
+
+```
+engine: /data/.../glasspole/build/glasspole -> /data/app/.../lib/arm64/libglasspole.so   good
+engine: no libglasspole.so in this APK      you installed the v7a build on a 64-bit device
+engine: could not link                      the interesting failure - send this one
+```
+
+If the link is there and titles still do not run, say so explicitly and include
+the whole log: an arm64 device has never been tested, and "the engine linked
+and then X happened" is the most valuable report anyone can send right now.
 
 Paste the whole `probe:` block. It also reports whether the app can make
 executable memory, exec a file, `mkfifo`, and map shared memory — which is the
