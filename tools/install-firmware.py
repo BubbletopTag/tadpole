@@ -301,60 +301,123 @@ def gather(src, stage):
 
 # ---- 2. the base firmware ---------------------------------------------------
 
-def find_firmware(pkgs):
-    listing = []
+# THE FIRMWARE IS NOT ALWAYS CALLED Firmware-Base, and assuming it is, is what
+# made "Online System Update" fail for the Didj with a list of thirteen
+# perfectly good packages and the advice to go and find a fourteenth.
+#
+# Every LeapPad and Leapster ships its root filesystem in a package whose
+# manifest reads Type="DiskImage", Name="Firmware-Base". The Didj — six years
+# older than any of them — ships Type="System", Name="Didj Device Firmware",
+# and the meta is the only thing that differs: it is still one package, still
+# holding the whole root filesystem, still the thing to extract first.
+#
+# So the test is on the CONTENTS rather than the name. A firmware package is
+# the one carrying a root filesystem image, and which kind it carries is also
+# the answer to how to unpack it:
+#
+#     *.ubi     LeapPad2, LeapPad Ultra, Leapster GS   ubi_reader
+#     *.jffs2   Didj                                   pkgtool's own reader
+#     a tar     LeapPad3                               (see setup-sysroot.sh)
+#
+# The manifest test is kept as well, and tried first, because it is the
+# cheapest and it is right for every device that has ever worked here.
+IMAGE_EXTS = ((".ubi", "ubi"), (".jffs2", "jffs2"))
+
+
+def firmware_image(pkg):
+    """-> (member, kind, is_root) for a filesystem image inside `pkg`, or None.
+
+    `is_root` SEPARATES THE ROOT FROM THE MERELY FILESYSTEM-SHAPED, and it has
+    to, because the Didj ships both. Its bootloader package carries a
+    128 KB bootflags.jffs2 — a JFFS2 volume by every structural test, and one
+    that sorts BEFORE the firmware — so a scan that stopped at the first image
+    it found extracted the boot flags and then reported the firmware as
+    unrecognisable. Every device names the real one erootfs: erootfs.jffs2
+    here, C4G-E1M-W4K-erootfs.ubi on the LeapPad2.
+    """
+    best = None
+    for name in members_of(pkg):
+        low = name.lower()
+        for ext, kind in IMAGE_EXTS:
+            if not low.endswith(ext):
+                continue
+            if "erootfs" in low:
+                return name, kind, True
+            if best is None:
+                best = (name, kind, False)
+    return best
+
+
+def find_firmware(pkgs, want_device=""):
+    """-> (package, version, image kind) for the firmware in `pkgs`.
+
+    `want_device` is a Device= from a manifest ("Didj", "LeapPad3"), and when
+    it is given a firmware for anything else is passed over.
+
+    THIS IS NOT BELT-AND-BRACES. Online System Update used to stage every
+    device's download into one sources/online-update/cache, so a Leapster GS
+    fetched last week was still sitting there when a Didj was fetched today —
+    and its Firmware-Base sorts first. The unfiltered scan installed a Leapster
+    GS, correctly and completely, for a user who had asked for a Didj. That
+    directory is now per-device (see online-update.sh), which fixes the case
+    Tadpole creates; this is what covers the one it does not, a hand-supplied
+    LFC_Downloads folder holding whatever the user's LFConnect ever downloaded.
+    """
+    listing, wrong, fallback = [], [], None
     for p in pkgs:
         meta = meta_of(p)
         if not meta:
             continue
-        t, n = field(meta, "Type"), field(meta, "Name")
-        listing.append((t, n))
-        if t == "DiskImage" and n == "Firmware-Base":
-            return p, field(meta, "Version")
-    say("no Firmware-Base (Type=DiskImage) package here.")
+        t, n, d = field(meta, "Type"), field(meta, "Name"), field(meta, "Device")
+        img = firmware_image(p)
+        named = t == "DiskImage" and n == "Firmware-Base"
+        if not (img or named):
+            listing.append((t, n))
+            continue
+        if want_device and d != want_device:
+            # Only the ones that would actually have been taken. The Didj's
+            # bootloader package holds a bootflags.jffs2 and so reaches here,
+            # and listing it as a firmware for another device would be one more
+            # wrong thing in a message whose whole job is to be right.
+            if img is not None and (img[2] or named):
+                wrong.append((d or "?", n))
+            continue
+        if img is None:
+            die("%s says it is the firmware but carries no root filesystem"
+                % os.path.basename(p))
+        if img[2] or named:
+            return p, field(meta, "Version"), img[1]
+        # An image that is not named erootfs and whose manifest does not claim
+        # to be the firmware either. Remembered, not taken: a package that IS
+        # both wins, and this is only right if nothing better turns up.
+        if fallback is None:
+            fallback = (p, field(meta, "Version"), img[1])
+    if fallback:
+        return fallback
+
+    if wrong:
+        # NOT "no firmware here", which would be false and would send someone
+        # to look for a file they already have. There is one; it is for
+        # something else.
+        say("no firmware for %s here, but there IS one for:" % want_device)
+        for d, n in wrong:
+            say("    %-22s %s" % (d, n))
+        die("this source holds another device's firmware — point it at %s's, "
+            "or drop --device to install what is here" % want_device)
+    say("no firmware package here.")
     say("Packages present:")
     for t, n in listing:
         say("    %-14s %s" % (t, n))
     die("supply the full LFC_Downloads directory, which contains it")
 
 
-def extract_rootfs(fw, version, stage):
-    dest = os.path.join(PROJ, "rootfs", "stock-%s" % version)
-    rfs = os.path.join(dest, "ubi_rfs")
-    if os.path.isdir(rfs) and os.listdir(rfs):
-        say("==> %s already populated — leaving it alone" % rfs)
-        say("    (delete it first if you want to re-extract)")
-        return dest
-
-    fwdir = os.path.join(stage, "fw")
-    extract_pkg(fw, fwdir)
-
-    ubi = kernel = None
-    for root, _dirs, files in os.walk(fwdir):
-        for fn in files:
-            low = fn.lower()
-            if ubi is None and low.endswith(".ubi") and "erootfs" in low:
-                ubi = os.path.join(root, fn)
-            elif ubi is None and low.endswith(".ubi"):
-                ubi = os.path.join(root, fn)
-            if low.endswith("kernel.bin"):
-                kernel = os.path.join(root, fn)
-    if not ubi:
-        die("no .ubi root filesystem inside Firmware-Base")
-    say("  root filesystem: %s (%d bytes)"
-        % (os.path.basename(ubi), os.path.getsize(ubi)))
-    if kernel:
-        say("  kernel: %s" % os.path.basename(kernel))
-
-    say("==> extracting the root filesystem")
-    say("    (a 53 MB volume — this takes a minute or two)")
-    out = os.path.join(stage, "rfs")
-    os.makedirs(out, exist_ok=True)
+def extract_ubi(image, out):
+    """The UBI path, and its diagnosis when ubi_reader is not all there."""
     try:
         # KEEP THE TOOL'S OWN ERROR. ubi_reader installed without its LZO
         # backend fails with "No module named 'lzallright'", a one-line fix
         # that is invisible if the message is swallowed.
-        pkgtool.cmd_ubi(ubi, out)
+        pkgtool.cmd_ubi(image, out)
     except SystemExit:
         raise
     except Exception as e:
@@ -372,7 +435,62 @@ def extract_rootfs(fw, version, stage):
             say("    pip install --user ubi_reader lzallright")
         die("could not extract the root filesystem")
 
-    # ubi_reader nests its output; find the tree that looks like a root.
+
+# WHAT THE EXTRACTED TREE IS CALLED, which setup-sysroot.sh and device.sh both
+# glob for. The name states which filesystem it came out of, so that nobody has
+# to open it to find out: ubi_rfs for a UBI volume, emmc_rfs for the LeapPad3's
+# tar, jffs2_rfs for the Didj. Calling the Didj's tree ubi_rfs would be a lie
+# the next person has to disprove — the same reasoning setup-sysroot.sh gives
+# for emmc_rfs, and the reason that comment is worth keeping in step with this.
+RFS_DIRNAME = {"ubi": "ubi_rfs", "jffs2": "jffs2_rfs"}
+
+
+def extract_rootfs(fw, version, stage, kind="ubi"):
+    dest = os.path.join(PROJ, "rootfs", "stock-%s" % version)
+    rfs = os.path.join(dest, RFS_DIRNAME.get(kind, "ubi_rfs"))
+    if os.path.isdir(rfs) and os.listdir(rfs):
+        say("==> %s already populated — leaving it alone" % rfs)
+        say("    (delete it first if you want to re-extract)")
+        return dest, rfs
+
+    fwdir = os.path.join(stage, "fw")
+    extract_pkg(fw, fwdir)
+
+    want = ".jffs2" if kind == "jffs2" else ".ubi"
+    image = kernel = None
+    for root, _dirs, files in os.walk(fwdir):
+        for fn in files:
+            low = fn.lower()
+            if image is None and low.endswith(want) and "erootfs" in low:
+                image = os.path.join(root, fn)
+            elif image is None and low.endswith(want):
+                image = os.path.join(root, fn)
+            if low.endswith("kernel.bin"):
+                kernel = os.path.join(root, fn)
+    if not image:
+        die("no %s root filesystem inside %s" % (want, os.path.basename(fw)))
+    say("  root filesystem: %s (%d bytes)"
+        % (os.path.basename(image), os.path.getsize(image)))
+    if kernel:
+        say("  kernel: %s" % os.path.basename(kernel))
+
+    say("==> extracting the root filesystem")
+    out = os.path.join(stage, "rfs")
+    os.makedirs(out, exist_ok=True)
+
+    if kind == "jffs2":
+        # NO SECOND-GUESSING HERE. pkgtool reads JFFS2 itself, with nothing to
+        # install and nothing that can be missing, so the elaborate ubi_reader
+        # diagnosis below has no counterpart: if this fails the image is bad.
+        say("    (a 7 MB volume)")
+        pkgtool.cmd_jffs2(image, out)
+    else:
+        say("    (a 53 MB volume — this takes a minute or two)")
+        extract_ubi(image, out)
+
+    # ubi_reader nests its output one or two levels deep and pkgtool's JFFS2
+    # reader does not, so neither is assumed: find the tree that looks like a
+    # root.
     root_tree = None
     for cur, dirs, _files in os.walk(out):
         if all(os.path.isdir(os.path.join(cur, d))
@@ -403,16 +521,47 @@ def extract_rootfs(fw, version, stage):
     if kernel:
         shutil.copy2(kernel, os.path.join(dest, "kernel.bin"))
 
+    # WHOSE FIRMWARE THIS IS, WRITTEN WHERE EVERYTHING LOOKS FOR IT.
+    #
+    # detect_device() below, tad_detect_device() in runtime/device.sh, the
+    # device picker and the park-and-switch all ask one question of an
+    # extracted tree: what does Firmware/meta.inf say Device= is. Every LeapPad
+    # and Leapster image carries that file. The Didj's does not — its root has
+    # no Firmware directory at all — so a faithful extraction identifies as no
+    # device and the tree is invisible to all four.
+    #
+    # The manifest is not fabricated to fix that: it is the firmware package's
+    # OWN meta.inf, the one that already says Device="Didj" Version="1.35.2.4222",
+    # copied to the place the other devices keep theirs. Never overwritten,
+    # so an image that ships its own keeps it.
+    seeded = os.path.join(rfs, "Firmware", "meta.inf")
+    if not os.path.exists(seeded):
+        meta = meta_of(fw)
+        if meta:
+            write_text(seeded, meta)
+            say("  recorded Device=\"%s\" in Firmware/meta.inf"
+                % field(meta, "Device"))
+
     # RESTORE THE EXECUTE BITS. ubi_reader only preserves permissions with
     # -k, which needs root, so everything arrives 0644 — including AppManager
     # ("Exec format error") and every shared library ("can't load library").
-    say("==> restoring execute permissions")
-    try:
-        subprocess.run([sys.executable, os.path.join(HERE, "fix-perms.py"), rfs],
-                       check=False)
-    except Exception:
-        say("    (could not restore permissions)")
-    return dest
+    #
+    # NOT FOR JFFS2, and this is a real difference rather than an optimisation.
+    # pkgtool's reader carries each inode's own mode across, so the tree
+    # already has the permissions the device has — and fix-perms.py guesses
+    # from file contents, so running it would ADD +x to every .so, which the
+    # Didj itself ships 0644. Guessing over a known answer is how a tree stops
+    # matching the hardware it came from.
+    if kind == "jffs2":
+        say("    permissions came out of the image itself")
+    else:
+        say("==> restoring execute permissions")
+        try:
+            subprocess.run([sys.executable, os.path.join(HERE, "fix-perms.py"), rfs],
+                           check=False)
+        except Exception:
+            say("    (could not restore permissions)")
+    return dest, rfs
 
 
 # ---- 3. the sysroot ---------------------------------------------------------
@@ -629,6 +778,23 @@ def detect_device(rootfs):
     return ""
 
 
+def profile_meta_device(dev_id):
+    """-> the DEV_META_DEVICE of runtime/devices/<dev_id>.conf, or "".
+
+    The inverse of detect_device: that turns a firmware's Device= into a
+    DEV_ID, this turns a DEV_ID back into the Device= to look for.
+    """
+    conf = os.path.join(PROJ, "runtime", "devices", dev_id + ".conf")
+    try:
+        with open(conf, "r", errors="replace") as f:
+            for line in f:
+                if line.startswith("DEV_META_DEVICE="):
+                    return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
 def link_runtime_libs(rootfs):
     """runtime/libs — every shared object, flat, for LD_LIBRARY_PATH."""
     libdir = os.path.join(PROJ, "runtime", "libs")
@@ -788,6 +954,175 @@ def grant_profile_access(sysroot, bulk):
     say("    profile access    %d" % done)
 
 
+# ---- the Didj ---------------------------------------------------------------
+#
+# A DIFFERENT SHAPE, not a different amount of work. The Didj is a 2008 LF1000
+# handheld and the oldest device Tadpole knows; everything above assumes the
+# LeapPad shape, and three of those assumptions are wrong here:
+#
+#   * the root filesystem is JFFS2 rather than a UBI volume (extract_rootfs),
+#   * the tree root is /Didj rather than /LF, with cartridges at /Cart,
+#   * the packages are Type="System" and install by NAME into /Didj/Base,
+#     where a LeapPad's content is typed and installs under LF/Bulk.
+#
+# So the Didj gets its own sysroot builder and its own destination map rather
+# than a pile of `if didj:` inside the LeapPad ones. See docs/DIDJ.md.
+
+# WHERE EACH PACKAGE GOES. Transcribed from the same community inventory as
+# tools/packagelists/Didj.xml, which keeps this map in comments beside each
+# entry because it cannot be derived from the CDN. Keyed on Type= because that
+# is what the manifests actually carry — all eleven system packages say
+# Type="System" — with the two that are not laid into the tree at all
+# recognised by their contents just above.
+DIDJ_DESTS = {
+    "System": os.path.join("Didj", "Base"),
+    "Avatar": os.path.join("Didj", "Data", "Avatars"),
+    "Application": os.path.join("Didj", "ProgramFiles"),
+}
+DIDJ_OTHER = os.path.join("Didj", "Data", "MDL")
+
+
+def install_didj_content(pkgs, sysroot, fw):
+    """Lay the Didj's packages into the sysroot's /Didj tree.
+
+    EVERY PACKAGE CARRIES ITS OWN TOP DIRECTORY — Brio/, bin/, lib/, BLT/,
+    Avatar1/, POW/ — so each one extracts straight into its destination and
+    lands as /Didj/Base/Brio, /Didj/Base/bin and so on. That is why there is no
+    self_wraps() dance here: on this device it is not a question, it is how all
+    thirteen are built, and /Didj/Base/bin/AppManager (the DEV_SHELL in
+    runtime/devices/didj.conf) is the file it produces.
+
+    ONLY Device="Didj" PACKAGES, and this map needs that more than the LeapPad
+    one does. Its last rule is a catch-all — anything unrecognised goes to
+    /Didj/Data/MDL — so pointed at a directory holding two devices' downloads
+    it would not skip the stranger, it would file it. A Leapster GS package set
+    left in a shared cache is how that stops being hypothetical.
+    """
+    say("==> installing Didj packages")
+    n = {}
+
+    def bump(k):
+        n[k] = n.get(k, 0) + 1
+
+    for f in pkgs:
+        if os.path.abspath(f) == os.path.abspath(fw):
+            continue                       # the root filesystem, already out
+        meta = meta_of(f)
+        if not meta:
+            bump("unreadable")
+            continue
+        if field(meta, "Device") != "Didj":
+            bump("another device (skipped)")
+            continue
+        # THE BOOTLOADER IS NOT PART OF THE FILESYSTEM. lightning-boot writes
+        # to the NOR flash the SoC boots from, and its package holds a .bin and
+        # a bootflags image — nothing that belongs anywhere in a tree. The Didj
+        # package list carries it because a real update flashes it; Tadpole
+        # never boots this device from its own bootloader, so it is skipped
+        # deliberately rather than dropped into /Didj/Data/MDL as an unknown.
+        if any(os.path.basename(m) == "lightning-boot.bin" for m in members_of(f)):
+            bump("bootloader (not installed)")
+            continue
+        typ = field(meta, "Type")
+        dest = os.path.join(sysroot, DIDJ_DESTS.get(typ, DIDJ_OTHER))
+        extract_pkg(f, dest)
+        bump(typ or "other")
+
+    for k in sorted(n):
+        say("    %-24s %d" % (k, n[k]))
+
+
+def build_sysroot_didj(rootfs):
+    """The Didj's runtime tree: the firmware, plus a /Didj for its packages."""
+    sysroot = os.path.join(PROJ, "runtime", "sysroot")
+    say("==> building the sysroot")
+    os.makedirs(sysroot, exist_ok=True)
+
+    for d in ("bin", "boot", "linuxrc", "mnt", "mnt2", "opt", "sbin", "test",
+              "Firmware"):
+        link_or_copy(os.path.join(rootfs, d), os.path.join(sysroot, d), rootfs)
+
+    # /lib AND /usr/lib BOTH GET BOTH, and that is not tidiness.
+    #
+    # qemu's -L only redirects a path that EXISTS under the prefix; anything
+    # missing resolves against the developer's machine instead. The Didj keeps
+    # libz, libpng and liblzo2 in /usr/lib while something in the Brio stack
+    # asks for /lib/libz.so by absolute path, so a faithful copy of the tree
+    # produces
+    #
+    #     AppManager: '/lib/libz.so' is not an ELF executable for ARM
+    #
+    # which names a host x86-64 object and reads as broken firmware. It is the
+    # trap docs/DIDJ.md records for LD_LIBRARY_PATH, in its other form: the fix
+    # is to make both directories complete so neither lookup can escape.
+    for d, others in (("lib", ("lib", "usr/lib")),
+                      ("usr/lib", ("usr/lib", "lib"))):
+        out = os.path.join(sysroot, d)
+        if os.path.islink(out):
+            os.remove(out)
+        # BUILT FRESH, because the entries below are skipped when something is
+        # already there and a re-install after a version change would
+        # otherwise keep every link into the rootfs that has just been
+        # replaced. Nothing here is the guest's: it is all links (or, on
+        # Windows, copies) of the firmware's own libraries.
+        shutil.rmtree(out, ignore_errors=True)
+        os.makedirs(out, exist_ok=True)
+        for src in others:
+            src = os.path.join(rootfs, src)
+            if not os.path.isdir(src):
+                continue
+            for f in sorted(os.listdir(src)):
+                p = os.path.join(out, f)
+                if os.path.islink(p) or os.path.exists(p):
+                    continue               # the directory's own wins
+                link_or_copy(os.path.join(src, f), p, rootfs)
+
+    usr = os.path.join(sysroot, "usr")
+    src_usr = os.path.join(rootfs, "usr")
+    if os.path.isdir(src_usr):
+        for b in sorted(os.listdir(src_usr)):
+            if b != "lib":
+                link_or_copy(os.path.join(src_usr, b), os.path.join(usr, b), rootfs)
+
+    # /etc and /var as real directories: rcS and launch_main write into both,
+    # and a symlink to the rootfs would put a running system's scribbles into
+    # the extracted firmware.
+    for d in ("etc", "var"):
+        out = os.path.join(sysroot, d)
+        if os.path.islink(out):
+            os.remove(out)
+        os.makedirs(out, exist_ok=True)
+        src = os.path.join(rootfs, d)
+        if os.path.isdir(src):
+            for b in sorted(os.listdir(src)):
+                link_or_copy(os.path.join(src, b), os.path.join(out, b), rootfs)
+
+    # THE MOUNT POINTS. On the device /Didj and /Cart are separate MTD
+    # partitions mounted onto an otherwise empty pair of directories in the
+    # root image — which is why the extracted rootfs has both and neither has
+    # anything in it. /Didj is what the packages fill; /Cart stays empty until
+    # there is a cartridge, exactly as on hardware with the slot empty.
+    for d in ("Didj/Base", "Didj/Data", "Didj/ProgramFiles", "Cart",
+              "dev/input", "sys", "proc", "tmp", "flags"):
+        os.makedirs(os.path.join(sysroot, d), exist_ok=True)
+
+    # NOTHING IS INVENTED UNDER /sys OR /flags, and that is a decision.
+    #
+    # The LeapPad sysroot writes some thirty sysfs files whose values were read
+    # off real hardware. Nobody here has read a Didj's, so writing plausible
+    # ones would be guessing at the exact place a wrong guess is hardest to
+    # spot later. The directories exist; what the firmware puts in them is what
+    # is in them. The two flags launch_main tests for are absent on a healthy
+    # device, so absent is also correct:
+    #
+    #     /flags/needs_repair   set only by a failed update
+    #     /flags/vbus           set while USB is plugged in
+    dev = detect_device(rootfs)
+    if dev:
+        write_text(os.path.join(sysroot, ".tadpole-device"), dev + "\n")
+    return sysroot
+
+
 # ---- main -------------------------------------------------------------------
 
 def main(argv):
@@ -795,26 +1130,45 @@ def main(argv):
     ap.add_argument("src", help="LFC_Downloads dir, or a .lfp/.lf2/.zip")
     ap.add_argument("--no-content", action="store_true",
                     help="system files only; skip the content packages")
+    ap.add_argument("--device", default="",
+                    help="a DEV_ID from runtime/devices: install only this "
+                         "device's firmware, whatever else is in the source")
     args = ap.parse_args(argv[1:])
 
     src = args.src
     if not os.path.exists(src):
         die("no such path: %s" % src)
 
+    # --device NAMES A PROFILE; find_firmware MATCHES A MANIFEST. The wizard
+    # and online-update speak in DEV_IDs ("didj", "leapstergs"), while the
+    # packages say Device="Didj". The profile is what maps one to the other,
+    # so an unknown --device is an error here rather than a filter that
+    # silently matches nothing later.
+    want_meta = ""
+    if args.device:
+        want_meta = profile_meta_device(args.device)
+        if not want_meta:
+            die("no device profile named %s (see runtime/devices/)" % args.device)
+
     stage = tempfile.mkdtemp(prefix="tadpole-fw-")
     try:
         pkgs = gather(src, stage)
-        fw, version = find_firmware(pkgs)
-        say("==> Firmware-Base version %s" % version)
-        rootfs = os.path.join(extract_rootfs(fw, version, stage), "ubi_rfs")
+        fw, version, kind = find_firmware(pkgs, want_meta)
+        say("==> firmware version %s" % version)
+        _dest, rootfs = extract_rootfs(fw, version, stage, kind)
 
         # THE SYSROOT BEFORE THE CONTENT. Content installs INTO the sysroot,
         # and the sort file that decides what appears on the home screen lives
         # there. The other order leaves content where nothing looks for it.
-        sysroot = build_sysroot(rootfs)
-        link_runtime_libs(rootfs)
-        if not args.no_content:
-            install_content(pkgs, sysroot)
+        if detect_device(rootfs) == "didj":
+            sysroot = build_sysroot_didj(rootfs)
+            if not args.no_content:
+                install_didj_content(pkgs, sysroot, fw)
+        else:
+            sysroot = build_sysroot(rootfs)
+            link_runtime_libs(rootfs)
+            if not args.no_content:
+                install_content(pkgs, sysroot)
 
         lf3 = [p for p in pkgs if p.lower().endswith(".lf3")]
         if lf3:

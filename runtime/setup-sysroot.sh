@@ -39,6 +39,38 @@ WANT="${1:-}"
 [ -n "$WANT" ] || WANT="$(tad_resolve_device)"
 ACTIVE="$(tad_active_device)"
 
+# THIS SCRIPT BUILDS THE /LF LAYOUT, AND NOT EVERY DEVICE HAS ONE.
+#
+# Everything after the switch assembles a tree around LF/Base and LF/Bulk:
+# symlinks into the rootfs's LF/Base, the sysfs files an LF2000 exposes, the
+# LeapPad UI package's save area. The Didj is a 2008 LF1000 whose tree root is
+# /Didj, with cartridges at /Cart, and which has no LF/Base to link to.
+#
+# Run against it this would not fail — it would SUCCEED at building nonsense,
+# and overwrite the working /Didj tree that install-firmware.py assembled,
+# since both write to runtime/sysroot. The test is on the structure rather than
+# on the device's name: no LF/Base in the rootfs means this script has nothing
+# to build here, whatever the profile is called.
+#
+# ASKED FOR BEFORE ANYTHING MOVES, so that the answer can still be "switch to
+# it and stop" rather than a refusal issued after the renames. Switching IS
+# this script's other job and works for any device with an assembled tree; only
+# the rebuild is someone else's, and re-running the installer is how it is
+# done — see docs/DIDJ.md.
+NO_LF_LAYOUT=""
+if [ -n "$WANT" ]; then
+    _cand="$(tad_rootfs_for_device "$WANT")"
+    [ -n "$_cand" ] && [ ! -d "$_cand/LF/Base" ] && NO_LF_LAYOUT=1
+fi
+if [ -n "$NO_LF_LAYOUT" ] && [ "$(tad_device_state "$WANT")" = installed ]; then
+    echo "$WANT has firmware but no sysroot, and this script cannot build its" >&2
+    echo "layout — it has no LF/Base. The firmware installer knows it:" >&2
+    echo "    ./tools/install-firmware.py --device $WANT <packages>" >&2
+    echo "    ./tools/online-update.sh          downloads, then does that" >&2
+    echo "Nothing has been changed." >&2
+    exit 1
+fi
+
 if [ -n "$WANT" ] && [ "$WANT" != "$ACTIVE" ]; then
     case "$(tad_device_state "$WANT")" in
         parked)
@@ -57,6 +89,17 @@ if [ -n "$WANT" ] && [ "$WANT" != "$ACTIVE" ]; then
             echo "  ./tadpole.sh --devices   shows what is here" >&2
             exit 1 ;;
     esac
+fi
+
+# Switched, and that was all this script can do for such a device. Its tree is
+# whatever the installer built and is now live; saying so beats either a silent
+# success that rebuilt nothing or an error after a switch that worked.
+if [ -n "$NO_LF_LAYOUT" ]; then
+    tad_load_device "$WANT" || exit 1
+    echo "==> $DEV_NAME ($DEV_ID) is live"
+    echo "    Its tree is built by ./tools/install-firmware.py, not by this"
+    echo "    script — nothing to rebuild here."
+    exit 0
 fi
 
 tad_load_device "$WANT"
@@ -79,13 +122,19 @@ tad_load_device "$WANT"
 # under a path naming a filesystem is a plain GNU tar of the root. So there is
 # no UBI step for it at all, and calling the result ubi_rfs would be a lie that
 # the next person has to disprove.
+#
+# jffs2_rfs IS THE FOURTH, for the same reason. The Didj is a 2008 MTD device
+# and its firmware carries erootfs.jffs2, read by pkgtool's own JFFS2 reader —
+# no ubireader, no tar. NOTHING HERE BUILDS A DIDJ SYSROOT YET: that tree is
+# assembled by install-firmware.py, which knows /Didj from /LF. This script
+# still finds the rootfs, which is what the glob below is for.
 ROOTFS="$(tad_rootfs_for_device "$DEV_ID")"
 if [ -z "$ROOTFS" ]; then
     # An unrecognised firmware — no meta.inf, or a Device= no profile claims.
     # Fall back to the old glob so a hand-extracted tree still builds, and say
     # what happened rather than silently using someone else's.
     for cand in "$PROJ"/rootfs/*/emmc_rfs "$PROJ"/rootfs/*/ubi_rfs \
-                "$PROJ"/rootfs/*/*/ubi_rfs; do
+                "$PROJ"/rootfs/*/jffs2_rfs "$PROJ"/rootfs/*/*/ubi_rfs; do
         [ -d "$cand" ] || continue
         ROOTFS="$cand"; break
     done

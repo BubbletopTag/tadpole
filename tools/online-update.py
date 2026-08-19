@@ -67,8 +67,49 @@ def run(script, args):
     return subprocess.call([sys.executable, os.path.join(HERE, script)] + args)
 
 
+def device():
+    """Which device to download, which is the one question this never asked.
+
+    IT DOWNLOADED A LEAPPAD2 WHATEVER THE WIZARD SAID. fetch-firmware.py
+    defaults to --device leappad2, and this passed no --device at all, so the
+    Windows Online System Update ignored the "Which device?" page entirely —
+    the page that exists for exactly this decision, since which firmware to
+    fetch is the one thing that cannot be autodetected before there IS any
+    firmware. online-update.sh grew the same fix; this is its other half.
+
+    NOT the device that happens to be installed: that is the right answer for
+    booting and the wrong one for a download, where the user's stated choice
+    outranks what is on disk. TADPOLE_DEVICE first, then the wizard's saved
+    answer, then the historical default.
+    """
+    dev = os.environ.get("TADPOLE_DEVICE", "").strip()
+    if dev:
+        return dev
+    # The wizard's answer, out of the same file tad_ui_cfg_device() reads:
+    # $XDG_CONFIG_HOME/tadpole/ui.cfg, whose lines are "key value" separated by
+    # whitespace — NOT key=value. See ui_cfg_save() in the viewer.
+    cfg = os.path.join(os.environ.get("XDG_CONFIG_HOME")
+                       or os.path.join(os.path.expanduser("~"), ".config"),
+                       "tadpole", "ui.cfg")
+    found = ""
+    try:
+        with open(cfg, "r", errors="replace") as f:
+            for line in f:
+                bits = line.split(None, 1)
+                if len(bits) == 2 and bits[0] == "device":
+                    found = bits[1].strip()      # last one wins, as sed | tail
+    except OSError:
+        pass
+    return found or "leappad2"
+
+
 def main(argv):
-    stage = argv[1] if len(argv) > 1 else os.path.join(PROJ, "sources", "online-update")
+    dev = device()
+    # ONE CACHE PER DEVICE. A single shared sources/online-update/cache let a
+    # Leapster GS downloaded last week supply the firmware for a Didj
+    # downloaded today — see the long note in online-update.sh.
+    stage = argv[1] if len(argv) > 1 else os.path.join(PROJ, "sources",
+                                                       "online-update", dev)
     cache = os.path.join(stage, "cache")
 
     print("==> Online System Update")
@@ -88,16 +129,16 @@ def main(argv):
         print("  Nothing has been changed.", file=sys.stderr)
         return 1
 
-    print("==> downloading packages")
+    print("==> downloading packages for %s" % dev)
     sys.stdout.flush()
-    if run("fetch-firmware.py", ["--get", "all", "-o", cache]) != 0:
+    if run("fetch-firmware.py", ["--device", dev, "--get", "all", "-o", cache]) != 0:
         print("download failed; nothing has been installed.", file=sys.stderr)
         return 1
 
     print()
     print("==> installing")
     sys.stdout.flush()
-    return run("install-firmware.py", [stage])
+    return run("install-firmware.py", ["--device", dev, stage])
 
 
 if __name__ == "__main__":

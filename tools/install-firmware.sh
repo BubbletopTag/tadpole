@@ -1,7 +1,7 @@
 #!/bin/bash
 # Tadpole — install LeapPad2 system files from LFConnect firmware packages.
 #
-#   ./tools/install-firmware.sh <LFC_Downloads dir | .lfp | .lf2 | .zip>
+#   ./tools/install-firmware.sh [--device DEV_ID] <LFC_Downloads dir | .lfp | .lf2 | .zip>
 #
 # You supply the firmware. Tadpole ships no LeapFrog code; this reads the packages
 # LFConnect leaves in its download cache on your own machine. See README.md.
@@ -33,8 +33,23 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(dirname "$HERE")"
-SRC="${1:-}"
 ROOTFS_DIR="$PROJ/rootfs"
+
+# --device <DEV_ID>: install THIS device's firmware and nothing else. Optional,
+# and everything below behaves as it always did without it — but online-update
+# always passes it now, because a directory holding two devices' downloads used
+# to install whichever firmware sorted first. Only install-firmware.py acts on
+# it; this script's own scan is single-device by construction, since the one
+# multi-device source Tadpole produces is the one it hands straight over.
+DEVICE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --device) DEVICE="${2:-}"; shift 2 ;;
+        --device=*) DEVICE="${1#--device=}"; shift ;;
+        *) break ;;
+    esac
+done
+SRC="${1:-}"
 
 die() { echo "error: $*" >&2; exit 1; }
 note() { echo "  $*"; }
@@ -64,8 +79,25 @@ pkg_extract() {                     # $1=archive $2=dir
     "$PY" "$HERE/pkgtool.py" extract "$1" "$2"
 }
 
-[ -n "$SRC" ] || die "usage: $0 <LFC_Downloads dir | .lfp | .lf2 | .zip>"
+[ -n "$SRC" ] || die "usage: $0 [--device DEV_ID] <LFC_Downloads dir | .lfp | .lf2 | .zip>"
 [ -e "$SRC" ] || die "no such path: $SRC"
+
+# THE DIDJ GOES TO THE PYTHON INSTALLER, whole.
+#
+# Its root filesystem is JFFS2, its tree root is /Didj rather than /LF, and its
+# packages install by name into /Didj/Base instead of by type into LF/Bulk —
+# three differences that run through every step below. install-firmware.py
+# implements all of it (see the "the Didj" section there), and it exists on
+# every platform because Windows has no shell to run this file.
+#
+# So the Didj is handled in ONE place rather than two, and this hands over
+# rather than growing a second copy that would drift. Everything else stays
+# here, unchanged, on the path that has always worked.
+if [ "$DEVICE" = didj ]; then
+    [ -n "$PY" ] || PY="$(tad_python || true)"
+    [ -n "$PY" ] || die "the Didj installer needs python3; run ./tools/fetch-deps.sh"
+    exec "$PY" "$HERE/install-firmware.py" --device didj "$SRC"
+fi
 
 # CHECK EVERYTHING FIRST. ubi_reader imports its dependencies lazily, so a
 # missing one surfaces minutes in, after the zip is unpacked and 70 packages

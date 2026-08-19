@@ -102,15 +102,17 @@ tad_detect_device() {
 
 # Every extracted firmware tree in this checkout, one path per line.
 #
-# THREE LAYOUTS, ALL VALID, and this is the one place that knows them:
+# FOUR LAYOUTS, ALL VALID, and this is the one place that knows them:
 # install-firmware.sh writes rootfs/<version>/ubi_rfs, the LeapPad3's eMMC
 # image extracts to emmc_rfs (a plain tar, no UBI step — see setup-sysroot.sh),
-# and the original hand-extracted copy had an extra numeric level.
+# the Didj's JFFS2 root extracts to jffs2_rfs, and the original hand-extracted
+# copy had an extra numeric level. Each name says which filesystem the tree
+# came out of, so nobody has to open it to find out.
 tad_rootfs_list() {
     local proj cand
     proj="$(tad_proj_dir)"
     for cand in "$proj"/rootfs/*/emmc_rfs "$proj"/rootfs/*/ubi_rfs \
-                "$proj"/rootfs/*/*/ubi_rfs; do
+                "$proj"/rootfs/*/jffs2_rfs "$proj"/rootfs/*/*/ubi_rfs; do
         [ -d "$cand" ] && printf '%s\n' "$cand"
     done
 }

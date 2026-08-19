@@ -150,8 +150,9 @@ fi
 # DEVICE's, not merely the first one on disk. Whatever install-firmware.sh
 # extracted lands under rootfs/<version>/…/ubi_rfs, and the version is whatever
 # the user's own device shipped with. emmc_rfs is the same thing for an eMMC
-# device (the LeapPad3), whose firmware carries a tar rather than a UBI volume
-# — see runtime/setup-sysroot.sh for why it is not called ubi_rfs anyway.
+# device (the LeapPad3), whose firmware carries a tar rather than a UBI volume,
+# and jffs2_rfs for the Didj, whose firmware carries a JFFS2 one — see
+# runtime/setup-sysroot.sh for why neither is called ubi_rfs anyway.
 #
 # The bare glob this used to be picked whichever directory sorted first, which
 # was right while only one device could be installed and silently wrong the
@@ -159,12 +160,35 @@ fi
 ROOTFS="$(tad_rootfs_for_device "$DEV_ID")"
 if [ -z "$ROOTFS" ]; then
     for cand in "$HERE"/rootfs/*/emmc_rfs "$HERE"/rootfs/*/ubi_rfs \
-                "$HERE"/rootfs/*/*/ubi_rfs; do
+                "$HERE"/rootfs/*/jffs2_rfs "$HERE"/rootfs/*/*/ubi_rfs; do
         [ -d "$cand" ] || continue
         ROOTFS="$cand"; break
     done
 fi
 : "${ROOTFS:=$HERE/rootfs/MISSING/ubi_rfs}"
+
+# A DEVICE THIS SCRIPT CANNOT BOOT SAYS SO, INSTEAD OF FLAILING.
+#
+# Everything below is /LF-shaped: the cartridge state reads $SYSROOT/LF/Cart,
+# the launcher walks LF/Bulk/ProgramFiles, VideoDaemon is started from
+# /LF/Base/bin. The Didj lays its system out under /Didj, so on that tree every
+# one of those paths is simply absent — nothing crashes and nothing works, and
+# the session ends in a wall of missing files that reads like a broken install
+# when the install is fine.
+#
+# Structural test, not a name: a rootfs with no LF/Base is not a tree this
+# script knows how to run, whatever the device is called. Installing such a
+# device works and is worth doing — the firmware is extracted, the sysroot is
+# assembled, and its shell starts under qemu by hand — so this points at where
+# that stands rather than calling it an error.
+if [ -d "$ROOTFS" ] && [ ! -d "$ROOTFS/LF/Base" ]; then
+    echo "tadpole: $DEV_NAME ($DEV_ID) is installed but cannot be run yet." >&2
+    echo "  Its system lives under /Didj rather than /LF, and this script" >&2
+    echo "  assumes /LF throughout. See docs/DIDJ.md for how far it gets." >&2
+    echo "  ./tadpole.sh --devices        what else is installed here" >&2
+    echo "  ./runtime/setup-sysroot.sh <device>   switch to one of them" >&2
+    exit 1
+fi
 # Two shim variants, because targets link different libraries: AppManager and
 # VideoDaemon pull in libdl.so.0, while the display tools (imager-fb etc.) link
 # libz.so.1 and no libdl at all. Both dirs are on the path; whichever the

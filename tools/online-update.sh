@@ -39,8 +39,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJ="$(dirname "$HERE")"
 . "$HERE/lib-deps.sh"
 
-STAGE="${1:-$PROJ/sources/online-update}"
-CACHE="$STAGE/cache"
+STAGE="${1:-}"
 
 PY="$(tad_python || true)"
 [ -n "$PY" ] || {
@@ -52,8 +51,6 @@ PY="$(tad_python || true)"
 echo "==> Online System Update"
 echo "    from digitalcontent.leapfrog.com"
 echo
-
-mkdir -p "$CACHE" || { echo "cannot write to $CACHE" >&2; exit 1; }
 
 # Reachability first, and say so plainly. "Connection refused" three minutes
 # into a download reads as a broken emulator; said up front it reads as no
@@ -95,6 +92,24 @@ if [ -z "$DEVICE" ] && [ -r "$PROJ/runtime/device.sh" ]; then
 fi
 : "${DEVICE:=leappad2}"
 
+# ONE CACHE PER DEVICE, and the shared one is why this note is long.
+#
+# Every download used to land in sources/online-update/cache, whichever device
+# it was for. install-firmware then scans the whole directory and takes the
+# first firmware it finds — so downloading a Didj into a checkout that had
+# fetched a Leapster GS last week produced a complete, correct install of the
+# LEAPSTER, from a run that said "downloading packages for didj" throughout.
+# The Didj's own content install had the matching failure in the other
+# direction: its destination map ends in a catch-all, so it would have filed
+# forty Leapster packages under /Didj/Data/MDL.
+#
+# install-firmware.py --device now refuses the wrong firmware outright, which
+# is the backstop for a hand-supplied LFC_Downloads folder. This is the fix for
+# the directory Tadpole fills itself: keep them apart to begin with.
+: "${STAGE:=$PROJ/sources/online-update/$DEVICE}"
+CACHE="$STAGE/cache"
+mkdir -p "$CACHE" || { echo "cannot write to $CACHE" >&2; exit 1; }
+
 echo "==> downloading packages for $DEVICE"
 "$PY" "$HERE/fetch-firmware.py" --device "$DEVICE" --get all -o "$CACHE" || {
     echo "download failed; nothing has been installed." >&2
@@ -103,4 +118,4 @@ echo "==> downloading packages for $DEVICE"
 
 echo
 echo "==> installing"
-exec "$HERE/install-firmware.sh" "$STAGE"
+exec "$HERE/install-firmware.sh" --device "$DEVICE" "$STAGE"

@@ -3,9 +3,17 @@
 Whether Tadpole can run a Didj natively, and how far it gets today. Written
 against the real firmware, pulled from LeapFrog's CDN and extracted.
 
-**Short answer: further than expected.** The Didj's own `AppManager` starts
-under `qemu-arm`, brings up Brio, and dies on ONE assertion — a cartridge read.
-That is a class of problem Tadpole already solves for other devices.
+**Short answer: further than expected.** Online System Update installs a Didj
+the same way it installs any other device, and the Didj's own `AppManager` then
+starts under `qemu-arm`, brings up Brio, and dies on ONE assertion — a cartridge
+read. That is a class of problem Tadpole already solves for other devices.
+
+    ./tools/online-update.sh            # with the Didj chosen in the wizard
+    TADPOLE_DEVICE=didj ./tools/online-update.sh
+
+Downloads thirteen packages, extracts the JFFS2 root filesystem to
+`rootfs/stock-1.35.2.4222/jffs2_rfs`, and assembles `runtime/sysroot` with the
+`/Didj` tree the packages fill. Re-running it is safe and rebuilds in place.
 
 ## Not to be confused with "Didj support"
 
@@ -48,15 +56,34 @@ containing:
 `meta.inf` says `Device="Didj"`, `Version="1.35.2.4222"`, 22 April 2009 — which
 is what `tad_detect_device()` matches on.
 
-Nothing in this repo reads JFFS2 and the host had no mtd-utils, so extraction
-used `jefferson`:
+Extraction was a throwaway `jefferson` venv while this was an investigation.
+`tools/pkgtool.py` now reads JFFS2 itself, with nothing to install:
 
-    python3 -m venv /tmp/jffsvenv && /tmp/jffsvenv/bin/pip install jefferson
-    /tmp/jffsvenv/bin/jefferson -d /tmp/didjroot firmware-LF_LF1000/erootfs.jffs2
+    ./tools/pkgtool.py jffs2 erootfs.jffs2 /tmp/didjroot
 
-**Installed into a throwaway venv on purpose.** Adding a project dependency is
-a decision for `tools/fetch-deps.sh`, not a side effect of an investigation.
-Turning this into a supported install path is outstanding work.
+**Written rather than depended on**, which is the opposite of the call made for
+UBI. `ubi_reader` is a substantial piece of software that already exists and is
+shipped as-is; JFFS2 here is two structs and one compressor. Measured before
+writing any of it: the image is 4637 nodes, and every compressed inode in it is
+`JFFS2_COMPR_ZLIB` — no LZO, no rtime, no rubin — so `zlib`, a memcpy and a run
+of zeros cover it completely. Anything else is refused loudly rather than
+filled with plausible bytes.
+
+**Checked against `jefferson`, not against itself.** Same image, both readers:
+178 files byte-identical by MD5, the same 325 symlinks with the same targets,
+the same 62 directories, no diff at all. And every node's checksums verify —
+all 4637 header CRCs, all 673 dirent CRCs, all 3911 inode node and data CRCs —
+which is a stronger statement about the struct layout than any extraction that
+merely looked plausible, since a CRC only agrees if every preceding field is
+where the reader thinks it is. `tools/tests/jffs2_read_test.py` covers the
+awkward cases against fixtures it builds itself, so it runs with no firmware
+present.
+
+One trap worth writing down: JFFS2's `crc32` is **not** zlib's. It calls
+mtd's table loop with an initial value of 0 and applies neither the initial nor
+the final inversion of the standard CRC-32, so `zlib.crc32(buf, 0xFFFFFFFF) ^
+0xFFFFFFFF` is what agrees with it. Comparing against plain `zlib.crc32` says
+every node in a perfectly good image is corrupt.
 
 ## It is a Brio device
 
@@ -83,49 +110,65 @@ Anything in the emulator that hardcodes `/LF` will have to learn this.
 
 ## Reproducing how far it gets
 
-Assemble a sysroot — the JFFS2 rootfs, then each package at its destination
-from the map in `tools/packagelists/Didj.xml`:
+The manual recipe this section used to give — copy the rootfs, unzip nine
+packages into `Didj/Base`, one into `Didj/Data/Avatars`, one into
+`Didj/ProgramFiles` — is what `install-firmware.py` now does. The destination
+map lives in `DIDJ_DESTS` there and in the comments beside each entry in
+`tools/packagelists/Didj.xml`; the two say the same thing, and the XML says it
+because the CDN cannot.
 
-    R=/tmp/didjsys; cp -a /tmp/didjroot $R
-    for p in 0x000E0004-000001 0x000E0005-000003 0x000E0006-000005 \
-             0x000E0007-000006 0x000E0008-000007 0x000E0009-000008 \
-             0x000E000A-000001 0x000E000B-000004 0x000E000C-000002; do
-        unzip -qo /tmp/didjfw/DIDJ-$p.lfp -d $R/Didj/Base/
-    done
-    unzip -qo /tmp/didjfw/DIDJ-0x000E0010-000002.lfp -d $R/Didj/Data/Avatars/
-    unzip -qo /tmp/didjfw/DIDJ-0x000F0001-000000.lfp -d $R/Didj/ProgramFiles/
+After an install:
 
-Then:
-
-    cd $R && qemu-arm -L . \
+    cd runtime/sysroot && qemu-arm -L . \
       -E LD_LIBRARY_PATH=/Didj/Base/Brio/lib:/Didj/Base/lib:/lib:/usr/lib \
       ./Didj/Base/bin/AppManager
 
     !ASSERT: [3] CButtonModule::LightningButtonTask: cart read failed
-    terminate called without an active exception
 
-**Order that `LD_LIBRARY_PATH` carefully, and do not trust an error that names
-a host path.** qemu's `-L` only redirects paths that ALREADY EXIST in the
-sysroot, so any library missing from the Didj tree silently resolves to the
-DEVELOPER'S copy. Listing `/usr/lib` before `/lib` produced
+**Do not trust an error that names a host path.** qemu's `-L` only redirects
+paths that ALREADY EXIST in the sysroot, so any library missing from the Didj
+tree silently resolves to the DEVELOPER'S copy and reports something that reads
+as broken firmware and is nothing of the sort:
 
     '/usr/lib/libstdc++.so.6' is not an ELF executable for ARM
+    '/lib/libz.so' is not an ELF executable for ARM
 
-which reads as a broken firmware and is nothing of the sort — `libstdc++` is in
-`/lib` on this device, and the message is the host's x86 copy being found.
+The first is an `LD_LIBRARY_PATH` ordering mistake — `libstdc++` is in `/lib`
+on this device. The second is structural and the sysroot builder fixes it: the
+Didj keeps `libz`, `libpng` and `liblzo2` in `/usr/lib` while something in the
+Brio stack asks for `/lib/libz.so` by absolute path, so **both** directories are
+built holding the union of the two. A faithful copy of the tree produces five
+of those messages; the assembled sysroot produces none.
+
+One line of host bleed-through is left, and it is cosmetic:
+
+    cache '/etc/ld.so.cache' is corrupt
+
+The Didj has no `/etc/ld.so.cache` — on hardware the loader's open fails and it
+moves on — but under `-L` a missing file falls through to the host's, which is
+glibc's. Writing a uClibc-format empty cache silences it; that is fabricating a
+loader file to quiet a warning, so it is not done.
 
 ## What is left
 
 1. **The cartridge.** `CButtonModule::LightningButtonTask` reads a cart and
    asserts when it cannot. Tadpole already fakes a cartridge for the LeapPad2
    (see `cartridge.sh` and the `cnotify` states in `tadpole.sh`), so this is
-   the nearest thing to a solved problem on the list.
-2. **A supported JFFS2 install path**, so `install-firmware` can lay a Didj
-   image into a sysroot the way it does a tarball.
-3. **`/Didj` versus `/LF`** everywhere the emulator assumes the latter.
+   the nearest thing to a solved problem on the list, and the only thing
+   between `AppManager` starting and `AppManager` running.
+2. **`/Didj` versus `/LF`** everywhere the emulator assumes the latter.
+   `install-firmware.py` knows the difference; `tadpole.sh`, `run.sh` and the
+   viewer do not yet, which is why there is no "play" for this device.
+3. **`runtime/setup-sysroot.sh` cannot build this tree**, and says so rather
+   than building nonsense over it — both write to `runtime/sysroot`, and the
+   LeapPad layout it assembles would overwrite a working Didj. It still
+   *switches* to the Didj; rebuilding means re-running the installer.
 4. **Fields not yet read** out of the image, deliberately absent from
    `runtime/devices/didj.conf` rather than guessed: `DEV_UIPKG`, `DEV_SPLASH`,
-   `DEV_SOUNDS`, `DEV_CODEC`, and the `DEV_*_DEV` node names.
+   `DEV_SOUNDS`, `DEV_CODEC`, and the `DEV_*_DEV` node names. Nothing is
+   invented under the sysroot's `/sys` or `/flags` either, for the same reason:
+   the LeapPad's values were read off real hardware and nobody has read a
+   Didj's.
 
 What is NOT a worry: the panel is 320x240 (all eight boot screens agree), there
 is no wifi, no Qt, and no touchscreen — so none of the three blockers that cost
