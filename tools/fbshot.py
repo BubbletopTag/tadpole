@@ -30,13 +30,20 @@ TAIL_SIZE = 4 + 4 + 64
 
 
 def check_size(nbytes):
-    """state.bin is the header, NUM_FB layers, and the screen tail. Anything
-    else means this script and the shim disagree about the struct."""
+    """state.bin is the header, NUM_FB layers, and the screen tail.
+
+    SHORTER than that is unreadable: the fields decoded below may not be in the
+    file. LONGER is normal and fine — a newer shim appended at the end, which is
+    the only way tadpole/shim/tadpole_state.h allows the file to grow, so every
+    offset this script uses is unchanged. Treating "longer" as an error is
+    exactly the mistake that made Leapster titles render at the full panel.
+    """
     want = HDR_SIZE + NUM_FB * LAYER_SIZE + TAIL_SIZE
-    if nbytes != want:
+    if nbytes < want:
         sys.stderr.write(
-            "fbshot: state.bin is %d bytes, expected %d — LAYER_FIELDS is out "
-            "of date with tadpole_shim.c\n" % (nbytes, want))
+            "fbshot: state.bin is %d bytes, short of the %d this script "
+            "decodes — the guest shim is older than "
+            "tadpole/shim/tadpole_state.h; rebuild it\n" % (nbytes, want))
 
 
 def read_state(d):

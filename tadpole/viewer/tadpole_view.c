@@ -74,8 +74,13 @@ static int tp_fifo_fd(const char *path, int want_read)
 #include <dirent.h>              /* guest_sweep_stragglers walks /proc */
 #endif
 
-#define TADPOLE_MAGIC 0x54414450u   /* "TADP" */
-#define NUM_FB 3
+/* struct tadpole_state, TADPOLE_MAGIC, NUM_FB and the two rules for reading a
+ * state.bin some other build wrote. This viewer, the guest shim and the guest's
+ * GL library all map that file; the header is the only place its layout is
+ * written down, because the four hand-kept copies it replaces drifted every
+ * time somebody added a field — see the long comment there. */
+#include "../shim/tadpole_state.h"
+
 #define NUM_EV 6
 
 /* How long the viewer keeps drawing the game layer after the last HLE frame.
@@ -89,38 +94,6 @@ static int tp_fifo_fd(const char *path, int want_read)
 #ifndef TADPOLE_VERSION
 #define TADPOLE_VERSION "dev"
 #endif
-
-/* Mirrors struct tadpole_state in the shim. Keep the two in sync. */
-struct layer_state {
-	uint32_t enabled, xres, yres, bpp, xoffset, yoffset;
-	uint32_t nonstd, alpha, blank;
-	/* On-panel rectangle for this layer — see the long note in
-	 * tadpole_shim.c. Must stay in step with the shim's copy: both map the
-	 * same state.bin, so a mismatch silently shifts every field after it. */
-	uint32_t win_x, win_y, win_w, win_h;
-	/* Video-scaler source size for the YUV layer; 0 = unset. */
-	uint32_t vid_w, vid_h;
-};
-
-/* What the guest is showing. The shim works this out from the files the guest
- * opens — see the long note by screen_note() in tadpole_shim.c — and says so
- * here; deciding which way up to hold the window from it is ours, below. */
-#define TAD_SCREEN_UNKNOWN 0
-#define TAD_SCREEN_SYSTEM  1
-#define TAD_SCREEN_TITLE   2
-#define PKGID_MAX          64
-
-struct tadpole_state {
-	uint32_t magic, version;
-	uint32_t width, height;
-	uint32_t vsync_count;
-	struct layer_state layer[NUM_FB];
-	/* Appended at the end, and it must stay at the end: tools/fbshot.py
-	 * decodes the header and the layers out of this file by offset. */
-	uint32_t screen;
-	uint32_t screen_seq;
-	char     screen_pkg[PKGID_MAX];
-};
 
 /* struct input_event as the 32-bit ARM guest sees it: 32-bit time_t. NOT the
  * host layout, which has a 64-bit timeval. Hard-coded deliberately. */
@@ -837,13 +810,12 @@ static int selftest(int rotate, int scale)
 static void layer_window(const struct layer_state *ls, int w, int h,
                          int *wx, int *wy, int *ww, int *wh)
 {
-	int x = (int)ls->win_x, y = (int)ls->win_y;
-	int cw = (int)ls->win_w, ch = (int)ls->win_h;
-
-	if (cw <= 0 || ch <= 0 || x < 0 || y < 0 || x + cw > w || y + ch > h) {
-		x = 0; y = 0; cw = w; ch = h;
-	}
-	*wx = x; *wy = y; *ww = cw; *wh = ch;
+	/* The rule itself lives in tadpole_state.h, because the guest's GL
+	 * rasteriser has to rasterise into exactly the rectangle this composites
+	 * from. When those two were open-coded separately they disagreed, and a
+	 * disagreement here is a title drawn at the wrong size — which is only
+	 * visible as "the game is cut off", never as an error. */
+	tad_layer_window(ls, w, h, wx, wy, ww, wh);
 }
 
 /* SAY WHERE A LAYER IS BEING COMPOSITED, once, and again whenever it moves.
@@ -1121,6 +1093,135 @@ static int selftest_layers(void)
 	free(src); free(dst);
 	printf("\n%s\n", bad ? "FAILED — layers are not composited at their window"
 	                     : "PASS — layers land where their window says");
+	return bad ? 1 : 0;
+}
+
+/* --selftest-state: a state.bin some OTHER build wrote is still readable.
+ *
+ * THIS IS THE SCALING-BUG TEST, and the bug is worth restating because it has
+ * come back four times: every Leapster title suddenly renders at the full
+ * 480x272 panel instead of the 320x240 window its ViewFrame gives it. It has
+ * never been a rendering fault. It is always a reader deciding it cannot trust
+ * state.bin and falling back to the whole panel — and until now, doing that
+ * silently.
+ *
+ * What made it recur is that four binaries map that one file and are built
+ * separately: the shim, the guest's GL library, this viewer, and the Python
+ * capture tools. The worktrees SHARE runtime/shimlibs by symlink, so the shim
+ * a run loads is whichever branch built last. When the android branch appended
+ * a camera block, state.bin went from 272 bytes to 528 and every other build's
+ * exact-size check refused it.
+ *
+ * So the case that matters is the LONGER file, and it must pass: growth is
+ * only ever allowed at the end, which leaves every offset a reader uses exactly
+ * where it was. Short files, bad magic and a layer array that has actually
+ * changed shape must all be caught and NAMED.
+ */
+static int selftest_state(void)
+{
+	/* Big enough for our struct and then some, so "a newer writer appended
+	 * fields" can be posed literally. */
+	unsigned char buf[sizeof(struct tadpole_state) + 256];
+	struct tadpole_state *st = (struct tadpole_state *)buf;
+	int bad = 0;
+
+	struct { const char *what; long bytes; int want_ok; } size_cases[] = {
+		{ "exactly our own struct",            (long)sizeof *st,        1 },
+		{ "528 bytes: the android branch's",   (long)sizeof *st + 256,  1 },
+		{ "one byte short",                    (long)sizeof *st - 1,    0 },
+		{ "an empty file",                     4,                       0 },
+	};
+	size_t k;
+
+	printf("state.bin written by another build\n\n");
+
+	for (k = 0; k < sizeof size_cases / sizeof *size_cases; k++) {
+		const char *why;
+		int i, ok;
+
+		memset(buf, 0, sizeof buf);
+		st->magic  = TADPOLE_MAGIC;
+		st->width  = 480; st->height = 272;
+		for (i = 0; i < NUM_FB; i++) {
+			st->layer[i].enabled = (i == 0);
+			st->layer[i].xres = 480; st->layer[i].yres = 272;
+			st->layer[i].bpp  = 32;
+		}
+		/* The rectangle the whole bug is about. */
+		st->layer[1].win_x = 15;  st->layer[1].win_y = 17;
+		st->layer[1].win_w = 320; st->layer[1].win_h = 240;
+
+		why = tad_state_fault(buf, size_cases[k].bytes);
+		ok  = size_cases[k].want_ok ? (why == NULL) : (why != NULL);
+		if (!ok) bad++;
+		printf("  %-34s %4ld bytes -> %-8s %s\n", size_cases[k].what,
+		       size_cases[k].bytes, why ? "refused" : "usable",
+		       ok ? "ok" : "FAIL");
+
+		/* A usable file must still yield the ViewFrame window, not the
+		 * panel. Reading the rect is the entire point of the file; a check
+		 * that accepts the bytes and then loses the rectangle would pass
+		 * the line above and still ship the bug. */
+		if (!why) {
+			int x, y, w, h;
+			int announced = tad_layer_window(&st->layer[1], 480, 272,
+			                                 &x, &y, &w, &h);
+			int right = announced && x == 15 && y == 17 && w == 320 && h == 240;
+			if (!right) bad++;
+			printf("  %-34s        layer1 -> %d,%d %dx%d  %s\n", "",
+			       x, y, w, h, right ? "ok" : "FAIL");
+		}
+	}
+
+	/* THE MISMATCH THAT IS REAL. A length can hide it — a struct layer_state
+	 * that changed shape slides layer[1] somewhere else while the file stays
+	 * the same size — so it is caught by what the layers say about themselves,
+	 * not by arithmetic. */
+	{
+		const char *why;
+		int i;
+
+		memset(buf, 0, sizeof buf);
+		st->magic = TADPOLE_MAGIC;
+		st->width = 480; st->height = 272;
+		for (i = 0; i < NUM_FB; i++) {
+			st->layer[i].xres = 0x66666; st->layer[i].yres = 0x77777;
+			st->layer[i].bpp  = 0x1234;
+		}
+		why = tad_state_fault(buf, (long)sizeof *st);
+		if (!why) bad++;
+		printf("  %-34s %4ld bytes -> %-8s %s\n", "layers decode as garbage",
+		       (long)sizeof *st, why ? "refused" : "usable",
+		       why ? "ok" : "FAIL");
+
+		memset(buf, 0, sizeof buf);
+		st->magic = 0xDEADBEEFu;
+		why = tad_state_fault(buf, (long)sizeof *st);
+		if (!why) bad++;
+		printf("  %-34s %4ld bytes -> %-8s %s\n", "not a Tadpole state.bin",
+		       (long)sizeof *st, why ? "refused" : "usable",
+		       why ? "ok" : "FAIL");
+	}
+
+	/* No window announced yet is NOT a fault — it is the first frames of a
+	 * title, and the answer is the panel with `announced` clear so the
+	 * rasteriser keeps whatever it already had. */
+	{
+		struct layer_state ls;
+		int x, y, w, h, announced, right;
+
+		memset(&ls, 0, sizeof ls);
+		announced = tad_layer_window(&ls, 480, 272, &x, &y, &w, &h);
+		right = !announced && x == 0 && y == 0 && w == 480 && h == 272;
+		if (!right) bad++;
+		printf("  %-34s        no window -> %d,%d %dx%d announced=%d  %s\n",
+		       "a title that has not said yet", x, y, w, h, announced,
+		       right ? "ok" : "FAIL");
+	}
+
+	printf("\n%s\n", bad
+	       ? "FAILED — a state.bin from another build is not read correctly"
+	       : "PASS — the layer rect survives a writer that is not this build");
 	return bad ? 1 : 0;
 }
 
@@ -1560,6 +1661,21 @@ static int try_map(void)
 	if (g_state->magic != TADPOLE_MAGIC) {   /* half-written; try again later */
 		g_state = NULL;
 		return 0;
+	}
+	/* SAY IT IF THE GUEST'S LAYOUT IS NOT OURS. A viewer and a shim from
+	 * different builds still map the same file, and the failure that follows
+	 * is geometric, not fatal: layers land in the wrong place, titles come out
+	 * the wrong size. One line here beats measuring pixels later. Once — this
+	 * runs until a guest appears, so it would otherwise repeat forever. */
+	{
+		static int said;
+		const char *why = tad_state_fault(g_state, (long)g_statesz);
+		if (why && !said) {
+			said = 1;
+			fprintf(stderr, "[tadpole] state.bin: %s (this build expects "
+			        "%ld bytes, the guest wrote %ld)\n", why,
+			        (long)sizeof *g_state, (long)g_statesz);
+		}
 	}
 	snprintf(path, sizeof(path), "%s/fb0.bin", g_dir);
 	g_fb[0] = map_file(path, &g_fbsz[0]);
@@ -2945,6 +3061,8 @@ int main(int argc, char **argv)
 			selftest_want = 1;
 		else if (!strcmp(argv[i], "--selftest-layers"))
 			return selftest_layers();
+		else if (!strcmp(argv[i], "--selftest-state"))
+			return selftest_state();
 		else if (!strcmp(argv[i], "--boot"))
 			boot_now = 1;
 		else if (!strcmp(argv[i], "--ui-shot") && i + 2 < argc) {

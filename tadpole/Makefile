@@ -50,6 +50,11 @@ SHIM_SONAME := libdl.so.0
 REAL_DL     := libdl.so.9
 
 SHIM_SRC := shim/tadpole_shim.c shim/tadpole_crash.c
+# state.bin's layout, shared by the shim, the GL library and the viewer. It is
+# a prerequisite of ALL of them on purpose: a build that keeps a stale object
+# after this header moves a field is the scaling bug in its purest form — the
+# binaries disagree about where layer[1] is and nothing says so.
+STATE_HDR := shim/tadpole_state.h
 SHIM_OUT := $(SHIMLIBS)/libdl.so.0
 # Second variant: the display tools (imager-fb, drawtext-fb, flipbook-fb,
 # fbtest) link no libdl at all — libz.so.1 is their first NEEDED entry.
@@ -87,7 +92,7 @@ TONE_OUT := ../runtime/tone
 VIEW_SRC := viewer/tadpole_view.c viewer/tadpole_ui.c viewer/tadpole_hle.c \
             viewer/tadpole_boot.c
 VIEW_HDR := viewer/tadpole_ui.h viewer/tadpole_font.h viewer/tadpole_hle.h \
-            viewer/tadpole_boot.h shim/tadpole_glcmd.h
+            viewer/tadpole_boot.h shim/tadpole_glcmd.h $(STATE_HDR)
 VIEW_OUT := viewer/tadpole-view
 
 SDL_CFLAGS := $(shell pkg-config --cflags sdl2 2>/dev/null)
@@ -179,7 +184,8 @@ $(EGL_OUT): $(EGL_SRC) $(GLES_OUT) | need-libs
 		-L$(SHIMLIBS_GL) -l:libGLESv1_CM.so $(GUESTLIBS)/libc.so.0
 	@echo "built $@"
 
-$(GLES_OUT): $(GLES_SRC) shim/tadpole_glcmd.h shim/tadpole_gles_debug.h | need-libs
+$(GLES_OUT): $(GLES_SRC) shim/tadpole_glcmd.h shim/tadpole_gles_debug.h \
+            $(STATE_HDR) | need-libs
 	@mkdir -p $(SHIMLIBS_GL)
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
@@ -266,7 +272,7 @@ $(ASOUND_OUT): $(ASOUND_SRC) | need-libs
 	@echo "built $@"
 
 
-$(SHIM_OUT): $(SHIM_SRC) $(SHIMLIBS)/$(REAL_DL) | need-libs
+$(SHIM_OUT): $(SHIM_SRC) $(STATE_HDR) $(SHIMLIBS)/$(REAL_DL) | need-libs
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
 		-fuse-ld=lld -Wl,-soname,$(SHIM_SONAME) -o $@ $(SHIM_SRC) \
@@ -310,7 +316,7 @@ shimz: $(SHIM_OUT_Z)
 # created, on both engines, for as long as this variant has existed. Naming the
 # library we already depend on is the fix; the symbol does come from the guest's
 # libgcc, we simply never said so out loud.
-$(SHIM_OUT_Z): $(SHIM_SRC) $(SHIMLIBS_Z)/$(REAL_Z) | need-libs
+$(SHIM_OUT_Z): $(SHIM_SRC) $(STATE_HDR) $(SHIMLIBS_Z)/$(REAL_Z) | need-libs
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-fno-stack-protector -fno-builtin \
 		-fuse-ld=lld -Wl,-soname,libz.so.1 -o $@ $(SHIM_SRC) \

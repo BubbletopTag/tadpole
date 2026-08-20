@@ -126,81 +126,16 @@ struct fb_fix_screeninfo {
 	u16   reserved[2];
 };
 
-/* ---- shared state, mirrored to the viewer ------------------------------ */
-#define TADPOLE_MAGIC   0x54414450u   /* "TADP" */
-#define TADPOLE_VERSION 1
-#define NUM_FB          3
+/* ---- shared state, mirrored to the viewer ------------------------------
+ *
+ * DEFINED IN tadpole_state.h, NOT HERE. It used to live in this file and be
+ * hand-copied into the viewer, the GL rasteriser and two Python tools — four
+ * mirrors of one layout, kept in step by comment. Every time one drifted, the
+ * GL rasteriser stopped trusting state.bin and rendered Leapster titles at the
+ * full panel; the header carries that whole story. */
+#include "tadpole_state.h"
+
 #define NUM_EV          6
-
-/* WHAT THE GUEST IS SHOWING. The panel is portrait and its software is not:
- * the LeapPad UI draws a quarter turn from how the device is held — the same
- * reason the stock boot art is named "...CW.png" — while nearly every title
- * draws landscape into the same buffer. So there is no one right rotation for
- * the window; it depends on what is on screen, and only the guest knows.
- * See screen_note() for how this is worked out and PKGID_MAX for the name. */
-#define TAD_SCREEN_UNKNOWN 0
-#define TAD_SCREEN_SYSTEM  1   /* the LeapPad UI — portrait */
-#define TAD_SCREEN_TITLE   2   /* an installed title — landscape, nearly always */
-#define PKGID_MAX          64
-
-struct layer_state {
-	u32 enabled, xres, yres, bpp, xoffset, yoffset;
-	u32 nonstd;      /* format/priority/planar bits, see lf1000fb.h */
-	u32 alpha, blank;
-	/* WHERE THIS LAYER LANDS ON THE PANEL.
-	 *
-	 * A Leapster title does not own the screen. AppManager draws a ViewFrame
-	 * (bamboo border, A/B/L/R buttons) on fb0 and gives the game a smaller
-	 * window on fb1. For SpongeBob: The Clam Prix, EmeraldTitles/<pkg>/
-	 * ViewFrame.json says x=15 y=17 w=320 h=240, and the guest pushes exactly
-	 * that down to the driver:
-	 *
-	 *     fb1 PUTVAR req 320x240 virt 480x2176
-	 *     fb1 posioctl 40046d03: f 11 <ptr> 14f 101
-	 *                            ^  ^        ^   ^-- bottom 257 = 17+240
-	 *                            |  |        `----- right  335 = 15+320
-	 *                            |  `-------------- top     17
-	 *                            `----------------- left    15
-	 *
-	 * The hardware MLC composites the layer at that rectangle. We have no MLC,
-	 * so the rect is published here for the GL rasteriser to render into and
-	 * for the viewer to composite with. Other titles differ (the reading games
-	 * use 250x250 at x=76), so this must never be hardcoded.
-	 *
-	 * Defaults to the full panel, which is what the Flash UI actually uses.
-	 */
-	u32 win_x, win_y, win_w, win_h;
-
-	/* THE VIDEO SCALER'S SOURCE SIZE, for the YUV layer only.
-	 *
-	 * LF1000FB_IOCSVIDSCALE carries the size of the picture that was actually
-	 * decoded; the MLC then stretches it to the layer window. Sneak Peeks
-	 * plays 320x240 trailers into a 362x272 window and says so:
-	 *
-	 *     SetVideoScaler: 0x86498: 320x240 (2)
-	 *
-	 * Without this the viewer reads a 362x272 rectangle out of a buffer that
-	 * only holds 320x240 of picture — cropped, with the remainder garbage.
-	 * Zero means "no scaler set": use the window size. */
-	u32 vid_w, vid_h;
-};
-
-struct tadpole_state {
-	u32 magic, version;
-	u32 width, height;
-	u32 vsync_count;
-	struct layer_state layer[NUM_FB];
-
-	/* APPENDED AT THE END ON PURPOSE. tools/fbshot.py reads the header and
-	 * the layer array out of this same file by offset, so anything inserted
-	 * above would silently shift every layer it decodes and the capture would
-	 * come out of the wrong page. Grow this struct here, never in the middle.
-	 */
-	u32 screen;                 /* TAD_SCREEN_*: the UI, or a title */
-	u32 screen_seq;             /* bumped on every change, so a viewer that
-	                             * was not looking still sees the transition */
-	char screen_pkg[PKGID_MAX]; /* the PackageID when a title is up */
-};
 
 /* ---- geometry ---------------------------------------------------------- */
 static u32 g_w   = 480;
@@ -587,7 +522,7 @@ static void init(void)
 	} else {
 		memset(g_state, 0, sizeof(*g_state));
 		g_state->magic   = TADPOLE_MAGIC;
-		g_state->version = TADPOLE_VERSION;
+		g_state->version = TAD_STATE_VERSION;
 		g_state->width   = g_w;
 		g_state->height  = g_h;
 		for (i = 0; i < NUM_FB; i++) {

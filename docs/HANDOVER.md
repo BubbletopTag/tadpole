@@ -2207,15 +2207,40 @@ one (zero) outside it**.
 
 `TADPOLE_GL_VIEW="x,y,w,h"` overrides it for bisection.
 
-### THREE COPIES OF struct layer_state MUST AGREE
+### ONE COPY OF struct layer_state — `tadpole/shim/tadpole_state.h`
 
-`tadpole_shim.c`, `tadpole_view.c`, and **`tools/fbshot.py`** each declare the
-layout independently. Adding four fields changed the stride from 36 to 52 bytes
-and `fbshot.py` still used `20 + i*36` with `<9I`, so it read every layer past
-the first from the wrong offset and captured a blank screen — while the
-rasteriser was working perfectly the whole time. `fbshot.py` now derives its
-stride from a single `LAYER_FIELDS` tuple and prints a loud warning when
-`state.bin` is not the size it expects.
+There used to be four, declared independently in `tadpole_shim.c`,
+`tadpole_gles_core.c`, `tadpole_view.c` and **`tools/fbshot.py`**, kept in step
+by comment. Every drift produced the same symptom from a different direction:
+
+* Adding the four `win_*` fields changed the stride from 36 to 52 bytes and
+  `fbshot.py` still used `20 + i*36` with `<9I`, so it read every layer past the
+  first from the wrong offset and captured a blank screen — while the rasteriser
+  was working perfectly.
+* The GL core checked its own layout by demanding `state.bin` be **exactly** its
+  `sizeof`, and its response to a mismatch was a silent fall back to the full
+  panel. On Windows, `CreateFileMapping` grew a 272-byte file to 65536 and every
+  Leapster title rendered at 480x272 (fixed in `host_win32.c`). Then the android
+  branch appended a camera block, making `state.bin` 528 bytes — and because the
+  worktrees share `runtime/shimlibs` **by symlink**, main was running that shim
+  with its own GL library, so the same bug came back with no local change at all.
+
+The C side is now one header, included by all three; the Python tools still
+decode by hand and are pinned by a test. Two rules, both enforced:
+
+* **Grow only at the end.** Everything up to and including `layer[NUM_FB-1]` is
+  frozen — a field inserted above the layers moves them for every reader that
+  has not been rebuilt.
+* **A longer `state.bin` is not an error.** Only a *shorter* one is unreadable.
+  A reader that demands `sizeof` equality turns every future field into the
+  scaling bug. `tad_state_fault()` is the check; do not open-code another.
+
+    tadpole/viewer/tadpole-view --selftest-state   # a 528-byte state still works
+    ./tools/tests/state_layout_test.py             # header vs fbshot.py/burst.py
+
+And when a reader does refuse, it says so on stderr and in `gl-warnings.log`.
+The silence is what made this cost four investigations that each began by
+reading the rasteriser.
 
 ### Two self-inflicted detours worth recognising
 

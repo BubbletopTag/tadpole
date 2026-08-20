@@ -44,6 +44,9 @@
  * adding the second texcoord unit is exactly the kind of change that silently
  * breaks when the two ends disagree about what slot 4 means. */
 #include "tadpole_glcmd.h"
+/* struct tadpole_state, and the two readers of it that every
+ * consumer shares — see the header for why they are not open-coded. */
+#include "tadpole_state.h"
 
 typedef unsigned char  u8;
 typedef unsigned short u16;
@@ -729,34 +732,15 @@ static int parse_int(const char **p)
  *
  * TADPOLE_GL_VIEW="x,y,w,h" overrides everything, for bisecting.
  */
-/* MUST MATCH struct layer_state in tadpole_shim.c, FIELD FOR FIELD.
+/* THE LAYOUT IS tadpole_state.h's, AND ONLY ITS.
  *
- * Not just the fields this file reads — the whole thing, because layer[1] is
- * addressed by STRIDE. Adding vid_w/vid_h to the shim's copy and not this one
- * moved layer[1] eight bytes and every 3D title came up black with a sliver
- * of picture in the top-left corner: the viewport was being read out of the
- * middle of layer[0]. Nothing warns; the numbers are just quietly wrong.
- *
- * A layout check runs at map time — see view_update(). */
-struct tad_layer_state {
-	u32 enabled, xres, yres, bpp, xoffset, yoffset;
-	u32 nonstd, alpha, blank;
-	u32 win_x, win_y, win_w, win_h;
-	u32 vid_w, vid_h;
-};
-struct tad_state {
-	u32 magic, version, width, height, vsync_count;
-	struct tad_layer_state layer[3];
-	/* The screen the guest is showing, published for the viewer to hold the
-	 * window the right way up. NOTHING HERE READS IT — it is mirrored because
-	 * the length check below pins the layout, and a struct that stopped
-	 * matching would take the layer rect out and render every 3D title to the
-	 * full panel with only a trace line to say so. */
-	u32 screen, screen_seq;
-	char screen_pkg[64];
-};
-
-static const struct tad_state *g_tstate;
+ * This file used to carry its own copy of struct layer_state, kept in step
+ * with the shim's by a comment. It is a separate .so from the shim even though
+ * both run inside the guest, so the two are built separately and a run can mix
+ * versions of them; a copy that drifted moved layer[1] by its own delta and
+ * every 3D title rendered to the wrong viewport with nothing to say why. The
+ * header explains what that looks like from the outside. */
+static const struct tadpole_state *g_tstate;
 static long g_state_bytes;
 static int g_view_forced = -1;      /* from TADPOLE_GL_VIEW */
 static int g_fx, g_fy, g_fw, g_fh;
@@ -785,7 +769,7 @@ static void view_update(void)
 			fd = open(path, O_RDWR);
 			if (fd >= 0) {
 				long got = lseek(fd, 0, SEEK_END_);
-				void *m = mmap(NULL, sizeof(struct tad_state),
+				void *m = mmap(NULL, sizeof(struct tadpole_state),
 				               PROT_RW, MAP_SHARED, fd, 0);
 				close(fd);
 				if (m != (void *)-1)
@@ -793,22 +777,33 @@ static void view_update(void)
 				g_state_bytes = got;
 			}
 			tr2("view state mapped?", g_tstate ? 1 : 0, 0);
-			/* DOES OUR IDEA OF THE LAYOUT MATCH WHAT IS THERE?
+			/* CAN WE READ WHAT IS THERE?
 			 *
-			 * state.bin is exactly the header plus three layers, so its
-			 * length pins the stride. Getting that wrong does not fail —
-			 * it reads plausible-looking numbers out of the wrong layer
-			 * and every 3D title renders to a wrong viewport, which is a
-			 * far worse thing to debug than a refusal. Fall back to the
-			 * full panel and say so, rather than trust a bad stride. */
+			 * This used to demand that state.bin be EXACTLY our own
+			 * sizeof, which is wrong in the one direction that keeps
+			 * happening: a shim newer than this library appends a field
+			 * at the end — the documented way to grow the file — and the
+			 * length no longer matches. Refusing then throws away a
+			 * perfectly readable layer rect and renders every Leapster
+			 * title at 480x272 instead of its ViewFrame window. That is
+			 * the bug the whole header comment is about; it has arrived
+			 * from three different directions now, most recently as a
+			 * 528-byte state.bin written by the android branch's shim,
+			 * which main shares by symlink.
+			 *
+			 * tad_state_fault() knows which mismatches actually matter.
+			 * If it does object, that is not a trace — a silent fall back
+			 * to the full panel is exactly what made this expensive to
+			 * find, so it goes to stderr and to gl-warnings.log. */
 			if (g_tstate) {
-				long want = (long)sizeof(struct tad_state);
-				long got  = g_state_bytes;
-				if (got > 0 && got != want) {
-					tr2("STATE LAYOUT MISMATCH bytes want/got",
-					    (int)want, (int)got);
-					tr2("struct tad_layer_state is out of step with "
-					    "tadpole_shim.c; using the full panel", 0, 0);
+				const char *why = tad_state_fault(g_tstate,
+				                                  g_state_bytes);
+				if (why) {
+					warn2(why, (int)sizeof(struct tadpole_state),
+					      (int)g_state_bytes);
+					warn2("state.bin unusable (sizeof/got above): every "
+					      "title with a ViewFrame will render at the "
+					      "full panel instead of its own window", 0, 0);
 					g_tstate = 0;
 				}
 			}
@@ -817,19 +812,26 @@ static void view_update(void)
 
 	if (g_view_forced) {
 		x = g_fx; y = g_fy; w = g_fw; h = g_fh;
+		if (w <= 0 || h <= 0 || x < 0 || y < 0 ||
+		    x + w > FB_W || y + h > FB_H)
+			return;                       /* TADPOLE_GL_VIEW is nonsense */
 	} else if (g_tstate) {
-		/* Layer 1 — GL renders into /dev/fb1, the 3D plane. */
-		x = (int)g_tstate->layer[1].win_x;
-		y = (int)g_tstate->layer[1].win_y;
-		w = (int)g_tstate->layer[1].win_w;
-		h = (int)g_tstate->layer[1].win_h;
+		/* Layer 1 — GL renders into /dev/fb1, the 3D plane. The same
+		 * placement rule the viewer composites by, from the same header,
+		 * so the picture is rasterised at exactly the size the compositor
+		 * is going to read back out.
+		 *
+		 * A window it has not announced yet means KEEP WHAT WE HAVE. The
+		 * rect is set while the title loads and can arrive a frame or two
+		 * after the first draw; falling back to the panel for those frames
+		 * would resize the title mid-load. */
+		if (!tad_layer_window(&g_tstate->layer[1], FB_W, FB_H, &x, &y, &w, &h))
+			return;
 	} else {
 		return;
 	}
 
-	if (w > 0 && h > 0 && x >= 0 && y >= 0 &&
-	    x + w <= FB_W && y + h <= FB_H &&
-	    (x != g_vx || y != g_vy || w != g_vw || h != g_vh)) {
+	if (x != g_vx || y != g_vy || w != g_vw || h != g_vh) {
 		g_vx = x; g_vy = y; g_vw = w; g_vh = h;
 		tr2("viewport now", w, h);
 		tr2("viewport at", x, y);

@@ -39,9 +39,16 @@ def read_state(d):
     with open(os.path.join(d, "state.bin"), "rb") as f:
         b = f.read()
     want = HDR + NUM_FB * LAYER + TAIL
-    if len(b) != want:
-        sys.stderr.write("burst: state.bin is %d bytes, expected %d — "
-                         "LAYER_FIELDS is out of date with tadpole_shim.c\n"
+    # SHORTER is the only unreadable case. A LONGER state.bin means the shim
+    # that wrote it appended a field at the end, which tadpole_state.h says is
+    # the one legal way to grow the file — everything this script decodes is
+    # still exactly where it was. Complaining about that (or worse, refusing)
+    # is how the same mismatch became "every Leapster title renders at the full
+    # panel"; see the header.
+    if len(b) < want:
+        sys.stderr.write("burst: state.bin is %d bytes, short of the %d this "
+                         "script decodes — the guest shim is older than "
+                         "tadpole/shim/tadpole_state.h; rebuild it\n"
                          % (len(b), want))
     magic, ver, w, h, vsync = struct.unpack_from("<5I", b, 0)
     layers = []
