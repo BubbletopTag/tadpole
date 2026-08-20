@@ -188,12 +188,59 @@ public class TadpoleActivity extends SDLActivity {
      * proper version check: the assets are fixed at build time, so a file that
      * is already the right length is already the right file.
      */
+    /**
+     * Copy one asset directory tree out of the APK, keeping its shape.
+     *
+     * <p>Same "already the right length" test as extractAssets: the files are
+     * fixed at build time, so one that is already the right size is already
+     * the right file, and rewriting it on every launch would quietly replace
+     * one somebody had put there on purpose.
+     */
+    private void extractTree(String asset, File dest) {
+        try {
+            String[] kids = getAssets().list(asset);
+            if (kids == null || kids.length == 0) return;      /* a plain file */
+            for (String kid : kids) {
+                String sub = asset + "/" + kid;
+                String[] grand = getAssets().list(sub);
+                if (grand != null && grand.length > 0) {
+                    extractTree(sub, new File(dest, kid));
+                    continue;
+                }
+                File out = new File(dest, kid);
+                File p = out.getParentFile();
+                if (p != null && !p.isDirectory() && !p.mkdirs()) continue;
+                InputStream in = getAssets().open(sub);
+                try {
+                    if (out.exists() && out.length() == in.available()) continue;
+                    OutputStream os = new FileOutputStream(out);
+                    try {
+                        byte[] buf = new byte[16384];
+                        int n;
+                        while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                    } finally { os.close(); }
+                    out.setExecutable(true, false);
+                } finally { in.close(); }
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "could not unpack " + asset, t);
+        }
+    }
+
     private void extractAssets(String destDir) {
         /* The two package lists Online System Update needs. The CDN cannot be
          * asked what exists — see OnlineUpdate — so the IDs ship with the app:
          * EnglishLeapPad2.xml is the manifest LFConnect itself uses, and
          * lp2-bundled.txt is the titles that come with the device and appear in
          * no manifest at all. */
+        /* THE GUEST-SIDE SHIMS TRAVEL AS ASSETS, and they are the difference
+         * between a firmware that boots and one that dies with no framebuffer.
+         * They cannot go in lib/<abi>/ instead: they are 32-bit ARM, and a
+         * 64-bit-only device extracts no armeabi-v7a libraries at all, which
+         * is precisely the class of phone that needs them most. Assets are
+         * unpacked whatever the device's ABI. */
+        extractTree("shim", new File(destDir, "runtime"));
+
         String[] names = { "tadpole.png", "glasspole.png",
                            "EnglishLeapPad2.xml", "lp2-bundled.txt" };
         for (String name : names) {

@@ -104,6 +104,11 @@ final class InstallFirmware implements Tools.Tool {
         out.println("==> seccomp");
         SeccompPatch.apply(new File(ubiRfs, "lib"), out);
 
+        /* BEFORE THE SYSROOT, because Sysroot.oneLibdl() links the shim into
+         * lib/ and usr/lib/ and silently skips it when it is not there yet. */
+        out.println("==> shim");
+        Shims.install(ubiRfs, out);
+
         out.println("==> sysroot");
         new Sysroot(Tools.proj(), ubiRfs, Tools.sysroot(), out).build();
 
