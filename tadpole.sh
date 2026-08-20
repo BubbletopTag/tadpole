@@ -276,6 +276,13 @@ BOOTLOGO=/var/screens/Valencia-Boot-logoCW.png
 #
 # It is still the right tool for one job — telling whether a rendering fault is
 # in the shared GL core or only in the replay — which is why it is kept at all.
+# A DEVICE MAY ASK FOR IT, and one does. DEV_GL_SOFTWARE=1 in the profile means
+# "host-GPU replay does not work on this machine yet", and it is a default the
+# environment still overrides — TADPOLE_GL_SOFTWARE=0 forces replay back on for
+# whoever is chasing the reason. See runtime/devices/didj.conf.
+if [ "${DEV_GL_SOFTWARE:-0}" = 1 ] && [ -z "${TADPOLE_GL_SOFTWARE+x}" ]; then
+    TADPOLE_GL_SOFTWARE=1
+fi
 if [ -n "${TADPOLE_GL_SOFTWARE:-}" ] && [ "${TADPOLE_GL_SOFTWARE}" != 0 ]; then
     export TADPOLE_GL_SOFTWARE
     unset TADPOLE_GL_HLE

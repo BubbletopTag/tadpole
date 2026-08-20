@@ -212,6 +212,9 @@ static GLuint            g_tex[MAX_TEX];       /* guest name -> host name */
  * steady-state menu was fine: the logo's upload happened before the encoder
  * attached, and only a missing BUFFER used to trigger a resync. */
 static unsigned char     g_tex_have[MAX_TEX];
+/* Whether we have ALREADY asked the guest to resend this one. See
+ * want_tex_if_missing() for why asking twice is worse than not asking. */
+static unsigned char     g_tex_asked[MAX_TEX];
 static unsigned int      g_bound_name;   /* guest texture name currently bound */
 static int               g_tex_enabled;  /* GL_TEXTURE_2D on unit 0 */
 static struct hbuf       g_buf[MAX_BUF];
@@ -931,6 +934,26 @@ static void want_tex_if_missing(void)
 		return;
 	if (g_tex_have[g_bound_name])
 		return;
+	/* ONCE PER NAME, NOT ONCE PER DRAW.
+	 *
+	 * A resync makes the guest resend everything it HAS. If it did not have
+	 * this texture's pixels the first time, it will not have them the second,
+	 * and asking again every draw of every frame is a request the guest can
+	 * never satisfy and must service anyway.
+	 *
+	 * The Didj is where that stopped being theoretical. Its UI binds a dozen
+	 * names it never uploads — the shim reports the same gap on its own
+	 * software path, so the pixels are missing before HLE is involved — and
+	 * the result was 6756 resyncs in forty-five seconds, the guest pinned
+	 * servicing them, and a boot frozen on the copyright screen. Under the
+	 * software rasteriser the same frame draws untextured and the boot
+	 * continues.
+	 *
+	 * Cleared whenever an image for the name actually arrives, so a texture
+	 * that is legitimately re-uploaded later is still watched. */
+	if (g_tex_asked[g_bound_name])
+		return;
+	g_tex_asked[g_bound_name] = 1;
 	g_ring->want_resync = 1;
 	if (g_verbose && g_notex_logged < 12)
 		fprintf(stderr, "hle: DRAW samples texture %u with no image at frame"
@@ -1555,6 +1578,7 @@ texenv_dropped:
 				 * silently samples nothing instead of asking for the new
 				 * upload — and never reports why. */
 				g_tex_have[n] = 0;
+				g_tex_asked[n] = 0;
 			}
 			break; }
 		case TADGL_TEXIMAGE2D: {
@@ -1568,7 +1592,7 @@ texenv_dropped:
 			 * little-endian host is BGRA byte order. */
 			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (GLsizei)hd[1],
 			             (GLsizei)hd[2], 0, GL_BGRA, GL_UNSIGNED_BYTE, px);
-			if (hd[0] < MAX_TEX) g_tex_have[hd[0]] = 1;
+			if (hd[0] < MAX_TEX) { g_tex_have[hd[0]] = 1; g_tex_asked[hd[0]] = 0; }
 			if (g_verbose && g_ti_logged < 40) {
 				g_ti_logged++;
 				fprintf(stderr, "hle: TEXIMAGE name=%u %ux%u frame=%lu\n",
@@ -1652,6 +1676,7 @@ texenv_dropped:
 				if (g_tex[k]) glDeleteTextures(1, &g_tex[k]);
 				g_tex[k] = 0;
 				g_tex_have[k] = 0;
+				g_tex_asked[k] = 0;
 			}
 			for (k = 0; k < MAX_BUF; k++) {
 				free(g_buf[k].data);

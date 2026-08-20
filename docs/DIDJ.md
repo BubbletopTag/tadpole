@@ -10,9 +10,10 @@ project's GLES shim onto an emulated LF1000 multi-layer controller.
     ./tools/online-update.sh     # with the Didj chosen in the wizard
     ./tadpole.sh
 
-What does NOT work yet: it renders but nothing has driven the input end to end,
-`libpng` hangs inside `imager`, and it runs on qemu-arm rather than glasspole —
-see "What is left".
+What does NOT work yet: it runs on qemu-arm rather than glasspole and on the
+software rasteriser rather than host-GPU replay — both are defaults the profile
+sets, with the reason recorded there — nothing has driven the input end to end,
+and `libpng` hangs inside `imager`. See "What is left".
 
     ./tools/online-update.sh            # with the Didj chosen in the wizard
     TADPOLE_DEVICE=didj ./tools/online-update.sh
@@ -232,11 +233,22 @@ loader file to quiet a warning, so it is not done.
    refuses both as well, so that is not it. `TADPOLE_QEMU` overrides the
    default for whoever goes looking.
 
-2. **Input has never been driven end to end.** The three evdev nodes are served
+2. **Host-GPU replay freezes it on the copyright screen** — two minutes of
+   identical frames, 24 draws each, no GL error and no progress, where the
+   software rasteriser walks on to the country picker. `DEV_GL_SOFTWARE=1` in
+   the profile; `TADPOLE_GL_SOFTWARE=0` forces replay back on.
+
+   Its UI binds about a dozen texture names it never uploads — the shim reports
+   the same gap on its own software path, so the pixels are missing before
+   replay is involved. Every such draw used to ask the guest to resync, 6756 of
+   them in forty-five seconds; that is fixed and the freeze survived it, so the
+   missing textures are a real bug and a separate one.
+
+3. **Input has never been driven end to end.** The three evdev nodes are served
    and Brio polls all three happily, but nothing has yet pressed a button and
    watched the country picker move.
 
-3. **`imager`'s PNG path hangs** inside libpng where its raw `.rgb` path does
+4. **`imager`'s PNG path hangs** inside libpng where its raw `.rgb` path does
    not. `display_screen` uses PNGs, so the boot screens are not reachable
    through the device's own tooling yet.
 
@@ -253,10 +265,10 @@ loader file to quiet a warning, so it is not done.
    The rectangle took a disassembly: imager computes `width = buf[3]-buf[0]+1`
    and `height = buf[2]-buf[1]+1`, so it was never a packed width and height,
    which is what four failed guesses had assumed.
-4. **`/Didj` versus `/LF`** everywhere the emulator assumes the latter.
+5. **`/Didj` versus `/LF`** everywhere the emulator assumes the latter.
    `install-firmware.py` knows the difference; `tadpole.sh`, `run.sh` and the
    viewer do not yet, which is why there is no "play" for this device.
-5. **`Pa_StartStream`** — fixed; see shim/tadpole_portaudio.c. Was: Audio itself works — see below — but
+6. **`Pa_StartStream`** — fixed; see shim/tadpole_portaudio.c. Was: Audio itself works — see below — but
    Brio's main thread is left in a futex wait after portaudio creates its
    callback thread, so nothing after audio init runs. The callback thread is
    healthy and producing 16 KB buffers on time, which is the odd part. The
@@ -264,17 +276,17 @@ loader file to quiet a warning, so it is not done.
    `libportaudio.so` outright rather than emulate a device well enough for a
    2008 copy of it. Brio imports only nine `Pa_*` symbols, so the surface is
    small.
-6. **`pipe`** — implemented, in both host backends. Was: (ARM syscall 42), so any guest shell
+7. **`pipe`** — implemented, in both host backends. Was: (ARM syscall 42), so any guest shell
    script with a pipeline or a `$(…)` fails there with "pipe call failed" —
    and the Didj boots through `usr/bin/launch_main`, which is a shell script.
    It needs `gp_pipe` in `host.h` and an implementation in BOTH backends;
    adding it to `host_posix.c` alone is the failure mode that file exists to
    prevent. qemu-arm has no such gap.
-7. **`runtime/setup-sysroot.sh` cannot build this tree**, and says so rather
+8. **`runtime/setup-sysroot.sh` cannot build this tree**, and says so rather
    than building nonsense over it — both write to `runtime/sysroot`, and the
    LeapPad layout it assembles would overwrite a working Didj. It still
    *switches* to the Didj; rebuilding means re-running the installer.
-8. **Fields not yet read** out of the image, deliberately absent from
+9. **Fields not yet read** out of the image, deliberately absent from
    `runtime/devices/didj.conf` rather than guessed: `DEV_UIPKG`, `DEV_SPLASH`,
    `DEV_SOUNDS`, `DEV_CODEC`, and the `DEV_*_DEV` node names. Nothing is
    invented under the sysroot's `/sys` or `/flags` either, for the same reason:
