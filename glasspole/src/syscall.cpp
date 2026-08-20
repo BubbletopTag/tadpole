@@ -54,6 +54,11 @@ enum : uint32_t {
     SYS_clone = 120, SYS_futex = 240, SYS_gettid = 224,
     SYS_mknod = 14, SYS_ftruncate = 93, SYS_getdents64 = 217, SYS_getdents = 141,
     SYS_ftruncate64 = 194,
+    /* The *at family. The shim reaches for these because Android's app
+     * seccomp filter refuses the classic numbers — see the block that
+     * implements them. */
+    SYS_openat = 322, SYS_mknodat = 324, SYS_unlinkat = 328,
+    SYS_fchmodat = 333,
     /* Descriptor duplication. Missing entirely until it was measured: busybox
      * ash asks for `>&2`, gets ENOSYS, and RETRIES FOREVER — 21.9 MB of
      * "sh: 0: Function not implemented" in twenty seconds. Shell redirection
@@ -364,6 +369,8 @@ const char *name_of(uint32_t nr) {
         case SYS_dup: return "dup";                 case SYS_dup2: return "dup2";
         case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
         case SYS_ftruncate64: return "ftruncate64";
+        case SYS_openat: return "openat";           case SYS_mknodat: return "mknodat";
+        case SYS_unlinkat: return "unlinkat";       case SYS_fchmodat: return "fchmodat";
         case SYS_getdents64: return "getdents64";   case SYS_getdents: return "getdents";
         case SYS_mq_open: return "mq_open";         case SYS_mq_unlink: return "mq_unlink";
         case SYS_mq_timedsend: return "mq_timedsend";
@@ -1324,6 +1331,73 @@ void gp_syscall(Thread &t) {
         }
         ret = gp_mkfifo(m.HostPath(p).c_str(), a1 & 07777);
         if (ret == GP_EEXIST) ret = 0;   /* a leftover FIFO is not a failure */
+        break;
+    }
+
+    /* ---- the *at family ---------------------------------------------------
+     *
+     * THE SAME REGRESSION AS ftruncate64, AND IT COST TOUCH AND SOUND.
+     *
+     * mknod(14), rmdir(40) and chmod(15) are all on the list of thirteen
+     * syscalls Android's app seccomp filter refuses, because bionic only ever
+     * reaches them through these. So the guest-side shim was changed to call
+     * the *at forms, which fixed running natively inside an app process and
+     * broke the emulated path here, where none of them existed. A tester's log
+     * on a Pixel 9a:
+     *
+     *     unimplemented syscall 324 (?) at pc=50aede98
+     *         args ffffff9c 3fffbe58 000011b6 00000000       (x13)
+     *     +++ AppManager: Can't find touchscreen event device in /dev/input
+     *
+     * a2 is 0o10666 — S_IFIFO|0666 — so those thirteen calls are the shim
+     * trying to create its input event FIFOs and the audio pipe. Touch and
+     * sound both come through those, which is why the guest booted to the
+     * language screen and then answered nothing.
+     *
+     * EVERY CALL THE SHIM MAKES PASSES AT_FDCWD, visible above as a0 =
+     * 0xffffff9c. A real directory descriptor would need path resolution
+     * relative to an open fd, which this VM has no way to do, so it is
+     * refused loudly rather than resolved wrongly and silently.
+     */
+    case SYS_mknodat:
+    case SYS_unlinkat:
+    case SYS_fchmodat:
+    case SYS_openat: {
+        constexpr int32_t AT_FDCWD = -100;
+        constexpr uint32_t AT_REMOVEDIR = 0x200;
+        constexpr uint32_t S_IFMT = 0xf000, S_IFIFO = 0x1000;
+        if ((int32_t)a0 != AT_FDCWD) {
+            gp_log("%s: relative to fd %d, and only AT_FDCWD is implemented\n",
+                   name_of(nr), (int32_t)a0);
+            ret = GP_ENOSYS;
+            break;
+        }
+        std::string p = m.Str(a1);
+        if (m.trace) tpath = p;
+        if (nr == SYS_mknodat) {
+            if ((a2 & S_IFMT) != S_IFIFO) {
+                gp_log("mknodat(%s, mode %o): not a FIFO, and device nodes are "
+                       "not implemented\n", p.c_str(), a2);
+                ret = GP_EPERM;
+                break;
+            }
+            ret = gp_mkfifo(m.HostPath(p).c_str(), a2 & 07777);
+            if (ret == GP_EEXIST) ret = 0;  /* a leftover FIFO is not a failure */
+        } else if (nr == SYS_unlinkat) {
+            ret = (a2 & AT_REMOVEDIR) ? gp_rmdir (m.HostPath(p).c_str())
+                                      : gp_unlink(m.HostPath(p).c_str());
+        } else if (nr == SYS_fchmodat) {
+            ret = gp_chmod(m.HostPath(p).c_str(), a2 & 07777);
+        } else {
+            std::string h = m.HostPath(p);
+            if (m.trace) tpath = p + " -> " + h;
+            gp_file *f = nullptr;
+            int r0 = gp_open(h.c_str(), open_flags(a2), a3, &f);
+            if (r0 < 0) { ret = r0; break; }
+            ret = m.AllocFd(f, nullptr, p);
+            if (ret < 0) gp_close(f);
+            else m.fds[ret].oflags = a2;
+        }
         break;
     }
 
