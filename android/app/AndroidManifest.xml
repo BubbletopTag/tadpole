@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
           package="org.tadpole.view"
-          android:versionCode="12" android:versionName="0.9-beta">
+          android:versionCode="13" android:versionName="0.10-beta">
     <!-- BUMP THIS WHEN SOMETHING THE PLATFORM CACHES ABOUT THE APP CHANGES.
          Android evaluates 16 KB page compatibility once per package version and
          remembers the verdict: after the libraries were re-linked aligned, the

@@ -44,6 +44,70 @@ final class Shims {
 
     private Shims() {}
 
+    /**
+     * Put the shim in place on an ALREADY-INSTALLED system, at startup.
+     *
+     * <p>WHY UPGRADING THE APK WAS NOT ENOUGH. install() runs from
+     * InstallFirmware, so everything it does — deriving libdl.so.9, and
+     * Sysroot.oneLibdl() pointing the sysroot's own libdl at our impersonator
+     * — only ever happened while installing firmware. Somebody who set their
+     * device up on an earlier build and then just updated the app got the new
+     * assets unpacked and nothing linked, and their guest ran with the
+     * FIRMWARE'S real libdl instead of ours: no fake framebuffer, no event
+     * devices. Reported from a Galaxy S25 FE on 0.9, where every ioctl came
+     * back "Inappropriate ioctl for device" — which is the emulator answering
+     * ENOTTY because nothing had intercepted it.
+     *
+     * <p>Making someone re-download 350 MB of firmware to fix that is not an
+     * answer, so this runs on every launch. It is a handful of exists() checks
+     * once everything is in place.
+     */
+    static void ensure(PrintStream out) {
+        File sysroot = Tools.sysroot();
+        if (!sysroot.isDirectory()) return;              /* nothing set up yet */
+        File shim = new File(Tools.proj(), "runtime/shimlibs/libdl.so.0");
+        if (!shim.isFile()) return;                      /* assets not unpacked */
+
+        File rootfs = firmware();
+        if (rootfs != null) install(rootfs, out);
+
+        /* AND THE TWO NAMES THE GUEST ACTUALLY RESOLVES. The loader looks for
+         * libdl.so.0 by filename; LD_LIBRARY_PATH puts shimlibs first, but the
+         * sysroot's own copy is the one a guest finds when anything resolves an
+         * absolute path — so both spellings have to point at ours. */
+        link(new File(sysroot, "lib/libdl.so.0"), shim, out);
+        link(new File(sysroot, "usr/lib/libdl.so.0"), shim, out);
+    }
+
+    /** rootfs/<version>/ubi_rfs, whatever the version is called. */
+    private static File firmware() {
+        File[] kids = new File(Tools.proj(), "rootfs").listFiles();
+        if (kids != null)
+            for (File k : kids) {
+                File u = new File(k, "ubi_rfs");
+                if (u.isDirectory()) return u;
+            }
+        return null;
+    }
+
+    /** Point one path at the shim, replacing whatever is there. */
+    private static void link(File at, File target, PrintStream out) {
+        try {
+            String want = target.getAbsolutePath();
+            try {
+                if (want.equals(android.system.Os.readlink(at.getAbsolutePath())))
+                    return;                              /* already ours */
+            } catch (Throwable notALink) { /* a real file, or absent */ }
+            File p = at.getParentFile();
+            if (p != null && !p.isDirectory() && !p.mkdirs()) return;
+            at.delete();
+            android.system.Os.symlink(want, at.getAbsolutePath());
+            out.println("  shim: " + Tools.rel(at) + " -> our libdl");
+        } catch (Throwable t) {
+            out.println("  shim: could not link " + Tools.rel(at) + ": " + t);
+        }
+    }
+
     /** Called once the sysroot exists — the derived pair need the firmware. */
     static void install(File rootfs, PrintStream out) {
         File shim   = new File(Tools.proj(), "runtime/shimlibs");

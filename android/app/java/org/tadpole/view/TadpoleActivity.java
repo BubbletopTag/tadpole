@@ -157,6 +157,9 @@ public class TadpoleActivity extends SDLActivity {
             TadpoleTools.setHome(dir);
             extractAssets(dir);
             linkEngine(dir);
+            /* The shim has to be linked into an already-installed sysroot too,
+             * not only while installing firmware — see Shims.ensure. */
+            Shims.ensure(System.out);
             nativeProbe(dir, getApplicationInfo().nativeLibraryDir);
         } catch (Throwable t) {
             Log.e(TAG, "could not set TADPOLE_DIR", t);

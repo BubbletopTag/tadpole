@@ -64,7 +64,7 @@ Tested on: an AOSP 8.1 tablet, armeabi-v7a only, Mali-T720.
 ## 1. Install
 
 ```sh
-adb install -r Tadpole-android-0.9-beta.apk
+adb install -r Tadpole-android-0.10-beta.apk
 ```
 
 Launch it once. It will send you to a **Settings** page asking for *All files

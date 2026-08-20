@@ -126,6 +126,17 @@ final class SaveLog implements Tools.Tool {
         b.append('\n');
     }
 
+    /** What a path resolves to, said in a way a bug report can use. */
+    private static String points(File f) {
+        try {
+            String t = android.system.Os.readlink(f.getAbsolutePath());
+            return t.contains("shimlibs") ? "-> our shim (correct)"
+                                          : "-> " + t + "  (NOT our shim)";
+        } catch (Throwable notALink) {
+            return f.isFile() ? "a real file, not a link (NOT our shim)" : "absent";
+        }
+    }
+
     /** Where the viewer puts its state, which is $HOME on this platform. */
     private static File home() {
         String h = Tools.home();
@@ -150,6 +161,17 @@ final class SaveLog implements Tools.Tool {
         b.append("packages      ").append(kids == null ? "none" : kids.length + " installed").append('\n');
         b.append("didj support  ").append(new File(Tools.base(), "DidjPatches").isDirectory()
                  ? "installed" : "not installed").append('\n');
+        /* THE SHIM, AND WHERE THE SYSROOT'S libdl ACTUALLY POINTS. Without
+         * these two lines a report cannot distinguish "the shim is missing"
+         * from "the shim is there and the guest is loading the firmware's own
+         * instead", and those have completely different fixes. An S25 FE on
+         * 0.9 looked identical to a device with no shim at all. */
+        File sh = new File(Tools.proj(), "runtime/shimlibs/libdl.so.0");
+        b.append("shim          ").append(sh.isFile()
+                 ? sh.length() + " bytes" : "MISSING").append('\n');
+        b.append("sysroot libdl ").append(points(new File(Tools.sysroot(), "lib/libdl.so.0")))
+         .append('\n');
+
         File gl = new File(home(), ".local/state/tadpole/tadpole.log");
         b.append("guest log     ").append(gl.isFile()
                  ? gl.length() + " bytes (included below)"
