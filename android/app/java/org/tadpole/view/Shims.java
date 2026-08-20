@@ -62,7 +62,16 @@ final class Shims {
         int n = 0;
         n += rename(new File(rootfs, "lib"), "libdl-", "libdl.so.0", "libdl.so.9",
                     new File(shim, "libdl.so.9"), out) ? 1 : 0;
-        n += rename(new File(Tools.sysroot(), "usr/lib"), "libz.so.1", "libz.so.1",
+        /* FROM THE ROOTFS, NOT THE SYSROOT. This runs before Sysroot.build(),
+         * so runtime/sysroot/usr/lib does not exist yet — and a tester's log
+         * caught it: libdl.so.9 was made (it reads the rootfs) while libz.so.9
+         * was not, and the guest stopped at
+         *
+         *     /LF/Base/bin/AppManager: can't load library 'libz.so.9'
+         *
+         * The order cannot simply be swapped: Sysroot.oneLibdl() links the
+         * shim into the tree it builds, so the shim has to be there first. */
+        n += rename(new File(rootfs, "usr/lib"), "libz.so.1", "libz.so.1",
                     "libz.so.9", new File(shimZ, "libz.so.9"), out) ? 1 : 0;
 
         /* The loader resolves DT_NEEDED by SONAME as a FILENAME, so libEGL's
@@ -123,16 +132,27 @@ final class Shims {
         }
     }
 
-    /** The firmware names these with a version — libdl-0.9.32.1-git.so. */
+    /**
+     * The firmware spells these two different ways, and both have to work:
+     * libdl is a versioned FILE (libdl-0.9.32.1-git.so) while libz.so.1 is a
+     * SYMLINK to libz.so.1.2.5. So try the exact name first — following a link
+     * is what we want, and gives the real bytes — then fall back to a prefix
+     * scan for the versioned spelling.
+     *
+     * <p>The fallback deliberately does not require a ".so" suffix: the file
+     * behind libz.so.1 ends in ".1.2.5", and an earlier version of this
+     * insisted on ".so" and would have found nothing had the link been absent.
+     */
     private static File pick(File dir, String prefix) {
         File exact = new File(dir, prefix);
-        if (exact.isFile()) return exact;
+        if (exact.isFile()) return exact;            /* follows a symlink */
         File[] kids = dir.listFiles();
+        File best = null;
         if (kids != null)
             for (File k : kids)
                 if (k.isFile() && k.getName().startsWith(prefix)
-                    && k.getName().endsWith(".so")) return k;
-        return null;
+                    && (best == null || k.length() > best.length())) best = k;
+        return best;
     }
 
     private static void link(File dir, String target, String name, PrintStream out) {
