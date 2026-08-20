@@ -53,6 +53,7 @@ enum : uint32_t {
     /* Threads. */
     SYS_clone = 120, SYS_futex = 240, SYS_gettid = 224,
     SYS_mknod = 14, SYS_ftruncate = 93, SYS_getdents64 = 217, SYS_getdents = 141,
+    SYS_ftruncate64 = 194,
     /* Descriptor duplication. Missing entirely until it was measured: busybox
      * ash asks for `>&2`, gets ENOSYS, and RETRIES FOREVER — 21.9 MB of
      * "sh: 0: Function not implemented" in twenty seconds. Shell redirection
@@ -362,6 +363,7 @@ const char *name_of(uint32_t nr) {
         case SYS_gettid: return "gettid";           case SYS_fcntl64: return "fcntl64";
         case SYS_dup: return "dup";                 case SYS_dup2: return "dup2";
         case SYS_mknod: return "mknod";             case SYS_ftruncate: return "ftruncate";
+        case SYS_ftruncate64: return "ftruncate64";
         case SYS_getdents64: return "getdents64";   case SYS_getdents: return "getdents";
         case SYS_mq_open: return "mq_open";         case SYS_mq_unlink: return "mq_unlink";
         case SYS_mq_timedsend: return "mq_timedsend";
@@ -1395,6 +1397,36 @@ void gp_syscall(Thread &t) {
         GuestFd *g = m.Fd((int)a0);
         if (!g || !g->file) { ret = GP_EBADF; break; }
         ret = gp_truncate(g->file, a1);
+        break;
+    }
+
+    /* ftruncate64, AND IT IS THE ONE THE SHIM ACTUALLY CALLS NOW.
+     *
+     * __NR_ftruncate (93) is one of the syscalls Android's app seccomp filter
+     * refuses — bionic only ever reaches it through the 64-bit entry — so the
+     * guest-side shim was changed to call this instead. That fixed the native
+     * path on a 32-bit device and broke the emulated one here, because 194 was
+     * never implemented: every call returned "unimplemented syscall 194", the
+     * file was never extended, and the shim then wrote into a mapping with no
+     * pages behind it. A tester's log caught it exactly:
+     *
+     *     unimplemented syscall 194 at pc=50af0be4 - args 3 0 003fc000 0
+     *     unimplemented syscall 194 at pc=50af0be4 - args 3 0 00000210 0
+     *     GUEST FAULT: 50fe0000 was never mapped
+     *     pc libc.so.0+0x3bfd0  lr libdl.so.0+0x1d04  r2 0x00000210
+     *
+     * 0x210 is 528 bytes, the size of the block it was clearing. It only ever
+     * looked intermittent because a device set up by push-firmware.sh already
+     * has those files at full size, so nothing needed extending.
+     *
+     * THE ARGUMENTS ARE NOT (fd, low, high). ARM's EABI aligns a 64-bit
+     * argument to an even register pair, so the length arrives in a2/a3 with
+     * a1 as padding — which is what the trace above shows: a1 is 0 while the
+     * real size sits in a2. */
+    case SYS_ftruncate64: {
+        GuestFd *g = m.Fd((int)a0);
+        if (!g || !g->file) { ret = GP_EBADF; break; }
+        ret = gp_truncate(g->file, (uint64_t)a2 | ((uint64_t)a3 << 32));
         break;
     }
 
