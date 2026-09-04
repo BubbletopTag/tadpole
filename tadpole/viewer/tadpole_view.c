@@ -433,11 +433,21 @@ static void *map_file(const char *path, size_t *len_out)
 #endif
 }
 
+/* --selftest-pad reads back what would have gone down the FIFO from here,
+ * so the test checks the bytes and not a re-implementation of them. */
+struct ev_rec { int dev; uint16_t type, code; int32_t value; };
+static struct ev_rec g_ev_rec[256];
+static int g_ev_rec_n, g_ev_rec_on;
+
 static void send_event(int dev, uint16_t type, uint16_t code, int32_t value)
 {
 	struct guest_input_event ev;
 	struct timeval tv;
 
+	if (g_ev_rec_on && g_ev_rec_n < (int)(sizeof g_ev_rec / sizeof *g_ev_rec)) {
+		struct ev_rec *r = &g_ev_rec[g_ev_rec_n++];
+		r->dev = dev; r->type = type; r->code = code; r->value = value;
+	}
 	if (dev < 0 || dev >= NUM_EV || g_evfd[dev] < 0)
 		return;
 
@@ -593,6 +603,739 @@ static void event_to_fb(int rotate, int w, int h, int lx, int ly,
 	/* scale screen pixels into the guest's expected touch range */
 	if (g_ts_max_x > 0) *fx = (int)((long)*fx * g_ts_max_x / (w - 1));
 	if (g_ts_max_y > 0) *fy = (int)((long)*fy * g_ts_max_y / (h - 1));
+}
+
+/* ======================================================================
+ * GAME CONTROLLER
+ *
+ * A pad drives the same FIFOs the keyboard and the mouse do; nothing past
+ * send_event() knows a controller from a keyboard. SDL's game-controller
+ * layer gives every pad the Xbox-shaped names (A B X Y, shoulders, sticks)
+ * and the binding is written in those. On the PlayStation-style pad this was
+ * written against it reads:
+ *
+ *     D-pad, left stick     D-pad — rotated with the display, like the arrows
+ *     Cross / Circle        A / B
+ *     L1 / R1  (L2 / R2)    L / R
+ *     Options / Share       Menu / Back — the Home and Esc keys
+ *     L3 / R3               volume down / up — Parent Settings needs them
+ *     Triangle              show or hide the CURSOR
+ *     Square                tap the screen where the cursor is; hold to drag
+ *
+ * With the cursor up, the D-pad and both sticks move it instead of steering
+ * the game, so a stylus-only title is playable from the sofa. The cursor
+ * lives in the window's own (logical) space, so it goes where the eye
+ * expects at every rotation, and a tap goes through event_to_fb() exactly as
+ * a click would.
+ *
+ * ONE RULE MAKES THE REST SAFE: nothing is sent straight from an event. An
+ * event only updates the raw pad state; pad_sync() then works out what the
+ * guest should be holding and sends the difference. So lifting the cursor,
+ * turning the display, a menu opening, or the pad being yanked out all
+ * release exactly what they must — a title is never left with a button held
+ * down that nothing can lift.
+ *
+ * THE MAPPING IS NOT LEFT TO SDL'S GUESS. The HORIPAD mini4 this was built
+ * against shows up on Linux as a plain HID gamepad, and with no entry for it
+ * SDL invents one from the evdev button order: Square became A, the L2/R2
+ * analogue axes became the right stick, Share and Options landed on the stick
+ * clicks — the same mess a browser's gamepad tester showed. The community
+ * SDL_GameControllerDB has the right line for it on Linux, Windows and macOS,
+ * so viewer/gamecontrollerdb.txt is that file, loaded before the first pad
+ * is opened. `tadpole-view --pad-probe` prints which mapping was chosen and
+ * what each press turns into; run it first when a pad misbehaves.
+ */
+
+/* The left stick steers the D-pad through a latch with two thresholds, so a
+ * stick resting near the line does not chatter a direction on and off. */
+#define PAD_STICK_ON   14000
+#define PAD_STICK_OFF   9000
+#define PAD_TRIG_ON    16000
+#define PAD_TRIG_OFF   12000
+#define PAD_CUR_DEAD    6000       /* stick deadzone for the cursor */
+#define PAD_CUR_SPEED  240.0f      /* logical px/s at full deflection */
+#define PAD_CUR_DPAD   150.0f      /* the D-pad moves it at a steady, slower pace */
+
+/* What the guest can be holding on the pad's behalf. The four directions are
+ * VISUAL, indexed like DPAD_CW, and rotated on the way out. */
+enum {
+	PS_UP, PS_RIGHT, PS_DOWN, PS_LEFT,
+	PS_A, PS_B, PS_L, PS_R, PS_MENU, PS_BACK, PS_VOLDN, PS_VOLUP,
+	PS_N
+};
+static const char *PS_NAME[PS_N] = {
+	"up", "right", "down", "left", "A", "B", "L", "R",
+	"Menu", "Back", "Vol-", "Vol+"
+};
+
+static SDL_GameController *g_pad;
+static SDL_JoystickID g_pad_id = -1;
+static char     g_pad_name[64];
+static int      g_pad_btn[SDL_CONTROLLER_BUTTON_MAX];
+static int      g_pad_axis[SDL_CONTROLLER_AXIS_MAX];
+static int      g_pad_stick[4];            /* left stick, latched per direction */
+static int      g_pad_trig[2];             /* L2 / R2, latched */
+static uint16_t g_pad_held[PS_N];          /* code the guest holds; 0 = none */
+static int      g_pad_cursor;              /* Triangle: the cursor is up */
+static float    g_pad_cx = -1.0f;          /* cursor, logical panel coords */
+static float    g_pad_cy = -1.0f;          /* (below the bar; -1 = not placed) */
+static int      g_pad_tap;                 /* Square: touching at the cursor */
+static Uint32   g_pad_tick_at;
+static int      g_pad_trace;               /* --pad-probe: narrate */
+static int      g_pad_virtual_only;        /* --selftest-pad: ignore real pads */
+
+static void pad_cursor_home(int lw, int lh)
+{
+	if (g_pad_cx < 0.0f || g_pad_cy < 0.0f) {
+		g_pad_cx = lw / 2.0f;
+		g_pad_cy = lh / 2.0f;
+	}
+	if (g_pad_cx > lw - 1) g_pad_cx = (float)(lw - 1);
+	if (g_pad_cy > lh - 1) g_pad_cy = (float)(lh - 1);
+}
+
+static void pad_reset_state(void)
+{
+	memset(g_pad_btn,   0, sizeof g_pad_btn);
+	memset(g_pad_axis,  0, sizeof g_pad_axis);
+	memset(g_pad_stick, 0, sizeof g_pad_stick);
+	memset(g_pad_trig,  0, sizeof g_pad_trig);
+}
+
+static void pad_open(int idx)
+{
+	const char *nm;
+	if (g_pad) return;                    /* first one in stays in charge */
+	if (g_pad_virtual_only && !SDL_JoystickIsVirtual(idx)) return;
+	if (!SDL_IsGameController(idx)) {
+		fprintf(stderr, "pad: '%s' has no controller mapping — see "
+		        "tadpole-view --pad-probe\n", SDL_JoystickNameForIndex(idx));
+		return;
+	}
+	g_pad = SDL_GameControllerOpen(idx);
+	if (!g_pad) {
+		fprintf(stderr, "pad: open: %s\n", SDL_GetError());
+		return;
+	}
+	g_pad_id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(g_pad));
+	nm = SDL_GameControllerName(g_pad);
+	snprintf(g_pad_name, sizeof g_pad_name, "%s", nm ? nm : "controller");
+	pad_reset_state();
+	printf("pad: %s\n", g_pad_name);
+	ui_set_pad_name(g_pad_name);
+	ui_status("%s connected", g_pad_name);
+}
+
+/* Anything held is released by the pad_sync() that follows: with no pad
+ * there is nothing wanted, and the diff sends the key-ups. */
+static void pad_close(void)
+{
+	if (!g_pad) return;
+	SDL_GameControllerClose(g_pad);
+	g_pad = NULL;
+	g_pad_id = -1;
+	g_pad_cursor = 0;
+	pad_reset_state();
+	printf("pad: %s unplugged\n", g_pad_name);
+	ui_set_pad_name(NULL);
+	ui_status("controller unplugged");
+}
+
+static void pad_scan(void)
+{
+	int i, n = SDL_NumJoysticks();
+	for (i = 0; i < n && !g_pad; i++)
+		pad_open(i);
+}
+
+/* Load the mapping table, then look for a pad. SDL also queues a
+ * CONTROLLERDEVICEADDED for every pad already present when it starts, so the
+ * main loop would find it too; pad_open() ignores the second look. */
+static void pad_init(const char *projdir)
+{
+	char path[1200];
+	size_t l;
+	int n;
+
+	if (!SDL_WasInit(SDL_INIT_GAMECONTROLLER))
+		return;
+	snprintf(path, sizeof path, "%s/tadpole/viewer/gamecontrollerdb.txt", projdir);
+	n = SDL_GameControllerAddMappingsFromFile(path);
+	if (n < 0)
+		fprintf(stderr, "pad: %s: %s — SDL's built-in mappings only\n",
+		        path, SDL_GetError());
+	else
+		printf("pad: %d mappings from %s\n", n, path);
+	/* A file of your own, beside ui.cfg, wins over both: same format, one
+	 * line per pad. --pad-probe prints the line in use as a starting point. */
+	ui_cfg_dir(path, sizeof path);
+	l = strlen(path);
+	snprintf(path + l, sizeof path - l, "/gamecontrollerdb.txt");
+	n = SDL_GameControllerAddMappingsFromFile(path);
+	if (n > 0)
+		printf("pad: %d of your own from %s\n", n, path);
+	pad_scan();
+}
+
+/* The tap: the same five events a mouse button sends, at the cursor. */
+static void pad_touch(int rotate, int w, int h, int down, int moving)
+{
+	int lw = (rotate == 90 || rotate == 270) ? h : w;
+	int lh = (rotate == 90 || rotate == 270) ? w : h;
+	int fx, fy;
+
+	pad_cursor_home(lw, lh);
+	event_to_fb(rotate, w, h, (int)g_pad_cx, (int)g_pad_cy, &fx, &fy);
+	g_touch_mark_x = fx; g_touch_mark_y = fy;
+	send_event(EV_TOUCH, EV_ABS, ABS_X, fx);
+	send_event(EV_TOUCH, EV_ABS, ABS_Y, fy);
+	send_event(EV_TOUCH, EV_ABS, ABS_PRESSURE, down ? TOUCH_PRESSURE : 0);
+	if (!moving)
+		send_event(EV_TOUCH, EV_KEY, BTN_TOUCH, down ? 1 : 0);
+	send_event(EV_TOUCH, EV_SYN, SYN_REPORT, 0);
+	if (g_pad_trace)
+		printf("  -> touch %s at fb(%d,%d)\n",
+		       moving ? "move" : down ? "down" : "up", fx, fy);
+}
+
+/* Reconcile what the guest holds with what the pad wants. Cheap enough to
+ * run every frame as well as after every event, which is what lets a modal
+ * opening — no pad event of its own — release a held button on time. */
+static void pad_sync(int rotate, int w, int h)
+{
+	static const int DPB[4] = {
+		SDL_CONTROLLER_BUTTON_DPAD_UP, SDL_CONTROLLER_BUTTON_DPAD_RIGHT,
+		SDL_CONTROLLER_BUTTON_DPAD_DOWN, SDL_CONTROLLER_BUTTON_DPAD_LEFT
+	};
+	uint16_t want[PS_N];
+	int i, tap;
+	/* Chrome first, as for the mouse: a modal or an open menu owns the
+	 * input and the guest must not see any of it. */
+	int live = g_pad && !ui_modal() && !ui_menu_open();
+
+	memset(want, 0, sizeof want);
+	if (live) {
+		if (!g_pad_cursor)
+			for (i = 0; i < 4; i++)
+				if (g_pad_btn[DPB[i]] || g_pad_stick[i])
+					want[i] = rotate_dpad(i, rotate);
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_A]) want[PS_A] = KEY_A_;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_B]) want[PS_B] = KEY_B_;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_LEFTSHOULDER] || g_pad_trig[0])
+			want[PS_L] = KEY_L_;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_RIGHTSHOULDER] || g_pad_trig[1])
+			want[PS_R] = KEY_R_;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_START])      want[PS_MENU]  = KEY_M_;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_BACK])       want[PS_BACK]  = KEY_ESC_;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_LEFTSTICK])  want[PS_VOLDN] = KEY_VOLUMEDOWN_;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_RIGHTSTICK]) want[PS_VOLUP] = KEY_VOLUMEUP_;
+	}
+	for (i = 0; i < PS_N; i++) {
+		if (want[i] == g_pad_held[i]) continue;
+		if (g_pad_held[i]) {
+			send_key(EV_GPIO_KEYS, g_pad_held[i], 0);
+			if (g_pad_trace)
+				printf("  -> guest %s (key %u) up\n", PS_NAME[i], g_pad_held[i]);
+		}
+		if (want[i]) {
+			send_key(EV_GPIO_KEYS, want[i], 1);
+			if (g_pad_trace)
+				printf("  -> guest %s (key %u) down\n", PS_NAME[i], want[i]);
+		}
+		g_pad_held[i] = want[i];
+	}
+	tap = live && g_pad_cursor && g_pad_btn[SDL_CONTROLLER_BUTTON_X];
+	if (tap != g_pad_tap) {
+		g_pad_tap = tap;
+		pad_touch(rotate, w, h, tap, 0);
+	}
+}
+
+static void pad_latch(int *state, int v, int on, int off)
+{
+	if (v >= on) *state = 1;
+	else if (v <= off) *state = 0;
+}
+
+/* -> 1 if the event was the pad's. Raw state only; pad_sync() does the rest. */
+static int pad_event(const SDL_Event *e, int rotate, int w, int h)
+{
+	switch (e->type) {
+	case SDL_CONTROLLERDEVICEADDED:
+		pad_open(e->cdevice.which);        /* a device INDEX here */
+		pad_sync(rotate, w, h);
+		return 1;
+	case SDL_CONTROLLERDEVICEREMOVED:
+		if (e->cdevice.which == g_pad_id) {   /* an instance ID here */
+			pad_close();
+			pad_sync(rotate, w, h);
+			pad_scan();                    /* a second pad takes over */
+		}
+		return 1;
+	case SDL_CONTROLLERBUTTONDOWN:
+	case SDL_CONTROLLERBUTTONUP: {
+		int b = e->cbutton.button;
+		int down = (e->type == SDL_CONTROLLERBUTTONDOWN);
+		if (e->cbutton.which != g_pad_id || b < 0 || b >= SDL_CONTROLLER_BUTTON_MAX)
+			return 1;
+		g_pad_btn[b] = down;
+		if (g_pad_trace)
+			printf("pad: %s %s\n", SDL_GameControllerGetStringForButton(
+			       (SDL_GameControllerButton)b), down ? "down" : "up");
+		/* Triangle toggles the cursor on the press. A tap in progress is
+		 * lifted by the sync below, since the cursor it needs has gone. */
+		if (b == SDL_CONTROLLER_BUTTON_Y && down) {
+			g_pad_cursor = !g_pad_cursor;
+			if (g_pad_trace)
+				printf("  -> cursor %s\n", g_pad_cursor ? "up" : "hidden");
+		}
+		pad_sync(rotate, w, h);
+		return 1;
+	}
+	case SDL_CONTROLLERAXISMOTION: {
+		int a = e->caxis.axis;
+		int v = e->caxis.value;
+		int before[4], tb[2];
+		if (e->caxis.which != g_pad_id || a < 0 || a >= SDL_CONTROLLER_AXIS_MAX)
+			return 1;
+		memcpy(before, g_pad_stick, sizeof before);
+		memcpy(tb, g_pad_trig, sizeof tb);
+		g_pad_axis[a] = v;
+		switch (a) {
+		case SDL_CONTROLLER_AXIS_LEFTX:
+			pad_latch(&g_pad_stick[PS_RIGHT],  v, PAD_STICK_ON, PAD_STICK_OFF);
+			pad_latch(&g_pad_stick[PS_LEFT],  -v, PAD_STICK_ON, PAD_STICK_OFF);
+			break;
+		case SDL_CONTROLLER_AXIS_LEFTY:
+			pad_latch(&g_pad_stick[PS_DOWN],   v, PAD_STICK_ON, PAD_STICK_OFF);
+			pad_latch(&g_pad_stick[PS_UP],    -v, PAD_STICK_ON, PAD_STICK_OFF);
+			break;
+		case SDL_CONTROLLER_AXIS_TRIGGERLEFT:
+			pad_latch(&g_pad_trig[0], v, PAD_TRIG_ON, PAD_TRIG_OFF);
+			break;
+		case SDL_CONTROLLER_AXIS_TRIGGERRIGHT:
+			pad_latch(&g_pad_trig[1], v, PAD_TRIG_ON, PAD_TRIG_OFF);
+			break;
+		default:
+			break;
+		}
+		if (g_pad_trace && (memcmp(before, g_pad_stick, sizeof before) ||
+		                    memcmp(tb, g_pad_trig, sizeof tb)))
+			printf("pad: %s %d\n", SDL_GameControllerGetStringForAxis(
+			       (SDL_GameControllerAxis)a), v);
+		pad_sync(rotate, w, h);
+		return 1;
+	}
+	default:
+		return 0;
+	}
+}
+
+/* One axis's contribution to the cursor's speed: nothing inside the
+ * deadzone, then a squared ramp so the first half of the travel is fine
+ * control and the rim is full speed. No libm — this file has never linked
+ * it, and a square needs none. */
+static float pad_axis_vel(int v)
+{
+	float k;
+	int neg = v < 0;
+	if (neg) v = -v;
+	if (v <= PAD_CUR_DEAD) return 0.0f;
+	k = (float)(v - PAD_CUR_DEAD) / (float)(32767 - PAD_CUR_DEAD);
+	if (k > 1.0f) k = 1.0f;
+	k *= k;
+	return (neg ? -k : k) * PAD_CUR_SPEED;
+}
+
+/* Advance the cursor by dt seconds. Split from pad_tick() so the self-test
+ * can drive it with a known dt instead of the wall clock. */
+static void pad_advance(float dt, int rotate, int w, int h)
+{
+	int lw = (rotate == 90 || rotate == 270) ? h : w;
+	int lh = (rotate == 90 || rotate == 270) ? w : h;
+
+	pad_cursor_home(lw, lh);
+	pad_sync(rotate, w, h);   /* modals and menus come and go without a pad event */
+	if (g_pad && g_pad_cursor && !ui_modal() && !ui_menu_open()) {
+		float vx = 0.0f, vy = 0.0f;
+		int ox = (int)g_pad_cx, oy = (int)g_pad_cy;
+
+		vx += pad_axis_vel(g_pad_axis[SDL_CONTROLLER_AXIS_LEFTX]);
+		vy += pad_axis_vel(g_pad_axis[SDL_CONTROLLER_AXIS_LEFTY]);
+		vx += pad_axis_vel(g_pad_axis[SDL_CONTROLLER_AXIS_RIGHTX]);
+		vy += pad_axis_vel(g_pad_axis[SDL_CONTROLLER_AXIS_RIGHTY]);
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_DPAD_LEFT])  vx -= PAD_CUR_DPAD;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_DPAD_RIGHT]) vx += PAD_CUR_DPAD;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_DPAD_UP])    vy -= PAD_CUR_DPAD;
+		if (g_pad_btn[SDL_CONTROLLER_BUTTON_DPAD_DOWN])  vy += PAD_CUR_DPAD;
+		g_pad_cx += vx * dt;
+		g_pad_cy += vy * dt;
+		if (g_pad_cx < 0.0f) g_pad_cx = 0.0f;
+		if (g_pad_cy < 0.0f) g_pad_cy = 0.0f;
+		pad_cursor_home(lw, lh);   /* the far edges */
+		/* Holding Square while moving is a drag, like a held mouse button. */
+		if (g_pad_tap && ((int)g_pad_cx != ox || (int)g_pad_cy != oy))
+			pad_touch(rotate, w, h, 1, 1);
+	}
+}
+
+static void pad_tick(Uint32 now, int rotate, int w, int h)
+{
+	float dt = g_pad_tick_at ? (now - g_pad_tick_at) / 1000.0f : 0.0f;
+	g_pad_tick_at = now;
+	if (dt > 0.05f) dt = 0.05f;   /* a stalled frame must not fling it */
+	pad_advance(dt, rotate, w, h);
+}
+
+static void pad_fill(SDL_Renderer *ren, int x, int y, int w, int h)
+{
+	SDL_Rect r;
+	r.x = x; r.y = y; r.w = w; r.h = h;
+	SDL_RenderFillRect(ren, &r);
+}
+
+/* The cursor: a cross in the window's logical space, below the bar, with a
+ * dark surround so it reads on any picture. Drawn before the chrome, so a
+ * dialog covers it as it covers the guest. */
+static void pad_draw(SDL_Renderer *ren, int rotate, int w, int h)
+{
+	int lw = (rotate == 90 || rotate == 270) ? h : w;
+	int lh = (rotate == 90 || rotate == 270) ? w : h;
+	int x, y;
+
+	if (!g_pad || !g_pad_cursor || ui_modal())
+		return;
+	pad_cursor_home(lw, lh);
+	x = (int)g_pad_cx;
+	y = UI_BAR_H + (int)g_pad_cy;
+	SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+	SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
+	pad_fill(ren, x - 6, y - 1, 13, 3);
+	pad_fill(ren, x - 1, y - 6, 3, 13);
+	if (g_pad_tap)
+		SDL_SetRenderDrawColor(ren, 255, 200, 40, 255);
+	else
+		SDL_SetRenderDrawColor(ren, 255, 255, 255, 255);
+	pad_fill(ren, x - 5, y, 11, 1);
+	pad_fill(ren, x, y - 5, 1, 11);
+}
+
+/* --pad-probe [seconds]: what SDL makes of every pad plugged in, and then a
+ * running narration of what each press would send the guest. The first thing
+ * to run when a pad misbehaves, and the output to paste when reporting one.
+ * A pad SDL has no mapping for is opened raw so its buttons still print,
+ * which is what a new gamecontrollerdb.txt line gets written from. */
+static int pad_probe(int secs, const char *projdir)
+{
+	SDL_Joystick *raw[16];
+	int i, n, nraw = 0;
+	Uint32 end;
+
+	if (SDL_Init(SDL_INIT_GAMECONTROLLER) != 0) {
+		fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+		return 1;
+	}
+	g_pad_trace = 1;
+	printf("SDL %d.%d.%d\n", SDL_MAJOR_VERSION, SDL_MINOR_VERSION, SDL_PATCHLEVEL);
+	pad_init(projdir);
+	n = SDL_NumJoysticks();
+	printf("%d joystick%s\n", n, n == 1 ? "" : "s");
+	for (i = 0; i < n; i++) {
+		char guid[64];
+		SDL_JoystickGetGUIDString(SDL_JoystickGetDeviceGUID(i), guid, sizeof guid);
+		printf("  [%d] %s\n      guid %s  usb %04x:%04x\n", i,
+		       SDL_JoystickNameForIndex(i), guid,
+		       SDL_JoystickGetDeviceVendor(i), SDL_JoystickGetDeviceProduct(i));
+		if (SDL_IsGameController(i)) {
+			char *m = SDL_GameControllerMappingForDeviceIndex(i);
+			printf("      mapping %s\n", m ? m : "?");
+			SDL_free(m);
+		} else {
+			printf("      NO MAPPING: SDL cannot use it as a controller. Its raw\n"
+			       "      buttons print below; a gamecontrollerdb.txt line is built from them.\n");
+			if (nraw < 16) raw[nraw++] = SDL_JoystickOpen(i);
+		}
+	}
+	if (!g_pad)
+		printf("no usable pad\n");
+	printf("listening for %d s — press things\n", secs);
+	end = SDL_GetTicks() + (Uint32)secs * 1000;
+	while (SDL_GetTicks() < end) {
+		SDL_Event e;
+		while (SDL_PollEvent(&e)) {
+			if (pad_event(&e, 0, 480, 272))
+				continue;
+			if (e.type == SDL_JOYBUTTONDOWN || e.type == SDL_JOYBUTTONUP)
+				printf("raw: button b%d %s\n", e.jbutton.button,
+				       e.type == SDL_JOYBUTTONDOWN ? "down" : "up");
+			else if (e.type == SDL_JOYHATMOTION)
+				printf("raw: hat h%d.%d\n", e.jhat.hat, e.jhat.value);
+			else if (e.type == SDL_JOYAXISMOTION &&
+			         (e.jaxis.value > 16000 || e.jaxis.value < -16000))
+				printf("raw: axis a%d %d\n", e.jaxis.axis, e.jaxis.value);
+		}
+		pad_tick(SDL_GetTicks(), 0, 480, 272);
+		SDL_Delay(10);
+	}
+	for (i = 0; i < nraw; i++)
+		if (raw[i]) SDL_JoystickClose(raw[i]);
+	pad_close();
+	SDL_Quit();
+	return 0;
+}
+
+/* --selftest-pad: the binding, driven through a VIRTUAL controller.
+ *
+ * Nobody has to hold a pad, and the test covers what a person at a pad
+ * cannot easily check: that a direction held across a rotation is re-sent
+ * as the new code, that half a stick sends nothing while a stick easing back
+ * from full keeps holding, that lifting the cursor lets go of the D-pad, that
+ * a tap lands where the cursor is, and that unplugging releases everything.
+ * The events are read back from the recorder in send_event(), so what is
+ * checked is what would have gone down the FIFO. */
+
+static int rec_count(int dev, uint16_t type, uint16_t code, int32_t value)
+{
+	int i, n = 0;
+	for (i = 0; i < g_ev_rec_n; i++)
+		if (g_ev_rec[i].dev == dev && g_ev_rec[i].type == type &&
+		    g_ev_rec[i].code == code && g_ev_rec[i].value == value)
+			n++;
+	return n;
+}
+
+static int rec_key(uint16_t code, int down)
+{
+	return rec_count(EV_GPIO_KEYS, EV_KEY, code, down ? 1 : 0);
+}
+
+/* What the recorder holds, printed under a FAIL so the failure says which
+ * bytes went out rather than only that the wrong ones did. */
+static void rec_dump(void)
+{
+	int i;
+	for (i = 0; i < g_ev_rec_n; i++)
+		printf("      sent: ev%d type %u code %u value %d\n", g_ev_rec[i].dev,
+		       g_ev_rec[i].type, g_ev_rec[i].code, g_ev_rec[i].value);
+	if (!g_ev_rec_n) printf("      sent: nothing\n");
+}
+
+static void pad_test_pump(int rotate, int w, int h)
+{
+	SDL_Event e;
+	SDL_JoystickUpdate();
+	SDL_PumpEvents();
+	while (SDL_PollEvent(&e))
+		pad_event(&e, rotate, w, h);
+	pad_advance(0.0f, rotate, w, h);
+}
+
+static int selftest_pad(void)
+{
+	const int w = 480, h = 272;
+	SDL_Joystick *vj;
+	int idx, bad = 0, i;
+	uint16_t c;
+	int fx, fy;
+
+#define CHECK(cond, what) do { \
+	int ok_ = (cond); \
+	printf("  %-58s %s\n", what, ok_ ? "ok" : "FAIL"); \
+	if (!ok_) { bad++; rec_dump(); } \
+	} while (0)
+#define PRESS(b, v)  do { SDL_JoystickSetVirtualButton(vj, (b), (Uint8)(v)); \
+	                      g_ev_rec_n = 0; pad_test_pump(rot, w, h); } while (0)
+#define AXIS(a, v)   do { SDL_JoystickSetVirtualAxis(vj, (a), (Sint16)(v)); \
+	                      g_ev_rec_n = 0; pad_test_pump(rot, w, h); } while (0)
+	int rot = 0;
+
+	if (SDL_Init(SDL_INIT_GAMECONTROLLER) != 0) {
+		fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
+		return 1;
+	}
+	printf("game controller binding, through a virtual pad\n\n");
+	g_pad_virtual_only = 1;
+	g_ev_rec_on = 1;
+	idx = SDL_JoystickAttachVirtual(SDL_JOYSTICK_TYPE_GAMECONTROLLER,
+	                                SDL_CONTROLLER_AXIS_MAX,
+	                                SDL_CONTROLLER_BUTTON_MAX, 0);
+	if (idx < 0) {
+		printf("  cannot attach a virtual joystick: %s\n", SDL_GetError());
+		SDL_Quit();
+		return 1;
+	}
+	vj = SDL_JoystickOpen(idx);
+	pad_test_pump(rot, w, h);
+	CHECK(g_pad != NULL, "the virtual pad is picked up and opened");
+	if (!g_pad) { SDL_Quit(); return 1; }
+
+	/* Face and shoulder buttons. */
+	PRESS(SDL_CONTROLLER_BUTTON_A, 1);
+	CHECK(rec_key(KEY_A_, 1) == 1 && rec_count(EV_GPIO_KEYS, EV_SYN, SYN_REPORT, 0) == 1,
+	      "Cross sends A down, with one SYN");
+	PRESS(SDL_CONTROLLER_BUTTON_A, 0);
+	CHECK(rec_key(KEY_A_, 0) == 1, "and A up on release");
+	PRESS(SDL_CONTROLLER_BUTTON_B, 1);
+	CHECK(rec_key(KEY_B_, 1) == 1, "Circle is B");
+	PRESS(SDL_CONTROLLER_BUTTON_B, 0);
+	PRESS(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 1);
+	CHECK(rec_key(KEY_L_, 1) == 1, "L1 is L");
+	PRESS(SDL_CONTROLLER_BUTTON_LEFTSHOULDER, 0);
+	CHECK(rec_key(KEY_L_, 0) == 1, "L1 released");
+	PRESS(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 1);
+	CHECK(rec_key(KEY_R_, 1) == 1, "R1 is R");
+	PRESS(SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, 0);
+	/* A trigger's SDL range is 0..32767, resting at 0. The VIRTUAL axis is
+	 * a plain -32768..32767 stick that SDL rescales, so its rest position
+	 * is -32768; a raw 0 here would be a trigger held halfway. */
+	AXIS(SDL_CONTROLLER_AXIS_TRIGGERLEFT, 30000);
+	CHECK(rec_key(KEY_L_, 1) == 1, "L2 pulled is L as well");
+	AXIS(SDL_CONTROLLER_AXIS_TRIGGERLEFT, 0);
+	CHECK(g_ev_rec_n == 0, "L2 eased to halfway still holds it");
+	AXIS(SDL_CONTROLLER_AXIS_TRIGGERLEFT, -32768);
+	CHECK(rec_key(KEY_L_, 0) == 1, "L2 let go releases it");
+	PRESS(SDL_CONTROLLER_BUTTON_START, 1);
+	CHECK(rec_key(KEY_M_, 1) == 1, "Options is Menu (the Home key)");
+	PRESS(SDL_CONTROLLER_BUTTON_START, 0);
+	PRESS(SDL_CONTROLLER_BUTTON_BACK, 1);
+	CHECK(rec_key(KEY_ESC_, 1) == 1, "Share is Back (Esc)");
+	PRESS(SDL_CONTROLLER_BUTTON_BACK, 0);
+	PRESS(SDL_CONTROLLER_BUTTON_LEFTSTICK, 1);
+	CHECK(rec_key(KEY_VOLUMEDOWN_, 1) == 1, "L3 is volume down");
+	PRESS(SDL_CONTROLLER_BUTTON_LEFTSTICK, 0);
+	PRESS(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 1);
+	CHECK(rec_key(KEY_VOLUMEUP_, 1) == 1, "R3 is volume up");
+	PRESS(SDL_CONTROLLER_BUTTON_RIGHTSTICK, 0);
+
+	/* The D-pad agrees with the arrow keys, at every rotation. */
+	for (i = 0; i < 4; i++) {
+		char what[64];
+		rot = i * 90;
+		c = map_key(SDLK_RIGHT, rot);
+		PRESS(SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 1);
+		snprintf(what, sizeof what, "D-pad right = the right arrow at rotate %d", rot);
+		CHECK(rec_key(c, 1) == 1, what);
+		PRESS(SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 0);
+		CHECK(rec_key(c, 0) == 1, "released");
+	}
+	rot = 0;
+
+	/* The left stick, with hysteresis. */
+	c = map_key(SDLK_UP, rot);
+	AXIS(SDL_CONTROLLER_AXIS_LEFTY, -12000);
+	CHECK(g_ev_rec_n == 0, "half a stick sends nothing");
+	AXIS(SDL_CONTROLLER_AXIS_LEFTY, -30000);
+	CHECK(rec_key(c, 1) == 1, "stick up = the up arrow");
+	AXIS(SDL_CONTROLLER_AXIS_LEFTY, -12000);
+	CHECK(g_ev_rec_n == 0, "easing back to half still holds it");
+	AXIS(SDL_CONTROLLER_AXIS_LEFTY, -3000);
+	CHECK(rec_key(c, 0) == 1, "and near centre lets go");
+	AXIS(SDL_CONTROLLER_AXIS_LEFTY, 0);
+
+	/* A direction held across a rotation is re-sent as the new code. */
+	c = map_key(SDLK_UP, 0);
+	PRESS(SDL_CONTROLLER_BUTTON_DPAD_UP, 1);
+	CHECK(rec_key(c, 1) == 1, "up held at rotate 0");
+	rot = 90;
+	g_ev_rec_n = 0;
+	pad_advance(0.0f, rot, w, h);
+	CHECK(rec_key(c, 0) == 1 && rec_key(map_key(SDLK_UP, 90), 1) == 1 &&
+	      c != map_key(SDLK_UP, 90),
+	      "turning to 90 releases the old code and sends the new");
+	rot = 0;
+	g_ev_rec_n = 0;
+	pad_advance(0.0f, rot, w, h);
+
+	/* The cursor. */
+	PRESS(SDL_CONTROLLER_BUTTON_Y, 1);
+	CHECK(g_pad_cursor && rec_key(c, 0) == 1,
+	      "Triangle lifts the cursor and lets go of the held D-pad");
+	PRESS(SDL_CONTROLLER_BUTTON_Y, 0);
+	PRESS(SDL_CONTROLLER_BUTTON_DPAD_UP, 0);
+	PRESS(SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 1);
+	CHECK(g_ev_rec_n == 0, "with the cursor up the D-pad sends nothing");
+	CHECK((int)g_pad_cx == w / 2 && (int)g_pad_cy == h / 2,
+	      "the cursor starts at the centre of the panel");
+	for (i = 0; i < 10; i++) pad_advance(0.1f, rot, w, h);
+	CHECK((int)g_pad_cx == w / 2 + (int)PAD_CUR_DPAD && (int)g_pad_cy == h / 2,
+	      "a second of D-pad right moves it a known distance");
+	PRESS(SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 0);
+	AXIS(SDL_CONTROLLER_AXIS_LEFTX, 32767);
+	for (i = 0; i < 100; i++) pad_advance(0.1f, rot, w, h);
+	CHECK((int)g_pad_cx == w - 1, "the stick runs it to the right edge and no further");
+	AXIS(SDL_CONTROLLER_AXIS_LEFTX, -32767);
+	for (i = 0; i < 100; i++) pad_advance(0.1f, rot, w, h);
+	CHECK((int)g_pad_cx == 0, "and back to the left edge");
+	AXIS(SDL_CONTROLLER_AXIS_LEFTX, 0);
+	AXIS(SDL_CONTROLLER_AXIS_RIGHTX, 32767);
+	for (i = 0; i < 10; i++) pad_advance(0.1f, rot, w, h);
+	CHECK((int)g_pad_cx > 0, "the right stick moves it too");
+	AXIS(SDL_CONTROLLER_AXIS_RIGHTX, 0);
+	g_pad_cx = 100.0f; g_pad_cy = 50.0f;
+	event_to_fb(rot, w, h, 100, 50, &fx, &fy);
+	PRESS(SDL_CONTROLLER_BUTTON_X, 1);
+	CHECK(rec_count(EV_TOUCH, EV_ABS, ABS_X, fx) == 1 &&
+	      rec_count(EV_TOUCH, EV_ABS, ABS_Y, fy) == 1 &&
+	      rec_count(EV_TOUCH, EV_KEY, BTN_TOUCH, 1) == 1 &&
+	      rec_count(EV_TOUCH, EV_ABS, ABS_PRESSURE, TOUCH_PRESSURE) == 1,
+	      "Square touches down where the cursor is");
+	CHECK(rec_count(EV_GPIO_KEYS, EV_KEY, KEY_A_, 1) == 0, "and is not A");
+	PRESS(SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 1);
+	for (i = 0; i < 5; i++) pad_advance(0.1f, rot, w, h);
+	CHECK(rec_count(EV_TOUCH, EV_ABS, ABS_PRESSURE, TOUCH_PRESSURE) > 1 &&
+	      rec_count(EV_TOUCH, EV_KEY, BTN_TOUCH, 1) == 0 &&
+	      rec_count(EV_TOUCH, EV_ABS, ABS_X, fx) == 0,
+	      "moving with Square held drags: new positions, no second touch-down");
+	PRESS(SDL_CONTROLLER_BUTTON_DPAD_RIGHT, 0);
+	PRESS(SDL_CONTROLLER_BUTTON_X, 0);
+	CHECK(rec_count(EV_TOUCH, EV_KEY, BTN_TOUCH, 0) == 1 &&
+	      rec_count(EV_TOUCH, EV_ABS, ABS_PRESSURE, 0) == 1,
+	      "releasing Square lifts the touch");
+	rot = 270;
+	g_pad_cx = 20.0f; g_pad_cy = 30.0f;
+	event_to_fb(rot, w, h, 20, 30, &fx, &fy);
+	PRESS(SDL_CONTROLLER_BUTTON_X, 1);
+	CHECK(rec_count(EV_TOUCH, EV_ABS, ABS_X, fx) == 1 &&
+	      rec_count(EV_TOUCH, EV_ABS, ABS_Y, fy) == 1,
+	      "at rotate 270 the tap goes through the same mapping as a click");
+	PRESS(SDL_CONTROLLER_BUTTON_X, 0);
+	rot = 0;
+	PRESS(SDL_CONTROLLER_BUTTON_X, 1);
+	PRESS(SDL_CONTROLLER_BUTTON_Y, 1);
+	CHECK(!g_pad_cursor && rec_count(EV_TOUCH, EV_KEY, BTN_TOUCH, 0) == 1,
+	      "hiding the cursor mid-tap lifts the touch");
+	PRESS(SDL_CONTROLLER_BUTTON_Y, 0);
+	PRESS(SDL_CONTROLLER_BUTTON_X, 0);
+	CHECK(g_ev_rec_n == 0, "Square with the cursor hidden does nothing");
+
+	/* Chrome first. */
+	ui_debug_state("about");
+	PRESS(SDL_CONTROLLER_BUTTON_A, 1);
+	CHECK(g_ev_rec_n == 0, "a modal on screen keeps A from the guest");
+	ui_debug_state("idle");
+	g_ev_rec_n = 0;
+	pad_advance(0.0f, rot, w, h);
+	CHECK(rec_key(KEY_A_, 1) == 1, "closing it delivers the A still held");
+	ui_debug_state("about");
+	g_ev_rec_n = 0;
+	pad_advance(0.0f, rot, w, h);
+	CHECK(rec_key(KEY_A_, 0) == 1, "opening one over a held A releases it");
+	ui_debug_state("idle");
+	g_ev_rec_n = 0;
+	pad_advance(0.0f, rot, w, h);
+
+	/* Unplugging. */
+	SDL_JoystickDetachVirtual(idx);
+	g_ev_rec_n = 0;
+	pad_test_pump(rot, w, h);
+	CHECK(g_pad == NULL && rec_key(KEY_A_, 0) == 1,
+	      "unplugging releases the A that was held");
+#undef CHECK
+#undef PRESS
+#undef AXIS
+	SDL_Quit();
+	printf("\n%s\n", bad ? "FAILED" : "all ok");
+	return bad ? 1 : 0;
 }
 
 /* --selftest: prove window_to_fb is right, using the REAL function.
@@ -3063,6 +3806,14 @@ int main(int argc, char **argv)
 			return selftest_layers();
 		else if (!strcmp(argv[i], "--selftest-state"))
 			return selftest_state();
+		else if (!strcmp(argv[i], "--selftest-pad"))
+			return selftest_pad();
+		else if (!strcmp(argv[i], "--pad-probe")) {
+			int secs = 15;
+			if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
+				secs = atoi(argv[++i]);
+			return pad_probe(secs, g_projdir);
+		}
 		else if (!strcmp(argv[i], "--boot"))
 			boot_now = 1;
 		else if (!strcmp(argv[i], "--ui-shot") && i + 2 < argc) {
@@ -3098,6 +3849,10 @@ int main(int argc, char **argv)
 		fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
 		return 1;
 	}
+	/* Separately, and not fatal: a machine whose joystick layer will not
+	 * start still gets a viewer, just one without a pad. */
+	if (SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER) != 0)
+		fprintf(stderr, "pad: no game controller support: %s\n", SDL_GetError());
 	{
 		int ww = (rotate == 90 || rotate == 270) ? h : w;
 		int wh = (rotate == 90 || rotate == 270) ? w : h;
@@ -3110,6 +3865,7 @@ int main(int argc, char **argv)
 	ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
 	set_logical(ren, rotate, w, h);
 	ui_init(ren, g_projdir);
+	pad_init(g_projdir);
 	{
 		SDL_Surface *ico = ui_icon_surface();
 		if (ico) { SDL_SetWindowIcon(win, ico); SDL_FreeSurface(ico); }
@@ -3219,6 +3975,13 @@ int main(int argc, char **argv)
 			case SDL_QUIT:
 				running = 0;
 				break;
+			case SDL_CONTROLLERDEVICEADDED:
+			case SDL_CONTROLLERDEVICEREMOVED:
+			case SDL_CONTROLLERBUTTONDOWN:
+			case SDL_CONTROLLERBUTTONUP:
+			case SDL_CONTROLLERAXISMOTION:
+				pad_event(&e, rotate, w, h);
+				break;
 			case SDL_KEYDOWN:
 			case SDL_KEYUP: {
 				uint16_t code;
@@ -3301,6 +4064,10 @@ int main(int argc, char **argv)
 				break;
 			}
 		}
+
+		/* The pad's cursor moves with the clock, not with events, and a
+		 * modal opening under a held button is noticed here. */
+		pad_tick(SDL_GetTicks(), rotate, w, h);
 
 		/* Replay whatever the guest queued. The finished frame lands in the
 		 * SAME place the software rasteriser writes — fb1's page in the shared
@@ -3609,6 +4376,7 @@ int main(int argc, char **argv)
 			} else {
 				ui_draw_idle(ren, lw, lh + UI_BAR_H);
 			}
+			pad_draw(ren, rotate, w, h);
 			ui_draw(ren, lw, lh + UI_BAR_H);
 		}
 		SDL_RenderPresent(ren);

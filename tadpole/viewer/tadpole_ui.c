@@ -2200,7 +2200,7 @@ static int games_write_list(char *out, size_t n)
  * XDG_CONFIG_HOME they are different files: the viewer would save a setting to
  * one and tadpole.sh would go on reading the other, so the Graphics
  * checkboxes appeared to do nothing at all. */
-static void cfg_path(char *out, size_t n)
+void ui_cfg_dir(char *out, size_t n)
 {
 	/* Same chain as games_cache_dir, and for the same reason. */
 	const char *x = getenv("XDG_CONFIG_HOME");
@@ -2212,10 +2212,14 @@ static void cfg_path(char *out, size_t n)
 	else if (la && *la) snprintf(out, n, "%s/Tadpole/config", la);
 	else                snprintf(out, n, "%s/.config/tadpole", home);
 	mkdir_p(out);
-	{
-		size_t l = strlen(out);
-		snprintf(out + l, n - l, "/ui.cfg");
-	}
+}
+
+static void cfg_path(char *out, size_t n)
+{
+	size_t l;
+	ui_cfg_dir(out, n);
+	l = strlen(out);
+	snprintf(out + l, n - l, "/ui.cfg");
 }
 
 /* tadpole.sh reads this file too (`awk '$1=="gl"{print $2}'`), so the format
@@ -2709,6 +2713,13 @@ SDL_Surface *ui_icon_surface(void)
 struct ui_settings *ui_cfg(void) { return &g_cfg; }
 int ui_modal(void) { return g_modal != M_NONE; }
 void ui_set_running(int r) { g_running = r; }
+int  ui_menu_open(void)  { return g_open_menu >= 0; }
+
+static char g_pad_label[64];
+void ui_set_pad_name(const char *name)
+{
+	snprintf(g_pad_label, sizeof g_pad_label, "%s", name ? name : "");
+}
 
 /* Something may have installed or erased the system files. */
 void ui_invalidate_prereqs(void) { g_sys_ready = -1; }
@@ -2991,7 +3002,7 @@ static struct dlg cur_dlg_settled(int lw, int lh)
 	case M_UPDATE: return dlg_fit(lw, lh, 400, 230);
 	case M_GFX:   return dlg_fit(lw, lh, 250, 200);
 	case M_AUDIO: return dlg_fit(lw, lh, 230, 122);
-	case M_PAD:   return dlg_fit(lw, lh, 240, 150);
+	case M_PAD:   return dlg_fit(lw, lh, 240, 236);
 	case M_DEBUG: return dlg_fit(lw, lh, 268, 200);
 	case M_SYSTEM: return dlg_fit(lw, lh, 268, 178);
 	case M_FILES: return dlg_fit(lw, lh, 300, 172);
@@ -3760,23 +3771,49 @@ static void draw_dialog_body(SDL_Renderer *r, int lw, int lh)
 	}
 	case M_PAD: {
 		static const char *rows[] = {
-			"Arrows      D-pad",
-			"X / Z       A / B",
-			"Q / W       L / R",
-			"Home        Menu",
-			"Esc         Back",
-			"Mouse       Stylus",
+			"Arrows        D-pad",
+			"X / Z         A / B",
+			"Q / W         L / R",
+			"Home          Menu",
+			"Esc           Back",
+			"Mouse         Stylus",
 			/* THE VOLUME KEYS WERE BOUND AND UNDOCUMENTED, which is the same
 			 * as not having them: Parent Settings is reached by holding a
 			 * volume button and pressing Home, and with nothing saying which
 			 * host keys those are, that door was shut. */
-			"- / =       Volume",
-			"Ctrl+R      Rotate",
-			"Ctrl+Q      Quit",
+			"- / =         Volume",
+			"Ctrl+R        Rotate",
+			"Ctrl+Q        Quit",
 		};
-		for (i = 0; i < (int)(sizeof rows / sizeof *rows); i++)
-			text(r, d.x + 10, d.y + 20 + i * 10, rows[i], C_TEXT);
-		text(r, d.x + 10, d.y + d.h - 30, "Remapping: not yet.", C_TEXT_DIM);
+		/* PlayStation names, because that is the pad this was built with;
+		 * on an Xbox-shaped pad read A B X Y for Cross Circle Square
+		 * Triangle and View / Menu for Share / Options. */
+		static const char *pad_rows[] = {
+			"D-pad/stick   D-pad",
+			"Cross/Circle  A / B",
+			"L1/R1 L2/R2   L / R",
+			"Options/Share Menu / Back",
+			"Triangle      Cursor on/off",
+			"Square        Tap at cursor",
+			"Both sticks   Move cursor",
+			"L3 / R3       Volume",
+		};
+		int y = d.y + 20;
+		char line[80];
+		for (i = 0; i < (int)(sizeof rows / sizeof *rows); i++, y += 10)
+			text(r, d.x + 10, y, rows[i], C_TEXT);
+		y += 6;
+		/* Which pad, live: the line a bad mapping is diagnosed from, and
+		 * the one that says "plug it in" when nothing is. */
+		if (g_pad_label[0]) {
+			snprintf(line, sizeof line, "Pad: %.28s", g_pad_label);
+			text(r, d.x + 10, y, line, C_ACCENT);
+		} else
+			text(r, d.x + 10, y, "Pad: none plugged in", C_TEXT_DIM);
+		y += 10;
+		for (i = 0; i < (int)(sizeof pad_rows / sizeof *pad_rows); i++, y += 10)
+			text(r, d.x + 10, y, pad_rows[i],
+			     g_pad_label[0] ? C_TEXT : C_TEXT_DIM);
 		break;
 	}
 	case M_PROGRESS: {

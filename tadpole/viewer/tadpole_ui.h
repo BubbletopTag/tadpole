@@ -211,6 +211,16 @@ void  ui_profile_get(char *name, size_t namesz, int *grade,
 /* Told by the viewer so the bar can show it and File can offer Stop. */
 void  ui_set_running(int running);
 
+/* The pad in charge, or NULL for none; the Controller panel shows it. */
+void  ui_set_pad_name(const char *name);
+
+/* A menu is dropped down: like a modal, the guest must not get input. */
+int   ui_menu_open(void);
+
+/* The directory ui.cfg lives in, created if need be. The pad's own mapping
+ * file sits beside it. */
+void  ui_cfg_dir(char *out, size_t n);
+
 /* Idle backdrop, drawn when no guest is running. */
 void  ui_draw_idle(SDL_Renderer *ren, int lw, int lh);
 

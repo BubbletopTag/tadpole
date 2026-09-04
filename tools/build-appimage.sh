@@ -143,6 +143,9 @@ cp "$PROJ/runtime/setup-sysroot.sh" "$APPDIR/app/runtime/"
 # tadpole.sh looks for the viewer at tadpole/viewer/tadpole-view relative to
 # itself, so give it one there rather than teaching it a second layout.
 cp "$PROJ/tadpole/viewer/tadpole-view" "$APPDIR/app/tadpole/viewer/"
+# The pad mapping table the viewer loads from beside itself; without it a
+# HORIPAD mini4 gets SDL's wrong guess. See pad_init() in tadpole_view.c.
+cp "$PROJ/tadpole/viewer/gamecontrollerdb.txt" "$APPDIR/app/tadpole/viewer/"
 [ -f "$PROJ/README.md" ] && cp "$PROJ/README.md" "$APPDIR/app/"
 [ -f "$PROJ/LICENSE" ]   && cp "$PROJ/LICENSE"   "$APPDIR/app/"
 
