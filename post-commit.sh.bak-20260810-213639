@@ -1,0 +1,415 @@
+#!/bin/bash
+# Tadpole — turn the most recent commit into a GitHub Release with the AppImage
+# attached.
+#
+#   ./post-commit.sh              release HEAD, reusing the AppImage in build/
+#   ./post-commit.sh --build      build the AppImage first, then release
+#   ./post-commit.sh --dry-run    print the tag, title, notes and asset; stop
+#   ./post-commit.sh --allow-stale  release an AppImage older than the commit
+#
+# It does NOT push your branch. That is deliberate — see PUSHING, below.
+#
+# THE VERSION IS A DATE, AND THE TAG IS NOT THE TITLE
+# ---------------------------------------------------
+# The release is called
+#
+#     Tadpole 08082026-0001          <- title, DDMMYYYY + a per-day sequence
+#     tadpole-08082026-0001          <- tag
+#
+# and those differ because a git ref cannot contain a space, so the spaced form
+# exists only as the title. The tag is the same string, lowercased and hyphen-
+# joined, which keeps it sortable, greppable and obviously the same thing.
+#
+# The sequence is worked out, not guessed: every tag for today is collected from
+# the local tags AND from `gh release list` (a tag can exist in one and not the
+# other), the highest four-digit suffix wins, and this release is that plus one.
+# The date is TODAY's, not the commit's — it numbers releases per day, and a
+# release made at 00:05 belongs to the day it was published.
+#
+# PUSHING: THE TAG, AND NOTHING ELSE
+# ----------------------------------
+# The tag is created locally at HEAD and pushed with git before `gh release
+# create` runs. That is not the same as letting gh create the tag for us, and
+# the difference matters here.
+#
+# gh creates a missing tag SERVER-SIDE, at the current tip of the default
+# branch. Since the whole point of this script is that you push your commits
+# yourself afterwards, that tip is the PREVIOUS commit — so gh would happily
+# publish a release whose tag points at the wrong commit, described by release
+# notes taken from a commit it does not contain. `--verify-tag` below makes that
+# failure impossible: gh will refuse rather than invent a tag.
+#
+# Pushing the tag does upload the commit objects it reaches — unavoidable, since
+# a release must point at something GitHub can see — but it moves no branch.
+# `git push` is still yours to run, and the script says so when it finishes.
+#
+# THE APPIMAGE IS THE RELEASE
+# ---------------------------
+# A release with no AppImage attached is not a partial success, it is a failed
+# release that looks finished: a tag, release notes, and nothing anyone can
+# download. So the asset is treated as the point of the exercise rather than a
+# nice-to-have. If there is no image and none can be built, this stops BEFORE
+# tagging anything; and once the release is made, the asset is read back from
+# GitHub and the release is only published if it is really there. The window is
+# closed by creating it as a DRAFT first — a draft is invisible to the public
+# and to the releases API, so a failed upload leaves nothing to find.
+#
+# THE ASSET FILENAME NEVER CHANGES
+# --------------------------------
+#     Tadpole-x86_64.AppImage
+#
+# every release, forever. The version lives in the tag and the title, not the
+# filename, because the in-app update checker fetches the releases API and looks
+# for that exact name; a filename carrying the version would mean the checker
+# had to pattern-match its way to the download, and one renamed asset would
+# break updates for everyone already running an older build. If the image being
+# released is called something else on disk (TADPOLE_APPIMAGE_OUT), it is linked
+# to the canonical name before upload rather than uploaded under its own.
+#
+# STALE IMAGES
+# ------------
+# The one genuinely dangerous failure mode is shipping yesterday's binary under
+# today's release notes, so an AppImage older than the commit is refused, with
+# the two ways forward named. --build removes the question entirely.
+
+set -u
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJ="$HERE"
+# Same override as tools/build-appimage.sh, so "build somewhere else, then
+# release it" needs one variable rather than two.
+ASSET="${TADPOLE_APPIMAGE_OUT:-$PROJ/build/Tadpole-x86_64.AppImage}"
+# The name every release must attach. Hard-coded on purpose; see above.
+ASSET_NAME="Tadpole-x86_64.AppImage"
+STAGE="$PROJ/build/.release-upload"
+
+die() { echo "error: $*" >&2; exit 1; }
+
+DRYRUN=0; BUILD=0; ALLOW_STALE=0
+for a in "$@"; do
+    case "$a" in
+        --dry-run|-n)  DRYRUN=1 ;;
+        --build)       BUILD=1 ;;
+        --allow-stale) ALLOW_STALE=1 ;;
+        -h|--help)     sed -n '2,10p' "$0"; exit 0 ;;
+        *)             die "unknown option: $a
+  usage: $0 [--dry-run] [--build] [--allow-stale]" ;;
+    esac
+done
+
+# ---- 1. the tools this needs ----------------------------------------------
+# Checked up front, including for --dry-run: the sequence number is only correct
+# if we can see the releases that already exist, and that read needs gh too.
+command -v gh >/dev/null 2>&1 || die "gh (the GitHub CLI) is not installed.
+  Arch:    sudo pacman -S github-cli
+  Debian:  sudo apt install gh
+  Fedora:  sudo dnf install gh
+  Any:     https://cli.github.com"
+
+gh auth status >/dev/null 2>&1 || die "gh is installed but not logged in.
+  Run:  gh auth login
+  It needs the 'repo' scope to create releases and upload assets."
+
+git -C "$PROJ" rev-parse --git-dir >/dev/null 2>&1 || die "$PROJ is not a git repository"
+
+REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null)" \
+    || die "gh cannot tell which GitHub repository this is.
+  Check that 'origin' points at GitHub:  git remote -v"
+
+# ---- 2. the commit being released -----------------------------------------
+SHA="$(git -C "$PROJ" rev-parse HEAD 2>/dev/null)" \
+    || die "no commits yet — there is nothing to release"
+SHORT="$(git -C "$PROJ" rev-parse --short HEAD)"
+SUBJECT="$(git -C "$PROJ" log -1 --format=%s)"
+COMMIT_EPOCH="$(git -C "$PROJ" log -1 --format=%ct)"
+
+# Uncommitted changes are the mirror image of a stale image: the AppImage would
+# carry code that the release notes' commit does not. A warning rather than a
+# refusal, because build/ and the firmware directories are full of untracked
+# working files and stopping for those would be wrong.
+DIRTY="$(git -C "$PROJ" status --porcelain --untracked-files=no)"
+[ -n "$DIRTY" ] && {
+    echo "WARNING: tracked files are modified and are NOT in $SHORT:" >&2
+    echo "$DIRTY" | sed 's/^/    /' >&2
+    echo "         a build made now would contain them; the release notes will not." >&2
+    echo >&2
+}
+
+ALREADY="$(git -C "$PROJ" tag --points-at HEAD | grep '^tadpole-' || true)"
+[ -n "$ALREADY" ] && {
+    echo "WARNING: $SHORT is already tagged $(echo "$ALREADY" | tr '\n' ' ')" >&2
+    echo "         this will publish a second release for the same commit." >&2
+    echo >&2
+}
+
+# ---- 3. the version --------------------------------------------------------
+DATE="$(date +%d%m%Y)"                       # DDMMYYYY
+
+# Both sources, because neither is complete on its own: a local tag may not be
+# pushed, and a release made from another machine has no local tag until you
+# fetch. (A tag pushed from elsewhere with no release attached is the one case
+# this cannot see; the push in step 7 would then be rejected, and say so.)
+#
+# A failure to list is fatal rather than "assume none": guessing -0001 when the
+# answer was -0003 does not produce a wrong number, it produces a collision.
+RELEASED="$(gh release list --limit 200 --json tagName -q '.[].tagName')" \
+    || die "could not list the existing releases of $REPO, so the next sequence
+  number cannot be worked out. Check the network and 'gh auth status'."
+KNOWN="$(git -C "$PROJ" tag -l "tadpole-$DATE-*")
+$RELEASED"
+
+high=0
+for t in $KNOWN; do
+    case "$t" in
+        tadpole-"$DATE"-[0-9][0-9][0-9][0-9])
+            # 10# or bash reads 0008 as octal and errors out on the 8.
+            n=$((10#${t##*-}))
+            [ "$n" -gt "$high" ] && high="$n" ;;
+    esac
+done
+[ "$high" -ge 9999 ] && die "9999 releases today already — the sequence has no room left"
+SEQ="$(printf '%04d' $((high + 1)))"
+
+TAG="tadpole-$DATE-$SEQ"
+TITLE="Tadpole $DATE-$SEQ"
+
+git -C "$PROJ" rev-parse -q --verify "refs/tags/$TAG" >/dev/null && \
+    die "tag $TAG already exists locally but was not counted — refusing to guess.
+  Look at it:      git show $TAG
+  Or drop it:      git tag -d $TAG"
+
+# ---- 4. the release notes --------------------------------------------------
+# The commit message verbatim, subject and body. GitHub renders it as Markdown,
+# which reflows the hard-wrapped prose into paragraphs; the indented blocks in
+# our commit messages survive intact as code blocks, which is the part that
+# would actually be damaged by reflowing.
+NOTES="$(mktemp "${TMPDIR:-/tmp}/tadpole-notes.XXXXXX")" || die "cannot create a temporary file"
+trap 'rm -f "$NOTES"; rm -rf "$STAGE"' EXIT
+# The release body is the commit message, minus the assistant trailers.
+# Those are provenance for the repository, not something a stranger reading a
+# release page needs — and the session URL in particular has no business on a
+# public page.
+git -C "$PROJ" log -1 --format=%B |
+    grep -v -e '^Claude-Session:' -e '^Co-Authored-By: Claude' > "$NOTES"
+
+# ---- 5. the AppImage -------------------------------------------------------
+if [ "$BUILD" = 1 ] && [ "$DRYRUN" = 0 ]; then
+    # fetch-deps.sh only when its output is missing: it is a network fetch, and
+    # build-appimage.sh works without it — it just produces an image that makes
+    # the user install qemu themselves, which is not what a release should be.
+    if [ ! -x "$PROJ/build/deps/bin/qemu-arm" ]; then
+        echo "==> staging dependencies (build/deps is empty)"
+        "$PROJ/tools/fetch-deps.sh" || die "tools/fetch-deps.sh failed — nothing has been tagged or pushed"
+    fi
+    # STAMP THE VERSION INTO THE VIEWER FIRST.
+    #
+    # build-appimage.sh packages whatever tadpole-view already exists, and the
+    # Makefile defaults TADPOLE_VERSION to "dev". Without this the released
+    # image reports itself as an unreleased build for ever: Help -> About shows
+    # "dev", and the update checker — which compares the running version
+    # against the release tags — can never say "up to date", because "dev"
+    # parses as no version at all. The one thing a release must know is which
+    # release it is.
+    echo "==> stamping the viewer as $DATE-$SEQ"
+    make -C "$PROJ/tadpole" viewer TADPOLE_VERSION="$DATE-$SEQ" \
+        || die "could not build the viewer — nothing has been tagged or pushed"
+    # AND CHECK IT TOOK. `make` skipping the relink is not hypothetical — it
+    # is how 08082026-0002 shipped reporting itself as 0001, which told the
+    # update checker it was permanently one version behind itself. The
+    # Makefile now depends on a version stamp file so this cannot happen, and
+    # this confirms it rather than trusting it.
+    if ! strings "$PROJ/tadpole/viewer/tadpole-view" 2>/dev/null |
+         grep -qx "$DATE-$SEQ"; then
+        die "the viewer does not carry $DATE-$SEQ after building — refusing to
+     ship an image that would misreport its own version"
+    fi
+    echo "    viewer reports $DATE-$SEQ"
+
+    echo "==> building the AppImage"
+    "$PROJ/tools/build-appimage.sh" || die "tools/build-appimage.sh failed — nothing has been tagged or pushed"
+    echo
+fi
+
+# NO IMAGE, NO RELEASE. Stopping here is the whole point: nothing has been
+# tagged or pushed yet, so this leaves no trace at all — which is much better
+# than a release page announcing a version with nothing on it.
+[ -f "$ASSET" ] || die "there is no AppImage at
+      $ASSET
+  and a release without one is not worth publishing. Nothing has been tagged,
+  pushed or created. Build one first:
+
+    ./post-commit.sh --build          build it and release in one go
+    ./tools/build-appimage.sh    build it yourself (./tools/fetch-deps.sh first,
+                                 or the image will not carry qemu and Python)"
+
+# An AppImage is an ELF whose bytes 8..9 are the magic 'AI'. Cheap, and it
+# catches the one mistake that would otherwise be found by whoever downloads it:
+# uploading a half-written or wrong file under a name that looks right.
+read -r magic < <(od -An -c -N 10 "$ASSET" | tr -d ' ')
+case "$magic" in
+    '177ELF'*'AI') ;;
+    *) die "$ASSET does not look like an AppImage (bad magic).
+  Rebuild it:  ./tools/build-appimage.sh" ;;
+esac
+
+ASSET_EPOCH="$(stat -c %Y "$ASSET")"
+ASSET_BYTES="$(stat -c %s "$ASSET")"
+ASSET_SIZE="$(du -h "$ASSET" | cut -f1)"
+STALE=0
+[ "$ASSET_EPOCH" -lt "$COMMIT_EPOCH" ] && STALE=1
+
+if [ "$STALE" = 1 ] && [ "$ALLOW_STALE" = 0 ]; then
+    die "the AppImage is OLDER than the commit being released.
+
+  $ASSET
+      built  $(date -d "@$ASSET_EPOCH" '+%Y-%m-%d %H:%M')
+  commit $SHORT
+      made   $(date -d "@$COMMIT_EPOCH" '+%Y-%m-%d %H:%M')
+
+  Releasing it would ship a binary that does not contain $SHORT, described
+  by $SHORT's message. Pick one:
+
+    ./post-commit.sh --build          rebuild, then release
+    ./post-commit.sh --allow-stale    ship this image anyway (say why in the notes)"
+fi
+
+if [ "$STALE" = 1 ]; then
+    AGE="STALE — built before $SHORT, shipping it anyway (--allow-stale)"
+else
+    AGE="built $(date -d "@$ASSET_EPOCH" '+%Y-%m-%d %H:%M'), after $SHORT"
+fi
+
+# gh uploads an asset under its basename, so an image built somewhere else under
+# another name is linked into a scratch directory as the canonical one. A hard
+# link costs nothing on the same filesystem and leaves the original where
+# build-appimage.sh expects it; cp covers build/ living elsewhere. The scratch
+# directory is used rather than build/ itself so this can never overwrite the
+# image someone is about to run.
+if [ "$(basename "$ASSET")" = "$ASSET_NAME" ]; then
+    UPLOAD="$ASSET"
+else
+    UPLOAD="$STAGE/$ASSET_NAME"
+fi
+
+# ---- 6. --dry-run stops here ----------------------------------------------
+if [ "$DRYRUN" = 1 ]; then
+    cat <<EOF
+==> DRY RUN — nothing has been tagged, pushed or published
+
+  repository   $REPO
+  commit       $SHORT  $SUBJECT
+  tag          $TAG            (annotated, created at $SHORT)
+  title        $TITLE
+  asset        $ASSET
+               EXISTS — $ASSET_SIZE ($ASSET_BYTES bytes), $AGE
+  uploaded as  $ASSET_NAME     (the same name every release)
+  would run    git push origin refs/tags/$TAG
+               gh release create $TAG --verify-tag --draft --title '$TITLE' ...
+               gh release view $TAG --json assets     (must list $ASSET_NAME)
+               gh release edit $TAG --draft=false
+
+  release notes, verbatim from $SHORT:
+EOF
+    printf -- '---8<---------------------------------------------------------------\n'
+    cat "$NOTES"
+    printf -- '--->8---------------------------------------------------------------\n'
+    [ "$BUILD" = 1 ] && echo "
+  NOTE: --build was given and was NOT honoured, because a dry run builds
+        nothing. The asset above is whatever is in build/ right now."
+    exit 0
+fi
+
+# ---- 7. tag, push the tag, publish ----------------------------------------
+echo "==> $TITLE  ($TAG)"
+echo "    $SHORT  $SUBJECT"
+echo "    $ASSET_NAME  $ASSET_SIZE, $AGE"
+echo
+
+if [ "$UPLOAD" != "$ASSET" ]; then
+    mkdir -p "$STAGE" || die "cannot create $STAGE"
+    ln -f "$ASSET" "$UPLOAD" 2>/dev/null || cp "$ASSET" "$UPLOAD" \
+        || die "cannot stage $ASSET under the name $ASSET_NAME"
+fi
+
+git -C "$PROJ" tag -a "$TAG" -m "$TITLE" "$SHA" || die "could not create the tag $TAG"
+
+echo "==> pushing the tag (only the tag)"
+if ! git -C "$PROJ" push origin "refs/tags/$TAG"; then
+    # Nothing else can reference a tag made two seconds ago, so removing it is
+    # safe — and leaving it behind would silently consume today's sequence
+    # number, so the next attempt would be -0002 with no -0001 anywhere.
+    # (The AppImage itself is never removed by any path here: $UPLOAD is usually
+    # the real file rather than a copy of it.)
+    git -C "$PROJ" tag -d "$TAG" >/dev/null 2>&1
+    die "could not push $TAG to origin — the local tag has been removed again.
+
+  If this was an authentication failure, your key is not loaded:
+      ssh-add -l          list what the agent holds
+      ssh-add ~/.ssh/id_ed25519
+  If the tag already exists on origin, someone else published it:
+      git fetch --tags && ./post-commit.sh"
+fi
+
+# A DRAFT, and only a draft until the AppImage is confirmed to be on it. Drafts
+# are not returned by the public releases API and do not appear on the releases
+# page, so an upload that fails here leaves nothing for anyone — including the
+# in-app update checker — to find. Publishing first and fixing afterwards would
+# mean a window in which the newest release is one that cannot be downloaded.
+CLEANUP="  gh release delete $TAG --yes --cleanup-tag
+  git tag -d $TAG"
+
+echo "==> creating a draft release and uploading $ASSET_NAME"
+if ! gh release create "$TAG" \
+        --verify-tag --draft \
+        --title "$TITLE" \
+        --notes-file "$NOTES" \
+        "$UPLOAD"; then
+    die "gh release create failed — nothing has been published.
+  The tag IS on GitHub now. Remove it before trying again, or the next run
+  will skip a sequence number:
+
+$CLEANUP
+  git push --delete origin $TAG"
+fi
+
+# Do not take the upload's word for it. The asset is the entire point of the
+# release, and "the command exited 0" and "the file is attached and complete"
+# are not the same claim.
+echo "==> checking GitHub really has it"
+attached_bytes() {
+    gh release view "$TAG" --json assets \
+        -q ".assets[] | select(.name == \"$ASSET_NAME\") | .size" 2>/dev/null
+}
+GOT_BYTES="$(attached_bytes)"
+if [ -z "$GOT_BYTES" ]; then
+    echo "    $ASSET_NAME is not attached — retrying the upload once" >&2
+    gh release upload "$TAG" "$UPLOAD" --clobber || true
+    GOT_BYTES="$(attached_bytes)"
+fi
+[ -n "$GOT_BYTES" ] || die "$ASSET_NAME did not attach, so the release is still an
+  unpublished DRAFT and nobody can see it — which is the right outcome, because
+  a release with nothing to download is worse than no release at all.
+
+  Look at it, or throw it away and start over:
+      gh release view $TAG --web
+$CLEANUP"
+[ "$GOT_BYTES" = "$ASSET_BYTES" ] || die "$ASSET_NAME attached but is the wrong size:
+      GitHub has $GOT_BYTES bytes, this machine has $ASSET_BYTES.
+  The upload was truncated. The release is still an unpublished DRAFT.
+
+$CLEANUP"
+echo "    $ASSET_NAME  $GOT_BYTES bytes  attached and complete"
+
+echo "==> publishing"
+# --latest explicitly: the update checker asks for the latest release, and
+# GitHub would otherwise decide by semver-ish tag ordering, which these date
+# tags are not.
+gh release edit "$TAG" --draft=false --latest >/dev/null || die "the AppImage is
+  attached but the release is still a DRAFT — publish it by hand:
+      gh release edit $TAG --draft=false --latest"
+
+echo
+echo "Released: https://github.com/$REPO/releases/tag/$TAG"
+echo
+echo "  asset       $ASSET_NAME  ($ASSET_SIZE) — the name every release uses"
+echo "  pushed      refs/tags/$TAG  (and the objects it reaches)"
+echo "  NOT pushed  your branch — run 'git push' yourself when you are ready"

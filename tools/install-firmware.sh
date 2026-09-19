@@ -4,7 +4,7 @@
 #   ./tools/install-firmware.sh <LFC_Downloads dir | .lfp | .lf2 | .zip>
 #
 # You supply the firmware. Tadpole ships no LeapFrog code; this reads the packages
-# LFConnect leaves in its download cache on your own machine. See README.md.
+# LFConnect leaves in its download cache on your own machine. See docs/MANUAL.md.
 #
 # WHAT THE PACKAGES ACTUALLY ARE
 # ------------------------------
