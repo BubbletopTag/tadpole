@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <ctype.h>
 #include <fcntl.h>
 #include <unistd.h>
 #ifndef _WIN32
@@ -141,6 +142,101 @@ static int gl_resolve(void)
 	return missing == 0;
 }
 
+/* ---- OpenGL 2.0: the programmable pipeline, for the LeapTV -------------
+ *
+ * Resolved separately and NOT required: a driver without shaders still
+ * replays every GLES1 title exactly as before, and only the GLES2 packets
+ * are dropped (with one line saying so). Own typedefs throughout, for the
+ * reason given above ClientActiveTexture. */
+typedef GLuint (APIENTRYP t2_createshader)(GLenum);
+typedef void   (APIENTRYP t2_shadersource)(GLuint, GLsizei, const GLchar *const *, const GLint *);
+typedef void   (APIENTRYP t2_compileshader)(GLuint);
+typedef void   (APIENTRYP t2_getshaderiv)(GLuint, GLenum, GLint *);
+typedef void   (APIENTRYP t2_getshaderlog)(GLuint, GLsizei, GLsizei *, GLchar *);
+typedef void   (APIENTRYP t2_deleteshader)(GLuint);
+typedef GLuint (APIENTRYP t2_createprogram)(void);
+typedef void   (APIENTRYP t2_attachshader)(GLuint, GLuint);
+typedef void   (APIENTRYP t2_detachshader)(GLuint, GLuint);
+typedef void   (APIENTRYP t2_bindattrib)(GLuint, GLuint, const GLchar *);
+typedef void   (APIENTRYP t2_linkprogram)(GLuint);
+typedef void   (APIENTRYP t2_getprogramiv)(GLuint, GLenum, GLint *);
+typedef void   (APIENTRYP t2_getprogramlog)(GLuint, GLsizei, GLsizei *, GLchar *);
+typedef void   (APIENTRYP t2_useprogram)(GLuint);
+typedef void   (APIENTRYP t2_deleteprogram)(GLuint);
+typedef GLint  (APIENTRYP t2_getuniformloc)(GLuint, const GLchar *);
+typedef void   (APIENTRYP t2_uniformfv)(GLint, GLsizei, const GLfloat *);
+typedef void   (APIENTRYP t2_uniformiv)(GLint, GLsizei, const GLint *);
+typedef void   (APIENTRYP t2_uniformmat)(GLint, GLsizei, GLboolean, const GLfloat *);
+typedef void   (APIENTRYP t2_attribpointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void *);
+typedef void   (APIENTRYP t2_attribenable)(GLuint);
+typedef void   (APIENTRYP t2_attrib4f)(GLuint, GLfloat, GLfloat, GLfloat, GLfloat);
+
+static struct {
+	t2_createshader  CreateShader;   t2_shadersource ShaderSource;
+	t2_compileshader CompileShader;  t2_getshaderiv  GetShaderiv;
+	t2_getshaderlog  GetShaderInfoLog; t2_deleteshader DeleteShader;
+	t2_createprogram CreateProgram;  t2_attachshader AttachShader;
+	t2_detachshader  DetachShader;   t2_bindattrib   BindAttribLocation;
+	t2_linkprogram   LinkProgram;    t2_getprogramiv GetProgramiv;
+	t2_getprogramlog GetProgramInfoLog; t2_useprogram UseProgram;
+	t2_deleteprogram DeleteProgram;  t2_getuniformloc GetUniformLocation;
+	t2_uniformfv Uniform1fv, Uniform2fv, Uniform3fv, Uniform4fv;
+	t2_uniformiv Uniform1iv, Uniform2iv, Uniform3iv, Uniform4iv;
+	t2_uniformmat UniformMatrix2fv, UniformMatrix3fv, UniformMatrix4fv;
+	t2_attribpointer VertexAttribPointer;
+	t2_attribenable  EnableVertexAttribArray, DisableVertexAttribArray;
+	t2_attrib4f      VertexAttrib4f;
+} g_gl2;
+static int g_gl2_ok;
+static unsigned int g_gl2_dropped;
+
+static void gl2_resolve(void)
+{
+	const struct { const char *name; void **slot; } tab[] = {
+		{ "glCreateShader",      (void **)&g_gl2.CreateShader },
+		{ "glShaderSource",      (void **)&g_gl2.ShaderSource },
+		{ "glCompileShader",     (void **)&g_gl2.CompileShader },
+		{ "glGetShaderiv",       (void **)&g_gl2.GetShaderiv },
+		{ "glGetShaderInfoLog",  (void **)&g_gl2.GetShaderInfoLog },
+		{ "glDeleteShader",      (void **)&g_gl2.DeleteShader },
+		{ "glCreateProgram",     (void **)&g_gl2.CreateProgram },
+		{ "glAttachShader",      (void **)&g_gl2.AttachShader },
+		{ "glDetachShader",      (void **)&g_gl2.DetachShader },
+		{ "glBindAttribLocation",(void **)&g_gl2.BindAttribLocation },
+		{ "glLinkProgram",       (void **)&g_gl2.LinkProgram },
+		{ "glGetProgramiv",      (void **)&g_gl2.GetProgramiv },
+		{ "glGetProgramInfoLog", (void **)&g_gl2.GetProgramInfoLog },
+		{ "glUseProgram",        (void **)&g_gl2.UseProgram },
+		{ "glDeleteProgram",     (void **)&g_gl2.DeleteProgram },
+		{ "glGetUniformLocation",(void **)&g_gl2.GetUniformLocation },
+		{ "glUniform1fv",        (void **)&g_gl2.Uniform1fv },
+		{ "glUniform2fv",        (void **)&g_gl2.Uniform2fv },
+		{ "glUniform3fv",        (void **)&g_gl2.Uniform3fv },
+		{ "glUniform4fv",        (void **)&g_gl2.Uniform4fv },
+		{ "glUniform1iv",        (void **)&g_gl2.Uniform1iv },
+		{ "glUniform2iv",        (void **)&g_gl2.Uniform2iv },
+		{ "glUniform3iv",        (void **)&g_gl2.Uniform3iv },
+		{ "glUniform4iv",        (void **)&g_gl2.Uniform4iv },
+		{ "glUniformMatrix2fv",  (void **)&g_gl2.UniformMatrix2fv },
+		{ "glUniformMatrix3fv",  (void **)&g_gl2.UniformMatrix3fv },
+		{ "glUniformMatrix4fv",  (void **)&g_gl2.UniformMatrix4fv },
+		{ "glVertexAttribPointer",     (void **)&g_gl2.VertexAttribPointer },
+		{ "glEnableVertexAttribArray", (void **)&g_gl2.EnableVertexAttribArray },
+		{ "glDisableVertexAttribArray",(void **)&g_gl2.DisableVertexAttribArray },
+		{ "glVertexAttrib4f",    (void **)&g_gl2.VertexAttrib4f },
+	};
+	unsigned int i;
+	int missing = 0;
+	for (i = 0; i < sizeof tab / sizeof tab[0]; i++) {
+		*tab[i].slot = SDL_GL_GetProcAddress(tab[i].name);
+		if (!*tab[i].slot) missing++;
+	}
+	g_gl2_ok = (missing == 0);
+	if (!g_gl2_ok)
+		fprintf(stderr, "hle: no OpenGL 2.0 on this driver (%d entry points"
+		        " missing) — GLES2 titles will not draw\n", missing);
+}
+
 /* GLES1 enums that differ from, or are absent on, the desktop. */
 #define GLES_FIXED  0x140C
 
@@ -203,6 +299,12 @@ static int               g_msaa;      /* samples in use; 0 = off */
  * It cannot make the picture sharper on screen — the guest still receives
  * 480x272 — but it decides how much detail survives being squeezed into it. */
 static int               g_ss = 1;
+/* WHAT WAS ASKED FOR, as distinct from what make_target() could grant. The
+ * viewer compares its setting against this, not against g_ss: comparing
+ * against the granted value made every clamped request a rebuild EVERY
+ * FRAME, which on a 720p panel at a saved 4x showed as a strip of noise.
+ */
+static int               g_ss_req = 1, g_msaa_req;
 static int               g_dw, g_dh;  /* draw-buffer size: panel * g_ss */
 static GLuint            g_tex[MAX_TEX];       /* guest name -> host name */
 /* host_tex() creates an empty GL texture object on demand, so "the object
@@ -219,6 +321,22 @@ static unsigned int      g_bound_name;   /* guest texture name currently bound *
 static int               g_tex_enabled;  /* GL_TEXTURE_2D on unit 0 */
 static struct hbuf       g_buf[MAX_BUF];
 static struct harr       g_arr[TADGL_ARR_COUNT];
+
+/* ---- GLES2 mirrors, indexed by GUEST name like everything else ---------- */
+#define MAX_SHADER 512          /* the guest's G2_MAX_SHADERS is 256 */
+#define MAX_PROG   256          /* ... and G2_MAX_PROGRAMS 64 */
+#define MAX_ATTR   16
+struct hprog { GLuint host; GLint *umap; unsigned int umap_n; int linked; };
+static struct { GLuint host; unsigned int type; } g_shd[MAX_SHADER];
+static struct hprog      g_prg[MAX_PROG];
+static unsigned int      g_cur_prog;      /* guest program in use, 0 = fixed */
+/* Generic attribute arrays, the GLES2 twin of g_arr. */
+static struct { unsigned int on, buf, type, norm, off; int size, stride; }
+                         g_attr[MAX_ATTR];
+static unsigned char     g_attr_host_on[MAX_ATTR];
+static float            *g_aconv[MAX_ATTR];
+static unsigned int      g_aconvn[MAX_ATTR];
+static unsigned int      g_shader_fail_logged;
 static int               g_w, g_h;
 /* The layer rectangle the guest told us about. Only g_vw x g_vh of the draw
  * buffer is rendered and read back: blanket-writing the whole panel filled the
@@ -312,6 +430,9 @@ static const char *const g_opnames[] = {
 	"RESET", "TEXENVCOLOR",
 	"SCISSOR", "COLORMASK", "LINEWIDTH", "POINTSIZE", "POLYGONOFFSET",
 	"LIGHT", "MATERIAL", "LIGHTMODEL", "NORMAL",
+	"SHADERSOURCE", "DELETESHADER", "ATTACHSHADER", "DETACHSHADER",
+	"BINDATTRIB", "LINKPROGRAM", "UNIFORMLOC", "USEPROGRAM", "DELETEPROGRAM",
+	"UNIFORM", "ATTRIBPOINTER", "ATTRIBENABLE", "ATTRIBVALUE",
 };
 typedef char tadgl_opnames_match[
 	(sizeof(g_opnames) / sizeof(g_opnames[0]) == TADGL_OP_COUNT) ? 1 : -1];
@@ -516,6 +637,15 @@ static int make_target(int w, int h, int samples, int ss)
 		        "%d — using %dx\n", ss, w * ss, h * ss, (int)maxtex, ss - 1);
 		ss--;
 	}
+	/* AND A BUDGET, NOT ONLY A LIMIT. The draw buffer is read back every
+	 * frame, so its pixel count is the frame cost. Ten megapixels is what
+	 * the Ultra's 1024x600 at 4x already spends and is known to be fine; a
+	 * 1280x720 panel at the same setting would be fifteen. */
+	while (ss > 1 && (long)w * h * ss * ss > 10000000L) {
+		fprintf(stderr, "hle: %dx render scale is %dx%d — over the 10 Mpx"
+		        " budget, using %dx\n", ss, w * ss, h * ss, ss - 1);
+		ss--;
+	}
 	g_ss = ss;
 	g_dw = w * ss;
 	g_dh = h * ss;
@@ -613,7 +743,8 @@ void hle_host_set_quality(int samples, int ss)
 	if (!g_ctx) return;
 	if (samples < 0) samples = 0;
 	if (ss < 1) ss = 1;
-	if (samples == g_msaa && ss == g_ss) return;
+	if (samples == g_msaa_req && ss == g_ss_req) return;
+	g_msaa_req = samples; g_ss_req = ss;
 
 	ctx_enter();
 	/* Tear down the old target completely. g_fbo and g_resolve are the SAME
@@ -644,7 +775,46 @@ void hle_host_set_quality(int samples, int ss)
 	ctx_leave();
 }
 
+/* THE PANEL SIZE ARRIVES AFTER THE TARGET IS BUILT. hle_host_init() runs at
+ * viewer start with whatever state.bin said last time — or 480x272 on a first
+ * run — and the guest's real panel is learned a few frames later. The LeapTV
+ * is the first device whose first run made that matter: a 1280x720 layer
+ * replayed into a 480x272 target puts the viewport at a negative y and reads
+ * back a corner. Same rebuild as a quality change, with a new size. */
+void hle_host_resize(int w, int h)
+{
+	if (!g_ctx || (w == g_w && h == g_h) || w <= 0 || h <= 0) return;
+	ctx_enter();
+	if (g_fbo && g_fbo != g_resolve) glDeleteFramebuffers(1, &g_fbo);
+	if (g_resolve) glDeleteFramebuffers(1, &g_resolve);
+	if (g_colour) glDeleteTextures(1, &g_colour);
+	if (g_depth) glDeleteRenderbuffers(1, &g_depth);
+	if (g_ms_colour) glDeleteRenderbuffers(1, &g_ms_colour);
+	if (g_ms_depth) glDeleteRenderbuffers(1, &g_ms_depth);
+	if (g_final && g_final != g_resolve) glDeleteFramebuffers(1, &g_final);
+	if (g_final_tex) glDeleteTextures(1, &g_final_tex);
+	g_fbo = g_resolve = g_colour = g_depth = g_ms_colour = g_ms_depth = 0;
+	g_final = g_final_tex = 0;
+	{
+		int samples = g_msaa, ss = g_ss;
+		g_msaa = 0; g_ss = 1;
+		g_w = w; g_h = h;
+		if (!make_target(w, h, samples, ss)) {
+			fprintf(stderr, "hle: could not rebuild the target at %dx%d\n", w, h);
+			make_target(w, h, 0, 1);
+		}
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, g_fbo);
+	if (g_vw && g_vh)
+		glViewport(0, (g_h - g_vh) * g_ss, g_vw * g_ss, g_vh * g_ss);
+	apply_scissor();
+	fprintf(stderr, "hle: target rebuilt for a %dx%d panel\n", w, h);
+	ctx_leave();
+}
+
 int hle_host_msaa(void) { return g_msaa; }
+int hle_host_msaa_wanted(void) { return g_msaa_req; }
+int hle_host_scale_wanted(void) { return g_ss_req; }
 int hle_host_scale(void) { return g_ss; }
 
 /* ---- handing the frame over at draw resolution --------------------------- */
@@ -714,6 +884,8 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 	void *m;
 
 	g_w = w; g_h = h;
+	g_msaa_req = samples < 0 ? 0 : samples;
+	g_ss_req = scale < 1 ? 1 : scale;
 #ifndef _WIN32
 	snprintf(path, sizeof(path), "%s/glcmd.bin", dir);
 	fd = open(path, O_RDWR | O_CREAT, 0666);
@@ -775,6 +947,7 @@ int hle_host_init(const char *dir, int w, int h, int samples, int scale)
 		fprintf(stderr, "hle: OpenGL past 1.1 unavailable on this driver\n");
 		return 0;
 	}
+	gl2_resolve();
 	if (!make_target(w, h, samples, scale)) {
 		fprintf(stderr, "hle: incomplete framebuffer object\n");
 		return 0;
@@ -972,12 +1145,15 @@ static int slot_texunit(int slot)
 	return -1;
 }
 
+static void attribs_off(void);
 static void setup_arrays(unsigned int nverts)
 {
 	static const GLenum client[TADGL_ARR_COUNT] = {
 		GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_TEXTURE_COORD_ARRAY,
 		GL_NORMAL_ARRAY, GL_TEXTURE_COORD_ARRAY };
 	int i;
+
+	attribs_off();
 
 	for (i = 0; i < TADGL_ARR_COUNT; i++) {
 		const void *p = bind_array(i, nverts);
@@ -1031,6 +1207,190 @@ static void setup_arrays(unsigned int nverts)
 	 * matrix mode in skin_end(). */
 	if (g_gl.ClientActiveTexture)
 		g_gl.ClientActiveTexture(GL_TEXTURE0);
+}
+
+/* ---- GLES2 helpers ------------------------------------------------------ */
+
+static GLuint host_shader(unsigned int name, unsigned int type)
+{
+	if (!g_gl2_ok || name == 0 || name >= MAX_SHADER) return 0;
+	if (!g_shd[name].host) {
+		g_shd[name].host = g_gl2.CreateShader(type);
+		g_shd[name].type = type;
+	}
+	return g_shd[name].host;
+}
+
+static struct hprog *host_prog(unsigned int name)
+{
+	if (!g_gl2_ok || name == 0 || name >= MAX_PROG) return NULL;
+	if (!g_prg[name].host) g_prg[name].host = g_gl2.CreateProgram();
+	return &g_prg[name];
+}
+
+/* ESSL 1.00 on a desktop context.
+ *
+ * First as it came: with "#version 100" on the front if it has no version
+ * line, which ARB_ES2_compatibility (Mesa, NVIDIA, AMD) accepts verbatim. If
+ * that is refused, once more as GLSL 1.20: the precision statements and
+ * qualifiers are the only things in these shaders 1.20 does not know. */
+static char *strip_precision(const char *src, unsigned int len)
+{
+	char *out = malloc(len + 32), *o = out;
+	unsigned int i = 0;
+	static const char *const q[] = { "lowp", "mediump", "highp" };
+	if (!out) return NULL;
+	while (i < len) {
+		/* a whole "precision ...;" statement goes */
+		if (!strncmp(src + i, "precision", 9) && (i == 0 || !isalnum((unsigned char)src[i-1]))
+		    && !isalnum((unsigned char)src[i+9])) {
+			while (i < len && src[i] != ';') i++;
+			if (i < len) i++;
+			continue;
+		}
+		if (src[i] == '#' && !strncmp(src + i, "#version", 8)) {
+			while (i < len && src[i] != '\n') i++;
+			continue;
+		}
+		{
+			int k, hit = 0;
+			for (k = 0; k < 3; k++) {
+				size_t n = strlen(q[k]);
+				if (!strncmp(src + i, q[k], n) && (i == 0 || !isalnum((unsigned char)src[i-1]))
+				    && !(isalnum((unsigned char)src[i+n]) || src[i+n] == '_')) {
+					i += (unsigned int)n; hit = 1; break;
+				}
+			}
+			if (hit) continue;
+		}
+		*o++ = src[i++];
+	}
+	*o = 0;
+	return out;
+}
+
+static int try_compile(GLuint sh, const char *head, const char *body, unsigned int blen)
+{
+	const GLchar *parts[2] = { head, body };
+	GLint lens[2] = { (GLint)strlen(head), (GLint)blen };
+	GLint ok = 0;
+	g_gl2.ShaderSource(sh, 2, parts, lens);
+	g_gl2.CompileShader(sh);
+	g_gl2.GetShaderiv(sh, 0x8B81 /* GL_COMPILE_STATUS */, &ok);
+	return ok != 0;
+}
+
+static void compile_es(unsigned int name, const char *src, unsigned int len)
+{
+	GLuint sh = g_shd[name].host;
+	int has_version = (len >= 8 && !strncmp(src, "#version", 8));
+	char *alt;
+	if (try_compile(sh, has_version ? "" : "#version 100\n", src, len))
+		return;
+	alt = strip_precision(src, len);
+	if (alt && try_compile(sh, "#version 120\n", alt, (unsigned int)strlen(alt))) {
+		free(alt);
+		return;
+	}
+	free(alt);
+	if (g_shader_fail_logged < 8) {
+		char log[2048];
+		GLsizei n = 0;
+		g_shader_fail_logged++;
+		g_gl2.GetShaderInfoLog(sh, sizeof log, &n, log);
+		fprintf(stderr, "hle: shader %u (%s) did not compile:\n%.*s\n", name,
+		        g_shd[name].type == 0x8B31 ? "vertex" : "fragment", (int)n, log);
+	}
+}
+
+static void umap_set(struct hprog *p, unsigned int loc, GLint host)
+{
+	if (loc >= p->umap_n) {
+		unsigned int n = loc + 64, k;
+		GLint *m = realloc(p->umap, n * sizeof *m);
+		if (!m) return;
+		for (k = p->umap_n; k < n; k++) m[k] = -1;
+		p->umap = m; p->umap_n = n;
+	}
+	p->umap[loc] = host;
+}
+
+/* Turn every generic attribute array off on the host, for a fixed-function
+ * draw that follows a shader one: a stale attribute 0 aliases the vertex
+ * array on some drivers, and a stale pointer is a crash. */
+static void attribs_off(void)
+{
+	unsigned int i;
+	if (!g_gl2_ok) return;
+	for (i = 0; i < MAX_ATTR; i++)
+		if (g_attr_host_on[i]) {
+			g_gl2.DisableVertexAttribArray(i);
+			g_attr_host_on[i] = 0;
+		}
+}
+
+/* The GLES2 twin of setup_arrays(): point the host at every enabled generic
+ * attribute, converting GL_FIXED as bind_array does. */
+static void setup_attribs(unsigned int nverts)
+{
+	static const GLenum client[TADGL_ARR_COUNT] = {
+		GL_VERTEX_ARRAY, GL_COLOR_ARRAY, GL_TEXTURE_COORD_ARRAY,
+		GL_NORMAL_ARRAY, GL_TEXTURE_COORD_ARRAY };
+	unsigned int i;
+	for (i = 0; i < TADGL_ARR_COUNT; i++) glDisableClientState(client[i]);
+	for (i = 0; i < MAX_ATTR; i++) {
+		struct hbuf *b;
+		const unsigned char *base;
+		unsigned int stride;
+		if (!g_attr[i].on || !g_attr[i].buf || g_attr[i].buf >= MAX_BUF ||
+		    !g_buf[g_attr[i].buf].data || g_attr[i].off >= g_buf[g_attr[i].buf].size) {
+			if (g_attr_host_on[i]) { g_gl2.DisableVertexAttribArray(i); g_attr_host_on[i] = 0; }
+			continue;
+		}
+		b = &g_buf[g_attr[i].buf];
+		base = b->data + g_attr[i].off;
+		stride = g_attr[i].stride ? (unsigned int)g_attr[i].stride
+		       : (unsigned int)g_attr[i].size * type_bytes(g_attr[i].type);
+		if (g_attr[i].type == GLES_FIXED) {
+			unsigned int c = (unsigned int)g_attr[i].size, v, k;
+			if (g_aconvn[i] < nverts * c) {
+				free(g_aconv[i]);
+				g_aconv[i] = malloc(nverts * c * sizeof(float));
+				g_aconvn[i] = g_aconv[i] ? nverts * c : 0;
+			}
+			if (!g_aconv[i]) continue;
+			for (v = 0; v < nverts; v++) {
+				const int *sv = (const int *)(base + (size_t)v * stride);
+				for (k = 0; k < c; k++) g_aconv[i][v * c + k] = (float)sv[k] / 65536.0f;
+			}
+			g_gl2.VertexAttribPointer(i, g_attr[i].size, GL_FLOAT, GL_FALSE, 0, g_aconv[i]);
+		} else {
+			g_gl2.VertexAttribPointer(i, g_attr[i].size, g_attr[i].type,
+			                          g_attr[i].norm ? GL_TRUE : GL_FALSE,
+			                          (GLsizei)g_attr[i].stride, base);
+		}
+		if (!g_attr_host_on[i]) { g_gl2.EnableVertexAttribArray(i); g_attr_host_on[i] = 1; }
+	}
+}
+
+static void gles2_reset(void)
+{
+	unsigned int k;
+	if (g_gl2_ok) {
+		g_gl2.UseProgram(0);
+		for (k = 0; k < MAX_PROG; k++)
+			if (g_prg[k].host) g_gl2.DeleteProgram(g_prg[k].host);
+		for (k = 0; k < MAX_SHADER; k++)
+			if (g_shd[k].host) g_gl2.DeleteShader(g_shd[k].host);
+		attribs_off();
+	}
+	for (k = 0; k < MAX_PROG; k++) {
+		free(g_prg[k].umap);
+		g_prg[k].umap = NULL; g_prg[k].umap_n = 0; g_prg[k].host = 0; g_prg[k].linked = 0;
+	}
+	for (k = 0; k < MAX_SHADER; k++) { g_shd[k].host = 0; g_shd[k].type = 0; }
+	memset(g_attr, 0, sizeof g_attr);
+	g_cur_prog = 0;
 }
 
 /* ---- the replay loop ---------------------------------------------------- */
@@ -1689,6 +2049,7 @@ texenv_dropped:
 			}
 			g_bound_name = 0;
 			g_tex_enabled = 0;
+			gles2_reset();
 			/* The next title starts with no scissor box of its own. Leaving
 			 * the previous one set would clip the new title to a rectangle it
 			 * never asked for — the same class of cross-title leak as the
@@ -1718,7 +2079,8 @@ texenv_dropped:
 		case TADGL_DRAWARRAYS: {
 			unsigned int v[3]; ring_get(v,12);
 			want_tex_if_missing();
-			setup_arrays((unsigned)v[1] + (unsigned)v[2]);
+			if (g_cur_prog) setup_attribs((unsigned)v[1] + (unsigned)v[2]);
+			else            setup_arrays((unsigned)v[1] + (unsigned)v[2]);
 			glDrawArrays(v[0], (GLint)v[1], (GLsizei)v[2]);
 			g_draws++;
 			break;
@@ -1764,10 +2126,152 @@ texenv_dropped:
 					for (i = 0; i < n; i++) if (idx[i] > maxi) maxi = idx[i];
 				}
 				want_tex_if_missing();
-				setup_arrays(maxi + 1);
+				if (g_cur_prog) setup_attribs(maxi + 1);
+				else            setup_arrays(maxi + 1);
 				glDrawElements(v[0], (GLsizei)n, v[2], idx);
 				g_draws++;
 			}
+			break;
+		}
+		/* ---- GLES2 --------------------------------------------------- */
+		case TADGL_SHADERSOURCE: {
+			unsigned int hd[3];
+			const unsigned char *src;
+			ring_get(hd, 12);
+			src = (p.len > 12) ? ring_peek(p.len - 12, &scratch, &scap) : NULL;
+			if (!g_gl2_ok) { g_gl2_dropped++; break; }
+			if (!host_shader(hd[0], hd[1])) break;
+			/* len 0 is "create only" — the source follows in its own packet. */
+			if (hd[2] && src) compile_es(hd[0], (const char *)src, hd[2]);
+			break;
+		}
+		case TADGL_DELETESHADER: {
+			unsigned int n; ring_get(&n, 4);
+			if (g_gl2_ok && n < MAX_SHADER && g_shd[n].host) {
+				g_gl2.DeleteShader(g_shd[n].host);
+				g_shd[n].host = 0;
+			}
+			break;
+		}
+		case TADGL_ATTACHSHADER: case TADGL_DETACHSHADER: {
+			unsigned int v[2]; struct hprog *pr;
+			ring_get(v, 8);
+			pr = host_prog(v[0]);
+			if (!pr || v[1] >= MAX_SHADER || !g_shd[v[1]].host) break;
+			if (p.op == TADGL_ATTACHSHADER) g_gl2.AttachShader(pr->host, g_shd[v[1]].host);
+			else                            g_gl2.DetachShader(pr->host, g_shd[v[1]].host);
+			break;
+		}
+		case TADGL_BINDATTRIB: {
+			unsigned int hd[3]; const unsigned char *nm; struct hprog *pr;
+			char name[256];
+			ring_get(hd, 12);
+			nm = (p.len > 12) ? ring_peek(p.len - 12, &scratch, &scap) : NULL;
+			pr = host_prog(hd[0]);
+			if (!pr || !nm || hd[2] >= sizeof name) break;
+			memcpy(name, nm, hd[2]); name[hd[2]] = 0;
+			g_gl2.BindAttribLocation(pr->host, hd[1], name);
+			break;
+		}
+		case TADGL_LINKPROGRAM: {
+			unsigned int n; struct hprog *pr; GLint ok = 0;
+			ring_get(&n, 4);
+			pr = host_prog(n);
+			if (!pr) break;
+			g_gl2.LinkProgram(pr->host);
+			g_gl2.GetProgramiv(pr->host, 0x8B82 /* GL_LINK_STATUS */, &ok);
+			pr->linked = ok != 0;
+			if (!ok && g_shader_fail_logged < 8) {
+				char log[2048]; GLsizei ln = 0;
+				g_shader_fail_logged++;
+				g_gl2.GetProgramInfoLog(pr->host, sizeof log, &ln, log);
+				fprintf(stderr, "hle: program %u did not link:\n%.*s\n", n, (int)ln, log);
+			}
+			break;
+		}
+		case TADGL_UNIFORMLOC: {
+			unsigned int hd[3]; const unsigned char *nm; struct hprog *pr;
+			char name[256];
+			ring_get(hd, 12);
+			nm = (p.len > 12) ? ring_peek(p.len - 12, &scratch, &scap) : NULL;
+			pr = host_prog(hd[0]);
+			if (!pr || !nm || hd[2] >= sizeof name) break;
+			memcpy(name, nm, hd[2]); name[hd[2]] = 0;
+			umap_set(pr, hd[1], g_gl2.GetUniformLocation(pr->host, name));
+			break;
+		}
+		case TADGL_USEPROGRAM: {
+			unsigned int n; ring_get(&n, 4);
+			if (!g_gl2_ok) { g_gl2_dropped++; break; }
+			if (n == 0) { g_gl2.UseProgram(0); g_cur_prog = 0; break; }
+			{
+				struct hprog *pr = host_prog(n);
+				if (!pr) break;
+				g_gl2.UseProgram(pr->host);
+				g_cur_prog = n;
+			}
+			break;
+		}
+		case TADGL_DELETEPROGRAM: {
+			unsigned int n; ring_get(&n, 4);
+			if (g_gl2_ok && n < MAX_PROG && g_prg[n].host) {
+				if (g_cur_prog == n) { g_gl2.UseProgram(0); g_cur_prog = 0; }
+				g_gl2.DeleteProgram(g_prg[n].host);
+				g_prg[n].host = 0; g_prg[n].linked = 0;
+				free(g_prg[n].umap); g_prg[n].umap = NULL; g_prg[n].umap_n = 0;
+			}
+			break;
+		}
+		case TADGL_UNIFORM: {
+			unsigned int hd[3]; const unsigned char *data;
+			struct hprog *pr;
+			GLint loc = -1;
+			ring_get(hd, 12);
+			data = (p.len > 12) ? ring_peek(p.len - 12, &scratch, &scap) : NULL;
+			if (!g_gl2_ok || !g_cur_prog || !data) break;
+			pr = &g_prg[g_cur_prog];
+			if (hd[0] < pr->umap_n) loc = pr->umap[hd[0]];
+			if (loc < 0) break;
+			{
+				const GLfloat *f = (const GLfloat *)data;
+				const GLint   *iv = (const GLint *)data;
+				GLsizei c = (GLsizei)hd[2];
+				switch (hd[1]) {
+				case TADGL_U1F: g_gl2.Uniform1fv(loc, c, f); break;
+				case TADGL_U2F: g_gl2.Uniform2fv(loc, c, f); break;
+				case TADGL_U3F: g_gl2.Uniform3fv(loc, c, f); break;
+				case TADGL_U4F: g_gl2.Uniform4fv(loc, c, f); break;
+				case TADGL_U1I: g_gl2.Uniform1iv(loc, c, iv); break;
+				case TADGL_U2I: g_gl2.Uniform2iv(loc, c, iv); break;
+				case TADGL_U3I: g_gl2.Uniform3iv(loc, c, iv); break;
+				case TADGL_U4I: g_gl2.Uniform4iv(loc, c, iv); break;
+				case TADGL_UM2: g_gl2.UniformMatrix2fv(loc, c, GL_FALSE, f); break;
+				case TADGL_UM3: g_gl2.UniformMatrix3fv(loc, c, GL_FALSE, f); break;
+				case TADGL_UM4: g_gl2.UniformMatrix4fv(loc, c, GL_FALSE, f); break;
+				default: break;
+				}
+			}
+			break;
+		}
+		case TADGL_ATTRIBPOINTER: {
+			unsigned int v[7]; ring_get(v, 28);
+			if (v[0] < MAX_ATTR) {
+				g_attr[v[0]].buf = v[1]; g_attr[v[0]].size = (int)v[2];
+				g_attr[v[0]].type = v[3]; g_attr[v[0]].norm = v[4];
+				g_attr[v[0]].stride = (int)v[5]; g_attr[v[0]].off = v[6];
+			}
+			break;
+		}
+		case TADGL_ATTRIBENABLE: {
+			unsigned int v[2]; ring_get(v, 8);
+			if (v[0] < MAX_ATTR) g_attr[v[0]].on = v[1];
+			break;
+		}
+		case TADGL_ATTRIBVALUE: {
+			unsigned int idx; float xyzw[4];
+			ring_get(&idx, 4); ring_get(xyzw, 16);
+			if (g_gl2_ok && idx < MAX_ATTR)
+				g_gl2.VertexAttrib4f(idx, xyzw[0], xyzw[1], xyzw[2], xyzw[3]);
 			break;
 		}
 		default:

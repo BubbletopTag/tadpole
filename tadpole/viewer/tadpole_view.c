@@ -792,6 +792,32 @@ static uint16_t map_key(SDL_Keycode k, int rotate)
  * ROTATION: rotating an image R degrees clockwise sends source (fx,fy) to
  * logical (H-1-fy, fx) for R=90, so the inverse is fx=ly, fy=H-1-lx.
  */
+/* ---- the pointer, for a device whose input IS a pointer ------------------
+ *
+ * The LeapTV navigates by a wand the camera tracks; shim/tadpole_wand.c
+ * stands in for that controller and reads the mouse from this file. Panel
+ * pixels, an SDL-style button mask (bit 0 left, 1 middle, 2 right) and a
+ * counter, rewritten in place on every motion and button event. Written
+ * unconditionally: 32 bytes a move is nothing, and the reader decides whether
+ * it cares. */
+static int      g_wand_fd = -1;
+static unsigned g_wand_buttons;
+static void wand_publish(int fx, int fy, unsigned buttons)
+{
+	static struct { unsigned magic, x, y, buttons, seq, pad[3]; } st;
+	if (g_wand_fd < 0) {
+		char p[600];
+		snprintf(p, sizeof p, "%s/pointer.bin", g_dir);
+		g_wand_fd = open(p, O_RDWR | O_CREAT, 0666);
+		if (g_wand_fd < 0) return;
+		if (ftruncate(g_wand_fd, 4096) != 0) { /* a short file still reads */ }
+	}
+	st.magic = 0x444E4157u;
+	st.x = (unsigned)(fx < 0 ? 0 : fx); st.y = (unsigned)(fy < 0 ? 0 : fy);
+	st.buttons = buttons; st.seq++;
+	if (pwrite(g_wand_fd, &st, sizeof st, 0) < 0) { /* the next move retries */ }
+}
+
 static void event_to_fb(int rotate, int w, int h, int lx, int ly,
                         int *fx, int *fy)
 {
@@ -3488,6 +3514,9 @@ int main(int argc, char **argv)
 				tex = nt; tex_top = ntt;
 				SDL_SetTextureBlendMode(tex_top, SDL_BLENDMODE_BLEND);
 				w = nw; h = nh;
+				/* The GPU target was built for the old size; see
+				 * hle_host_resize() for why that is not cosmetic. */
+				if (hle_host_ready()) hle_host_resize(w, h);
 				set_logical(ren, rotate, w, h);
 				{
 					int ww = (rotate == 90 || rotate == 270) ? h : w;
@@ -3581,6 +3610,14 @@ int main(int argc, char **argv)
 				int fx, fy;
 				event_to_fb(rotate, w, h, e.button.x,
 				            e.button.y - UI_BAR_H, &fx, &fy);
+				{
+					unsigned bit = e.button.button == SDL_BUTTON_LEFT ? 1u
+					             : e.button.button == SDL_BUTTON_MIDDLE ? 2u
+					             : e.button.button == SDL_BUTTON_RIGHT ? 4u : 0u;
+					if (e.type == SDL_MOUSEBUTTONDOWN) g_wand_buttons |= bit;
+					else                               g_wand_buttons &= ~bit;
+					wand_publish(fx, fy, g_wand_buttons);
+				}
 				touching = (e.type == SDL_MOUSEBUTTONDOWN);
 				g_touch_mark_x = fx; g_touch_mark_y = fy;
 				send_event(EV_TOUCH, EV_ABS, ABS_X, fx);
@@ -3614,6 +3651,14 @@ int main(int argc, char **argv)
 				break;
 			}
 			case SDL_MOUSEMOTION:
+				{
+					/* THE POINTER, EVEN WHEN NOTHING IS PRESSED. A touchscreen
+					 * has no hover; a LeapTV's wand is nothing but hover. */
+					int px, py;
+					event_to_fb(rotate, w, h, e.motion.x,
+					            e.motion.y - UI_BAR_H, &px, &py);
+					wand_publish(px, py, g_wand_buttons);
+				}
 				if (touching) {
 					int fx, fy;
 					event_to_fb(rotate, w, h, e.motion.x,
@@ -4230,8 +4275,8 @@ int main(int argc, char **argv)
 		 * next launch. One int compare per frame; the rebuild only happens on
 		 * an actual change. */
 		if (hle_host_ready() &&
-		    (ui_cfg()->msaa != hle_host_msaa() ||
-		     ui_cfg()->render_scale != hle_host_scale())) {
+		    (ui_cfg()->msaa != hle_host_msaa_wanted() ||
+		     ui_cfg()->render_scale != hle_host_scale_wanted())) {
 			hle_host_set_quality(ui_cfg()->msaa, ui_cfg()->render_scale);
 			if (hle_host_scale() > 1 && hle_host_msaa())
 				ui_status("%dx scale + %dx AA", hle_host_scale(), hle_host_msaa());

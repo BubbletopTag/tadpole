@@ -214,9 +214,14 @@ static u32 g_frames;
  * is what stops animated content smearing across frames. */
 extern void tadpole_gl_present(void);
 
+/* The LeapTV's stand-in controller (tadpole_wand.c) takes its frame tick from
+ * here. Weak: the builds without it resolve this to nothing. */
+extern void tad_wand_tick(void) __attribute__((weak));
+
 u32 eglSwapBuffers(void *dpy, void *surf)
 {
 	(void)dpy; (void)surf;
+	if (tad_wand_tick) tad_wand_tick();
 	tadpole_gl_present();
 	g_frames++;
 	return EGL_TRUE;
@@ -253,3 +258,92 @@ u32 tadpole_egl_frames(void) { return g_frames; }
 void  __vr5_set_swap_buffer_callback(void *cb) { (void)cb; }
 void *__global_ftn_vg_dispatch_table;
 void *tad_egl_proc_list __asm__("_ZN3EGL11g_pProcListE");
+
+/* ---- EGL entry points the LF3000 (Mali) firmware imports ---------------
+ *
+ * The LeapTV's Brio display module and its Qt stack import these beyond the
+ * set the LeapPad2 needed. Most only have to RESOLVE — the fbdev path we give
+ * the guest never reaches them — and the ones that are queried answer for the
+ * one config we hand out. Mali's own extensions (DrawingOrgSize, the swap
+ * callback) are accepted and ignored. */
+
+#define EGL_BUFFER_SIZE     0x3020
+#define EGL_ALPHA_SIZE      0x3021
+#define EGL_BLUE_SIZE       0x3022
+#define EGL_GREEN_SIZE      0x3023
+#define EGL_RED_SIZE        0x3024
+#define EGL_DEPTH_SIZE      0x3025
+#define EGL_STENCIL_SIZE    0x3026
+#define EGL_CONFIG_ID       0x3028
+#define EGL_NATIVE_VISUAL_ID   0x302E
+#define EGL_NATIVE_VISUAL_TYPE 0x302F
+#define EGL_SURFACE_TYPE    0x3033
+#define EGL_RENDERABLE_TYPE 0x3040
+#define EGL_MAX_PBUFFER_WIDTH  0x302C
+#define EGL_MAX_PBUFFER_HEIGHT 0x302A
+#define EGL_MAX_PBUFFER_PIXELS 0x302B
+
+u32 eglGetConfigAttrib(void *dpy, void *config, i32 attr, i32 *value)
+{
+	(void)dpy; (void)config;
+	if (!value) return EGL_FALSE;
+	switch (attr) {
+	case EGL_BUFFER_SIZE:   *value = 32; break;
+	case EGL_RED_SIZE: case EGL_GREEN_SIZE: case EGL_BLUE_SIZE:
+	case EGL_ALPHA_SIZE:    *value = 8; break;
+	case EGL_DEPTH_SIZE:    *value = 16; break;
+	case EGL_STENCIL_SIZE:  *value = 0; break;
+	case EGL_CONFIG_ID:     *value = 1; break;
+	case EGL_SURFACE_TYPE:  *value = 0x0004 | 0x0001; break;  /* WINDOW | PBUFFER */
+	case EGL_RENDERABLE_TYPE: *value = 0x0001 | 0x0004; break; /* ES1 | ES2 */
+	case EGL_MAX_PBUFFER_WIDTH:  *value = 2048; break;
+	case EGL_MAX_PBUFFER_HEIGHT: *value = 2048; break;
+	case EGL_MAX_PBUFFER_PIXELS: *value = 2048 * 2048; break;
+	case EGL_NATIVE_VISUAL_ID: case EGL_NATIVE_VISUAL_TYPE: *value = 0; break;
+	default: *value = 0; break;
+	}
+	return EGL_TRUE;
+}
+
+u32 eglGetConfigs(void *dpy, void **configs, i32 config_size, i32 *num_config)
+{
+	(void)dpy;
+	if (configs && config_size > 0) configs[0] = TAD_CONFIG;
+	if (num_config) *num_config = (configs && config_size > 0) ? 1 : 1;
+	return EGL_TRUE;
+}
+
+/* No extension entry points are offered, and the guest's ordinary calls bind
+ * through the loader — so NULL is the honest answer, and every caller checks. */
+void *eglGetProcAddress(const char *name) { (void)name; return NULL; }
+
+void *eglCreatePbufferSurface(void *dpy, void *config, const i32 *a)
+{ (void)dpy; (void)config; (void)a; return TAD_SURFACE; }
+void *eglCreatePixmapSurface(void *dpy, void *config, void *pixmap, const i32 *a)
+{ (void)dpy; (void)config; (void)pixmap; (void)a; return TAD_SURFACE; }
+u32 eglBindTexImage(void *dpy, void *surf, i32 buffer)
+{ (void)dpy; (void)surf; (void)buffer; return EGL_TRUE; }
+u32 eglReleaseTexImage(void *dpy, void *surf, i32 buffer)
+{ (void)dpy; (void)surf; (void)buffer; return EGL_TRUE; }
+u32 eglQuerySurface(void *dpy, void *surf, i32 attr, i32 *value)
+{ (void)dpy; (void)surf; (void)attr; if (value) *value = 0; return EGL_TRUE; }
+u32 eglQueryContext(void *dpy, void *ctx, i32 attr, i32 *value)
+{ (void)dpy; (void)ctx; if (value) *value = (attr == 0x3098) ? 2 : 0; return EGL_TRUE; }
+u32 eglSurfaceAttrib(void *dpy, void *surf, i32 attr, i32 value)
+{ (void)dpy; (void)surf; (void)attr; (void)value; return EGL_TRUE; }
+u32 eglCopyBuffers(void *dpy, void *surf, void *target)
+{ (void)dpy; (void)surf; (void)target; return EGL_TRUE; }
+u32 eglWaitClient(void) { return EGL_TRUE; }
+u32 eglQueryAPI(void) { return 0x30A0; }                    /* EGL_OPENGL_ES_API */
+
+/* EGLImage: no images are ever created, and EGL_NO_IMAGE_KHR is a NULL the
+ * caller has to check for. */
+void *eglCreateImageKHR(void *dpy, void *ctx, u32 target, void *buffer, const i32 *a)
+{ (void)dpy; (void)ctx; (void)target; (void)buffer; (void)a; return NULL; }
+u32 eglDestroyImageKHR(void *dpy, void *image) { (void)dpy; (void)image; return EGL_TRUE; }
+
+/* Mali extensions. Accepted, ignored. */
+u32 eglSetDrawingOrgSize(void) { return EGL_TRUE; }
+u32 eglEnableDrawingOrgSize(void) { return EGL_TRUE; }
+u32 eglDisableDrawingOrgSize(void) { return EGL_TRUE; }
+u32 eglSetSwapbufferCallback(void) { return EGL_TRUE; }

@@ -595,6 +595,35 @@ for prof in 0 1 2 3 All; do
 done
 mkdir -p LF/Bulk/Data/Uploads/1 LF/Bulk/Data/Uploads/2 LF/Bulk/Data/Uploads/3
 
+# THE LeapTV's BULK PARTITION ARRIVES WHOLE, NOT AS PACKAGES.
+#
+# Every other device's /LF/Bulk is assembled from downloaded .lf2 packages.
+# The LeapTV's DONUT image carries the partition itself — titles, language
+# pack, package databases, all of it — and tools/install-leaptv-donut.sh
+# lays it out as rootfs/<name>/bulk beside emmc_rfs. Mirror it here the way
+# LF/Base is mirrored: what the guest WRITES (Data/, the databases) is copied
+# once and then left alone, and everything else is shadowed, so the package
+# daemon's meta.inf rewrites land in the sysroot and rootfs/ stays pristine.
+BULK_SRC="$(dirname "$ROOTFS")/bulk"
+if [ -d "$BULK_SRC" ]; then
+    echo "==> /LF/Bulk from $(basename "$(dirname "$ROOTFS")")/bulk"
+    for e in "$BULK_SRC"/*; do
+        [ -e "$e" ] || continue
+        b="$(basename "$e")"
+        case "$b" in
+            Data|*.db|*.json)
+                [ -e "LF/Bulk/$b" ] || cp -a "$e" "LF/Bulk/$b" ;;
+            *)
+                if [ -d "$e" ]; then
+                    [ -L "LF/Bulk/$b" ] && rm -f "LF/Bulk/$b"
+                    shadow_meta "$e" "LF/Bulk/$b"
+                else
+                    lns "$e" "LF/Bulk/$b"
+                fi ;;
+        esac
+    done
+fi
+
 # EVERY INSTALLED TITLE NEEDS A SAVE DIRECTORY, AND NOTHING CREATED IT.
 #
 # A title's save file goes to /LF/Bulk/Data/Local/<profile>/<ProductID>/, and

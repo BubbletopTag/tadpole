@@ -17,6 +17,9 @@ int  hle_host_init(const char *dir, int w, int h, int samples, int scale);
  * Anything the driver cannot honour is clamped and reported. Neither is
  * visible to the guest, which receives its 480x272 either way. */
 void hle_host_set_quality(int samples, int scale);
+void hle_host_resize(int w, int h);
+int  hle_host_msaa_wanted(void);
+int  hle_host_scale_wanted(void);
 int  hle_host_msaa(void);
 int  hle_host_scale(void);
 void hle_host_shutdown(void);

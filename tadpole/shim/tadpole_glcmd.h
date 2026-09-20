@@ -154,7 +154,46 @@ enum tadgl_op {
 	TADGL_LIGHTMODEL,       /* u32 pname, count;        then count floats */
 	TADGL_NORMAL,           /* float x, y, z */
 
+	/* ---- GLES 2.0: shaders, programs, uniforms, generic attributes -------
+	 * Appended for the LeapTV, whose whole system UI is a GLES2 program
+	 * (see runtime/devices/leaptv.conf). Same rules as everything above:
+	 * appended, never inserted, and no pointer on the wire.
+	 *
+	 * NAMES ARE THE GUEST'S. Shader and program names are the numbers the
+	 * guest handed the title; the host keeps its own objects in a table
+	 * indexed by them, exactly as it does for textures and buffers.
+	 *
+	 * LOCATIONS ARE THE GUEST'S TOO. The guest cannot ask the host what
+	 * location a uniform or attribute got — there is no reply channel — so it
+	 * assigns its own by parsing the shader source, tells the host the name
+	 * behind each number (BINDATTRIB before the link, UNIFORMLOC after it),
+	 * and from then on both sides speak in the guest's numbers. */
+	TADGL_SHADERSOURCE,     /* u32 shader, type, len; then len bytes of source */
+	TADGL_DELETESHADER,     /* u32 shader */
+	TADGL_ATTACHSHADER,     /* u32 program, shader */
+	TADGL_DETACHSHADER,     /* u32 program, shader */
+	TADGL_BINDATTRIB,       /* u32 program, index, len; then len bytes of name */
+	TADGL_LINKPROGRAM,      /* u32 program */
+	TADGL_UNIFORMLOC,       /* u32 program, guest_loc, len; then len bytes of name */
+	TADGL_USEPROGRAM,       /* u32 program (0 = fixed function) */
+	TADGL_DELETEPROGRAM,    /* u32 program */
+	TADGL_UNIFORM,          /* u32 guest_loc, kind, count; then count*words payload
+	                         * kind: see enum tadgl_ukind */
+	TADGL_ATTRIBPOINTER,    /* u32 index, buffer, i32 size, u32 type, u32 norm,
+	                         * i32 stride, u32 offset */
+	TADGL_ATTRIBENABLE,     /* u32 index, u32 on */
+	TADGL_ATTRIBVALUE,      /* u32 index, float x,y,z,w */
+
 	TADGL_OP_COUNT
+};
+
+/* `kind` for TADGL_UNIFORM: what glUniform* variant the guest was handed, so
+ * the host can call the matching one. Words per element follow from it. */
+enum tadgl_ukind {
+	TADGL_U1F = 0, TADGL_U2F, TADGL_U3F, TADGL_U4F,
+	TADGL_U1I, TADGL_U2I, TADGL_U3I, TADGL_U4I,
+	TADGL_UM2, TADGL_UM3, TADGL_UM4,
+	TADGL_UKIND_COUNT
 };
 
 /* `which` for TADGL_ARRAYPOINTER / TADGL_CLIENTSTATE. Small dense values rather

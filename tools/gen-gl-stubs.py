@@ -42,6 +42,8 @@ PROJ = os.path.dirname(HERE)
 STUBS = os.path.join(PROJ, "tadpole", "shim", "tadpole_gles_stubs.c")
 CORE = os.path.join(PROJ, "tadpole", "shim", "tadpole_gles_core.c")
 EGL = os.path.join(PROJ, "tadpole", "shim", "tadpole_egl.c")
+# The GLES2 half lives beside the core and its definitions count the same.
+GLES2 = os.path.join(PROJ, "tadpole", "shim", "tadpole_gles2.c")
 
 # Entry points that must do real work for 3D to be correct. Stubbing them keeps
 # a title running but renders it wrong, so they are called out separately.
@@ -227,7 +229,7 @@ def main(argv):
         sys.stderr.write("gen-gl-stubs: no device libGLESv1_CM.so found\n")
         return 1
 
-    real_src = defined_in(CORE) | defined_in(EGL)
+    real_src = defined_in(CORE) | defined_in(EGL) | defined_in(GLES2)
     real = real_src
     stubs = stub_names()
     built = exported_by_us()

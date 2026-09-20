@@ -120,7 +120,8 @@ ASOUND_OUT := $(SHIMLIBS)/libasound.so.2
 
 EGL_SRC   := shim/tadpole_egl.c
 GLES_SRC  := shim/tadpole_gles_core.c shim/tadpole_gles_stubs.c \
-             shim/tadpole_gles_hle.c shim/tadpole_gles_debug.c
+             shim/tadpole_gles_hle.c shim/tadpole_gles_debug.c \
+             shim/tadpole_gles2.c
 SHIMLIBS_GL := ../runtime/shimlibs-gl
 # CHAIN, DO NOT REPLACE. The stock libGLESv1_CM.so.1.1 is a 1.9 MB blob that
 # exports 697 symbols, only 180 of which are GL — it also carries Flash Lite
@@ -599,12 +600,16 @@ shimegl: $(SHIMLIBS_EGL)/$(REAL_DL) shimegl-links
 # guest its stack. `readelf --dyn-syms runtime/shimlibs-egl/libasound.so.2`
 # lists snd_* and nothing else; that is the check, not this comment.
 .PHONY: shimegl-links
-shimegl-links: $(GLES_OUT) $(ASOUND_OUT)
+shimegl-links: $(SHIM_OUT_EGL) $(ASOUND_OUT)
 	@mkdir -p $(SHIMLIBS_EGL)
-	@cp $(GLES_OUT) $(SHIMLIBS_EGL)/libGLESv1_CM.so
+	@# EVERY GL NAME IS libEGL.so — see the note above $(SHIM_OUT_EGL). A
+	@# symlink, never a copy: a copy is a second inode, and a second inode is
+	@# a second shim in any guest that links two of these names.
+	@rm -f $(SHIMLIBS_EGL)/libGLESv1_CM.so
+	@ln -sf libEGL.so $(SHIMLIBS_EGL)/libGLESv1_CM.so
 	@# By SONAME, which is the filename the loader looks for.
-	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libGLESv1_CM.so.1
-	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libopengles_lite.so
+	@ln -sf libEGL.so $(SHIMLIBS_EGL)/libGLESv1_CM.so.1
+	@ln -sf libEGL.so $(SHIMLIBS_EGL)/libopengles_lite.so
 	@# libGLES_CM.so IS A THIRD NAME FOR THE SAME API AND THE LEAPPAD3 IS THE
 	@# FIRST DEVICE TO ASK FOR IT — and it is not cosmetic, because on this
 	@# device that library is Mali's COMBINED GLES+EGL: it defines eglGetDisplay
@@ -616,9 +621,10 @@ shimegl-links: $(GLES_OUT) $(ASOUND_OUT)
 	@# correctly refuses a handle it never issued, and the title dies on
 	@#     <ASSERT>: [0x5] eglInitialize() failed
 	@# which reads like our EGL being broken rather than there being two.
-	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libGLES_CM.so
-	@# AND libGLESv2.so, FOR THE SAME REASON AND NOT BECAUSE ANYTHING WANTS
-	@# GLES2. It is Mali's combined library too — eglGetDisplay, eglInitialize,
+	@ln -sf libEGL.so $(SHIMLIBS_EGL)/libGLES_CM.so
+	@# AND libGLESv2.so — which, since the LeapTV, IS wanted for GLES2: the
+	@# same object carries shim/tadpole_gles2.c. The original reason stands
+	@# too. It is Mali's combined library too — eglGetDisplay, eglInitialize,
 	@# eglMakeCurrent and eglSwapBuffers are all defined in it — and it sits
 	@# BEFORE libEGL.so in BrioWrapper's DT_NEEDED, so it won the global lookup
 	@# and the stock Mali eglInitialize ran instead of ours. Ours was never
@@ -630,7 +636,7 @@ shimegl-links: $(GLES_OUT) $(ASOUND_OUT)
 	@# glUniform*, glVertexAttrib*), so nothing here is losing an API — it is
 	@# only losing a second EGL. Anything that DOES want real GLES2 will fail
 	@# loudly at load time rather than quietly, which is the right trade.
-	@ln -sf libGLESv1_CM.so $(SHIMLIBS_EGL)/libGLESv2.so
+	@ln -sf libEGL.so $(SHIMLIBS_EGL)/libGLESv2.so
 	@cp $(ASOUND_OUT) $(SHIMLIBS_EGL)/libasound.so.2
 	@# libAudio.so's DT_NEEDED says libasound.so.2, and so does the SONAME, so
 	@# no alias is needed here — unlike the GL pair above.
@@ -642,14 +648,26 @@ shimegl-links: $(GLES_OUT) $(ASOUND_OUT)
 # path for it, and shimlibs/libdl.so.9 (which our libEGL has in NEEDED) would
 # then not resolve. A second copy beside the library that needs it keeps
 # shimlibs-egl self-contained.
-$(SHIM_OUT_EGL): $(SHIM_SRC) $(EGL_SRC) $(GLES_OUT) $(SHIMLIBS)/$(REAL_DL) \
+# ONE OBJECT FOR EVERY GL NAME, AND THIS IS WHY. The LeapTV's shell,
+# GlasgowUI, links libGLESv2.so at the first level and libEGL.so only
+# transitively (through six of its own libraries), so a shim that lives only
+# in libEGL.so arrives too late to win symbol lookup — and its own
+# dlsym(RTLD_NEXT, "open") comes back round to itself, which the guard in
+# tadpole_shim.c stops with exit 70. So the GLES sources are compiled INTO this
+# object rather than chained from libGLESv1_CM.so, and shimegl-links below
+# points every GL name at this one file. uClibc's loader recognises a library
+# it has already mapped by device and inode, so a guest that names two of
+# those — BrioWrapper links libGLESv2.so AND libEGL.so — still gets exactly
+# one copy, which is the invariant this whole directory exists to keep.
+WAND_SRC := shim/tadpole_wand.c
+$(SHIM_OUT_EGL): $(SHIM_SRC) $(EGL_SRC) $(GLES_SRC) $(WAND_SRC) shim/tadpole_glcmd.h \
+                 shim/tadpole_gles_debug.h $(SHIMLIBS)/$(REAL_DL) \
                  $(SHIMLIBS_EGL)/$(REAL_EGL) | need-libs
 	@mkdir -p $(SHIMLIBS_EGL)
 	$(CLANG) $(ARMFLAGS) -fPIC -shared -nostdlib -O2 -Wall \
 		-Wno-incompatible-library-redeclaration \
 		-fno-stack-protector -fno-builtin \
-		-fuse-ld=lld -Wl,-soname,libEGL.so -o $@ $(SHIM_SRC) $(EGL_SRC) \
-		-L$(SHIMLIBS_GL) -l:libGLESv1_CM.so \
+		-fuse-ld=lld -Wl,-soname,libEGL.so -o $@ $(SHIM_SRC) $(EGL_SRC) $(GLES_SRC) $(WAND_SRC) \
 		-L$(SHIMLIBS_EGL) -l:$(REAL_EGL) \
 		$(SHIMLIBS)/$(REAL_DL) $(GUESTLIBS)/libc.so.0
 	@echo "built $@"

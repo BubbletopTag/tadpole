@@ -525,6 +525,136 @@ static void dbg(const char *msg)
 		write(g_logfd, msg, n);
 }
 
+/* ---- the real dlopen, found WITHOUT RTLD_NEXT --------------------------
+ *
+ * RTLD_NEXT IS NOT "THE NEXT DEFINITION". uClibc's do_dlsym walks the symbol
+ * table chain from the entry after the caller and searches each later
+ * module's scope in turn — so whether a libdl is ever reached depends on the
+ * EXECUTABLE's link order, not on ours. The LeapTV's GlasgowUI names us at
+ * the first level as libGLESv2.so and names no libdl at all; every module
+ * after us in its chain has a scope without one, the lookup returns NULL, and
+ * the loader's "Unable to resolve symbol" is left behind for the next
+ * dlerror() to report — which made every Brio module load look like a
+ * missing symbol. (The probe that proved it, linked libEGL.so then
+ * libdl.so.0, worked perfectly: there libdl WAS the next entry.)
+ *
+ * So ask the loader for its object list instead, find the libdl it mapped —
+ * ours (libdl.so.9) or the device's, whichever comes first — and read the
+ * symbol out of its own dynamic symbol table. That is what dlsym does
+ * underneath, minus the scope rules that were the problem. uClibc's libdl has
+ * only a GNU hash table, so the symbol count comes from walking its chains.
+ */
+struct tad_phdr_info {
+	u32         addr;
+	const char *name;
+	const struct { u32 type, offset, vaddr, paddr, filesz, memsz, flags, align; } *phdr;
+	u16         phnum;
+};
+extern int dl_iterate_phdr(int (*cb)(struct tad_phdr_info *, size_t, void *), void *data);
+
+struct tad_dlsym_req { const char *lib; const char *name; void *found; };
+
+static int libdl_cb(struct tad_phdr_info *info, size_t size, void *data)
+{
+	struct tad_dlsym_req *req = data;
+	const char *base, *nm = info->name;
+	const char *strtab = 0;
+	const u8 *symtab = 0;
+	const u32 *gnuhash = 0, *sysvhash = 0;
+	u32 i, nsyms = 0;
+	(void)size;
+	if (!nm) return 0;
+	base = nm;
+	for (i = 0; nm[i]; i++) if (nm[i] == '/') base = nm + i + 1;
+	/* "libdl" matches libdl.so.9 and libdl-0.9.33.1-git.so, not libdlfoo. */
+	{
+		const char *want = req->lib;
+		u32 k = 0;
+		while (want[k] && base[k] == want[k]) k++;
+		if (want[k] || !(base[k] == '.' || base[k] == '-')) return 0;
+	}
+	for (i = 0; i < info->phnum; i++) {
+		const s32 *dyn;
+		if (info->phdr[i].type != 2) continue;               /* PT_DYNAMIC */
+		dyn = (const s32 *)(info->addr + info->phdr[i].vaddr);
+		for (; dyn[0] != 0; dyn += 2) {
+			u32 v = (u32)dyn[1];
+			/* Entries stay as the file wrote them here: a small vaddr, which
+			 * wants the load base adding. */
+			if (dyn[0] == 5 || dyn[0] == 6 || dyn[0] == 4 || dyn[0] == (s32)0x6ffffef5)
+				if (v < info->addr) v += info->addr;
+			if (dyn[0] == 5) strtab = (const char *)v;
+			else if (dyn[0] == 6) symtab = (const u8 *)v;
+			else if (dyn[0] == 4) sysvhash = (const u32 *)v;
+			else if (dyn[0] == (s32)0x6ffffef5) gnuhash = (const u32 *)v;
+		}
+	}
+	if (!strtab || !symtab) return 0;
+	if (sysvhash) {
+		nsyms = sysvhash[1];
+	} else if (gnuhash) {
+		u32 nbuckets = gnuhash[0], symoff = gnuhash[1], bloom = gnuhash[2];
+		const u32 *buckets = gnuhash + 4 + bloom;
+		const u32 *chain = buckets + nbuckets;
+		u32 last = 0;
+		for (i = 0; i < nbuckets; i++) if (buckets[i] > last) last = buckets[i];
+		if (last >= symoff) {
+			while (!(chain[last - symoff] & 1)) last++;
+			nsyms = last + 1;
+		}
+	}
+	for (i = 1; i < nsyms; i++) {
+		const u8 *sym = symtab + i * 16;
+		u32 st_name = *(const u32 *)sym, st_value = *(const u32 *)(sym + 4);
+		u16 st_shndx = *(const u16 *)(sym + 14);
+		const char *a = strtab + st_name, *b = req->name;
+		if (!st_value || !st_shndx) continue;
+		while (*a && *a == *b) { a++; b++; }
+		if (*a || *b) continue;
+		req->found = (void *)(info->addr + st_value);
+		return 1;
+	}
+	return 0;
+}
+
+void *tad_module_symbol(const char *lib, const char *name)
+{
+	struct tad_dlsym_req req;
+	req.lib = lib; req.name = name; req.found = 0;
+	dl_iterate_phdr(libdl_cb, &req);
+	if (g_debug && req.found) {
+		dbg("[tadpole] "); dbg(name); dbg(" found in "); dbg(lib); dbg(" by object walk\n");
+	}
+	return req.found;
+}
+
+static void *libdl_symbol(const char *name) { return tad_module_symbol("libdl", name); }
+
+/* The load base of a named module, by the same walk: what a caller needs to
+ * read a value out of a library's own data at a known offset. */
+static int base_cb(struct tad_phdr_info *info, size_t size, void *data)
+{
+	struct tad_dlsym_req *req = data;
+	const char *base, *nm = info->name, *want = req->lib;
+	u32 i, k = 0;
+	(void)size;
+	if (!nm) return 0;
+	base = nm;
+	for (i = 0; nm[i]; i++) if (nm[i] == '/') base = nm + i + 1;
+	while (want[k] && base[k] == want[k]) k++;
+	if (want[k] || !(base[k] == '.' || base[k] == '-')) return 0;
+	req->found = (void *)info->addr;
+	return 1;
+}
+
+void *tad_module_base(const char *lib)
+{
+	struct tad_dlsym_req req;
+	req.lib = lib; req.name = 0; req.found = 0;
+	dl_iterate_phdr(base_cb, &req);
+	return req.found;
+}
+
 static void init(void)
 {
 	const char *e;
@@ -711,6 +841,13 @@ static void init(void)
 	if (!real_close) dbg("[tadpole] WARNING: dlsym(close) failed\n");
 	if (!real_mmap)  dbg("[tadpole] WARNING: dlsym(mmap) failed\n");
 	if (!real_read)  dbg("[tadpole] WARNING: dlsym(read) failed\n");
+	/* A NULL here makes every dlopen() in the guest fail SILENTLY, and the
+	 * caller's dlerror() then reports whatever the loader last complained
+	 * about — which is this very lookup, "Unable to resolve symbol". That read
+	 * as a Brio module with a missing symbol for an afternoon. */
+	if (!real_dlopen)  real_dlopen  = libdl_symbol("dlopen");
+	if (!real_dlerror) real_dlerror = libdl_symbol("dlerror");
+	if (!real_dlopen) dbg("[tadpole] WARNING: dlsym(dlopen) failed — every dlopen will fail\n");
 
 	/* WHICH INPUT DEVICES THIS MACHINE HAS. The launcher passes DEV_EVDEV
 	 * from the device profile; anything unrecognised, or nothing at all,
@@ -2099,8 +2236,10 @@ void *dlopen(const char *path, int flags)
 	void *h;
 
 	init();
-	if (!real_dlopen)
+	if (!real_dlopen) {
+		if (g_debug) dbg("[tadpole] dlopen: no real dlopen to chain to\n");
 		return 0;
+	}
 	h = real_dlopen(path, flags);
 	/* A NATIVE TITLE ARRIVES HERE AND NOWHERE ELSE. CAppManager::LoadNewApp
 	 * dlopen()s the package's App.so, and the guest's own loader then opens

@@ -243,6 +243,7 @@ static int g_tint = -1;
  * host for that purpose only — never added to a pixel here. */
 static int g_vx, g_vy, g_vw, g_vh, g_view_init;
 static void view_update(void);
+static int g_panel_w = FB_W, g_panel_h = FB_H;   /* the real panel; see view_update */
 
 /* ---- framebuffer ---------------------------------------------------------
  * We draw into the SAME /dev/fbN the display stack uses, opened the ordinary
@@ -500,6 +501,14 @@ extern void hle_arraypointer(u32 which, u32 buf, int size, u32 type, int stride,
 extern void hle_clientstate(u32 which, u32 on);
 extern void hle_drawarrays(u32 mode, int first, int count);
 extern void hle_drawelements(u32 mode, int count, u32 type, u32 elembuf, u32 off);
+
+/* The programmable half, in tadpole_gles2.c. With a program in use a draw is
+ * the shader path's to send; there is no software rasteriser for it. */
+extern int  tad_g2_in_use(void);
+extern void tad_g2_send_attribs(u32 nverts);
+extern int  tad_g2_get_integer(GLenum p, GLint *v);
+extern void tad_g2_resync(void);
+extern void tad_g2_reset(void);
 
 /* Defined after the buffer and texture tables it walks; see the resync note
  * there for why the encoder cannot rely on lazy attach alone. */
@@ -786,7 +795,22 @@ static void view_update(void)
 		int fd;
 
 		g_view_init = 1;
-		g_vx = 0; g_vy = 0; g_vw = FB_W; g_vh = FB_H;
+		/* THE PANEL IS NOT ALWAYS 480x272. FB_W/FB_H size the software
+		 * rasteriser's buffers and stay what they are; the layer window the
+		 * HOST replays into is bounded by the real panel, which the launcher
+		 * passes as TADPOLE_W/H. The LeapTV's 1280x720 layer was refused by
+		 * the old bound and the shell drew squeezed into one corner. */
+		{
+			const char *pw = getenv("TADPOLE_W"), *ph = getenv("TADPOLE_H");
+			g_panel_w = FB_W; g_panel_h = FB_H;
+			if (pw && ph) {
+				int a = parse_int(&pw), b = parse_int(&ph);
+				if (a > 0 && b > 0) { g_panel_w = a; g_panel_h = b; }
+			}
+		}
+		g_vx = 0; g_vy = 0;
+		g_vw = hle_on() ? g_panel_w : FB_W;
+		g_vh = hle_on() ? g_panel_h : FB_H;
 
 		e = getenv("TADPOLE_GL_VIEW");
 		if (e) {
@@ -842,12 +866,16 @@ static void view_update(void)
 		return;
 	}
 
+	{
+		int bw = hle_on() ? g_panel_w : FB_W;
+		int bh = hle_on() ? g_panel_h : FB_H;
 	if (w > 0 && h > 0 && x >= 0 && y >= 0 &&
-	    x + w <= FB_W && y + h <= FB_H &&
+	    x + w <= bw && y + h <= bh &&
 	    (x != g_vx || y != g_vy || w != g_vw || h != g_vh)) {
 		g_vx = x; g_vy = y; g_vw = w; g_vh = h;
 		tr2("viewport now", w, h);
 		tr2("viewport at", x, y);
+	}
 	}
 }
 
@@ -1756,6 +1784,9 @@ static void hle_sync_state(void)
 	 * each needs its own measurement rather than an assumption, so they are not
 	 * swept in here on spec. */
 	hle_blendfunc(g_blend_src, g_blend_dst);
+	/* Shaders, programs, uniforms and attribute enables — the GLES2 side
+	 * keeps its own tables and replays them the same way. */
+	tad_g2_resync();
 	tr2("HLE resynced buffers/textures", MAX_BUFS, MAX_TEXS);
 }
 
@@ -1771,6 +1802,10 @@ static int hle_ready(void)
 		hle_sync_state();
 	return 1;
 }
+
+/* What tadpole_gles2.c needs from this file's private state. */
+int tad_core_hle_ready(void) { return hle_ready(); }
+u32 tad_core_bound_array(void) { return g_bound_array; }
 
 struct array { const u8 *ptr; GLuint buf; GLint size; GLenum type; GLsizei stride; int on; };
 /* g_nrm IS NEW, AND IT WAS THE MOST-NEEDED MISSING ENTRY POINT IN THE LIBRARY.
@@ -3132,6 +3167,13 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 	if (hle_ready()) {
 		u32 nv = (u32)first + (u32)count;
 		u32 tu;
+		/* A PROGRAM IN USE MEANS THE GLES2 PATH: generic attributes, no
+		 * fixed-function arrays, no skinning. */
+		if (tad_g2_in_use()) {
+			tad_g2_send_attribs(nv);
+			hle_drawarrays(mode, first, count);
+			return;
+		}
 		int sk = skin_begin(nv);
 		if (!sk) hle_send_array(&g_vtx, 0, nv, HLE_CLIENT_VTX);
 		hle_send_array(&g_col, 1, nv, HLE_CLIENT_COL);
@@ -3149,6 +3191,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 		skin_end(sk);
 		return;
 	}
+	if (tad_g2_in_use()) return;           /* no software path for shaders */
 	const u8 *vs = g_vtx.ptr, *cs = g_col.ptr, *ts = g_texa[0].ptr;
 	if (first > 0) {
 		if (g_vtx.ptr)
@@ -3185,6 +3228,17 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
 		u32 eoff = (u32)(unsigned long)indices;
 		u32 tu;
 
+		if (tad_g2_in_use()) {
+			tad_g2_send_attribs(nv);
+			if (!ebuf && indices) {
+				u32 isz = (type == GL_UNSIGNED_SHORT) ? 2u : 1u;
+				hle_bufferdata(HLE_CLIENT_IDX, (u32)count * isz, indices);
+				ebuf = HLE_CLIENT_IDX;
+				eoff = 0;
+			}
+			hle_drawelements(mode, count, type, ebuf, eoff);
+			return;
+		}
 		/* Any array without a buffer has to travel by value — see the note on
 		 * client-side arrays above. */
 		int sk = skin_begin(nv);
@@ -3214,6 +3268,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices
 		skin_end(sk);
 		return;
 	}
+	if (tad_g2_in_use()) return;           /* no software path for shaders */
 	draw_indexed(mode, count, indices, type);
 }
 
@@ -3389,6 +3444,33 @@ static u32 texel_bytes(GLenum fmt, GLenum type)
 	}
 }
 
+/* GL_UNPACK_ALIGNMENT is the one pixel-store parameter that changes what an
+ * upload MEANS: rows of a 1- or 3-byte-per-texel image are padded to it, so a
+ * 5-wide GL_ALPHA glyph has 8-byte rows at the default of 4. This was a stub
+ * until the LeapTV, whose text comes through GL_ALPHA textures. */
+static u32 g_unpack_align = 4;
+
+void glPixelStorei(GLenum pname, GLint param)
+{
+	int ok = (param == 1 || param == 2 || param == 4 || param == 8);
+	tr2("glPixelStorei pname/param", (int)pname, param);
+	if (pname == 0x0CF5) {                       /* GL_UNPACK_ALIGNMENT */
+		if (ok) g_unpack_align = (u32)param;
+		else tad_gl_error(TAD_GL_INVALID_VALUE, "glPixelStorei");
+	} else if (pname == 0x0D05) {                /* GL_PACK_ALIGNMENT: readback only */
+		if (!ok) tad_gl_error(TAD_GL_INVALID_VALUE, "glPixelStorei");
+	} else {
+		tad_gl_error(TAD_GL_INVALID_ENUM, "glPixelStorei");
+	}
+}
+
+/* Bytes from one source row to the next, alignment included. */
+static u32 unpack_row(u32 w, u32 bpt)
+{
+	u32 row = w * bpt;
+	return (row + g_unpack_align - 1) & ~(g_unpack_align - 1);
+}
+
 static void convert_row(u32 *dst, const void *src, u32 n, GLenum fmt, GLenum type)
 {
 	u32 i;
@@ -3477,7 +3559,18 @@ void glTexImage2D(GLenum tgt, GLint lvl, GLint ifmt, GLsizei w, GLsizei h,
 		tr2("  NULL upload — awaiting glTexSubImage2D", (int)w, (int)h);
 		return;
 	}
-	convert_row(t->argb, px, n, fmt, type);
+	{
+		u32 bpt = texel_bytes(fmt, type);
+		u32 row = unpack_row((u32)w, bpt);
+		if (row == (u32)w * bpt) {
+			convert_row(t->argb, px, n, fmt, type);
+		} else {
+			GLint y;
+			for (y = 0; y < h; y++)
+				convert_row(t->argb + (u32)y * (u32)w,
+				            (const u8 *)px + (u32)y * row, (u32)w, fmt, type);
+		}
+	}
 	dump_tex(g_bound_tex, t->w, t->h, t->argb);
 	/* One canonical layout on the wire. Every pixel-format decision stays on
 	 * this side, where it is already tested, so the host only ever sees
@@ -3511,7 +3604,7 @@ void glTexSubImage2D(GLenum tgt, GLint lvl, GLint xoff, GLint yoff,
 	tr2("glTexSubImage2D tex/w", (int)g_bound_tex, (int)w);
 
 	bpt = texel_bytes(fmt, type);
-	row = (u32)w * bpt;
+	row = unpack_row((u32)w, bpt);
 	for (y = 0; y < h; y++)
 		convert_row(t->argb + (u32)(yoff + y) * t->w + (u32)xoff,
 		            src + (u32)y * row, (u32)w, fmt, type);
@@ -4388,7 +4481,13 @@ void glGenBuffers(GLsizei n, GLuint *o)
  * error since the last read is the one reported, because that is the one
  * nearest the cause. */
 GLenum glGetError(void) { return tad_gl_error_take(); }
-const u8 *glGetString(GLenum n) { (void)n; return (const u8 *)"Tadpole GLES 1.1"; }
+const u8 *glGetString(GLenum n)
+{
+	/* GL_SHADING_LANGUAGE_VERSION is the one string a GLES2 title has a real
+	 * use for; everything else keeps the answer every GLES1 title has seen. */
+	if (n == 0x8B8C) return (const u8 *)"OpenGL ES GLSL ES 1.00";
+	return (const u8 *)"Tadpole GLES 1.1";
+}
 /* ---- STATE QUERIES -------------------------------------------------------
  *
  * These used to answer "0" and "not enabled" to everything, which is far worse
@@ -4461,6 +4560,7 @@ const u8 *glGetString(GLenum n) { (void)n; return (const u8 *)"Tadpole GLES 1.1"
  * does. Returning the count is what lets all three copy exactly what exists. */
 static int get_integers(GLenum p, GLint *v)
 {
+	if (tad_g2_get_integer(p, v)) return 1;      /* GLES2 limits and bindings */
 	switch (p) {
 	case GL_MAX_TEXTURE_SIZE:             *v = 4096; break;
 	/* Our arrays hold MAX_TEXUNITS (4); the DEVICE has 2, and that is the
@@ -4855,6 +4955,8 @@ void tad_gl_context_reset(void)
 	{ int k; for (k = 0; k < MAX_PALETTE; k++) g_palette_set[k] = 0; }
 	g_palette_loads = 0;
 	g_cur_palette = 0;
+
+	tad_g2_reset();
 
 	/* Drop the host's mirrors too, then force a fresh sync — otherwise the
 	 * host keeps the old title's images under names the next one reuses. */

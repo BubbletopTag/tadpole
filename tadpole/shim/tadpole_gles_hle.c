@@ -476,14 +476,54 @@ void hle_texparam(u32 pname, i32 v)
 /* Textures cross already converted to ARGB8888 — the core's upload path has
  * done the format work, and sending one canonical layout keeps every pixel
  * format decision on the guest side where it is already tested. */
-void hle_teximage2d(u32 name, u32 w, u32 h, const u32 *argb)
-{ u32 hd[3]={name,w,h}; enc_blob(TADGL_TEXIMAGE2D, hd, 3, argb, w*h*4u); }
+/* NEVER A PACKET THE RING CANNOT HOLD. The LeapTV's shell uploads a 4096-wide
+ * atlas and four 2048x2048 ones — 64 MB and 16 MB of pixels against an 8 MB
+ * ring — and one such packet used to end host-GPU replay for the session
+ * ("packet larger than the ring"). So anything past TADGL_CHUNK travels in
+ * pieces: an empty TEXIMAGE2D that makes the host allocate, then row bands
+ * as TEXSUBIMAGE2D. The host handles both exactly as before. */
+#define TADGL_CHUNK (1u << 20)
 
 void hle_texsubimage2d(u32 name, u32 x, u32 y, u32 w, u32 h, const u32 *argb)
 { u32 hd[5]={name,x,y,w,h}; enc_blob(TADGL_TEXSUBIMAGE2D, hd, 5, argb, w*h*4u); }
 
+void hle_teximage2d(u32 name, u32 w, u32 h, const u32 *argb)
+{
+	u32 hd[3]={name,w,h};
+	u32 bytes = w * h * 4u;
+	if (!argb || bytes <= TADGL_CHUNK) {
+		enc_blob(TADGL_TEXIMAGE2D, hd, 3, argb, argb ? bytes : 0);
+		return;
+	}
+	enc_blob(TADGL_TEXIMAGE2D, hd, 3, NULL, 0);      /* allocate only */
+	{
+		u32 rows = TADGL_CHUNK / (w * 4u), y;
+		if (!rows) rows = 1;
+		for (y = 0; y < h; y += rows) {
+			u32 n = (h - y < rows) ? h - y : rows;
+			hle_texsubimage2d(name, 0, y, w, n, argb + (u32)y * w);
+		}
+	}
+}
+
+void hle_buffersubdata(u32 name, u32 off, u32 size, const void *data);
+
 void hle_bufferdata(u32 name, u32 size, const void *data)
-{ u32 hd[2]={name,size}; enc_blob(TADGL_BUFFERDATA, hd, 2, data, data ? size : 0); }
+{
+	u32 hd[2]={name,size};
+	if (!data || size <= TADGL_CHUNK) {
+		enc_blob(TADGL_BUFFERDATA, hd, 2, data, data ? size : 0);
+		return;
+	}
+	enc_blob(TADGL_BUFFERDATA, hd, 2, NULL, 0);      /* allocate only */
+	{
+		u32 off;
+		for (off = 0; off < size; off += TADGL_CHUNK) {
+			u32 n = (size - off < TADGL_CHUNK) ? size - off : TADGL_CHUNK;
+			hle_buffersubdata(name, off, n, (const u8 *)data + off);
+		}
+	}
+}
 
 void hle_buffersubdata(u32 name, u32 off, u32 size, const void *data)
 { u32 hd[3]={name,off,size}; enc_blob(TADGL_BUFFERSUBDATA, hd, 3, data, size); }
@@ -502,3 +542,44 @@ void hle_drawarrays(u32 mode, i32 first, i32 count)
 
 void hle_drawelements(u32 mode, i32 count, u32 type, u32 elembuf, u32 off)
 { u32 v[5]={mode,(u32)count,type,elembuf,off}; enc_u32(TADGL_DRAWELEMENTS, v, 5); }
+
+/* ---- GLES 2.0 ---------------------------------------------------------- */
+
+void hle_shadersource(u32 shader, u32 type, const char *src, u32 len)
+{ u32 hd[3]={shader,type,len}; enc_blob(TADGL_SHADERSOURCE, hd, 3, src, len); }
+
+void hle_deleteshader(u32 shader) { enc_u32(TADGL_DELETESHADER, &shader, 1); }
+
+void hle_attachshader(u32 program, u32 shader)
+{ u32 v[2]={program,shader}; enc_u32(TADGL_ATTACHSHADER, v, 2); }
+
+void hle_detachshader(u32 program, u32 shader)
+{ u32 v[2]={program,shader}; enc_u32(TADGL_DETACHSHADER, v, 2); }
+
+void hle_bindattrib(u32 program, u32 index, const char *name, u32 len)
+{ u32 hd[3]={program,index,len}; enc_blob(TADGL_BINDATTRIB, hd, 3, name, len); }
+
+void hle_linkprogram(u32 program) { enc_u32(TADGL_LINKPROGRAM, &program, 1); }
+
+void hle_uniformloc(u32 program, u32 loc, const char *name, u32 len)
+{ u32 hd[3]={program,loc,len}; enc_blob(TADGL_UNIFORMLOC, hd, 3, name, len); }
+
+void hle_useprogram(u32 program) { enc_u32(TADGL_USEPROGRAM, &program, 1); }
+
+void hle_deleteprogram(u32 program) { enc_u32(TADGL_DELETEPROGRAM, &program, 1); }
+
+/* `words` is the payload length in 32-bit words; floats and ints travel
+ * as-is, matrices column-major exactly as the title handed them over. */
+void hle_uniform(u32 loc, u32 kind, u32 count, const void *data, u32 words)
+{ u32 hd[3]={loc,kind,count}; enc_blob(TADGL_UNIFORM, hd, 3, data, words * 4u); }
+
+void hle_attribpointer(u32 index, u32 buf, i32 size, u32 type, u32 norm,
+                       i32 stride, u32 off)
+{ u32 v[7]={index,buf,(u32)size,type,norm,(u32)stride,off};
+  enc_u32(TADGL_ATTRIBPOINTER, v, 7); }
+
+void hle_attribenable(u32 index, u32 on)
+{ u32 v[2]={index,on}; enc_u32(TADGL_ATTRIBENABLE, v, 2); }
+
+void hle_attribvalue(u32 index, const float *xyzw)
+{ u32 v[5]; v[0]=index; memcpy(&v[1], xyzw, 16); enc_u32(TADGL_ATTRIBVALUE, v, 5); }

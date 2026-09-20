@@ -119,8 +119,6 @@ void glMultiTexCoord4x(void)
 { static unsigned int hits; tad_gl_stub_hit("glMultiTexCoord4x", &hits); }
 void glOrthofOES(void)
 { static unsigned int hits; tad_gl_stub_hit("glOrthofOES", &hits); }
-void glPixelStorei(void)
-{ static unsigned int hits; tad_gl_stub_hit("glPixelStorei", &hits); }
 void glPointParameterf(void)
 { static unsigned int hits; tad_gl_stub_hit("glPointParameterf", &hits); }
 void glPointParameterfv(void)
