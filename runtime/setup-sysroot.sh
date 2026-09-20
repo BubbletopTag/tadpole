@@ -524,6 +524,24 @@ printf '1'                         > "sys/devices/platform/$DEV_POWER_DEV/status
 printf '0'                         > "sys/devices/platform/$DEV_POWER_DEV/shutdown"
 printf '0'                         > sys/class/graphics/fb0/rotate
 
+# A USB CAMERA, FOR THE DEVICE THAT POINTS WITH ONE. Brio's camera module
+# decides whether a camera is present by looking in sysfs — it walks
+# /sys/class/video4linux/ and reads the USB interface class and product
+# behind each node — and the shim answers /dev/video0 itself
+# (shim/tadpole_v4l2.c). These files are the sysfs half of that story.
+if [ "${DEV_HAS_CAMERA:-0}" = 1 ]; then
+    echo "==> a USB camera in sysfs (the shim answers /dev/video0)"
+    mkdir -p sys/class/video4linux/video0/device sys/class/usb_device
+    printf 'LeapTV Camera\n'  > sys/class/video4linux/video0/name
+    printf '81:0\n'           > sys/class/video4linux/video0/dev
+    printf '0\n'              > sys/class/video4linux/video0/index
+    printf '0e\n'             > sys/class/video4linux/video0/device/bInterfaceClass
+    printf 'ef\n'             > sys/class/video4linux/video0/device/bDeviceClass
+    printf 'LeapTV Camera\n'  > sys/class/video4linux/video0/device/product
+    printf '1d6b\n'           > sys/class/video4linux/video0/device/idVendor
+    printf '0001\n'           > sys/class/video4linux/video0/device/idProduct
+fi
+
 echo "==> device nodes"
 # These must EXIST as directory entries or the guest stops enumerating after
 # event1. The shim intercepts open() on them regardless of content.
@@ -535,6 +553,7 @@ for i in $(seq 0 24); do : > "dev/input/event$i"; done
 # shim intercepts open() on it regardless of what is inside.
 : > dev/input/touchscreen0
 for i in 0 1 2;      do : > "dev/fb$i"; done
+[ "${DEV_HAS_CAMERA:-0}" = 1 ] && : > dev/video0
 
 echo "==> /proc/asound (audio codec identity)"
 # CAudioModule reads /proc/asound/card0/id to identify the codec and logs

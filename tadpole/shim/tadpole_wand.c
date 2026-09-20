@@ -234,12 +234,16 @@ static void post_event(u32 type)
 	static unsigned char evmpi[64];
 	static int have_evmpi;
 	static unsigned char msg[64];
-	void (*ev_ctor)(void *) = tad_module_symbol("libEventMPI", "_ZN8LeapFrog4Brio9CEventMPIC1Ev");
-	u32  (*ev_post)(const void *, const void *, u8, const void *) =
-		tad_module_symbol("libEventMPI",
-		    "_ZNK8LeapFrog4Brio9CEventMPI9PostEventERKNS0_13IEventMessageEhPKNS0_14IEventListenerE");
-	void (*msg_ctor)(void *, ulong, const void *) = tad_module_symbol("libControllerMPI",
-		    "_ZN2LF8Hardware24HWControllerEventMessageC1EmPKNS0_12HWControllerE");
+	static void (*ev_ctor)(void *);
+	static u32  (*ev_post)(const void *, const void *, u8, const void *);
+	static void (*msg_ctor)(void *, ulong, const void *);
+	/* Looked up once: the walk takes the loader's lock, and this runs on
+	 * the render thread every click. */
+	if (!ev_ctor)  ev_ctor  = tad_module_symbol("libEventMPI", "_ZN8LeapFrog4Brio9CEventMPIC1Ev");
+	if (!ev_post)  ev_post  = tad_module_symbol("libEventMPI",
+	    "_ZNK8LeapFrog4Brio9CEventMPI9PostEventERKNS0_13IEventMessageEhPKNS0_14IEventListenerE");
+	if (!msg_ctor) msg_ctor = tad_module_symbol("libControllerMPI",
+	    "_ZN2LF8Hardware24HWControllerEventMessageC1EmPKNS0_12HWControllerE");
 	char line[64];
 	if (!ev_ctor || !ev_post || !msg_ctor) { dbg("[wand] cannot post: symbols missing\n"); return; }
 	if (!have_evmpi) { ev_ctor(evmpi); have_evmpi = 1; }

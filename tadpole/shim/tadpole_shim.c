@@ -64,6 +64,15 @@ extern void tad_crash_install(const char *dir,
 /* Returns the guest's previous handler, or (void(*)(int))-1 for a signal the
  * crash reporter does not manage — in which case signal() falls through. */
 extern void (*tad_crash_take_signal(int sig, void (*h)(int)))(int);
+extern void (*tad_crash_take_sigaction(int sig, void (*h)(int), unsigned long flags))(int);
+/* tadpole_v4l2.c: the LeapTV's camera, a USB device that is not there. */
+extern int  tad_cam_match(const char *path);
+extern int  tad_cam_open(const char *path, const char *dir,
+                         int (*real_open)(const char *, int, ...),
+                         void *(*real_mmap)(void *, size_t, int, int, int, long));
+extern int  tad_cam_is(int fd);
+extern int  tad_cam_ioctl(int fd, ulong req, void *arg);
+extern void tad_cam_close(int fd);
 
 #define RTLD_NEXT ((void *)-1L)
 /* uClibc's value for "search the global scope, from the beginning" — which is
@@ -471,6 +480,7 @@ static void *(*real_dlopen)(const char *, int);
 static char *(*real_dlerror)(void);
 static void *(*real_fopen64)(const char *, const char *);
 static int  (*real_execve)(const char *, char *const [], char *const []);
+static int  (*real_sigaction)(int, const void *, void *);
 
 /* Open <TADPOLE_LOG>.<pid>.log and park it on a high fd.
  *
@@ -718,6 +728,9 @@ static void init(void)
 	real_fopen  = dlsym(RTLD_NEXT, "fopen");
 	real_fopen64= dlsym(RTLD_NEXT, "fopen64");
 	real_execve = dlsym(RTLD_NEXT, "execve");
+	real_sigaction = dlsym(RTLD_NEXT, "sigaction");
+	if (!real_sigaction) real_sigaction = tad_module_symbol("libc", "sigaction");
+	if (!real_sigaction) real_sigaction = tad_module_symbol("libuClibc", "sigaction");
 
 	/* DID RTLD_NEXT FIND US AGAIN?
 	 *
@@ -2115,6 +2128,11 @@ static int open_common(const char *path, int flags, int mode)
 		return fd;
 	}
 
+	/* /dev/videoN — the fake USB camera, when the device has one. */
+	if (tad_cam_match(path))
+		return tad_cam_open(path, g_dir, real_open,
+		                    (void *(*)(void *, size_t, int, int, int, long))real_mmap);
+
 	/* SYSROOT FIRST FOR EVERY ABSOLUTE PATH, not only for creating opens.
 	 *
 	 * This was gated on O_CREAT because the symptom that prompted it was "qemu
@@ -2875,27 +2893,40 @@ void (*signal(int sig, void (*h)(int)))(int)
  * LeapTV's titles install theirs through sigaction() instead, and that door
  * was open. Pet Play World's engine did exactly that on its way in, so its
  * crash six seconds later printed only qemu's "uncaught target signal 11"
- * and no report at all. Same treatment: for the signals the reporter owns,
- * record the guest's handler (either field; SA_SIGINFO handlers get the
- * signal number, which is all the reporter passes on) and answer as if it
- * had been installed. libc's struct sigaction on this ABI is
- * { handler; sigset_t (128 bytes); flags; restorer }. */
-struct tad_libc_sigaction { void *handler; unsigned char mask[128]; unsigned long flags; void *restorer; };
-static int (*real_sigaction)(int, const void *, void *);
+ * and no report at all. Same treatment: for the crash signals, record the
+ * guest's handler and its flags (the reporter calls an SA_SIGINFO handler
+ * back with three arguments) and answer as if it had been installed.
+ *
+ * THE STRUCT IS THE KERNEL'S, NOT GLIBC'S. uClibc here passes the caller's
+ * struct straight to rt_sigaction, so it is { handler; flags; restorer;
+ * mask[2] } — twenty bytes. A first cut assumed glibc's 140-byte layout, read
+ * the flags from beyond the end and zeroed 140 bytes into the caller's
+ * twenty-byte `old`. That smashed Qt's stack on its first SIGQUIT install and
+ * GlasgowUI hung on a condition for ever, black, with the replay idle.
+ *
+ * NO init() HERE: a sigaction() can come from a constructor before the shim
+ * has any business starting threads and mapping files. The real function is
+ * found the way dlopen's is, and by init() as well once it runs. */
+struct tad_libc_sigaction { void *handler; unsigned long flags; void *restorer; unsigned long mask[2]; };
 int sigaction(int sig, const struct tad_libc_sigaction *act, struct tad_libc_sigaction *old)
 {
 	void (*prev)(int);
-	init();
 	if (!real_sigaction) real_sigaction = dlsym(RTLD_NEXT, "sigaction");
+	if (!real_sigaction && g_ready) real_sigaction = tad_module_symbol("libc", "sigaction");
+	if (!real_sigaction && g_ready) real_sigaction = tad_module_symbol("libuClibc", "sigaction");
 	if (act) {
-		prev = tad_crash_take_signal(sig, (void (*)(int))act->handler);
+		prev = tad_crash_take_sigaction(sig, (void (*)(int))act->handler, act->flags);
 		if (prev != (void (*)(int))-1) {
-			if (g_debug) { dbg("[tadpole] sigaction() kept the crash reporter\n"); }
+			if (g_debug) {
+				char b[96];
+				snprintf(b, sizeof b, "[tadpole] sigaction(%d) kept the crash reporter: handler=%p flags=0x%lx\n",
+				         sig, act->handler, act->flags);
+				dbg(b);
+			}
 			if (old) {
-				unsigned i;
 				old->handler = (void *)prev;
-				for (i = 0; i < sizeof old->mask; i++) old->mask[i] = 0;
 				old->flags = 0; old->restorer = 0;
+				old->mask[0] = old->mask[1] = 0;
 			}
 			return 0;
 		}
@@ -3074,6 +3105,7 @@ int close(int fd)
 		g_dsp_of_fd[fd] = 0;
 		g_mlc_of_fd[fd] = 0;
 		g_mem_of_fd[fd] = 0;
+		tad_cam_close(fd);
 	}
 	if (!real_close) return -1;
 	return real_close(fd);
@@ -3147,6 +3179,10 @@ int ioctl(int fd, ulong req, ...)
 	va_start(ap, req);
 	arg = va_arg(ap, void *);
 	va_end(ap);
+
+	/* ---------------- /dev/video0 ---------------- */
+	if (tad_cam_is(fd))
+		return tad_cam_ioctl(fd, req, arg);
 
 	/* ---------------- /dev/dsp ---------------- */
 	if (fd >= 0 && fd < MAXFD && g_dsp_of_fd[fd])

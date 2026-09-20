@@ -442,6 +442,7 @@ static void report(int sig, void *ucv, const char *what)
  */
 #define MAXSIG 32
 static void (*g_guest[MAXSIG])(int);
+static unsigned long g_guest_flags[MAXSIG];   /* the sigaction flags it came with */
 
 static int ours(int sig)
 {
@@ -456,6 +457,24 @@ void (*tad_crash_take_signal(int sig, void (*h)(int)))(int)
 		return (void (*)(int))-1;      /* not ours: caller falls through */
 	prev = g_guest[sig];
 	g_guest[sig] = h;
+	g_guest_flags[sig] = 0;
+	return prev;
+}
+
+/* The sigaction() form: the same, with the flags kept so a handler installed
+ * with SA_SIGINFO is called back the way it was written — three arguments,
+ * the siginfo and context it will read. SIGQUIT is never taken this way: Qt's
+ * QWS server installs a SIGQUIT handler to clean up, and the stack sampler
+ * that shares the number is a developer's tool, not something to hang a shell
+ * for. */
+void (*tad_crash_take_sigaction(int sig, void (*h)(int), unsigned long flags))(int)
+{
+	void (*prev)(int);
+	if (sig == 3 || sig <= 0 || sig >= MAXSIG || !ours(sig))
+		return (void (*)(int))-1;
+	prev = g_guest[sig];
+	g_guest[sig] = h;
+	g_guest_flags[sig] = flags;
 	return prev;
 }
 
@@ -467,7 +486,10 @@ static void on_crash(int sig, void *info, void *ucv)
 	report(sig, ucv, "crashed");
 	/* SIG_DFL(0) and SIG_IGN(1) are not addresses to call. */
 	if (guest && guest != (void (*)(int))1) {
-		guest(sig);
+		if (g_guest_flags[sig] & 4 /* SA_SIGINFO */)
+			((void (*)(int, void *, void *))guest)(sig, info, ucv);
+		else
+			guest(sig);
 		/* It returned, so it did not want the process gone. Neither do we. */
 		return;
 	}
