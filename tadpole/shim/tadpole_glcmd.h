@@ -183,6 +183,7 @@ enum tadgl_op {
 	                         * i32 stride, u32 offset */
 	TADGL_ATTRIBENABLE,     /* u32 index, u32 on */
 	TADGL_ATTRIBVALUE,      /* u32 index, float x,y,z,w */
+	TADGL_BLENDFUNCSEP,     /* u32 srcRGB, dstRGB, srcA, dstA */
 
 	TADGL_OP_COUNT
 };

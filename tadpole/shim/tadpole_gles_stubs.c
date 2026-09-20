@@ -33,8 +33,6 @@ void glBindFramebufferOES(void)
 { static unsigned int hits; tad_gl_stub_hit("glBindFramebufferOES", &hits); }
 void glBindRenderbufferOES(void)
 { static unsigned int hits; tad_gl_stub_hit("glBindRenderbufferOES", &hits); }
-void glBlendFuncSeparate(void)
-{ static unsigned int hits; tad_gl_stub_hit("glBlendFuncSeparate", &hits); }
 GLenum glCheckFramebufferStatusOES(void)
 { static unsigned int hits; tad_gl_stub_hit("glCheckFramebufferStatusOES", &hits); return 0; }
 void glClearDepthfOES(void)

@@ -525,13 +525,30 @@ printf '0'                         > "sys/devices/platform/$DEV_POWER_DEV/shutdo
 printf '0'                         > sys/class/graphics/fb0/rotate
 
 # A USB CAMERA, FOR THE DEVICE THAT POINTS WITH ONE. Brio's camera module
-# decides whether a camera is present by looking in sysfs — it walks
-# /sys/class/video4linux/ and reads the USB interface class and product
-# behind each node — and the shim answers /dev/video0 itself
-# (shim/tadpole_v4l2.c). These files are the sysfs half of that story.
+# decides whether a camera is present by looking in sysfs, and the shim
+# answers /dev/video0 itself (shim/tadpole_v4l2.c). These files are the
+# sysfs half of that story, and the USB half is the one that decides:
+# libCameraUSB's CameraListener::Notify walks /sys/class/usb_device/ first
+# (EnumCameraCallback: accept an entry whose device/bDeviceClass parses as
+# 0xef with %x) and /sys/class/video4linux/ second (EnumVideoCallback:
+# accept a node whose name matches the USB device's product, else whose
+# device/bInterfaceClass is 0x0e), then reports "USB camera missing" if the
+# USB path is still empty, whatever the video walk found. Measured on Pet
+# Play World, which put up its "connect the camera" card with only the
+# video4linux half present.
 if [ "${DEV_HAS_CAMERA:-0}" = 1 ]; then
     echo "==> a USB camera in sysfs (the shim answers /dev/video0)"
-    mkdir -p sys/class/video4linux/video0/device sys/class/usb_device
+    mkdir -p sys/class/video4linux/video0/device sys/class/usb_device/usbdev1.2/device
+    printf '189:1\n'          > sys/class/usb_device/usbdev1.2/dev
+    printf 'ef\n'             > sys/class/usb_device/usbdev1.2/device/bDeviceClass
+    printf '02\n'             > sys/class/usb_device/usbdev1.2/device/bDeviceSubClass
+    printf '01\n'             > sys/class/usb_device/usbdev1.2/device/bDeviceProtocol
+    printf 'LeapTV Camera\n'  > sys/class/usb_device/usbdev1.2/device/product
+    printf 'LeapFrog\n'       > sys/class/usb_device/usbdev1.2/device/manufacturer
+    printf '1d6b\n'           > sys/class/usb_device/usbdev1.2/device/idVendor
+    printf '0001\n'           > sys/class/usb_device/usbdev1.2/device/idProduct
+    printf '1\n'              > sys/class/usb_device/usbdev1.2/device/busnum
+    printf '2\n'              > sys/class/usb_device/usbdev1.2/device/devnum
     printf 'LeapTV Camera\n'  > sys/class/video4linux/video0/name
     printf '81:0\n'           > sys/class/video4linux/video0/dev
     printf '0\n'              > sys/class/video4linux/video0/index

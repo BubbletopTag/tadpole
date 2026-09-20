@@ -365,6 +365,13 @@ static int    g_blend_on;
  * answering these badly did to Ben 10's menu. */
 static GLenum g_blend_src = GL_ONE_;
 static GLenum g_blend_dst = GL_ZERO_;
+/* The alpha pair of glBlendFuncSeparate; equal to the RGB pair unless a
+ * title sets them apart. Pet Play World (and, by its imports, evoLib in
+ * general) NEVER calls glBlendFunc — only the separate form — so a stub for
+ * it left the host at GL_ONE / GL_ZERO and every alpha edge drew opaque:
+ * text came out as solid blocks of its own colour. */
+static GLenum g_blend_src_a = GL_ONE_;
+static GLenum g_blend_dst_a = GL_ZERO_;
 
 /* ---- DEPTH BUFFER --------------------------------------------------------
  *
@@ -1580,15 +1587,29 @@ void glClear(GLbitfield mask)
 	g_tri_offscreen = g_tri_sliver = 0;
 	g_tri_nearclip = 0;
 	g_tri_submitted = g_tri_painted = g_tri_zero_area = 0;
-	if (hle_ready())
+	if (hle_ready()) {
 		hle_clear(mask, g_clear_argb, g_depth_clear);
+		/* THE HOST OWNS THE PIXELS NOW, AND THE SOFTWARE BUFFERS ARE 480x272.
+		 * Under HLE the window is the PANEL (g_vw x g_vh = 1280x720 on a
+		 * LeapTV), and the two wipes below index g_zbuf/g_back by that: a
+		 * 1280-wide row at a 480 stride runs 1.4 MB past each array, through
+		 * every global that follows it in .bss. Measured: g_active_tex became
+		 * 0xff000000 (the title's clear colour) three seconds into Pet Play
+		 * World and the next glBindTexture stored through unit 0xff000000;
+		 * GlasgowUI's texture table took the same wipe and its exit-time
+		 * glDeleteTextures handed free() a pixel. */
+		return;
+	}
 	if (mask & GL_DEPTH_BUFFER_BIT) {
 		int yy, xx;
+		int cw, ch;
 		view_init();
+		cw = g_vw < FB_W ? g_vw : FB_W;
+		ch = g_vh < FB_H ? g_vh : FB_H;
 		/* Only the window, not the whole panel — the colour clear is already
 		 * scoped this way and 130560 float stores per frame is not free. */
-		for (yy = 0; yy < g_vh; yy++)
-			for (xx = 0; xx < g_vw; xx++)
+		for (yy = 0; yy < ch; yy++)
+			for (xx = 0; xx < cw; xx++)
 				g_zbuf[yy*FB_W + xx] = g_depth_clear;
 	}
 	fb_init();
@@ -1601,11 +1622,13 @@ void glClear(GLbitfield mask)
 	g_clear_done++;
 	{
 		u32 *dst = fb_target();
-		int yy;
+		int yy, cw, ch;
 		if (!dst) return;
 		view_init();
-		for (yy = 0; yy < g_vh; yy++)
-			for (i = 0; i < g_vw; i++)
+		cw = g_vw < FB_W ? g_vw : FB_W;
+		ch = g_vh < FB_H ? g_vh : FB_H;
+		for (yy = 0; yy < ch; yy++)
+			for (i = 0; i < cw; i++)
 				dst[yy*FB_W + i] = g_clear_argb;
 	}
 }
@@ -1767,11 +1790,23 @@ static struct gl_buffer *buf_slot(GLuint name)
  * restarts mid-session.
  */
 static int g_hle_synced;
+extern void hle_reset(void);
+extern void hle_blendfuncsep(u32 sr, u32 dr, u32 sa, u32 da);
 
 static void hle_sync_state(void)
 {
 	int i;
 	g_hle_synced = 1;                 /* set FIRST: the sends below re-enter */
+	/* DROP WHATEVER THE HOST STILL HOLDS BEFORE REPLAYING. This process may
+	 * not be the one that filled the host's tables: on a LeapTV the shell
+	 * (GlasgowUI) and the title (BrioWrapper) are separate processes sharing
+	 * one viewer, and each numbers its GL objects from 1. Without a reset the
+	 * title's shader 7 found the shell's shader 7 already there, a VERTEX
+	 * object, and its fragment source failed to compile in it ("gl_FragColor
+	 * undeclared", measured on Pet Play World). Everything the host needs
+	 * afterwards is re-sent right below, so a reset here costs one upload
+	 * pass, which the sync was already paying. */
+	hle_reset();
 	for (i = 0; i < MAX_BUFS; i++)
 		if (g_bufs[i].name && g_bufs[i].data)
 			hle_bufferdata(g_bufs[i].name, g_bufs[i].size, g_bufs[i].data);
@@ -1790,7 +1825,7 @@ static void hle_sync_state(void)
 	 * itself, depth, texenv) has the same hole and wants the same treatment, but
 	 * each needs its own measurement rather than an assumption, so they are not
 	 * swept in here on spec. */
-	hle_blendfunc(g_blend_src, g_blend_dst);
+	hle_blendfuncsep(g_blend_src, g_blend_dst, g_blend_src_a, g_blend_dst_a);
 	/* Shaders, programs, uniforms and attribute enables — the GLES2 side
 	 * keeps its own tables and replays them the same way. */
 	tad_g2_resync();
@@ -3423,7 +3458,20 @@ void glTexParameterx(GLenum t, GLenum p, GLfixed v);
  * up, beside g_blend_on, because hle_sync_state() replays them on attach. */
 void glBlendFunc(GLenum sf, GLenum df) { tr2("glBlendFunc src/dst", (int)sf, (int)df);
   g_blend_src = sf; g_blend_dst = df;
+  g_blend_src_a = sf; g_blend_dst_a = df;
   if (hle_ready()) hle_blendfunc(sf, df); }
+
+extern void hle_blendfuncsep(u32 sr, u32 dr, u32 sa, u32 da);
+void glBlendFuncSeparate(GLenum sr, GLenum dr, GLenum sa, GLenum da)
+{
+	tr2("glBlendFuncSeparate rgb src/dst", (int)sr, (int)dr);
+	tr2("glBlendFuncSeparate a src/dst", (int)sa, (int)da);
+	/* The software rasteriser hardcodes src-alpha-over and reads neither
+	 * pair; the RGB pair is what GL_BLEND_SRC / GL_BLEND_DST answer. */
+	g_blend_src = sr; g_blend_dst = dr;
+	g_blend_src_a = sa; g_blend_dst_a = da;
+	if (hle_ready()) hle_blendfuncsep(sr, dr, sa, da);
+}
 
 /* TEXEL CONVERSION — one path for glTexImage2D and glTexSubImage2D.
  *
@@ -4947,6 +4995,8 @@ void tad_gl_context_reset(void)
 	 * game's factors. */
 	g_blend_src = GL_ONE_;
 	g_blend_dst = GL_ZERO_;
+	g_blend_src_a = GL_ONE_;
+	g_blend_dst_a = GL_ZERO_;
 	/* TexEnv is per-unit, not per-object, so clearing the texture table does
 	 * not touch it — the next title would inherit the previous one's combiner
 	 * and env colour. Texture sampler state needs nothing here: tex_slot()

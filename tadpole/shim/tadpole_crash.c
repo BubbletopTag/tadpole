@@ -118,6 +118,7 @@ struct k_sigaction {
 
 extern long syscall(long number, ...);
 #define __NR_rt_sigaction 174
+#define __NR_sigaltstack   186
 
 #define SA_SIGINFO   0x00000004
 #define SA_NODEFER   0x40000000
@@ -509,6 +510,27 @@ static void on_dump(int sig, void *info, void *ucv)
 }
 
 /* ---- installation ------------------------------------------------------ */
+/* A STACK TO REPORT FROM WHEN THE GUEST HAS NONE LEFT.
+ *
+ * A runaway recursion ends in SIGSEGV on the guard page, and a handler that
+ * needs the same stack cannot run: the kernel forces the default action and
+ * qemu prints "uncaught target signal 11" with nothing else — which is all
+ * Pet Play World's death six seconds into BrioWrapper ever said. So every
+ * thread gets an alternate stack (sigaltstack is per thread; the shim's
+ * pthread_create wrapper calls this in each new thread) and the crash signals
+ * are installed SA_ONSTACK. 64 KB: report() formats lines and walks memory,
+ * nothing deeper. The block is never freed; a thread's alt stack outlives it
+ * by design and the count is small. */
+extern void *malloc(size_t n);
+void tad_crash_altstack(void)
+{
+	struct { void *sp; int flags; size_t size; } ss;
+	void *mem = malloc(65536);
+	if (!mem) return;
+	ss.sp = mem; ss.flags = 0; ss.size = 65536;
+	syscall(__NR_sigaltstack, (long)&ss, 0L);
+}
+
 void tad_crash_install(const char *dir, int (*real_open)(const char *, int, ...))
 {
 	static const int sigs[] = { 4, 6, 7, 8, 11 };   /* ILL ABRT BUS FPE SEGV */
@@ -546,7 +568,8 @@ void tad_crash_install(const char *dir, int (*real_open)(const char *, int, ...)
 	sa.handler = on_crash;
 	/* RESETHAND so a fault inside the handler cannot loop forever; NODEFER so
 	 * the deliberate re-raise at the end is delivered immediately. */
-	sa.flags = SA_SIGINFO | SA_NODEFER | SA_RESETHAND;
+	tad_crash_altstack();                 /* the main thread's; see above */
+	sa.flags = SA_SIGINFO | SA_NODEFER | SA_RESETHAND | 0x08000000 /* SA_ONSTACK */;
 
 	/* The trailing 8 is sigsetsize, which rt_sigaction validates against its
 	 * own sigset_t; anything else fails with EINVAL. */

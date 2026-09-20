@@ -391,6 +391,8 @@ void hle_enable(u32 cap)  { enc_u32(TADGL_ENABLE,  &cap, 1); }
 void hle_disable(u32 cap) { enc_u32(TADGL_DISABLE, &cap, 1); }
 
 void hle_blendfunc(u32 s, u32 d) { u32 v[2]={s,d}; enc_u32(TADGL_BLENDFUNC, v, 2); }
+void hle_blendfuncsep(u32 sr, u32 dr, u32 sa, u32 da)
+{ u32 v[4]={sr,dr,sa,da}; enc_u32(TADGL_BLENDFUNCSEP, v, 4); }
 void hle_depthfunc(u32 f)        { enc_u32(TADGL_DEPTHFUNC, &f, 1); }
 void hle_depthmask(u32 on)       { enc_u32(TADGL_DEPTHMASK, &on, 1); }
 void hle_cullface(u32 m)         { enc_u32(TADGL_CULLFACE, &m, 1); }

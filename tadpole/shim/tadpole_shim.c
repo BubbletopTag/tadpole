@@ -712,6 +712,11 @@ static void init(void)
 	real_fcntl  = dlsym(RTLD_NEXT, "fcntl");
 	real_poll   = dlsym(RTLD_NEXT, "poll");
 	real_pthread_create = dlsym(RTLD_NEXT, "pthread_create");
+	/* RTLD_NEXT finds no libpthread from inside GlasgowUI either (see
+	 * tad_module_symbol); left NULL, the pthread_create wrapper answered
+	 * EAGAIN and Brio's KernelMPI asserted two seconds into the shell. */
+	if (!real_pthread_create)
+		real_pthread_create = tad_module_symbol("libpthread", "pthread_create");
 	real_rename = dlsym(RTLD_NEXT, "rename");
 	real_mkstemp   = dlsym(RTLD_NEXT, "mkstemp");
 	real_mkstemp64 = dlsym(RTLD_NEXT, "mkstemp64");
@@ -2934,6 +2939,34 @@ int sigaction(int sig, const struct tad_libc_sigaction *act, struct tad_libc_sig
 	return real_sigaction ? real_sigaction(sig, act, old) : -1;
 }
 
+/* pthread_create() — EVERY THREAD GETS THE REPORTER'S ALTERNATE STACK.
+ *
+ * sigaltstack is per thread, and a title's crash is rarely on the main one.
+ * The guest's start routine runs unchanged after a one-line prologue. The
+ * shim's own pump thread goes through real_pthread_create and is not
+ * wrapped, which is fine: it has nothing to overflow. */
+extern void tad_crash_altstack(void);
+extern void *malloc(size_t n);
+extern void  free(void *p);
+struct tad_thread_start { void *(*fn)(void *); void *arg; };
+static void *tad_thread_tramp(void *p)
+{
+	struct tad_thread_start s = *(struct tad_thread_start *)p;
+	free(p);
+	tad_crash_altstack();
+	return s.fn(s.arg);
+}
+int pthread_create(ulong *tid, const void *attr, void *(*fn)(void *), void *arg)
+{
+	struct tad_thread_start *s;
+	init();
+	if (!real_pthread_create) return 11;              /* EAGAIN */
+	s = malloc(sizeof *s);
+	if (!s) return real_pthread_create(tid, attr, fn, arg);
+	s->fn = fn; s->arg = arg;
+	return real_pthread_create(tid, attr, tad_thread_tramp, s);
+}
+
 /* mkdir() — THE GUEST COULD NOT CREATE A DIRECTORY AT ALL.
  *
  * `real_mkdir` has been resolved since the shim was written but nothing ever
@@ -2966,6 +2999,8 @@ int sigaction(int sig, const struct tad_libc_sigaction *act, struct tad_libc_sig
  * Sysroot first, literal second, as chdir/rename/unlink already do — so the
  * shim's own runtime directory under /tmp keeps working.
  */
+extern int *__errno_location(void);
+
 int mkdir(const char *path, u32 mode)
 {
 	char f[512];
@@ -2986,11 +3021,23 @@ int mkdir(const char *path, u32 mode)
 	    (path[dlen] == '\0' || path[dlen] == '/'))
 		return real_mkdir(path, mode);
 	if (path && path[0] == '/' && g_sysroot[0]) {
+		int r;
 		sysrootify(f, sizeof(f), path);
-		if (real_mkdir(f, mode) == 0) {
+		r = real_mkdir(f, mode);
+		if (r == 0) {
 			if (g_debug) { dbg("[tadpole] mkdir "); dbg(path); dbg("\n"); }
 			return 0;
 		}
+		/* THE SYSROOT'S ANSWER IS THE ANSWER, unless the parent is simply
+		 * not there. Falling through to the raw path after EEXIST turned
+		 * "/LF already exists" into EACCES from the host's root directory,
+		 * and a LeapTV title's make-the-parents loop, which accepts EEXIST
+		 * and retries anything else, then retried for ever: 200k rounds of
+		 * stat/mkdir/open in twelve seconds under strace, and without it a
+		 * stack overflow in vfprintf eight seconds after launch. Measured
+		 * on Pet Play World creating /LF/Bulk/Data/Uploads/<profile>. */
+		if (*__errno_location() != 2 /* ENOENT */)
+			return r;
 	}
 	return real_mkdir(path, mode);
 }

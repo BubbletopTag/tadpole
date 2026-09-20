@@ -67,6 +67,12 @@
  * in the comment above: glClientActiveTexture is GL 1.3, Windows' opengl32.dll
  * exports 1.1, and a direct call would not link there. */
 typedef void (APIENTRYP tad_clientactivetexture_fn)(GLenum texture);
+/* glBlendFuncSeparate is GL 1.4 and has the same header trouble: Mesa's gl.h
+ * claims GL_VERSION_1_4 and declares the bare prototype, so glext's PFN block
+ * for it is skipped. Resolved but NOT required — a driver without it gets
+ * plain glBlendFunc with the RGB pair, which is what every GLES1 title sent
+ * before the separate form existed here. */
+typedef void (APIENTRYP tad_blendfuncseparate_fn)(GLenum, GLenum, GLenum, GLenum);
 
 static struct {
 	PFNGLACTIVETEXTUREPROC                  ActiveTexture;
@@ -87,6 +93,7 @@ static struct {
 	PFNGLFRAMEBUFFERRENDERBUFFERPROC        FramebufferRenderbuffer;
 	PFNGLCHECKFRAMEBUFFERSTATUSPROC         CheckFramebufferStatus;
 	PFNGLBLITFRAMEBUFFERPROC                BlitFramebuffer;
+	tad_blendfuncseparate_fn                BlendFuncSeparate;   /* optional */
 } g_gl;
 
 /* Call sites keep the real GL names; these defines are the loader's whole
@@ -139,6 +146,9 @@ static int gl_resolve(void)
 			missing++;
 		}
 	}
+	/* Optional: the replay falls back to glBlendFunc without it. */
+	g_gl.BlendFuncSeparate = (tad_blendfuncseparate_fn)
+		SDL_GL_GetProcAddress("glBlendFuncSeparate");
 	return missing == 0;
 }
 
@@ -433,6 +443,7 @@ static const char *const g_opnames[] = {
 	"SHADERSOURCE", "DELETESHADER", "ATTACHSHADER", "DETACHSHADER",
 	"BINDATTRIB", "LINKPROGRAM", "UNIFORMLOC", "USEPROGRAM", "DELETEPROGRAM",
 	"UNIFORM", "ATTRIBPOINTER", "ATTRIBENABLE", "ATTRIBVALUE",
+	"BLENDFUNCSEP",
 };
 typedef char tadgl_opnames_match[
 	(sizeof(g_opnames) / sizeof(g_opnames[0]) == TADGL_OP_COUNT) ? 1 : -1];
@@ -1701,6 +1712,12 @@ int hle_host_pump(unsigned int *out, unsigned int pitch_px)
 			break;
 		}
 		case TADGL_BLENDFUNC: { unsigned int v[2]; ring_get(v,8); glBlendFunc(v[0],v[1]); break; }
+		case TADGL_BLENDFUNCSEP: {
+			unsigned int v[4]; ring_get(v,16);
+			if (g_gl.BlendFuncSeparate) g_gl.BlendFuncSeparate(v[0],v[1],v[2],v[3]);
+			else glBlendFunc(v[0],v[1]);
+			break;
+		}
 		case TADGL_DEPTHFUNC: { unsigned int f; ring_get(&f,4); glDepthFunc(f); break; }
 		case TADGL_DEPTHMASK: { unsigned int o; ring_get(&o,4); glDepthMask(o?GL_TRUE:GL_FALSE); break; }
 		case TADGL_CULLFACE:  { unsigned int m; ring_get(&m,4); glCullFace(m); break; }
