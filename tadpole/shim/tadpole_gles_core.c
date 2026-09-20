@@ -834,16 +834,23 @@ static void view_update(void)
 			tr2("view state mapped?", g_tstate ? 1 : 0, 0);
 			/* DOES OUR IDEA OF THE LAYOUT MATCH WHAT IS THERE?
 			 *
-			 * state.bin is exactly the header plus three layers, so its
-			 * length pins the stride. Getting that wrong does not fail —
-			 * it reads plausible-looking numbers out of the wrong layer
-			 * and every 3D title renders to a wrong viewport, which is a
-			 * far worse thing to debug than a refusal. Fall back to the
-			 * full panel and say so, rather than trust a bad stride. */
+			 * state.bin's length pins the stride. Getting that wrong does
+			 * not fail — it reads plausible-looking numbers out of the
+			 * wrong layer and every 3D title renders to a wrong viewport,
+			 * which is a far worse thing to debug than a refusal. Fall
+			 * back to the full panel and say so, rather than trust a bad
+			 * stride.
+			 *
+			 * SHORTER IS THE ONLY MISMATCH. The struct grows at its end
+			 * and nowhere else (the shim says so beside it), so a file
+			 * longer than this build's sizeof was written by a newer shim
+			 * that appended a field — the layers are exactly where they
+			 * were. Demanding equality here turned every such append into
+			 * the "Leapster title fills the whole panel" bug. */
 			if (g_tstate) {
 				long want = (long)sizeof(struct tad_state);
 				long got  = g_state_bytes;
-				if (got > 0 && got != want) {
+				if (got > 0 && got < want) {
 					tr2("STATE LAYOUT MISMATCH bytes want/got",
 					    (int)want, (int)got);
 					tr2("struct tad_layer_state is out of step with "

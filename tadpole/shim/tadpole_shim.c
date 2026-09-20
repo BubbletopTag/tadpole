@@ -190,6 +190,21 @@ struct layer_state {
 	u32 vid_w, vid_h;
 };
 
+/* WHAT EACH INPUT NODE IS FOR, so the viewer can find the keyboard by
+ * purpose instead of by a slot number it assumed. The slot numbers differ per
+ * device family (see g_ev_lf2000 and g_ev_lf1000 below) and the viewer used
+ * to hard-code the LeapPad2's: on the Didj that sent every keypress to the
+ * Power Button node, and nothing responded. TAD_EV_SLOTS is fixed rather than
+ * NUM_EV so the on-disk layout does not move if NUM_EV ever does. */
+#define TAD_EV_NONE       0
+#define TAD_EV_USB        1
+#define TAD_EV_KEYS       2
+#define TAD_EV_TOUCH      3
+#define TAD_EV_TOUCH_RAW  4
+#define TAD_EV_ACCEL      5
+#define TAD_EV_POWER      6
+#define TAD_EV_SLOTS      8
+
 struct tadpole_state {
 	u32 magic, version;
 	u32 width, height;
@@ -205,6 +220,14 @@ struct tadpole_state {
 	u32 screen_seq;             /* bumped on every change, so a viewer that
 	                             * was not looking still sees the transition */
 	char screen_pkg[PKGID_MAX]; /* the PackageID when a title is up */
+	/* Which evdev node is which: TAD_EV_* per slot, TAD_EV_NONE past the
+	 * device's count. Appended, so a reader built before it sees a longer
+	 * file than it expects — which is fine, and every reader must treat it
+	 * so (tadpole_gles_core.c, tadpole_view.c, tools/fbshot.py, tools/burst.py).
+	 * A reader that demands an exact length turns this into the "Leapster
+	 * title fills the whole panel" bug, which is the rasteriser refusing the
+	 * file and falling back. */
+	u32 ev_role[TAD_EV_SLOTS];
 };
 
 /* ---- geometry ---------------------------------------------------------- */
@@ -345,6 +368,7 @@ struct ev_device {
 	const char *phys;   /* EVIOCGPHYS */
 	u32 ev_bits;        /* EVIOCGBIT(0)      capability classes */
 	u32 abs_bits;       /* EVIOCGBIT(EV_ABS) axes, word 0 */
+	u32 role;           /* TAD_EV_*: published in state.bin for the viewer */
 };
 
 /* Exact names, order and phys strings from a live LeapPad2's
@@ -359,13 +383,13 @@ struct ev_device {
  * after which the caller dereferences the null handle and dies. Word 0 =
  * bits 0..31. */
 static const struct ev_device g_ev_lf2000[] = {
-	{ "LF2000 USB",            "lf2000/usb",             0x21, 0 },
-	{ "gpio-keys",             "gpio-keys/input0",       0x23, 0 },
+	{ "LF2000 USB",            "lf2000/usb",             0x21, 0, TAD_EV_USB },
+	{ "gpio-keys",             "gpio-keys/input0",       0x23, 0, TAD_EV_KEYS },
 	{ "touchscreen interface", "lf2000/touchscreen",     0x0b,
-	  ABS_X_BIT | ABS_Y_BIT | ABS_PRESSURE_BIT },
-	{ "touchscreen raw",       "lf2000/touchscreen-raw", 0x09, 0x7ff },
-	{ "LF2000 Accelerometer",  "lf2000/aclmtr",          0x0b, 0x107 },
-	{ "Power Button",          "lf2000/power_button",    0x03, 0 },
+	  ABS_X_BIT | ABS_Y_BIT | ABS_PRESSURE_BIT,                   TAD_EV_TOUCH },
+	{ "touchscreen raw",       "lf2000/touchscreen-raw", 0x09, 0x7ff, TAD_EV_TOUCH_RAW },
+	{ "LF2000 Accelerometer",  "lf2000/aclmtr",          0x0b, 0x107, TAD_EV_ACCEL },
+	{ "Power Button",          "lf2000/power_button",    0x03, 0, TAD_EV_POWER },
 };
 
 /* THE DIDJ HAS THREE, read out of the device's own kernel rather than captured
@@ -400,9 +424,9 @@ static const struct ev_device g_ev_lf2000[] = {
  * has no touchscreen and runtime/devices/didj.conf records that. If a Didj
  * capture ever turns up, this is the line to check. */
 static const struct ev_device g_ev_lf1000[] = {
-	{ "LF1000 Keyboard", "lf1000/input0",       0x03, 0 },
-	{ "Power Button",    "lf1000/power_button", 0x03, 0 },
-	{ "LF1000 USB",      "lf1000/usb",          0x21, 0 },
+	{ "LF1000 Keyboard", "lf1000/input0",       0x03, 0, TAD_EV_KEYS },
+	{ "Power Button",    "lf1000/power_button", 0x03, 0, TAD_EV_POWER },
+	{ "LF1000 USB",      "lf1000/usb",          0x21, 0, TAD_EV_USB },
 };
 
 /* Selected by init() from TADPOLE_EVDEV; g_ev_count is how many of the
@@ -1001,6 +1025,10 @@ static void init(void)
 			/* fb0 is the primary; the overlays start disabled */
 			g_state->layer[i].enabled = (i == 0);
 		}
+		/* Tell the viewer which node is which. g_ev was chosen from
+		 * TADPOLE_EVDEV above, before the state existed. */
+		for (i = 0; i < TAD_EV_SLOTS; i++)
+			g_state->ev_role[i] = (i < g_ev_count) ? g_ev[i].role : TAD_EV_NONE;
 	}
 
 	/* input FIFOs — viewer writes struct input_event, guest reads */
@@ -1609,7 +1637,12 @@ static void screen_note(const char *path)
 /* How much buffer we claim to have. Only GETOSPACE and GETBLKSIZE see it; the
  * real pacing is done by the FIFO's backpressure, or by dsp_pace() when there
  * is nothing on the other end. */
-#define DSP_FRAGS 8
+/* The modelled device buffer, in fragments: what GETOSPACE reports and how
+ * far dsp_pace() lets the guest run ahead. Four 4096-byte fragments is 128 ms
+ * at 32000 Hz stereo — the same lead the ALSA path allows (a 4096-frame
+ * buffer), and half the viewer's 260 ms trim threshold. Eight put the guest
+ * 256 ms ahead, a jitter away from being trimmed. */
+#define DSP_FRAGS 4
 
 static signed char g_dsp_of_fd[MAXFD];  /* 1 when this fd is /dev/dsp */
 static signed char g_mlc_of_fd[MAXFD];  /* 1 when this fd is an LF1000 control node */
@@ -1621,6 +1654,7 @@ static u32  g_dsp_ch   = 2;
 static u32  g_dsp_fmt  = AFMT_S16_LE;
 static u32  g_dsp_frag = 4096;
 static unsigned long long g_dsp_played; /* bytes accepted since t0 */
+static unsigned long long g_dsp_total;  /* bytes accepted ever, for GETOPTR */
 static long long g_dsp_t0_us;           /* 0 = not started */
 
 static u32 dsp_bits(void)     { return g_dsp_fmt == AFMT_U8 ? 8u : 16u; }
@@ -1654,10 +1688,10 @@ static void dsp_publish(void)
 		real_close(fd);
 }
 
+static unsigned g_dsp_open_tries;
 static void dsp_open_fifo(void)
 {
 	char path[512];
-	static unsigned tries;
 
 	if (g_dsp_fifo >= 0 || !real_open || !g_dir[0])
 		return;
@@ -1667,51 +1701,141 @@ static void dsp_open_fifo(void)
 	 * Eager for the first 32 tries so a viewer that is merely slow to scan
 	 * does not cost the opening sound, then one in 64 forever. */
 	{
-		unsigned t = tries++;
+		unsigned t = g_dsp_open_tries++;
 		if (t >= 32 && (t & 0x3F))
 			return;
 	}
 	snprintf(path, sizeof(path), "%s/audio.%d.dsp", g_dir, getpid());
 	mkfifo(path, 0666);                     /* harmless if it exists */
 	g_dsp_fifo = real_open(path, O_WRONLY | O_NONBLOCK, 0);
+	if (g_dsp_fifo >= 0)
+		g_dsp_open_tries = 0;               /* eager again after a reopen */
 }
 
-/* PACE TO REAL TIME WHEN NOTHING IS DRAINING US.
+/* PACE TO REAL TIME ON EVERY WRITE, NOT ONLY WHEN NOBODY IS LISTENING.
  *
- * With a viewer the FIFO does this for free: it fills, our writes come back
- * short, and the retry loop below waits. With no viewer there is no
- * backpressure at all, and a guest whose audio thread never blocks runs that
- * thread as fast as qemu can go — which is not merely wasteful, it makes the
- * guest's own idea of elapsed time wrong. So sleep for as long as the samples
- * we just swallowed would have taken to play. */
-static void dsp_pace(u32 bytes)
+ * This ran only with no viewer, on the theory that with one the FIFO supplies
+ * the backpressure: it fills, writes come back short, the retry loop in
+ * dsp_write() waits. Measured on the Didj with a reader draining the FIFO:
+ *
+ *     bytes=480387072 over 10.00s -> 48038693 B/s   (128000 expected)
+ *
+ * 375 times real time. The viewer drains the pipe faster than real time BY
+ * DESIGN — into a ring it trims back to its latency cap — so the pipe never
+ * stays full, and the retry loop's 64 ms bound then drops whatever does not
+ * fit. Brio's mixer thread therefore rendered the whole soundtrack as fast as
+ * qemu could go, most of it was thrown away, and what reached the speaker
+ * was a sampling of the song at fast-forward speed: "much too fast", which
+ * sounds like a sample-rate mistake and is not one — audio.fmt and the
+ * viewer both said 32000 Hz stereo throughout.
+ *
+ * tadpole_asound.c met exactly this on the ALSA path ("running EXTREMELY
+ * FAST and sounds terrible") and its answer is taken here unchanged: model
+ * the device. Bytes drain at the byte rate; hold the writer until what is in
+ * flight fits one device buffer — DSP_FRAGS fragments, 128 ms at 32000 Hz
+ * stereo with the 4096-byte fragments this guest never changes — and resync
+ * rather than accumulate credit when the buffer drains, or a quiet passage
+ * would earn the right to dump a burst afterwards. The same in-flight count
+ * answers GETODELAY, so a guest that asks is told the truth. Sleeps are
+ * bounded so a stopped clock cannot wedge the thread.
+ *
+ * TADPOLE_AUDIO_PACE=0 turns it off, as it does for ALSA (Options -> Audio ->
+ * "Hold guest to realtime"), and TADPOLE_AUDIO_DEBUG=1 prints once a second
+ * what the pacer saw, in the same shape as the ALSA line. */
+static int g_dsp_pace_on = -1;
+static int g_dsp_pace_dbg = -1;
+static unsigned long long g_dsp_dbg_bytes, g_dsp_dbg_slept;
+static long long g_dsp_dbg_t0;
+
+static long long dsp_now_us(void)
 {
-	struct tad_timespec now, nap;
-	long long now_us, due_us;
+	struct tad_timespec now;
+	if (clock_gettime(CLOCK_MONOTONIC_, &now) != 0)
+		return 0;
+	return (long long)now.tv_sec * 1000000 + now.tv_nsec / 1000;
+}
+
+/* Bytes still queued in the modelled device at `now_us`; restarts the clock
+ * when it has drained. */
+static u32 dsp_inflight(long long now_us)
+{
+	unsigned long long played;
 	u32 br = dsp_byterate();
 
-	if (!br || clock_gettime(CLOCK_MONOTONIC_, &now) != 0)
-		return;
-	now_us = (long long)now.tv_sec * 1000000 + now.tv_nsec / 1000;
-	if (!g_dsp_t0_us) {
+	if (!br || !g_dsp_t0_us || now_us < g_dsp_t0_us)
+		return 0;
+	played = (unsigned long long)(now_us - g_dsp_t0_us) * br / 1000000ull;
+	if (played >= g_dsp_played) {
 		g_dsp_t0_us = now_us;
+		g_dsp_played = 0;
+		return 0;
+	}
+	return (u32)(g_dsp_played - played);
+}
+
+static void dsp_pace(u32 bytes)
+{
+	long long now;
+	u32 br = dsp_byterate(), cap, inflight;
+	int guard = 0;
+
+	if (g_dsp_pace_on < 0) {
+		const char *e = getenv("TADPOLE_AUDIO_PACE");
+		g_dsp_pace_on = (e && e[0] == '0') ? 0 : 1;
+	}
+	if (!g_dsp_pace_on || !br)
+		return;
+	cap = g_dsp_frag * DSP_FRAGS;
+	if (cap < 4096)
+		cap = 4096;
+	now = dsp_now_us();
+	if (!now)
+		return;                              /* no clock: do not throttle */
+	if (!g_dsp_t0_us) {
+		g_dsp_t0_us = now;
 		g_dsp_played = 0;
 	}
+	for (;;) {
+		inflight = dsp_inflight(now);
+		if (inflight + bytes <= cap)
+			break;
+		{
+			unsigned long long over = inflight + bytes - cap;
+			long long us = (long long)(over * 1000000ull / br);
+			struct tad_timespec nap;
+			if (us < 1000) us = 1000;
+			if (us > 100000) us = 100000;    /* never wedge the thread */
+			nap.tv_sec  = (long)(us / 1000000);
+			nap.tv_nsec = (long)((us % 1000000) * 1000);
+			nanosleep(&nap, 0);
+			g_dsp_dbg_slept += (unsigned long long)us;
+		}
+		now = dsp_now_us();
+		if (!now || ++guard > 40)
+			break;
+	}
 	g_dsp_played += bytes;
-	due_us = g_dsp_t0_us + (long long)(g_dsp_played * 1000000ull / br);
-	if (due_us > now_us) {
-		long long d = due_us - now_us;
-		if (d > 200000)                  /* never nap more than 0.2 s */
-			d = 200000;
-		nap.tv_sec  = (long)(d / 1000000);
-		nap.tv_nsec = (long)((d % 1000000) * 1000);
-		nanosleep(&nap, 0);
-	} else if (now_us - due_us > 1000000) {
-		/* More than a second behind: the guest was stopped, or qemu was.
-		 * Resync rather than sprint to catch up, which would just burn the
-		 * backlog at full speed and still be late. */
-		g_dsp_t0_us = now_us;
-		g_dsp_played = 0;
+	g_dsp_total  += bytes;
+
+	if (g_dsp_pace_dbg < 0) {
+		const char *e = getenv("TADPOLE_AUDIO_DEBUG");
+		g_dsp_pace_dbg = (e && e[0] && e[0] != '0') ? 1 : 0;
+	}
+	if (g_dsp_pace_dbg) {
+		g_dsp_dbg_bytes += bytes;
+		if (!g_dsp_dbg_t0)
+			g_dsp_dbg_t0 = now;
+		if (now && now - g_dsp_dbg_t0 >= 1000000) {
+			char b[192];
+			snprintf(b, sizeof(b),
+			         "[tadpole] dsp pace[pid %d]: %llu B/s in (rate=%u ch=%u -> %u B/s"
+			         " expected) cap=%u slept=%llu ms/s\n",
+			         (int)getpid(),
+			         g_dsp_dbg_bytes * 1000000ull / (unsigned long long)(now - g_dsp_dbg_t0),
+			         g_dsp_rate, g_dsp_ch, br, cap, g_dsp_dbg_slept / 1000ull);
+			note(b);
+			g_dsp_dbg_bytes = 0; g_dsp_dbg_slept = 0; g_dsp_dbg_t0 = now;
+		}
 	}
 }
 
@@ -1740,6 +1864,17 @@ static long dsp_write(const void *buf, size_t n)
 			nanosleep(&s, 0);
 		}
 	}
+	if (done < n && g_dsp_fifo >= 0) {
+		/* 64 ms without a byte accepted: either the viewer has stalled and
+		 * the pipe is full, or it has gone and every write is EPIPE. No
+		 * errno here to tell them apart, and no need: drop the fd. The
+		 * next write reopens — at once if a reader is there, ENXIO and the
+		 * no-viewer path if not — and whatever was in the pipe stays there
+		 * for a reader that has merely paused. */
+		if (real_close)
+			real_close(g_dsp_fifo);
+		g_dsp_fifo = -1;
+	}
 	if (g_debug) {
 		static unsigned long nw, nb;
 		nw++; nb += (unsigned long)n;
@@ -1750,8 +1885,7 @@ static long dsp_write(const void *buf, size_t n)
 			dbg(b);
 		}
 	}
-	if (g_dsp_fifo < 0)
-		dsp_pace((u32)n);
+	dsp_pace((u32)n);                    /* with or without a reader: see above */
 	/* ALWAYS CLAIM THE WHOLE BUFFER. A short write from an OSS device means
 	 * something specific to portaudio and none of it is true here. */
 	return (long)n;
@@ -1860,7 +1994,12 @@ static int dsp_ioctl(ulong req, void *arg)
 		return 0;
 
 	/* audio_buf_info { fragments, fragstotal, fragsize, bytes } — always
-	 * empty, because we never refuse a write. */
+	 * empty ON PURPOSE, though the pacer knows better. portaudio's OSS host
+	 * polls this before each write and its poll() on our fd — a regular
+	 * placeholder file — returns at once, so a truthful "one fragment free"
+	 * would have it spin a whole fragment's worth of time asking again. An
+	 * empty buffer lets it write, and write() then holds it to real time,
+	 * which is how a real driver with room feels from the outside. */
 	case SNDCTL_DSP_GETOSPACE:
 		if (arg) {
 			int *b = (int *)arg;
@@ -1878,14 +2017,14 @@ static int dsp_ioctl(ulong req, void *arg)
 		return 0;
 
 	case SNDCTL_DSP_GETODELAY:
-		if (ip) *ip = 0;                 /* nothing queued: see GETOSPACE */
+		if (ip) *ip = (int)dsp_inflight(dsp_now_us());   /* what the pacer holds */
 		return 0;
 	/* count_info { bytes, blocks, ptr } */
 	case SNDCTL_DSP_GETOPTR:
 	case SNDCTL_DSP_GETIPTR:
 		if (arg) {
 			int *c = (int *)arg;
-			c[0] = (int)(u32)g_dsp_played;
+			c[0] = (int)(u32)g_dsp_total;
 			c[1] = 0;
 			c[2] = 0;
 		}
@@ -2178,6 +2317,16 @@ static int dsp_note_open(const char *path, int fd)
 {
 	if (fd >= 0 && fd < MAXFD && dsp_is(path)) {
 		g_dsp_of_fd[fd] = 1;
+		/* THE VIEWER GOING AWAY MUST NOT TAKE THE GUEST WITH IT. The audio
+		 * FIFO's write end is ours and its read end is the viewer's; a
+		 * write with no reader left raises SIGPIPE, whose default is a
+		 * silent death — the guest simply stopped, with no signal line in
+		 * the log, first seen when a measurement script closed the FIFO.
+		 * A process that has opened /dev/dsp ignores it from here on and
+		 * gets EPIPE back instead, which dsp_write() survives. Scoped to
+		 * such processes: nothing else in the guest is exposed. */
+		if (real_signal)
+			real_signal(13 /* SIGPIPE */, (void (*)(int))1 /* SIG_IGN */);
 		dsp_publish();
 		dsp_open_fifo();
 		if (g_debug) dbg("[tadpole] open /dev/dsp\n");

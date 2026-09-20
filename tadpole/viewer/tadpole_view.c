@@ -110,6 +110,17 @@ struct layer_state {
 #define TAD_SCREEN_TITLE   2
 #define PKGID_MAX          64
 
+/* WHAT EACH INPUT NODE IS FOR — the shim's TAD_EV_* values, one per slot of
+ * state.bin's ev_role[]. Keep in step with tadpole_shim.c. */
+#define TAD_EV_NONE       0
+#define TAD_EV_USB        1
+#define TAD_EV_KEYS       2
+#define TAD_EV_TOUCH      3
+#define TAD_EV_TOUCH_RAW  4
+#define TAD_EV_ACCEL      5
+#define TAD_EV_POWER      6
+#define TAD_EV_SLOTS      8
+
 struct tadpole_state {
 	uint32_t magic, version;
 	uint32_t width, height;
@@ -120,6 +131,9 @@ struct tadpole_state {
 	uint32_t screen;
 	uint32_t screen_seq;
 	char     screen_pkg[PKGID_MAX];
+	/* Which node is which — see ev_node(). Appended; a shim older than
+	 * this field leaves the file short of it, which ev_node() checks. */
+	uint32_t ev_role[TAD_EV_SLOTS];
 };
 
 /* struct input_event as the 32-bit ARM guest sees it: 32-bit time_t. NOT the
@@ -146,15 +160,24 @@ struct guest_input_event {
  * pick something inside the range the guest would actually see. */
 #define TOUCH_PRESSURE 60
 
-/* evdev node indices — MUST match g_ev_names[] in the shim, which follows
- * the real device's /proc/bus/input/devices order. Getting these wrong sends
- * keypresses to the USB node and nothing responds. */
-#define EV_USB        0
-#define EV_GPIO_KEYS  1
-#define EV_TOUCH      2
-#define EV_TOUCH_RAW  3
-#define EV_ACCEL      4
-#define EV_POWER      5
+/* WHICH NODE IS WHICH IS THE GUEST'S TO SAY.
+ *
+ * These were fixed slot numbers — the LeapPad2's /proc/bus/input/devices
+ * order, with a warning that getting them wrong "sends keypresses to the USB
+ * node and nothing responds". Then the Didj arrived with three nodes in a
+ * different order: its keyboard is event0 and event1 is its Power Button. So
+ * every keypress went to the power button, and nothing responded — exactly
+ * the failure the warning described, reached from the other side.
+ *
+ * So the shim publishes each node's purpose in state.bin (ev_role[]) and
+ * these are looked up by purpose, through ev_node(). With no guest mapped,
+ * or a shim older than the field, the LF2000 order is assumed, which is what
+ * every device before the Didj used. -1 means the device has no such node
+ * and send_event() drops the event: a Didj has nothing to touch. */
+static int ev_node(int role);
+#define EV_GPIO_KEYS  ev_node(TAD_EV_KEYS)
+#define EV_TOUCH      ev_node(TAD_EV_TOUCH)
+#define EV_POWER      ev_node(TAD_EV_POWER)
 
 /* Keycodes. LeapPad1's driver mapped the D-pad and buttons this way; LeapPad2
  * has fewer buttons but the codes carry over. Refine against the LF2000
@@ -207,6 +230,34 @@ static void *g_fb[NUM_FB];
 static size_t g_fbsz[NUM_FB];
 static struct tadpole_state *g_state;
 static size_t g_statesz;              /* bytes actually mapped at g_state */
+
+/* -> the evdev slot serving `role` on the running guest, or -1 for none. */
+static int ev_node(int role)
+{
+	int i, any = 0;
+
+	if (g_state && g_statesz >= sizeof *g_state) {
+		for (i = 0; i < TAD_EV_SLOTS; i++)
+			any |= (int)g_state->ev_role[i];
+		if (any) {
+			for (i = 0; i < TAD_EV_SLOTS && i < NUM_EV; i++)
+				if (g_state->ev_role[i] == (uint32_t)role)
+					return i;
+			return -1;
+		}
+		/* All zero: a shim that has the field but never filled it, which
+		 * no released shim does. Treat as unknown. */
+	}
+	switch (role) {                    /* the LF2000 order */
+	case TAD_EV_USB:       return 0;
+	case TAD_EV_KEYS:      return 1;
+	case TAD_EV_TOUCH:     return 2;
+	case TAD_EV_TOUCH_RAW: return 3;
+	case TAD_EV_ACCEL:     return 4;
+	case TAD_EV_POWER:     return 5;
+	default:               return -1;
+	}
+}
 
 /* ---- audio -------------------------------------------------------------- *
  *
@@ -1123,8 +1174,10 @@ static int pad_event(const SDL_Event *e, int rotate, int w, int h)
 			printf("pad: %s %s\n", SDL_GameControllerGetStringForButton(
 			       (SDL_GameControllerButton)b), down ? "down" : "up");
 		/* Triangle toggles the cursor on the press. A tap in progress is
-		 * lifted by the sync below, since the cursor it needs has gone. */
-		if (b == SDL_CONTROLLER_BUTTON_Y && down) {
+		 * lifted by the sync below, since the cursor it needs has gone.
+		 * Not on a device with no touchscreen: the cursor would only take
+		 * the D-pad away from the game, with nothing to tap. */
+		if (b == SDL_CONTROLLER_BUTTON_Y && down && EV_TOUCH >= 0) {
 			g_pad_cursor = !g_pad_cursor;
 			if (g_pad_trace)
 				printf("  -> cursor %s\n", g_pad_cursor ? "up" : "hidden");
@@ -2528,6 +2581,57 @@ static void ev_open_missing(void)
 #else
 		g_evfd[i] = tp_fifo_fd(path, 0);   /* writer end; guest serves */
 #endif
+	}
+}
+
+static void unmap_file(void *p, size_t len)
+{
+#ifndef _WIN32
+	munmap(p, len);
+#else
+	(void)len;
+	UnmapViewOfFile(p);
+#endif
+}
+
+/* THE FILE CAN GROW UNDER THE MAPPING, ONCE.
+ *
+ * The viewer maps state.bin as soon as it finds one, which on a warm start is
+ * the file the PREVIOUS guest left. When that guest ran under a shim older
+ * than the newest field, the file is short of it, and this build's shim then
+ * ftruncate()s it longer when the next guest starts — but our mapping keeps
+ * the old length, so the field stays out of reach for the whole session and
+ * ev_node() keeps assuming the LF2000 order. On a Didj that is the input bug
+ * back for exactly one run after an upgrade, which is one run too many.
+ *
+ * So while the mapping is short, look once a second for the file having
+ * grown and remap. Costs nothing once the file is the right size, which is
+ * every run after the first. */
+static void state_regrow(void)
+{
+	static Uint32 last;
+	char path[600];
+	size_t n = 0;
+	void *p;
+	Uint32 now;
+
+	if (!g_state || g_statesz >= sizeof *g_state)
+		return;
+	now = SDL_GetTicks();
+	if (last && now - last < 1000)
+		return;
+	last = now;
+	snprintf(path, sizeof(path), "%s/state.bin", g_dir);
+	p = map_file(path, &n);
+	if (!p)
+		return;
+	if (n >= sizeof *g_state && ((struct tadpole_state *)p)->magic == TADPOLE_MAGIC) {
+		unmap_file(g_state, g_statesz);
+		g_state   = p;
+		g_statesz = n;
+		printf("tadpole-view: state.bin grew to %u bytes; remapped\n", (unsigned)n);
+	} else {
+		unmap_file(p, n);
 	}
 }
 
@@ -4055,6 +4159,18 @@ int main(int argc, char **argv)
 			return selftest_layers();
 		else if (!strcmp(argv[i], "--selftest-pad"))
 			return selftest_pad();
+		else if (!strcmp(argv[i], "--print-nodes")) {
+			/* Which FIFO each kind of input goes to, for the guest in
+			 * TADPOLE_DIR — or the assumed LF2000 order with none there.
+			 * The check for "keys are going to the wrong node". */
+			int mapped = try_map();
+			printf("%s: keys=ev%d touch=ev%d power=ev%d (%s)\n", g_dir,
+			       EV_GPIO_KEYS, EV_TOUCH, EV_POWER,
+			       !mapped ? "no state.bin: LF2000 order assumed"
+			       : g_statesz < sizeof *g_state ? "state.bin predates ev_role: LF2000 order assumed"
+			       : "published by the shim");
+			return 0;
+		}
 		else if (!strcmp(argv[i], "--pad-probe")) {
 			int secs = 15;
 			if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9')
@@ -4916,6 +5032,7 @@ int main(int argc, char **argv)
 		g_adepth_target_ms = ui_cfg()->audio_latency_ms / 2;
 
 		if (g_state) {
+			state_regrow();
 			/* Stand in for the panel's vsync so anything blocking on
 			 * FBIO_WAITFORVSYNC gets a plausible cadence. */
 			g_state->vsync_count++;
@@ -5027,7 +5144,7 @@ int main(int argc, char **argv)
 		 * succession cover a guest that had not yet installed its handler, and
 		 * all three are done long before the picker exists. AppManager's
 		 * 12-second shutdown timer is still beaten with room to spare. */
-		if (g_evfd[EV_POWER] >= 0 && power_announced < 3) {
+		if (EV_POWER >= 0 && g_evfd[EV_POWER] >= 0 && power_announced < 3) {
 			static Uint32 last_power;
 			Uint32 now3 = SDL_GetTicks();
 			if (!power_announced || now3 - last_power >= 250) {

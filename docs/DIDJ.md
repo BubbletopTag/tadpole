@@ -223,6 +223,70 @@ moves on — but under `-L` a missing file falls through to the host's, which is
 glibc's. Writing a uClibc-format empty cache silences it; that is fabricating a
 loader file to quiet a warning, so it is not done.
 
+## Input and audio, driven end to end
+
+Both work now, and each had a bug that looked like something else.
+
+**Every keypress went to the Power Button.** The viewer wrote keys to evdev
+slot 1 — `gpio-keys` on a LeapPad2 — and on the Didj slot 1 is the Power
+Button; the `LF1000 Keyboard` is slot 0. Brio read every press on a node it
+only watches for power events and did nothing, which from the window looks
+like "does not respond to any input". The codes were never the problem: the
+Didj's own `LinuxKeyToBrio()` (in `Brio/Module/libEvent.so`, read out of the
+disassembly) is a jump table over codes 19..108 that maps R P A H L X B M and
+the four arrows to `kButton*` bits — exactly the set the viewer already sends.
+Volume (114, 115) and Esc (1) fall outside the table, so Brio ignores them on
+this device.
+
+The slot numbers are the guest's to say, so the shim now publishes each node's
+purpose in `state.bin` (`ev_role[]`, appended after the screen tail) and the
+viewer, `tools/key.py` and `tools/tap.py` look the keyboard up by purpose.
+`tadpole/viewer/tadpole-view --print-nodes` prints what was resolved:
+
+    /tmp/tadpole-didj: keys=ev0 touch=ev-1 power=ev1 (published by the shim)
+
+Measured with `TADPOLE_DIR=/tmp/tadpole-didj tools/key.py right` at the
+country picker: the ring moves from USA to UK, and the shim log shows the read
+on the keyboard's fd:
+
+    [tadpole] ev0 fd=6 GUEST-GOT KEY code=106 val=1
+
+`state.bin` growing is the part with teeth. Every reader used to demand its
+own `sizeof` exactly, and `tadpole_gles_core.c` answered a mismatch by
+rendering to the full panel — the Leapster scaling bug, again. Readers now
+take a longer file as a newer writer's appended field (only shorter is an
+error), which is the rule `main`'s `tadpole_state.h` states.
+
+**Audio ran at 375 times real time.** Not a sample-rate problem, though it
+sounds like one: `audio.fmt` and the viewer both said 32000 Hz stereo 16-bit
+throughout. Measured by draining the guest's `/dev/dsp` FIFO for ten seconds:
+
+    bytes=480387072 over 10.00s -> 48038693 B/s   (128000 expected)
+
+The shim paced `/dev/dsp` writes to real time only when NO viewer was reading,
+trusting the FIFO to supply backpressure otherwise. But the viewer drains the
+pipe far faster than real time by design, into a ring it trims back to its
+latency cap, so the pipe never stayed full; Brio's mixer thread rendered the
+whole soundtrack as fast as qemu could go, the ring threw most of it away, and
+what reached the speaker was a sampling of the song at fast-forward speed.
+`tadpole_asound.c` met exactly this on the ALSA path, and its model is now
+the OSS path's too: bytes drain at the byte rate, the writer is held until
+what is in flight fits one device buffer (four 4096-byte fragments, 128 ms),
+and the clock resyncs rather than banking credit when the buffer drains. After:
+
+    [tadpole] dsp pace[pid 355604]: 128000 B/s in (rate=32000 ch=2 -> 128000 B/s expected) cap=16384 slept=970 ms/s
+
+`TADPOLE_AUDIO_PACE=0` switches it off (Options → Audio → "Hold guest to
+realtime" is the same switch) and `TADPOLE_AUDIO_DEBUG=1` prints that line
+once a second.
+
+One more, found by the measurement itself: closing the FIFO's read end while
+the guest wrote to it killed the guest silently — SIGPIPE, no line in any log.
+A process that has opened `/dev/dsp` now ignores SIGPIPE, and a run of refused
+writes drops the fd so the next write re-probes for a reader. The viewer holds
+its end open so this never happened in ordinary use, but a viewer that died
+would have taken the guest with it.
+
 ## What is left
 
 1. **It only runs on qemu-arm.** `runtime/devices/didj.conf` sets
@@ -244,11 +308,7 @@ loader file to quiet a warning, so it is not done.
    them in forty-five seconds; that is fixed and the freeze survived it, so the
    missing textures are a real bug and a separate one.
 
-3. **Input has never been driven end to end.** The three evdev nodes are served
-   and Brio polls all three happily, but nothing has yet pressed a button and
-   watched the country picker move.
-
-4. **`imager`'s PNG path hangs** inside libpng where its raw `.rgb` path does
+3. **`imager`'s PNG path hangs** inside libpng where its raw `.rgb` path does
    not. `display_screen` uses PNGs, so the boot screens are not reachable
    through the device's own tooling yet.
 

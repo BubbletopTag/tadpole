@@ -10,14 +10,23 @@ ring — so navigating past a title's first screen needs keys, not taps.
     ./tools/key.py -d /tmp/x down a     another instance dir
     ./tools/key.py --hold 0.2 a         longer press
 
-Codes are the Linux input codes the shim's gpio-keys device reports, and match
-tadpole/viewer/tadpole_view.c exactly — keep the two in step.
+Codes are the Linux input codes the shim's keys device reports, and match
+tadpole/viewer/tadpole_view.c exactly — keep the two in step. They are the same
+on every device: the Didj's own LinuxKeyToBrio() (Brio/Module/libEvent.so)
+takes precisely this set, arrows and A B L R M H P X, and nothing else — its
+table stops at 108, so volume and esc are not buttons there.
+
+WHICH NODE the keys go to is read from state.bin (evnode.py), because it is not
+the same everywhere: gpio-keys is event1 on a LeapPad2 and the LF1000 Keyboard
+is event0 on a Didj, whose event1 is the Power Button.
 """
 import os, struct, sys, time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from evnode import ev_node, ROLE_KEYS
+
 EV_SYN, EV_KEY = 0x00, 0x01
 SYN_REPORT = 0
-EV_GPIO_KEYS = 1          # index of "gpio-keys" in the shim's device table
 
 KEYS = {
     "esc": 1, "back": 1,
@@ -100,7 +109,11 @@ def main(argv):
                          % (", ".join(bad), " ".join(sorted(KEYS))))
         return 2
 
-    path = os.path.join(d, "ev%d" % EV_GPIO_KEYS)
+    node = ev_node(d, ROLE_KEYS)
+    if node < 0:
+        sys.stderr.write("the guest in %s serves no keys node\n" % d)
+        return 1
+    path = os.path.join(d, "ev%d" % node)
     if not os.path.exists(path):
         sys.stderr.write("no %s — is a guest running?\n" % path)
         return 1

@@ -39,8 +39,9 @@ def read_state(d):
     with open(os.path.join(d, "state.bin"), "rb") as f:
         b = f.read()
     want = HDR + NUM_FB * LAYER + TAIL
-    if len(b) != want:
-        sys.stderr.write("burst: state.bin is %d bytes, expected %d — "
+    # Longer is fine: the struct grows at its end (the evdev roles, today).
+    if len(b) < want:
+        sys.stderr.write("burst: state.bin is %d bytes, expected at least %d — "
                          "LAYER_FIELDS is out of date with tadpole_shim.c\n"
                          % (len(b), want))
     magic, ver, w, h, vsync = struct.unpack_from("<5I", b, 0)

@@ -30,13 +30,15 @@ TAIL_SIZE = 4 + 4 + 64
 
 
 def check_size(nbytes):
-    """state.bin is the header, NUM_FB layers, and the screen tail. Anything
-    else means this script and the shim disagree about the struct."""
+    """state.bin is the header, NUM_FB layers, the screen tail, and then
+    whatever a newer shim has appended (the evdev roles, today). Longer is
+    fine — the struct only ever grows at its end. SHORTER means this script
+    and the shim disagree about the layers."""
     want = HDR_SIZE + NUM_FB * LAYER_SIZE + TAIL_SIZE
-    if nbytes != want:
+    if nbytes < want:
         sys.stderr.write(
-            "fbshot: state.bin is %d bytes, expected %d — LAYER_FIELDS is out "
-            "of date with tadpole_shim.c\n" % (nbytes, want))
+            "fbshot: state.bin is %d bytes, expected at least %d — "
+            "LAYER_FIELDS is out of date with tadpole_shim.c\n" % (nbytes, want))
 
 
 def read_state(d):

@@ -17,11 +17,15 @@ ABS_Y advertise min=1 max=1023, but the driver actually emits panel pixels
 """
 import os, struct, sys, time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from evnode import ev_node, ROLE_TOUCH
+
 EV_SYN, EV_KEY, EV_ABS = 0x00, 0x01, 0x03
 SYN_REPORT = 0
 BTN_TOUCH = 0x14A
 ABS_X, ABS_Y, ABS_PRESSURE = 0x00, 0x01, 0x18
-EV_TOUCH = 2          # index of "touchscreen interface" in the shim's table
+# Which node is the touchscreen is read from state.bin: event2 on the LF2000
+# devices, and none at all on a Didj. See evnode.py.
 W, H = 480, 272
 
 
@@ -37,7 +41,10 @@ def tap(d, x, y, press=60, hold=0.8):
     hold the guest observes only the release -- you get ProcessMouseUp with no
     matching ProcessMouseDown, and nothing responds. 0.8s is comfortably
     longer than a poll interval on a loaded host."""
-    fd = os.open(os.path.join(d, f"ev{EV_TOUCH}"), os.O_RDWR | os.O_NONBLOCK)
+    node = ev_node(d, ROLE_TOUCH)
+    if node < 0:
+        raise SystemExit(f"the guest in {d} serves no touchscreen node")
+    fd = os.open(os.path.join(d, f"ev{node}"), os.O_RDWR | os.O_NONBLOCK)
     try:
         ev(fd, EV_KEY, BTN_TOUCH, 1)
         # STREAM THE POSITION, DO NOT SEND IT ONCE.
@@ -92,7 +99,7 @@ def main():
         x = x * raw // (W - 1)
         y = y * raw // (H - 1)
     tap(d, x, y, hold=hold)
-    print(f"tap ({x},{y}) -> {d}/ev{EV_TOUCH}")
+    print(f"tap ({x},{y}) -> {d}/ev{ev_node(d, ROLE_TOUCH)}")
     return 0
 
 
