@@ -28,10 +28,12 @@
 # a flat pile of hash-named files, so the only way to know what one is, is to
 # read the manifest inside. This scans them all.
 #
-# THE ROOT FILESYSTEM IS A UBIFS VOLUME, not a tar, and reading it needs
-# ubi_reader. That is not vendored — writing a UBIFS reader is a project in
-# itself and the tool already exists — so if it is missing this says exactly
-# that instead of half installing something.
+# THE ROOT FILESYSTEM IS A UBIFS VOLUME on the NAND devices, not a tar, and
+# reading it needs ubi_reader. That is not vendored — writing a UBIFS reader is
+# a project in itself and the tool already exists — so if it is missing this
+# says exactly that instead of half installing something. The eMMC devices
+# (LeapPad3, LeapPad Ultimate) ship the root AS a tar, firmware/emmc/2ext4/3/RFS,
+# which Python's own tarfile reads; see extract_rootfs().
 #
 # LINKS VERSUS COPIES. The sysroot is a symlink farm on Linux and a copy on
 # Windows, which is what setup-sysroot.sh already does for MSYS. Copies cost
@@ -317,7 +319,7 @@ def gather(src, stage):
 #
 #     *.ubi     LeapPad2, LeapPad Ultra, Leapster GS   ubi_reader
 #     *.jffs2   Didj                                   pkgtool's own reader
-#     a tar     LeapPad3                               (see setup-sysroot.sh)
+#     emmc/RFS  LeapPad3, LeapPad Ultimate             a plain tar: tarfile
 #
 # The manifest test is kept as well, and tried first, because it is the
 # cheapest and it is right for every device that has ever worked here.
@@ -337,7 +339,11 @@ def firmware_image(pkg):
     """
     best = None
     for name in members_of(pkg):
-        low = name.lower()
+        low = name.lower().replace("\\", "/")
+        # The eMMC layout: a member literally named RFS under emmc/. It is the
+        # root by construction — there is no second tar to confuse it with.
+        if low.endswith("/rfs") and "/emmc/" in low:
+            return name, "tar", True
         for ext, kind in IMAGE_EXTS:
             if not low.endswith(ext):
                 continue
@@ -442,7 +448,50 @@ def extract_ubi(image, out):
 # tar, jffs2_rfs for the Didj. Calling the Didj's tree ubi_rfs would be a lie
 # the next person has to disprove — the same reasoning setup-sysroot.sh gives
 # for emmc_rfs, and the reason that comment is worth keeping in step with this.
-RFS_DIRNAME = {"ubi": "ubi_rfs", "jffs2": "jffs2_rfs"}
+RFS_DIRNAME = {"ubi": "ubi_rfs", "jffs2": "jffs2_rfs", "tar": "emmc_rfs"}
+
+
+def extract_tar_root(image, out):
+    """The eMMC tar, member by member.
+
+    Not extractall(): the archive carries /dev's device nodes, which mknod
+    refuses for an ordinary user and which nothing in a sysroot needs — the
+    shim answers for /dev — so they are skipped rather than fatal. Everything
+    else comes out with its own mode, so there is no permissions pass after.
+
+    filter="fully_trusted" where the tarfile supports it (3.12+, and the
+    security backports before it). The default became "data" in 3.14, and
+    "data" refuses the absolute symlinks this root is full of —
+    usr/lib/libustring.so -> /usr/lib/libglibmm-2.4.so.1 is the LeapPad3's
+    own — as links outside the destination. The tree IS the device's root;
+    those links are right, and setup-sysroot.sh re-roots them.
+    """
+    import inspect
+    import tarfile
+    kw = {}
+    if "filter" in inspect.signature(tarfile.TarFile.extract).parameters:
+        kw["filter"] = "fully_trusted"
+    with tarfile.open(image) as tf:
+        for m in tf.getmembers():
+            if m.isdev() or m.isfifo():
+                continue
+            try:
+                tf.extract(m, out, **kw)
+            except OSError as e:
+                # A symlink Windows will not let us make, or similar. The
+                # file is named so the fault is not a mystery later.
+                say("    skipped %s: %s" % (m.name, e))
+                continue
+            # OWNER-READABLE, WHATEVER THE IMAGE SAID. /usr/bin/sudo and three
+            # siblings are mode 4111: executable and unreadable, which is
+            # fine for a kernel and fatal for the copytree that moves this
+            # tree out of the stage — it has to open every file. Setuid means
+            # nothing in a sysroot, so the bits above 0777 go too.
+            if m.isreg() and not (m.mode & 0o400):
+                try:
+                    os.chmod(os.path.join(out, m.name), (m.mode & 0o777) | 0o400)
+                except OSError:
+                    pass
 
 
 def extract_rootfs(fw, version, stage, kind="ubi"):
@@ -457,10 +506,16 @@ def extract_rootfs(fw, version, stage, kind="ubi"):
     extract_pkg(fw, fwdir)
 
     want = ".jffs2" if kind == "jffs2" else ".ubi"
-    image = kernel = None
+    image = kernel = fat = None
     for root, _dirs, files in os.walk(fwdir):
         for fn in files:
             low = fn.lower()
+            if kind == "tar":
+                if low == "rfs" and "emmc" in root.lower():
+                    image = os.path.join(root, fn)
+                elif low == "fat32" and "emmc" in root.lower():
+                    fat = os.path.join(root, fn)
+                continue
             if image is None and low.endswith(want) and "erootfs" in low:
                 image = os.path.join(root, fn)
             elif image is None and low.endswith(want):
@@ -468,7 +523,8 @@ def extract_rootfs(fw, version, stage, kind="ubi"):
             if low.endswith("kernel.bin"):
                 kernel = os.path.join(root, fn)
     if not image:
-        die("no %s root filesystem inside %s" % (want, os.path.basename(fw)))
+        die("no %s root filesystem inside %s"
+            % ("emmc/RFS tar" if kind == "tar" else want, os.path.basename(fw)))
     say("  root filesystem: %s (%d bytes)"
         % (os.path.basename(image), os.path.getsize(image)))
     if kernel:
@@ -484,6 +540,9 @@ def extract_rootfs(fw, version, stage, kind="ubi"):
         # diagnosis below has no counterpart: if this fails the image is bad.
         say("    (a 7 MB volume)")
         pkgtool.cmd_jffs2(image, out)
+    elif kind == "tar":
+        say("    (a %d MB tar)" % (os.path.getsize(image) // 1048576))
+        extract_tar_root(image, out)
     else:
         say("    (a 53 MB volume — this takes a minute or two)")
         extract_ubi(image, out)
@@ -520,6 +579,12 @@ def extract_rootfs(fw, version, stage, kind="ubi"):
                     ignore_dangling_symlinks=True)
     if kernel:
         shutil.copy2(kernel, os.path.join(dest, "kernel.bin"))
+    if fat:
+        # The uImage, beside the root as tools/install-leaptv-donut.sh lays
+        # out the LeapTV's. Nothing boots it; its mode string and board name
+        # are how a profile's UNVERIFIED values get checked.
+        say("  kernel partition: %s -> fat/" % os.path.basename(fat))
+        extract_tar_root(fat, os.path.join(dest, "fat"))
 
     # WHOSE FIRMWARE THIS IS, WRITTEN WHERE EVERYTHING LOOKS FOR IT.
     #
@@ -552,7 +617,7 @@ def extract_rootfs(fw, version, stage, kind="ubi"):
     # from file contents, so running it would ADD +x to every .so, which the
     # Didj itself ships 0644. Guessing over a known answer is how a tree stops
     # matching the hardware it came from.
-    if kind == "jffs2":
+    if kind in ("jffs2", "tar"):
         say("    permissions came out of the image itself")
     else:
         say("==> restoring execute permissions")

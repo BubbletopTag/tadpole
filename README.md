@@ -3,9 +3,11 @@
 A LeapPad2 and LeapPad Ultra emulator for Linux.
 
 **This is a testing branch for additional devices, and it is not the stable
-one.** The LeapPad Ultra and the LeapPad3 today; in time the whole range, from
-the Didj up to the LeapPad Ultimate. Everything further down this document was
-written around the LeapPad2 and still describes it.
+one.** The LeapPad Ultra, the LeapPad3, the LeapPad Ultimate, the Leapster GS,
+the Didj and (as a proof of concept) the LeapTV today. Everything further down
+this document was written around the LeapPad2 and still describes it. Each
+port has its notes under `docs/`: `ULTRA.md`, `LEAPPAD3.md`, `ULTIMATE.md`,
+`LEAPSTER-GS.md`, `DIDJ.md`, `LEAPTV.md`.
 
 **A great many modifications were made to the shim to get there, and LeapPad2
 support may be completely broken. Who knows!** No LeapPad2 has been booted on

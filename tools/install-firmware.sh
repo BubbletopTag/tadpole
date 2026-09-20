@@ -21,10 +21,18 @@
 #   Firmware-Base/5,53477376,C4G-E1M-W4K-erootfs.ubi     <- the root filesystem
 #   Firmware-Base/meta.inf                                  Version="4.6.0.784"
 #
-# THE ROOT FILESYSTEM IS A UBIFS VOLUME, not a tar. Reading it needs ubi_reader,
-# which is not vendored — writing a UBIFS reader is a project in itself, and the
-# tool already exists. If it is missing this says so precisely instead of half
-# installing something.
+# THE ROOT FILESYSTEM IS A UBIFS VOLUME on the NAND devices (LeapPad2, Ultra,
+# Leapster GS), not a tar. Reading it needs ubi_reader, which is not vendored —
+# writing a UBIFS reader is a project in itself, and the tool already exists.
+# If it is missing this says so precisely instead of half installing something.
+#
+# THE eMMC DEVICES ARE A TAR. The LeapPad3 and the LeapPad Ultimate ship
+#
+#   firmware/emmc/2ext4/3/RFS        a plain GNU tar of the root
+#   firmware/emmc/1fat/2/FAT32       a tar holding the uImage
+#
+# and need no extractor at all; the tree lands in emmc_rfs, the name every
+# rootfs glob knows (see runtime/device.sh).
 #
 # Content packages (Applications, Downloads, DeviceAssets, LanguagePacks) are
 # handled by install-content.sh, which already knows the destination rules; this
@@ -168,18 +176,67 @@ echo "==> Firmware-Base version $FWVER"
 mkdir -p "$STAGE/fw"
 pkg_extract "$FW" "$STAGE/fw" || die "could not unpack $(basename "$FW")"
 
-UBI="$(find "$STAGE/fw" -type f -iname '*erootfs*.ubi' | head -1)"
-[ -n "$UBI" ] || UBI="$(find "$STAGE/fw" -type f -iname '*.ubi' | head -1)"
-[ -n "$UBI" ] || die "no .ubi root filesystem inside Firmware-Base"
-note "root filesystem: $(basename "$UBI") ($(stat -c %s "$UBI") bytes)"
+# WHICH KIND OF ROOT, decided by what is in the package rather than by which
+# device was asked for: an RFS tar under emmc/ is the eMMC layout, a .ubi is
+# NAND. The directory name says which it was, so nobody has to open it.
+UBI=""; RFS_TAR="$(find "$STAGE/fw" -type f -name RFS -path '*emmc*' | head -1)"
+if [ -n "$RFS_TAR" ]; then
+    RFS_DIR=emmc_rfs
+    note "root filesystem: $(basename "$RFS_TAR") ($(stat -c %s "$RFS_TAR") bytes, a tar)"
+else
+    RFS_DIR=ubi_rfs
+    UBI="$(find "$STAGE/fw" -type f -iname '*erootfs*.ubi' | head -1)"
+    [ -n "$UBI" ] || UBI="$(find "$STAGE/fw" -type f -iname '*.ubi' | head -1)"
+    [ -n "$UBI" ] || die "no root filesystem inside Firmware-Base (neither a .ubi nor an emmc RFS tar)"
+    note "root filesystem: $(basename "$UBI") ($(stat -c %s "$UBI") bytes)"
+fi
 
 KERNEL="$(find "$STAGE/fw" -type f -iname '*kernel.bin' | head -1)"
 [ -n "$KERNEL" ] && note "kernel: $(basename "$KERNEL")"
+FAT_TAR="$(find "$STAGE/fw" -type f -name FAT32 -path '*emmc*' | head -1)"
+[ -n "$FAT_TAR" ] && note "kernel partition: $(basename "$FAT_TAR") (a tar holding the uImage)"
 
 DEST="$ROOTFS_DIR/stock-$FWVER"
-if [ -d "$DEST/ubi_rfs" ] && [ -n "$(ls -A "$DEST/ubi_rfs" 2>/dev/null)" ]; then
-    echo "==> $DEST/ubi_rfs already populated — leaving it alone"
+if [ -d "$DEST/$RFS_DIR" ] && [ -n "$(ls -A "$DEST/$RFS_DIR" 2>/dev/null)" ]; then
+    echo "==> $DEST/$RFS_DIR already populated — leaving it alone"
     echo "    (delete it first if you want to re-extract)"
+elif [ -n "$RFS_TAR" ]; then
+    # ---- 4a. the eMMC tar -> a directory tree --------------------------
+    #
+    # tar exits 2 over the device nodes it cannot create as an ordinary user,
+    # and nothing in a sysroot needs them — the shim answers for /dev. Anything
+    # worse shows up as a tree with no /bin below. Modes come out of the
+    # archive itself (minus the umask), so fix-perms.py has nothing to do.
+    echo "==> extracting the root filesystem (a $(( $(stat -c %s "$RFS_TAR") / 1048576 )) MB tar)"
+    # BESIDE THE DESTINATION, NOT UNDER $STAGE. The stage is in /tmp, usually
+    # a different filesystem, where mv becomes a copy — and a copy has to READ
+    # every file. /usr/bin/sudo and its three siblings are mode 4111 in the
+    # image, which tar unpacks as 0111: executable, unreadable, and the copy
+    # failed on them. A rename on one filesystem reads nothing.
+    TMPD="$ROOTFS_DIR/.stock-$FWVER.tmp"
+    rm -rf "$TMPD"; mkdir -p "$TMPD/$RFS_DIR"
+    tar -x -C "$TMPD/$RFS_DIR" --no-same-owner -f "$RFS_TAR" 2>&1 \
+        | grep -v -E 'Cannot mknod|previous errors' || true
+    ROOT="$TMPD/$RFS_DIR"
+    for need in bin lib sbin etc; do
+        [ -d "$ROOT/$need" ] || die "the RFS tar unpacked to no recognisable root filesystem (no /$need)"
+    done
+    # Those same four files: owner-readable, so setup-sysroot.sh's copies and
+    # dedupe-rootfs.py's checksums can open them. Nothing here is setuid.
+    find "$ROOT" ! -perm -u+r -exec chmod u+r {} + 2>/dev/null || true
+    echo "==> installing to $DEST/$RFS_DIR"
+    mkdir -p "$DEST"
+    rm -rf "$DEST/$RFS_DIR"
+    mv "$ROOT" "$DEST/$RFS_DIR" || die "move failed"
+    rmdir "$TMPD" 2>/dev/null || true
+    if [ -n "$FAT_TAR" ]; then
+        # Kept for reference beside the root, as tools/install-leaptv-donut.sh
+        # lays out the LeapTV's: nothing boots it, but the mode string and
+        # board name inside the uImage are how a profile's UNVERIFIED values
+        # get checked.
+        mkdir -p "$DEST/fat"
+        tar -x -C "$DEST/fat" --no-same-owner -f "$FAT_TAR" 2>/dev/null || true
+    fi
 else
     # ---- 4. UBIFS -> a directory tree ----------------------------------
     #
@@ -296,7 +353,7 @@ if [ -x "$PROJ/runtime/setup-sysroot.sh" ]; then
     if [ -r "$PROJ/runtime/device.sh" ]; then
         # shellcheck disable=SC1091
         . "$PROJ/runtime/device.sh"
-        NEWDEV="$(tad_detect_device "$DEST/ubi_rfs" 2>/dev/null)"
+        NEWDEV="$(tad_detect_device "$DEST/$RFS_DIR" 2>/dev/null)"
     fi
     if [ -n "$NEWDEV" ]; then
         echo "==> building the sysroot for $NEWDEV"
