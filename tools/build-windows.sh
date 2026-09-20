@@ -363,6 +363,9 @@ cp "$OUT/tadpole.exe"                    "$STAGE/tadpole.exe"
 # measurement instead of a round trip. See the note where it is built.
 [ -f "$OUT/hle-probe.exe" ] && cp "$OUT/hle-probe.exe" "$STAGE/"
 cp "$OUT/tadpole-view.exe"               "$STAGE/tadpole/viewer/build/"
+# The pad mapping table: the viewer looks for it at <proj>/tadpole/viewer/,
+# the same place as in a checkout. See pad_init() in tadpole_view.c.
+cp "$PROJ/tadpole/viewer/gamecontrollerdb.txt" "$STAGE/tadpole/viewer/"
 cp "$OUT/glasspole/glasspole.exe"        "$STAGE/glasspole/build/"
 [ -n "$SDL" ] && cp "$SDL/bin/SDL2.dll" "$STAGE/tadpole/viewer/build/" 2>/dev/null || true
 # tadpole.sh is how every part of this finds the project root, so it ships

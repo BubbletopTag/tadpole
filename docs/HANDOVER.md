@@ -6177,3 +6177,147 @@ that is the directory its UI data sits in. On a system that has never booted
 there is no file yet, so one is created there; if that id were ever wrong for
 some other device, AppManager would make its own and the nag would show once
 more before the next launch caught it.
+
+## 2026-09-04 — Game controller support, and why SDL alone got the HORIPAD wrong
+
+A pad now drives the same FIFOs the keyboard and mouse do. All of it is one
+section of `viewer/tadpole_view.c` (search `GAME CONTROLLER`); nothing past
+`send_event()` knows a controller from a keyboard.
+
+### The binding
+
+SDL's game-controller layer gives every pad the Xbox-shaped names and the
+binding is written in those; on the PlayStation-style pad it was built with:
+
+```
+D-pad, left stick     D-pad — rotated with the display, like the arrows
+Cross / Circle        A / B
+L1 / R1  (L2 / R2)    L / R
+Options / Share       Menu / Back  (the Home and Esc keys)
+L3 / R3               volume down / up  (Parent Settings needs them)
+Triangle              show or hide the CURSOR
+Square                tap the screen at the cursor; hold to drag
+```
+
+With the cursor up, the D-pad and both sticks move it instead of steering the
+game. The cursor lives in the window's LOGICAL space, below the bar, so it
+goes where the eye expects at every rotation; a tap converts through
+`event_to_fb()` exactly as a click does and sends the same five events.
+
+### One rule: nothing is sent from an event
+
+An event only updates the raw pad state (`g_pad_btn[]`, `g_pad_axis[]`, the
+latched stick directions). `pad_sync()` then works out what the guest should
+be holding — twelve slots, four of them visual directions rotated on the way
+out — and sends the DIFFERENCE against what was last sent. It runs after every
+pad event and once per frame. That is what makes every awkward case fall out
+for free:
+
+* Triangle lifts the cursor while a direction is held: the direction is no
+  longer wanted, so it is released.
+* The display turns while a direction is held: the wanted code changes, so the
+  old one goes up and the new one goes down.
+* A menu drops down or a modal opens: `live` is false, everything is released,
+  and the per-frame sync notices it even though no pad event happened.
+* The pad is unplugged: `g_pad` is NULL, same thing.
+
+A title can never be left with a button held that nothing can lift, which is
+the failure a hand-written "send on press, send on release" would have had at
+every one of those transitions.
+
+The left stick steers the D-pad through a latch with two thresholds (14000 on,
+9000 off) so a stick resting near the line does not chatter. Triggers latch
+the same way at 16000/12000. Both stick axes feed the cursor with a 6000
+deadzone and a squared ramp, no libm — this file has never linked it.
+
+### SDL's mapping for the HORIPAD mini4 was wrong, and a browser's was too
+
+The owner's pad is a HORI "HORIPAD mini4" (USB `0f0d:00ee`). On Linux it is
+handled by the generic HID driver — `hid-sony` does not claim it — and shows
+up as a plain joystick: six axes, a hat, fourteen buttons with the
+`BTN_TRIGGER`-style codes. SDL 2.32 recognised it as a controller but, with no
+entry in its table, INVENTED a mapping from the evdev button order:
+
+```
+a:b0 b:b1 x:b3 y:b4 back:b10 start:b11 leftshoulder:b6 rightshoulder:b7
+rightx:a3 righty:a4 lefttrigger:a2 righttrigger:a5
+```
+
+On this pad b0 is Square, b1 Cross, b3 Triangle, b4 L1, b6/b7 are L2/R2, b10/b11
+are the stick clicks, and a3/a4 are the L2/R2 analogue axes. So A was Square,
+Y was L1, the shoulders were the triggers, Share and Options were L3 and R3,
+and pulling a trigger swung the "right stick" — which is precisely the mess a
+web gamepad tester showed the owner, because a browser guesses the same way.
+
+The community SDL_GameControllerDB has the right line for it on Linux, Windows
+and macOS:
+
+```
+030000000d0f0000ee00000011010000,Horipad Mini 4,a:b1,b:b2,back:b8,...,
+  leftshoulder:b4,lefttrigger:a3,rightshoulder:b5,righttrigger:a4,
+  rightx:a2,righty:a5,start:b9,x:b0,y:b3,platform:Linux,
+```
+
+(The GUID SDL prints for the pad carries a CRC in bytes 2–3 —
+`0300c73c0d0f...` — and SDL ≥ 2.26 matches a table entry without one against
+it, so the DB line applies.) So the whole file is vendored as
+`viewer/gamecontrollerdb.txt` (zlib licence, the same as SDL) and loaded by
+`pad_init()` from `<proj>/tadpole/viewer/` before the first pad is opened;
+mappings added through the API outrank SDL's built-in table and its guesses.
+A file of the same name beside `ui.cfg` is loaded after it, so a line of your
+own wins over both, and SDL's own `SDL_GAMECONTROLLERCONFIG_FILE` still works.
+Both packagers copy the file to the same relative place: the AppImage into
+`app/tadpole/viewer/`, the Windows stage into `tadpole/viewer/`.
+
+Measured, not assumed: the probe below printed the invented mapping, then the
+DB's, with the same binary and only the file added.
+
+### Two tools, so this does not need a person holding a pad
+
+`tadpole-view --pad-probe [seconds]` prints what SDL makes of every pad plugged
+in — name, GUID, USB ids, and the mapping line in use — and then narrates each
+press as the guest would receive it (`pad: a down` / `-> guest A (key 30)
+down`). A pad SDL has no mapping for is opened raw so its buttons still print;
+a `gamecontrollerdb.txt` line is written from those. This is the first thing
+to run when a pad misbehaves and the output to ask for when someone reports
+one.
+
+`tadpole-view --selftest-pad` drives the binding through an SDL VIRTUAL
+controller and reads back what went to the FIFOs from a recorder in
+`send_event()` — so it checks the bytes, not a re-implementation of them.
+Forty-odd checks: every button, the D-pad against `map_key()` at all four
+rotations, stick hysteresis, a direction held across a rotation, the cursor's
+speed and clamping, a tap's coordinates at rotate 0 and 270, dragging, a modal
+blocking and then releasing, and unplugging. Run it with `SDL_JOYSTICK_HIDAPI=0`
+on a machine where `/dev/hidraw*` is root-only, or SDL wastes time trying.
+
+One trap the test itself hit: a trigger's SDL range is 0..32767 resting at 0,
+but a virtual axis is a plain -32768..32767 stick that SDL RESCALES, so a raw 0
+is a trigger held halfway and "released" is -32768. Real pads rest at 0.
+
+### Windows: built for, not yet run on
+
+Nothing here is platform-specific — the pad is SDL, the output is
+`send_event()` — but no Windows run has been done. What is known:
+
+* `SDL_INIT_GAMECONTROLLER` is brought up with `SDL_InitSubSystem()` after the
+  main init, and a failure only prints; the viewer still starts.
+* The static SDL2 the cross build links comes from SDL's own mingw archive,
+  and `sdl2-config --static-libs` already lists `dinput8`, `setupapi` and the
+  rest of the joystick imports, so nothing was added to the link line.
+* On Windows SDL's hidapi driver can open the HORIPAD mini4 itself (it is in
+  SDL's PS4 list), which yields a correct mapping without the DB; if SDL lands
+  on DirectInput instead, the DB's Windows line for the same pad
+  (`030000000d0f0000ee00000000000000`) covers it. Either way `--pad-probe`
+  says which happened.
+* `tadpole\viewer\build\tadpole-view.exe --pad-probe 10` works from a command
+  prompt: the viewer is a console subsystem exe. The project directory is
+  found from `argv[0]` the same way as on Linux.
+
+### Also
+
+`Options → Controller Settings` now lists both tables and names the pad in
+charge (or says none is), and the bar's status line announces connect and
+unplug. The UI gained `ui_set_pad_name()`, `ui_menu_open()` and `ui_cfg_dir()`,
+the last carved out of `cfg_path()` so the user's mapping file lands beside
+`ui.cfg` on every platform.

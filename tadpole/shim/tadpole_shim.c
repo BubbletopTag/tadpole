@@ -2720,6 +2720,40 @@ void (*signal(int sig, void (*h)(int)))(int)
 	return real_signal ? real_signal(sig, h) : (void (*)(int))-1;
 }
 
+/* sigaction() — THE SAME GUARD, FOR THE OTHER DOOR.
+ *
+ * signal() above kept the reporter through AppManager's handlers; the
+ * LeapTV's titles install theirs through sigaction() instead, and that door
+ * was open. Pet Play World's engine did exactly that on its way in, so its
+ * crash six seconds later printed only qemu's "uncaught target signal 11"
+ * and no report at all. Same treatment: for the signals the reporter owns,
+ * record the guest's handler (either field; SA_SIGINFO handlers get the
+ * signal number, which is all the reporter passes on) and answer as if it
+ * had been installed. libc's struct sigaction on this ABI is
+ * { handler; sigset_t (128 bytes); flags; restorer }. */
+struct tad_libc_sigaction { void *handler; unsigned char mask[128]; unsigned long flags; void *restorer; };
+static int (*real_sigaction)(int, const void *, void *);
+int sigaction(int sig, const struct tad_libc_sigaction *act, struct tad_libc_sigaction *old)
+{
+	void (*prev)(int);
+	init();
+	if (!real_sigaction) real_sigaction = dlsym(RTLD_NEXT, "sigaction");
+	if (act) {
+		prev = tad_crash_take_signal(sig, (void (*)(int))act->handler);
+		if (prev != (void (*)(int))-1) {
+			if (g_debug) { dbg("[tadpole] sigaction() kept the crash reporter\n"); }
+			if (old) {
+				unsigned i;
+				old->handler = (void *)prev;
+				for (i = 0; i < sizeof old->mask; i++) old->mask[i] = 0;
+				old->flags = 0; old->restorer = 0;
+			}
+			return 0;
+		}
+	}
+	return real_sigaction ? real_sigaction(sig, act, old) : -1;
+}
+
 /* mkdir() — THE GUEST COULD NOT CREATE A DIRECTORY AT ALL.
  *
  * `real_mkdir` has been resolved since the shim was written but nothing ever

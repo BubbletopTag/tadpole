@@ -431,7 +431,7 @@ may behave differently this way than they do from the home screen.
 
 ### Controls
 
-| | |
+| Keyboard | |
 |---|---|
 | Arrow keys | D-pad |
 | X / Z | A / B |
@@ -443,9 +443,41 @@ may behave differently this way than they do from the home screen.
 | Ctrl+R | rotate |
 | Ctrl+Q | quit |
 
+A game controller works too, plugged in before or after Tadpole starts. The
+names below are a PlayStation pad's; on an Xbox-shaped pad read A B X Y for
+Cross Circle Square Triangle, and View / Menu for Share / Options.
+
+| Controller | |
+|---|---|
+| D-pad, left stick | D-pad |
+| Cross / Circle | A / B |
+| L1 / R1, or L2 / R2 | L / R |
+| Options / Share | Menu / Back |
+| Triangle | show or hide the cursor |
+| Square | tap the screen at the cursor; hold and move to drag |
+| D-pad, either stick | move the cursor while it is shown |
+| L3 / R3 | volume down / up |
+
+With the cursor up, the D-pad and the sticks steer it instead of the game, so
+a stylus-only title is playable from the sofa; Triangle again puts them back.
+**Options → Controller Settings** shows the same table and which pad is
+plugged in.
+
+If a pad's buttons come out wrong, run
+
+    tadpole/viewer/tadpole-view --pad-probe
+
+press things, and read what each press turns into. Tadpole ships the community
+[SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB) as
+`tadpole/viewer/gamecontrollerdb.txt` and loads it ahead of SDL's own guesses
+— that is what makes a HORIPAD mini4 come out right on Linux, where SDL alone
+puts A on Square and the triggers on the right stick. A line of your own in a
+`gamecontrollerdb.txt` beside `ui.cfg` overrides both.
+
 **Parent Settings** is behind the device's own chord: hold a volume key and
 press **Home** from the home screen. That is what `-` and `=` are for — the
-device has volume buttons and nothing else here needs them.
+device has volume buttons and nothing else here needs them. On a pad, hold L3
+or R3 and press Options.
 
 The D-pad rotates with the display. A Leapster title is landscape on a portrait
 device, so its axes sit a quarter turn from the hardware's; Tadpole corrects for
