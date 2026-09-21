@@ -361,6 +361,78 @@ unit's binding afterwards.
 The five never-uploaded textures still draw white on both paths. That is the
 "missing textures" bug the old note called separate, and it still is.
 
+## Installing titles, and backporting an Explorer one
+
+A Didj title is a flat tar — `App.so`, `meta.inf`, `packagefiles.md5`, the
+assets — and lives at `/Didj/ProgramFiles/<3LD>/`, the three-letter ID from
+its `meta.inf` (the stock demo is `POW`). Nothing else registers it: the
+shell scans that directory. Sonic the Hedgehog (`SNC`, a real Didj package)
+installed that way shows on the ring and plays.
+
+**A LeapsterExplorer title bricks the shell at boot, exactly as the LFHacks
+community expected** — and the emulator makes that a ten-second experiment
+instead of a dead handheld. Ni Hao, Kai-lan (`LST3-0x00180002`, `NIH`)
+installed the same way took AppManager down before it drew a menu:
+
+    !ASSERT: [0] CTexturePNG::LoadPNG() unexpected problem reading: /Didj/ProgramFiles/NIH/icon.swf
+
+Explorer packages carry a Flash icon (`Icon="icon.swf"`); the Didj's shell
+reads every title's icon as a PNG and asserts on the first that is not one.
+The installed copy's `meta.inf` now names the PNGs the package also ships
+(`Icon="icon64.png"`, a 64x64 like the Didj's own; `PreviewImage=
+"nihao_icon_large.png"`), with the original kept as `meta.inf.orig`. With that
+the title is listed, previewed and selectable, and the Device= line — still
+"LeapsterExplorer" — is not checked. Launching it fails one step later:
+
+    !BRIO WARNING: unable to open module '/Didj/ProgramFiles/NIH/App.so', File not found
+    !ASSERT: [0] CGamesManager::PushApp(...), Could not dlopen the application so
+
+uClibc's dlopen says "File not found" for a dependency it cannot resolve, and
+`App.so` is right there. What is missing is measured, not guessed: every
+symbol `App.so` imports, minus every symbol the Didj's libraries export, with
+Sonic's `App.so` through the same sieve as the control (it comes out clean
+but for three weak libgcc frame hooks, which both share and neither needs).
+
+**Kai-lan is closer to the Didj than the name suggests.** Of its 236 imports,
+217 resolve against the Didj's own libraries — the Brio MPIs by their exact
+mangled C++ signatures, `libopengles_lite.so` (35 symbols), and the Didj's
+Lightning framework (35: `CSystemData`, `BaseUtils`, `CLogFile`, the
+`LogData::Lightning` event classes, `LTM::CPlayerProfile`). It links the same
+2008 uClibc, the same libstdc++, the same GLES 1.0 Common-Lite library. And
+it does not want touch for play: its one touch dependency is a queue object
+it constructs, not an input it reads. What it lacks is one library and
+sixteen symbols, all of which exist in the Leapster GS firmware under
+`runtime/installs/leapstergs`:
+
+| missing | where the Explorer line has it |
+|---|---|
+| `libCartridgeMPI.so` — NEEDED, but **no symbol is imported from it** | `LF/Base/Brio/lib/` |
+| `LeapFrog::Brio::CTouchEventQueue` ctor, dtor, `GetQueue()` | `libButtonMPI.so` (the Didj's has no touch at all) |
+| `CMilestones::Instance()`, `Add(ustring)`, `GetMatch(vector<ustring>)` | `libLightningJSON.so` |
+| `CSystemData::GetBaseTutorialPath()` (the Didj has `GetBasePath()`) | `libLightningJSON.so` |
+| `tPackageType::tPackageType()`, `tPackageType(char const*)` | `libLightningJSON.so` |
+| `tUploadDataType::tUploadDataType()`, `tUploadDataType(char const*)` | `libLightningJSON.so` |
+| `LTM::CPlayerProfile::AddBadge(unsigned long)` | `libLightningJSON.so` |
+| `LTM::CMicroDownloads::CMicroDownloads()` (the Didj has `get()`) | `libLightningJSON.so` |
+| `LogData::Lightning::CGameAreaStart(char*)`, `CGameAreaExit()`, `CAchievementEarned(unsigned short)` | `libLightningJSON.so` |
+
+So the gap is the Explorer's additions to the Lightning framework — badges,
+milestones, micro-downloads, tutorials, two more analytics events — plus a
+touch queue and an empty dependency on the cartridge MPI. A backport's first
+attempt is one small ARM library named `libCartridgeMPI.so`, dropped into
+`/Didj/Base/Brio/lib/`, exporting those sixteen names as stubs: `App.so`
+already asks for that file by name, so the loader brings it in and resolves
+the rest from it. Whether the title then runs on the Didj's 2009 Brio is the
+next experiment; the loader will no longer be the thing that stops it.
+
+Reproduce the measurement:
+
+    nm -D --undefined-only runtime/sysroot/Didj/ProgramFiles/NIH/App.so | awk '{print $NF}' | sed 's/@.*//' | sort -u > imports
+    for f in runtime/shimlibs/*.so* runtime/sysroot/Didj/Base/{Brio/lib,lib,Brio/Module}/*.so \
+             runtime/sysroot/{lib,usr/lib}/*.so*; do nm -D --defined-only "$f"; done \
+        | awk '{print $NF}' | sed 's/@.*//' | sort -u > exports
+    comm -23 imports exports | c++filt
+
 ## What is left
 
 1. **It only runs on qemu-arm.** `runtime/devices/didj.conf` sets
