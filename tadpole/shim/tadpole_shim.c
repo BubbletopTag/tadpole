@@ -237,6 +237,18 @@ struct tadpole_state {
 	 * title fills the whole panel" bug, which is the rasteriser refusing the
 	 * file and falling back. */
 	u32 ev_role[TAD_EV_SLOTS];
+	/* Which plane GL renders into — see g_gl_layer — STORED PLUS ONE, so
+	 * zero means "not published". Appended after ev_role under the same
+	 * rule: a reader that finds the file shorter than this field assumes
+	 * fb1, which is what every device but the Didj wants. The plus one is
+	 * for a file that is LONGER than this struct but was written by another
+	 * branch's shim, whose own appended fields sit here: worktrees share
+	 * runtime/shimlibs, so that happens, and a zero found here must not
+	 * read as "GL is fb0" on a LeapPad. */
+	u32 gl_layer;
+	/* The D-pad turn — see g_dpad_turn — plus one, for the same reason.
+	 * Appended after gl_layer. */
+	u32 dpad_turn;
 };
 
 /* ---- geometry ---------------------------------------------------------- */
@@ -448,6 +460,31 @@ static u32 g_mlc_dflt = 1;  /* answer for an unrecognised _IO('m',n) query */
 
 static const struct ev_device *g_ev = g_ev_lf2000;
 static int g_ev_count = (int)(sizeof(g_ev_lf2000) / sizeof(g_ev_lf2000[0]));
+
+/* WHICH PLANE THE GL SURFACE IS. Published in state.bin (gl_layer) for the
+ * viewer, and set from TADPOLE_GL_LAYER, which tadpole.sh takes from the
+ * device profile's DEV_GL_LAYER.
+ *
+ * On the LF2000 devices it is fb1: Brio puts the 3D surface on the second
+ * plane, and every reader here — the rasteriser, the host replayer, the
+ * compositor — grew up assuming so. The Didj has no such plane. Its
+ * libDisplay configures ONE RGB layer, layer0 (format 4, hstride 1280,
+ * address 0, enable — all of it in the MLC ioctl trace), and its OpenGL
+ * context renders into that layer's buffer; layer1 is only ever asked for
+ * its address and layer2 is the YUV plane the boot movie plays on. The
+ * software rasteriser had been landing on the right bytes by accident —
+ * every plane aliases arena offset 0 on this device — while the host
+ * replayer, told the GL plane was fb1, presented into a page the Didj
+ * never enables and the copyright screen sat there for the whole session.
+ * See runtime/devices/didj.conf. */
+static u32 g_gl_layer = 1;
+
+/* HOW FAR THE D-PAD'S AXES SIT FROM THE ARROWS' — quarter turns clockwise,
+ * published for the viewer's rotate_dpad(). 3 is the LF2000 family's turn,
+ * measured twice there and hard-coded in the viewer for years; the Didj's
+ * libEvent maps its keyboard codes straight and wants 0. Set from
+ * TADPOLE_DPAD_TURN, which tadpole.sh takes from DEV_DPAD_TURN. */
+static u32 g_dpad_turn = 3;
 
 /* real libc entry points */
 static int  (*real_pipe)(int *);
@@ -918,6 +955,13 @@ static void init(void)
 		g_ev = g_ev_lf1000;
 		g_ev_count = (int)(sizeof(g_ev_lf1000) / sizeof(g_ev_lf1000[0]));
 	}
+	/* One digit, 0..NUM_FB-1; anything else keeps the LF2000 default. */
+	if ((e = getenv("TADPOLE_GL_LAYER")) != 0 &&
+	    e[0] >= '0' && e[0] < '0' + NUM_FB && e[1] == '\0')
+		g_gl_layer = (u32)(e[0] - '0');
+	if ((e = getenv("TADPOLE_DPAD_TURN")) != 0 &&
+	    e[0] >= '0' && e[0] <= '3' && e[1] == '\0')
+		g_dpad_turn = (u32)(e[0] - '0');
 
 	e = getenv("TADPOLE_SYSROOT");
 	snprintf(g_sysroot, sizeof(g_sysroot), "%s", e ? e : "");
@@ -1047,6 +1091,8 @@ static void init(void)
 		 * TADPOLE_EVDEV above, before the state existed. */
 		for (i = 0; i < TAD_EV_SLOTS; i++)
 			g_state->ev_role[i] = (i < g_ev_count) ? g_ev[i].role : TAD_EV_NONE;
+		g_state->gl_layer  = g_gl_layer + 1;      /* 0 = not published */
+		g_state->dpad_turn = g_dpad_turn + 1;
 	}
 
 	/* input FIFOs — viewer writes struct input_event, guest reads */

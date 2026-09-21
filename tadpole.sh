@@ -712,6 +712,8 @@ guest() {
            -E TADPOLE_W="${DEV_LCD%x*}" -E TADPOLE_H="${DEV_LCD#*x}" \
            -E TADPOLE_QEMU="$QEMU" \
            ${DEV_EVDEV:+-E TADPOLE_EVDEV="$DEV_EVDEV"} \
+           ${DEV_GL_LAYER:+-E TADPOLE_GL_LAYER="$DEV_GL_LAYER"} \
+           ${DEV_DPAD_TURN:+-E TADPOLE_DPAD_TURN="$DEV_DPAD_TURN"} \
            ${DEV_HAS_QT:+-E TADPOLE_ABS_PANEL=1} \
            ${DEV_ENV_ARGS[@]+"${DEV_ENV_ARGS[@]}"} \
            $([ "$debug" = 1 ] && echo "-E TADPOLE_DEBUG=1") \

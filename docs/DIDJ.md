@@ -10,10 +10,16 @@ project's GLES shim onto an emulated LF1000 multi-layer controller.
     ./tools/online-update.sh     # with the Didj chosen in the wizard
     ./tadpole.sh
 
-What does NOT work yet: it runs on qemu-arm rather than glasspole and on the
-software rasteriser rather than host-GPU replay — both are defaults the profile
-sets, with the reason recorded there — nothing has driven the input end to end,
-and `libpng` hangs inside `imager`. See "What is left".
+**And it draws on the host GPU.** Host-GPU replay (HLE) was pinned off for
+this device for months because it "froze on the copyright screen"; it never
+did — see "Host-GPU replay" below for the three bugs that looked like one
+freeze. The home screen, the country picker and a title all render under
+replay at the panel's 60 fps now, and the profile no longer asks for the
+software rasteriser.
+
+What does NOT work yet: it runs on qemu-arm rather than glasspole (a default
+the profile sets, with the reason recorded there), the boot movie's YUV plane
+is not composited, and `libpng` hangs inside `imager`. See "What is left".
 
     ./tools/online-update.sh            # with the Didj chosen in the wizard
     TADPOLE_DEVICE=didj ./tools/online-update.sh
@@ -238,6 +244,15 @@ the four arrows to `kButton*` bits — exactly the set the viewer already sends.
 Volume (114, 115) and Esc (1) fall outside the table, so Brio ignores them on
 this device.
 
+**And the arrows went out a quarter turn round.** The viewer turns the D-pad
+for every LF2000 device (`DPAD_GAME_TURN` in `tadpole_view.c`, measured on
+the LeapPad2 and again on the LeapPad3); this device's libEvent maps its
+codes straight, so at ROT 0 in the home menu LEFT moved the selection DOWN
+and RIGHT moved it UP. `DEV_DPAD_TURN=0` in the profile says so, and travels
+the same way as the node roles below: the shim publishes it in `state.bin`
+(`dpad_turn`, after `gl_layer`) and the viewer reads it, defaulting to the
+LF2000 turn for a file that lacks it.
+
 The slot numbers are the guest's to say, so the shim now publishes each node's
 purpose in `state.bin` (`ev_role[]`, appended after the screen tail) and the
 viewer, `tools/key.py` and `tools/tap.py` look the keyboard up by purpose.
@@ -287,6 +302,65 @@ writes drops the fd so the next write re-probes for a reader. The viewer holds
 its end open so this never happened in ordinary use, but a viewer that died
 would have taken the guest with it.
 
+## Host-GPU replay
+
+Replay "froze the Didj on its copyright screen": two minutes of identical
+frames, 24 draws each, no GL error and no progress, where the software
+rasteriser walked on to the country picker. The guest was never stopped. It
+ran at 60 fps the whole time, drawing menus into a page nobody looked at, and
+three separate faults each produced exactly that picture. All three were found
+by instrumenting the ring (`TADPOLE_HLE_DEBUG=1`) and the MLC ioctls
+(`--debug`) and diffing against the software run, not from the window.
+
+**1. The frame was presented on the wrong plane.** Every LF2000 device puts
+its 3D surface on fb1, and the rasteriser, the host replayer and the viewer's
+compositor all assumed so. The Didj's libDisplay configures exactly one RGB
+layer, read out of its MLC ioctl trace:
+
+    layer0: format 4, hstride 1280, address 0, enable 1     (the RGB plane)
+    layer1: asked for its address, never configured
+    layer2: format 1, hstride 4096, address 0x20000000      (YUV, the boot movie)
+
+Its OpenGL context renders into layer0's buffer. The software rasteriser
+opens `/dev/fb1` and had been landing on the right bytes by accident — every
+plane aliases arena offset 0 here — while the replayer wrote fb1's page,
+which fb0 aliased, so the viewer diverted the frame to a shadow page it would
+composite as fb1. The Didj never enables fb1. `DEV_GL_LAYER=0` in the profile
+now says which plane GL is; the shim publishes it in `state.bin` (`gl_layer`,
+appended after `ev_role`, stored plus one so that zero means "not
+published" — a longer file from another branch's shim must not read as
+fb0), the rasteriser opens that node, and the viewer
+presents into that plane's page and composites it opaque rather than
+alpha-keyed, since it IS the picture. Every other device keeps fb1.
+
+**2. Every draw after the first resync had no vertex array.** The Didj's UI
+binds five texture names (4, 7, 9, 20, 21) it never uploads, so the host asks
+for a state resync on every boot. The resync begins with `TADGL_RESET`, which
+drops the host's array table — every slot's enable and buffer reference — and
+nothing rebuilt it. The per-draw path should have: it re-sends a VBO array's
+reference at each draw, except that it tested the pointer before the binding,
+and with a VBO bound the pointer is the byte offset, which is 0. So an
+offset-0 VBO array was skipped as "unset", the host drew from the reference
+it last held, and after the reset it held none:
+
+    drawelem pkts 1200 skipped-nobuf 0 no-array 1180
+
+`hle_send_array` now gates on the binding, as `glDrawElements` already said
+to for its indices, and `hle_sync_arrays` re-sends every array's enable and
+reference after the reset.
+
+**3. Once the draws landed, the frame was white.** The resync re-uploaded
+every texture as a fresh host object with GL's default parameters, and the
+default minification filter wants mipmaps the upload does not supply. An
+incomplete texture is sampled by desktop GL as if texturing were off, so
+every quad came out in the vertex colour. The guest had the filters all along
+(`struct gl_texture`); the resync now sends them after each image, with
+`GL_GENERATE_MIPMAP` bound first so the driver honours it, and restores each
+unit's binding afterwards.
+
+The five never-uploaded textures still draw white on both paths. That is the
+"missing textures" bug the old note called separate, and it still is.
+
 ## What is left
 
 1. **It only runs on qemu-arm.** `runtime/devices/didj.conf` sets
@@ -297,16 +371,13 @@ would have taken the guest with it.
    refuses both as well, so that is not it. `TADPOLE_QEMU` overrides the
    default for whoever goes looking.
 
-2. **Host-GPU replay freezes it on the copyright screen** — two minutes of
-   identical frames, 24 draws each, no GL error and no progress, where the
-   software rasteriser walks on to the country picker. `DEV_GL_SOFTWARE=1` in
-   the profile; `TADPOLE_GL_SOFTWARE=0` forces replay back on.
+2. **Host-GPU replay** — fixed; see "Host-GPU replay" above. Was: freezes
+   it on the copyright screen. It never froze; the frame went to a plane the
+   Didj does not enable, and two resync bugs behind that.
 
-   Its UI binds about a dozen texture names it never uploads — the shim reports
-   the same gap on its own software path, so the pixels are missing before
-   replay is involved. Every such draw used to ask the guest to resync, 6756 of
-   them in forty-five seconds; that is fixed and the freeze survived it, so the
-   missing textures are a real bug and a separate one.
+   Still open from it: the UI binds five texture names it never uploads, and
+   those draws are white on both paths. Where the device gets those pixels
+   from is unread.
 
 3. **`imager`'s PNG path hangs** inside libpng where its raw `.rgb` path does
    not. `display_screen` uses PNGs, so the boot screens are not reachable

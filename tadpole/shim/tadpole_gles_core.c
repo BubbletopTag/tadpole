@@ -245,6 +245,25 @@ static int g_vx, g_vy, g_vw, g_vh, g_view_init;
 static void view_update(void);
 static int g_panel_w = FB_W, g_panel_h = FB_H;   /* the real panel; see view_update */
 
+/* WHICH PLANE GL RENDERS INTO: fb1 on every LF2000 device, fb0 on the Didj,
+ * whose libDisplay configures one RGB layer and puts the 3D surface in it.
+ * TADPOLE_GL_LAYER comes from the device profile through tadpole.sh, and the
+ * shim publishes the same value in state.bin for the viewer, so all three
+ * readers of the arena agree on which layer's window and page are GL's.
+ * Read here rather than out of state.bin because the rasteriser needs it
+ * before the state file is mapped — fb_init() opens the node by number. */
+static int gl_layer(void)
+{
+	static int cached = -1;
+	if (cached < 0) {
+		const char *e = getenv("TADPOLE_GL_LAYER");
+		cached = 1;
+		if (e && e[0] >= '0' && e[0] <= '2' && e[1] == 0)
+			cached = e[0] - '0';
+	}
+	return cached;
+}
+
 /* ---- framebuffer ---------------------------------------------------------
  * We draw into the SAME /dev/fbN the display stack uses, opened the ordinary
  * way so tadpole_shim's open/ioctl/mmap emulation handles it. Real EGL opens
@@ -259,8 +278,15 @@ static void fb_init(void)
 	int fd;
 	if (g_fb)
 		return;
-	fd = open("/dev/fb1", O_RDWR);
-	tr2("fb_init open /dev/fb1 ->", fd, 0);
+	{
+		/* /dev/fb<N>: the GL plane's node. On the Didj every plane aliases
+		 * arena offset 0, so /dev/fb1 landed on the right bytes there by
+		 * luck; name the layer the device actually renders into instead. */
+		char node[16];
+		snprintf(node, sizeof(node), "/dev/fb%d", gl_layer());
+		fd = open(node, O_RDWR);
+		tr2("fb_init open /dev/fb<gl> ->", fd, gl_layer());
+	}
 	if (fd < 0)
 		return;
 	g_fbfd = fd;
@@ -785,7 +811,18 @@ struct tad_state {
 	 * full panel with only a trace line to say so. */
 	u32 screen, screen_seq;
 	char screen_pkg[64];
+	/* Appended by the shim after the screen tail, in this order. Neither is
+	 * read here — the evdev roles are the viewer's business and the GL plane
+	 * comes from the environment below — but the struct mirrors the file so
+	 * the layout check can say how long a CURRENT file is. The check itself
+	 * demands only the part up to screen_pkg: a file from a shim older than
+	 * these fields still has every layer where this reads it. */
+	u32 ev_role[8];
+	u32 gl_layer;
+	u32 dpad_turn;
 };
+/* The bytes a state.bin must have for the layer array to be trusted. */
+#define TAD_STATE_MIN ((long)__builtin_offsetof(struct tad_state, ev_role))
 
 static const struct tad_state *g_tstate;
 static long g_state_bytes;
@@ -855,7 +892,7 @@ static void view_update(void)
 			 * were. Demanding equality here turned every such append into
 			 * the "Leapster title fills the whole panel" bug. */
 			if (g_tstate) {
-				long want = (long)sizeof(struct tad_state);
+				long want = TAD_STATE_MIN;
 				long got  = g_state_bytes;
 				if (got > 0 && got < want) {
 					tr2("STATE LAYOUT MISMATCH bytes want/got",
@@ -871,11 +908,13 @@ static void view_update(void)
 	if (g_view_forced) {
 		x = g_fx; y = g_fy; w = g_fw; h = g_fh;
 	} else if (g_tstate) {
-		/* Layer 1 — GL renders into /dev/fb1, the 3D plane. */
-		x = (int)g_tstate->layer[1].win_x;
-		y = (int)g_tstate->layer[1].win_y;
-		w = (int)g_tstate->layer[1].win_w;
-		h = (int)g_tstate->layer[1].win_h;
+		/* The GL plane's window — fb1 on the LF2000 devices, fb0 on the
+		 * Didj; see gl_layer(). */
+		const struct tad_layer_state *gl = &g_tstate->layer[gl_layer()];
+		x = (int)gl->win_x;
+		y = (int)gl->win_y;
+		w = (int)gl->win_w;
+		h = (int)gl->win_h;
 	} else {
 		return;
 	}
@@ -1792,6 +1831,7 @@ static struct gl_buffer *buf_slot(GLuint name)
 static int g_hle_synced;
 extern void hle_reset(void);
 extern void hle_blendfuncsep(u32 sr, u32 dr, u32 sa, u32 da);
+static void hle_sync_arrays(void);
 
 static void hle_sync_state(void)
 {
@@ -1810,10 +1850,37 @@ static void hle_sync_state(void)
 	for (i = 0; i < MAX_BUFS; i++)
 		if (g_bufs[i].name && g_bufs[i].data)
 			hle_bufferdata(g_bufs[i].name, g_bufs[i].size, g_bufs[i].data);
+	/* EACH TEXTURE WITH ITS PARAMETERS, not just its pixels. The host builds
+	 * a re-uploaded texture as a fresh GL object with GL's defaults, and the
+	 * default minification filter wants mipmaps the upload does not supply
+	 * — an INCOMPLETE texture, which desktop GL samples as if texturing were
+	 * off: every textured quad comes out in the vertex colour, white. The
+	 * title set its filters once, at creation, before any of this; nothing
+	 * would say them again. Measured on the Didj, whose UI binds five names
+	 * it never uploads, so the host asks for a resync on every boot and the
+	 * whole menu came back as a white screen with replay reporting a full
+	 * frame. The bind first, so GL_GENERATE_MIPMAP is in force BEFORE the
+	 * image arrives, which is when the driver acts on it. */
 	for (i = 0; i < MAX_TEXS; i++)
-		if (g_texs[i].name && g_texs[i].argb)
-			hle_teximage2d(g_texs[i].name, g_texs[i].w, g_texs[i].h,
-			               g_texs[i].argb);
+		if (g_texs[i].name && g_texs[i].argb) {
+			const struct gl_texture *t = &g_texs[i];
+			hle_bindtexture(t->name);
+			if (t->gen_mipmap) hle_texparam(GL_GENERATE_MIPMAP_, 1);
+			hle_teximage2d(t->name, t->w, t->h, t->argb);
+			hle_texparam(GL_TEXTURE_MIN_FILTER_, (int)t->min_filter);
+			hle_texparam(GL_TEXTURE_MAG_FILTER_, (int)t->mag_filter);
+			hle_texparam(GL_TEXTURE_WRAP_S_, (int)t->wrap_s);
+			hle_texparam(GL_TEXTURE_WRAP_T_, (int)t->wrap_t);
+		}
+	/* AND PUT THE BINDINGS BACK. The uploads above left the host's texture
+	 * units bound to whichever name went last; the title's next draw binds
+	 * only if it binds — the Didj does, per draw, but a title that bound
+	 * once at load would sample the wrong image until it did so again. */
+	for (i = TEXCOORD_UNITS; i-- > 0;) {
+		hle_activetexture((u32)i);
+		hle_bindtexture(g_bound_tex_u[i]);
+	}
+	hle_activetexture((u32)g_active_tex);
 	/* THE BLEND FACTORS TOO, for the same reason the textures are here: a title
 	 * that set them BEFORE the viewer attached forwarded them to nobody, and the
 	 * host would then blend with its own defaults (GL_ONE / GL_ZERO) while the
@@ -1826,6 +1893,17 @@ static void hle_sync_state(void)
 	 * each needs its own measurement rather than an assumption, so they are not
 	 * swept in here on spec. */
 	hle_blendfuncsep(g_blend_src, g_blend_dst, g_blend_src_a, g_blend_dst_a);
+	/* THE CLIENT ARRAYS, for the same reason again and with a measurement
+	 * of its own. TADGL_RESET — which this function sends first — drops the
+	 * host's array table: every slot's enable bit and buffer reference. A
+	 * title that set its pointers up once and then only drew (the Didj's
+	 * AppManager binds a VBO, points GL_FIXED arrays at offset 0, and never
+	 * touches them again) sent nothing after the reset that would put them
+	 * back, and the host's bind_array() answered every draw with "no vertex
+	 * array" from then on. The picture froze on whatever the first frame
+	 * left — the copyright screen — while the guest ran on underneath at a
+	 * steady 60 fps, and that read as "HLE hangs the Didj" for months. */
+	hle_sync_arrays();
 	/* Shaders, programs, uniforms and attribute enables — the GLES2 side
 	 * keeps its own tables and replays them the same way. */
 	tad_g2_resync();
@@ -1982,6 +2060,33 @@ static int array_slot(GLenum a)
 	case GL_TEXTURE_COORD_ARRAY: return 2;
 	case GL_NORMAL_ARRAY_:       return 3;
 	default:                     return -1;
+	}
+}
+
+/* Re-send every fixed-function array's enable and, where it lives in a VBO,
+ * its reference, after a TADGL_RESET has dropped the host's copies. Client-
+ * side (unbuffered) arrays need only the enable: their bytes travel with each
+ * draw through hle_send_array(), which is also what re-sends VBO references
+ * from then on. Called from hle_sync_state() with g_hle_synced already set,
+ * so the sends below do not recurse into another sync. */
+static void hle_sync_arrays(void)
+{
+	struct array *arrs[3 + TEXCOORD_UNITS];
+	u32 slots[3 + TEXCOORD_UNITS];
+	u32 i, n = 0;
+
+	arrs[n] = &g_vtx; slots[n++] = 0;
+	arrs[n] = &g_col; slots[n++] = 1;
+	arrs[n] = &g_nrm; slots[n++] = 3;
+	for (i = 0; i < TEXCOORD_UNITS; i++) {
+		arrs[n] = &g_texa[i]; slots[n++] = texcoord_slot(i);
+	}
+	for (i = 0; i < n; i++) {
+		struct array *a = arrs[i];
+		hle_clientstate(slots[i], (u32)(a->on ? 1 : 0));
+		if (a->on && a->buf)
+			hle_arraypointer(slots[i], a->buf, a->size, a->type, a->stride,
+			                 (u32)(unsigned long)a->ptr);
 	}
 }
 
@@ -2682,12 +2787,25 @@ static void hle_send_array(struct array *a, u32 which, u32 nverts, u32 name)
 {
 	u32 stride;
 
-	if (!a->on || !a->ptr) return;
-	if (a->buf) {                       /* already in a buffer: send the ref */
+	if (!a->on) return;
+	/* ALREADY IN A BUFFER: SEND THE REFERENCE, AND SEND IT EVEN WHEN THE
+	 * OFFSET IS ZERO. With a VBO bound, the pointer glVertexPointer was
+	 * handed is a byte offset into it, and that offset is usually 0 — which
+	 * arrives here as a NULL ptr. This used to test `!a->ptr` before looking
+	 * at the binding, so every offset-0 VBO array was skipped as if it were
+	 * an unset client array, and the host drew from whatever reference it
+	 * last held. That reference was fine until the first TADGL_RESET dropped
+	 * it — after which every draw was "no-array" for the rest of the session.
+	 * Measured on the Didj: its whole UI is offset-0 VBO arrays, and 1180 of
+	 * the first 1200 draw-elements packets were skipped that way. Gate on the
+	 * binding, never on the pointer value — the same rule glDrawElements
+	 * states for its indices. */
+	if (a->buf) {
 		hle_arraypointer(which, a->buf, a->size, a->type, a->stride,
 		                 (u32)(unsigned long)a->ptr);
 		return;
 	}
+	if (!a->ptr) return;                /* no buffer and no data: unset */
 	stride = a->stride ? (u32)a->stride : elem_size(a->type, a->size);
 	hle_bufferdata(name, nverts * stride, a->ptr);
 	/* Tightly packed after the copy, so the original stride still applies. */

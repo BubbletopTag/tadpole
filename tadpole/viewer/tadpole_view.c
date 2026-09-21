@@ -14,6 +14,7 @@
 
 #include <SDL2/SDL.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -134,7 +135,25 @@ struct tadpole_state {
 	/* Which node is which — see ev_node(). Appended; a shim older than
 	 * this field leaves the file short of it, which ev_node() checks. */
 	uint32_t ev_role[TAD_EV_SLOTS];
+	/* Which plane GL renders into, PLUS ONE: 2 on every LF2000 device, 1 on
+	 * the Didj, 0 for "not published". Appended after ev_role; see
+	 * gl_layer() for the reader and runtime/devices/didj.conf for why the
+	 * field exists at all. The plus one is because a file longer than this
+	 * struct may have been written by another branch's shim with its own
+	 * fields here — worktrees share runtime/shimlibs — and a stray zero
+	 * must read as "unknown", never as "GL is fb0". */
+	uint32_t gl_layer;
+	/* Quarter turns between the D-pad's axes and the arrows', plus one —
+	 * see dpad_turn(). Appended after gl_layer. */
+	uint32_t dpad_turn;
 };
+
+/* DOES THE MAPPED state.bin REACH THIS FIELD? Every field past the layer
+ * array was appended by a later shim than the one before it, so each is
+ * checked by its own end rather than by sizeof: comparing against sizeof
+ * would make the newest field's absence hide every older one too. */
+#define STATE_HAS(f) \
+	(g_state && g_statesz >= offsetof(struct tadpole_state, f) + sizeof g_state->f)
 
 /* struct input_event as the 32-bit ARM guest sees it: 32-bit time_t. NOT the
  * host layout, which has a 64-bit timeval. Hard-coded deliberately. */
@@ -231,12 +250,24 @@ static size_t g_fbsz[NUM_FB];
 static struct tadpole_state *g_state;
 static size_t g_statesz;              /* bytes actually mapped at g_state */
 
+/* -> the plane GL renders into, as the shim published it, or fb1 when the
+ * file predates the field. The layer whose page the replayed frame is
+ * presented into, whose window bounds it, and — when it is fb0 — which is
+ * composited opaque rather than alpha-keyed, since it IS the picture. */
+static int gl_layer(void)
+{
+	if (STATE_HAS(gl_layer) && g_state->gl_layer >= 1 &&
+	    g_state->gl_layer - 1 < NUM_FB)
+		return (int)g_state->gl_layer - 1;
+	return 1;
+}
+
 /* -> the evdev slot serving `role` on the running guest, or -1 for none. */
 static int ev_node(int role)
 {
 	int i, any = 0;
 
-	if (g_state && g_statesz >= sizeof *g_state) {
+	if (STATE_HAS(ev_role)) {
 		for (i = 0; i < TAD_EV_SLOTS; i++)
 			any |= (int)g_state->ev_role[i];
 		if (any) {
@@ -770,8 +801,23 @@ static int g_dpad_shift = -1;   /* -1 = derive from the rotation */
  *
  * So it stays a constant, and the derivation is written down here as measured
  * and rejected rather than left to be re-invented a third time.
- */
+ *
+ * A CONSTANT OF THE FAMILY, NOT OF THE WORLD. The Didj's libEvent maps its
+ * keyboard's codes straight to Brio's buttons, and with this turn applied
+ * the owner measured LEFT arriving as the menu's DOWN and RIGHT as its UP
+ * — the LeapPad correction where none is wanted. So the device profile
+ * says how many quarter turns its input stack needs (DEV_DPAD_TURN: 0 on
+ * the Didj), the shim publishes it in state.bin, and this is the value for
+ * every device that does not say — the LF2000 measurement above. */
 #define DPAD_GAME_TURN 3
+
+static int dpad_turn(void)
+{
+	if (STATE_HAS(dpad_turn) && g_state->dpad_turn >= 1 &&
+	    g_state->dpad_turn - 1 < 4)
+		return (int)g_state->dpad_turn - 1;
+	return DPAD_GAME_TURN;
+}
 
 /* TADPOLE_DPAD_MIRROR=1 reflects left/right, leaving up/down alone.
  *
@@ -798,7 +844,7 @@ static uint16_t rotate_dpad(int visual_idx, int rotate)
 		visual_idx ^= 2;
 	shift = (g_dpad_shift >= 0)
 	      ? g_dpad_shift
-	      : ((4 - ((rotate / 90) & 3)) + DPAD_GAME_TURN) & 3;
+	      : ((4 - ((rotate / 90) & 3)) + dpad_turn()) & 3;
 	return DPAD_CW[(visual_idx + shift) & 3];
 }
 
@@ -1969,13 +2015,60 @@ static void fb0_pick_page(int w, int h)
 	 * Not gated on fb1 being enabled or fb0 being unblanked either: the title
 	 * blanks fb0 and enables its own layer a few frames after the shell has
 	 * painted the bezel, and one present into those bytes in that window is
-	 * enough to punch an alpha-zero hole through artwork nothing repaints. */
+	 * enough to punch an alpha-zero hole through artwork nothing repaints.
+	 *
+	 * ONLY WHEN THE GAME LAYER IS A DIFFERENT PLANE. On the Didj the GL
+	 * surface IS fb0 (gl_layer() == 0): there is no bezel underneath and no
+	 * second plane to divert to, so "aliasing" is simply the frame landing
+	 * where it belongs. Diverting it produced the port's long-standing
+	 * "replay freezes on the copyright screen": the frame went to a shadow
+	 * page composited as fb1, and the Didj never enables fb1. */
 	{
 		size_t p1 = (size_t)w * (l1->bpp ? l1->bpp : 32) / 8;
 		size_t o1 = (size_t)l1->yoffset * p1
 		          + (size_t)l1->xoffset * (l1->bpp ? l1->bpp : 32) / 8;
-		g_fb0_aliases = (g_fb[0] == g_fb[1]) && (o1 == g_fb0_src);
+		g_fb0_aliases = gl_layer() == 1 &&
+		                (g_fb[0] == g_fb[1]) && (o1 == g_fb0_src);
 	}
+}
+
+/* WHERE A REPLAYED FRAME IS PRESENTED: the GL plane's visible page in the
+ * shared arena, which is where the software rasteriser writes too, so the
+ * compositor needs no special case — or our own shadow page when fb0 would
+ * be painted over (see fb0_pick_page()). NULL until the arena is mapped.
+ *
+ * One function for the three places that pump the ring, because the two
+ * resize-time pumps used to write into fb1's base page unconditionally and
+ * so disagreed with the frame loop about where the picture was. */
+static uint32_t *g_gl_shadow;     /* the GL layer's page when fb0 wants ours */
+
+static uint32_t *gl_target(int w, int h)
+{
+	const struct layer_state *ls;
+	size_t pitch, off;
+	int gl = gl_layer(), wx, wy, ww, wh;
+
+	if (!g_state || !g_fb[gl])
+		return NULL;
+	if (g_fb0_aliases) {
+		if (!g_gl_shadow)
+			g_gl_shadow = calloc((size_t)w * h, 4);
+		return g_gl_shadow;
+	}
+	ls = &g_state->layer[gl];
+	pitch = (size_t)w * (ls->bpp ? ls->bpp : 32) / 8;
+	layer_window(ls, w, h, &wx, &wy, &ww, &wh);
+	if (gl == 0) {
+		/* The page fb0 is composited FROM, which is not always the one it
+		 * panned to — fb0_pick_page() decides, and the frame must land on
+		 * the page the compositor will read. */
+		off = g_fb0_src;
+	} else {
+		off = (size_t)ls->yoffset * pitch;
+		if (off + pitch * (size_t)wh > g_fbsz[gl])
+			off = 0;
+	}
+	return (uint32_t *)((unsigned char *)g_fb[gl] + off);
 }
 
 /* SAY WHERE A LAYER IS BEING COMPOSITED, once, and again whenever it moves.
@@ -2747,12 +2840,14 @@ static void apply_layout(SDL_Renderer *ren, SDL_Window *win, int rotate,
 	int lw = (rotate == 90 || rotate == 270) ? h : w;
 	int lh = (rotate == 90 || rotate == 270) ? w : h;
 
-	if (hle_host_ready() && g_state && g_fb[1])
-		hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
+	uint32_t *dst = gl_target(w, h);
+
+	if (hle_host_ready() && dst)
+		hle_host_pump(dst, (unsigned)w);
 	set_logical(ren, rotate, w, h);
 	SDL_SetWindowSize(win, lw * scale, (lh + UI_BAR_H) * scale);
-	if (hle_host_ready() && g_state && g_fb[1])
-		hle_host_pump((uint32_t *)g_fb[1], (unsigned)w);
+	if (hle_host_ready() && dst)
+		hle_host_pump(dst, (unsigned)w);
 }
 
 static int try_map(void)
@@ -4072,7 +4167,6 @@ int main(int argc, char **argv)
 	int vid_over_fb1 = 0;             /* MLC video priority puts fb2 above fb1 */
 	int said_vid_order = -1;
 	int g_upd_checked = 0;            /* the silent update check has run */
-	uint32_t *gl_shadow = NULL;       /* the GL layer's page when fb0 wants ours */
 	int gl_have = 0;                  /* tex_gl holds a current frame */
 	Uint32 gl_stamp = 0;              /* when that frame arrived */
 	int gl_rx = 0, gl_ry = 0, gl_rw = 0, gl_rh = 0;   /* where it belongs */
@@ -4167,8 +4261,19 @@ int main(int argc, char **argv)
 			printf("%s: keys=ev%d touch=ev%d power=ev%d (%s)\n", g_dir,
 			       EV_GPIO_KEYS, EV_TOUCH, EV_POWER,
 			       !mapped ? "no state.bin: LF2000 order assumed"
-			       : g_statesz < sizeof *g_state ? "state.bin predates ev_role: LF2000 order assumed"
+			       : !STATE_HAS(ev_role) ? "state.bin predates ev_role: LF2000 order assumed"
 			       : "published by the shim");
+			/* The other two device facts the shim publishes, with the same
+			 * "or assumed" honesty: which plane GL renders into and how far
+			 * the D-pad is turned. Both were hard-coded LeapPad values once,
+			 * and the Didj was wrong on both without anything saying so. */
+			printf("%s: gl-plane=fb%d (%s) dpad-turn=%d (%s)\n", g_dir,
+			       gl_layer(),
+			       STATE_HAS(gl_layer) && g_state->gl_layer
+			           ? "published by the shim" : "fb1 assumed",
+			       dpad_turn(),
+			       STATE_HAS(dpad_turn) && g_state->dpad_turn
+			           ? "published by the shim" : "LF2000 turn assumed");
 			return 0;
 		}
 		else if (!strcmp(argv[i], "--pad-probe")) {
@@ -4379,7 +4484,7 @@ int main(int argc, char **argv)
 			if (np && npt && nt && ntt) {
 				free(pixels); free(pixels_top);
 				/* Panel-sized too; let it be re-made at the new size. */
-				free(gl_shadow); gl_shadow = NULL;
+				free(g_gl_shadow); g_gl_shadow = NULL;
 				if (tex)     SDL_DestroyTexture(tex);
 				if (tex_top) SDL_DestroyTexture(tex_top);
 				pixels = np; pixels_top = npt;
@@ -4592,24 +4697,9 @@ int main(int argc, char **argv)
 		 * shared arena — so the three-layer compositor below needs no changes.
 		 * The exception is the aliasing case above. */
 		if (hle_host_ready()) {
-			uint32_t *dst = NULL;
-			if (g_fb0_aliases) {
-				/* A PAGE OF OUR OWN, because the guest's would be the bezel.
-				 * The compositor reads the game layer back out of here — see
-				 * the note in fb0_pick_page(). */
-				if (!gl_shadow)
-					gl_shadow = calloc((size_t)w * h, 4);
-				dst = gl_shadow;
-			} else if (g_state && g_fb[1]) {
-				const struct layer_state *ls = &g_state->layer[1];
-				size_t pitch = (size_t)w * (ls->bpp ? ls->bpp : 32) / 8;
-				size_t off = (size_t)ls->yoffset * pitch;
-				int wx, wy, ww, wh;
-				layer_window(ls, w, h, &wx, &wy, &ww, &wh);
-				dst = (off + pitch * (size_t)wh <= g_fbsz[1])
-				    ? (uint32_t *)((unsigned char *)g_fb[1] + off)
-				    : (uint32_t *)g_fb[1];
-			}
+			/* The GL plane's page, or our shadow of it — see gl_target(). */
+			uint32_t *dst = gl_target(w, h);
+			int to_scratch = 0;
 			if (!dst) {
 				/* Drain into scratch when the shared arena is not mapped yet.
 				 * The guest BLOCKS on present waiting for frames_done, so
@@ -4620,6 +4710,7 @@ int main(int argc, char **argv)
 				static uint32_t *scratch;
 				if (!scratch) scratch = malloc((size_t)w * h * 4);
 				dst = scratch;
+				to_scratch = 1;
 			}
 			/* SAY WHERE THE FRAME IS GOING, once, and again if it changes.
 			 *
@@ -4632,21 +4723,19 @@ int main(int argc, char **argv)
 			if (dst) {
 				static const void *last_dst;
 				static int said_scratch = -1;
-				int to_scratch = g_fb0_aliases ? 0
-				               : (g_state && g_fb[1])
-				               ? ((const void *)dst < g_fb[1] ||
-				                  (const char *)dst >= (const char *)g_fb[1] + g_fbsz[1])
-				               : 1;
 				if (dst != last_dst || to_scratch != said_scratch) {
 					last_dst = dst;
 					said_scratch = to_scratch;
 					if (getenv("TADPOLE_HLE_DEBUG"))
 						fprintf(stderr, "hle: presenting to %s "
-						        "(state=%p fb1=%p yoff=%u)\n",
+						        "(state=%p fb%d=%p yoff=%u%s)\n",
 						        to_scratch ? "SCRATCH — the compositor will "
-						                     "never see this" : "the fb1 arena",
-						        (void *)g_state, g_fb[1],
-						        g_state ? g_state->layer[1].yoffset : 0);
+						                     "never see this"
+						        : g_fb0_aliases ? "a shadow of the fb1 page"
+						        : "the GL plane's page in the arena",
+						        (void *)g_state, gl_layer(), g_fb[gl_layer()],
+						        g_state ? g_state->layer[gl_layer()].yoffset : 0,
+						        gl_layer() == 0 ? ", GL is fb0" : "");
 				}
 				hle_host_pump(dst, (unsigned)w);
 
@@ -4835,14 +4924,20 @@ int main(int argc, char **argv)
 				base = (const unsigned char *)g_fb[i] + off;
 				/* The game layer was presented into our own page, so read it
 				 * back from there rather than from the bezel underneath. */
-				if (i == 1 && g_fb0_aliases && gl_shadow)
-					base = (const unsigned char *)gl_shadow;
+				if (i == 1 && g_fb0_aliases && g_gl_shadow)
+					base = (const unsigned char *)g_gl_shadow;
 				say_layer(i, wx, wy, ww, wh);
 
 				/* fb0 is the TOP layer and goes into its own buffer, so the
 				 * game picture can be drawn between the two at its own
 				 * resolution. Everything else composites as before. */
-				if (i == 0 && pixels_top) {
+				/* NOT WHEN fb0 IS THE GL PLANE. The keyed blit treats alpha
+				 * zero as "show what is underneath", which is right for a
+				 * bezel and wrong for a rendered frame whose alpha is
+				 * whatever the title cleared to; and the plane below it is
+				 * nothing. Draw it as the picture it is, and let the
+				 * full-resolution game frame (tex_gl) go over it. */
+				if (i == 0 && pixels_top && gl_layer() != 0) {
 					memset(pixels_top, 0, (size_t)w * h * 4);
 					blit_layer_keyed(pixels_top, w, h, ls, base);
 					top_drawn = 1;
@@ -5077,7 +5172,7 @@ int main(int argc, char **argv)
 			if (g_rot_want >= 0) {
 				want = g_rot_want;
 				g_rot_want = -1;
-			} else if (g_state && g_statesz >= sizeof *g_state &&
+			} else if (STATE_HAS(screen_pkg) &&
 			           g_state->screen != TAD_SCREEN_UNKNOWN &&
 			           (g_state->screen_seq != screen_seq_seen ||
 			            g_state->screen != screen_kind_seen)) {
