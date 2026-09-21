@@ -363,6 +363,12 @@ The five never-uploaded textures still draw white on both paths. That is the
 
 ## Installing titles, and backporting an Explorer one
 
+**The backport works.** Ni Hao, Kai-lan plays on the Didj's own firmware
+with one added library and two rewritten `meta.inf` lines; the tool that
+does both, and the tutorial for the emulator and for real hardware, are
+[DIDJ-BACKPORT.md](DIDJ-BACKPORT.md) and `tools/didj-backport.py`. What
+follows is how that was found.
+
 A Didj title is a flat tar — `App.so`, `meta.inf`, `packagefiles.md5`, the
 assets — and lives at `/Didj/ProgramFiles/<3LD>/`, the three-letter ID from
 its `meta.inf` (the stock demo is `POW`). Nothing else registers it: the

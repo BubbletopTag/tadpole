@@ -529,6 +529,44 @@ $(SHIMLIBS)/libopengles_lite.so: $(GLES_SRC) $(EGL_SRC) shim/tadpole_glcmd.h \
 		$(GLES_SRC) $(EGL_SRC) $(GUESTLIBS)/libc.so.0
 	@echo "built $@"
 
+# ---- the Didj's libCartridgeMPI.so, for backporting an Explorer title -----
+#
+# Not part of `all`. See shim/tadpole_didj_backport.c for what it is,
+# docs/DIDJ-BACKPORT.md for how it is used, and docs/DIDJ.md for the
+# measurement behind it.
+#
+# BUILT FOR THE REAL DIDJ, NOT JUST THE EMULATOR. Every other guest shim here
+# is ARMv7 with VFP, which is what qemu-arm and the LF2000 devices run. The
+# Didj's LF1000 is an ARM926EJ-S: ARMv5TE, no floating-point unit. This one
+# library is meant to be copied onto real hardware by people testing the
+# backport, so it is built for v5TE with the soft-float ABI — the same
+# calling convention as softfp, so it links against the same uClibc 0.9.29
+# and runs unchanged under qemu-arm. Checked: readelf -A says Tag_CPU_arch:
+# v5TE and the disassembly has no v7 or VFP instruction in it.
+#
+# The stable copy lives in runtime/didj-backport/, TRACKED IN GIT like the
+# shimlibs-gl binaries, so a hardware tester can take the one file from the
+# repository; tools/didj-backport.py finds it there
+# whichever device is live; when the Didj IS live it is also dropped into
+# the Didj's own Brio lib directory, which is where the loader wants it.
+DIDJ_BACKPORT     := ../runtime/didj-backport/libCartridgeMPI.so
+DIDJ_BACKPORT_DST := ../runtime/sysroot/Didj/Base/Brio/lib/libCartridgeMPI.so
+.PHONY: didj-backport
+didj-backport: $(DIDJ_BACKPORT)
+	@if [ -d ../runtime/sysroot/Didj/Base/Brio/lib ]; then \
+	  cp $(DIDJ_BACKPORT) $(DIDJ_BACKPORT_DST) && echo "installed $(DIDJ_BACKPORT_DST)"; \
+	else echo "the live device is not the Didj; built only"; fi
+
+$(DIDJ_BACKPORT): shim/tadpole_didj_backport.c | need-libs
+	@mkdir -p ../runtime/didj-backport
+	$(CLANG) --target=$(ARCH_TRIPLE) -march=armv5te -mfloat-abi=soft \
+		-fPIC -shared -nostdlib -O2 -Wall \
+		-fno-stack-protector -fno-builtin \
+		-fuse-ld=lld -Wl,--hash-style=both -Wl,-soname,libCartridgeMPI.so \
+		-Wl,--unresolved-symbols=ignore-all \
+		-o $@ shim/tadpole_didj_backport.c $(GUESTLIBS)/libc.so.0
+	@echo "built $@ (ARMv5TE, soft-float: runs on a real Didj)"
+
 .PHONY: shimpa
 ifeq ($(wildcard $(ROOTFS)/lib/libdl-0.9.29.so),)
 shimpa:
