@@ -22,7 +22,7 @@ dies at boot, before it draws a menu:
 
     !ASSERT: [0] CTexturePNG::LoadPNG() unexpected problem reading: /Didj/ProgramFiles/NIH/icon.swf
 
-Explorer packages carry a Flash icon (`Icon="icon.swf"` in `meta.inf`). The
+Explorer packages cat pontentially carry a Flash icon (`Icon="icon.swf"` in `meta.inf`). The
 Didj's shell reads every installed title's icon as a PNG while it builds the
 game ring, and asserts on the first that is not one. On a real Didj that is
 the "brick": the shell asserts on every boot until the package is removed.
@@ -148,6 +148,72 @@ If it bricks the shell, the way back is the way in: delete
 `/Didj/ProgramFiles/<3LD>/` (and, if you like, the library) and the device is
 stock. Keep a way to reach the filesystem that does not depend on the shell
 booting before you try.
+
+## How much RAM it needs, and how that was measured
+
+The Didj's kernel is booted with `mem=16M` (its built-in command line, read
+out of `kernel.bin`): Linux manages 16 MB, and the display and 3D engine
+buffers live in physical RAM beyond that, mapped through `/dev/mem`. So the
+question for a backport is whether the shell's process, with the title
+loaded into it, fits in what is left of 16 MB after the kernel itself.
+
+The emulator cannot read that off directly. Under qemu-arm every byte the
+guest touches is a byte of the qemu process, so `/proc/<pid>/smaps` split by
+mapping IS the guest's footprint — but this project's GLES shim keeps a
+32-bit ARGB copy of every texture the title uploads and a copy of every
+vertex buffer, none of which exists on hardware (a texture goes to the 3D
+engine's memory, outside the 16 MB, in its own format, and the title's copy
+is freed). `TADPOLE_GL_MEM=1` makes the shim print what it holds once a
+second, so it can be subtracted:
+
+    [gl] mem held by the shim: 67 textures 6278 KB, 0 buffers 0 KB, rasteriser 1507 KB static
+
+Kai-lan and Sonic (a stock Didj title that runs on the hardware), each on a
+fresh boot, first launch, measured at matching moments. "Device-side" is
+the guest's touched memory minus the host-GPU command ring (8 MB, emulator
+only), minus the shim's texture and buffer copies, minus its static
+rasteriser buffers:
+
+| | guest touched | shim's textures | device-side | of which code+libs | heap |
+|---|---|---|---|---|---|
+| Sonic, main menu | 20.7 MB | 2.2 MB | **9.0 MB** | ~5.9 MB | ~3 MB |
+| Sonic, in play (level 1) | 44.2 MB | 24.8 MB | **9.9 MB** | ~5.9 MB | ~4 MB |
+| Kai-lan, title screen | 34.5 MB | 10.3 MB | **14.7 MB** | ~6.9 MB | ~8 MB |
+| Kai-lan, overworld | 30.7 MB | 6.3 MB | **14.9 MB** | ~6.9 MB | ~8 MB |
+
+So Kai-lan's process wants about 15 MB where a stock title wants about
+10, and the difference is heap: ~8 MB against ~4, with App.so itself 2.4 MB
+against Sonic's 1.4. Textures are not the problem — Kai-lan uploads far
+less than Sonic does — and they do not count against the 16 MB anyway.
+
+What that means for hardware, honestly: 15 MB against a 16 MB kernel that
+must also hold itself (~2-3 MB for this 2.6.20 build), the flash
+filesystem's caches, and every other process, is not obviously going to
+fit, and the emulator cannot tell you whether it does — it does not model
+the kernel, the page cache, or what uClibc's malloc gives back. What the
+emulator does say is that a stock title runs at roughly two thirds of
+Kai-lan's footprint, so a Didj that plays Sonic has a few MB of headroom,
+not a lot. The first symptom of running out on the device would be the
+allocation failure Brio reports, or the kernel's OOM killer taking
+AppManager; both are worth looking for on the serial console.
+
+The measurement is repeatable: `TADPOLE_GL_MEM=1 ./tadpole.sh --device didj`,
+then `cat /proc/$(pgrep -x qemu-arm)/smaps` at the moment of interest and
+sum `Rss` over the mappings below 4 GB, which are the guest's (qemu's own
+live far above). The file-backed ones name the library; the anonymous ones
+are heap, stacks and the shim's copies.
+
+## Exiting and relaunching: one thing that does go wrong
+
+Exit Kai-lan through its own Home dialog and the shell unloads it cleanly
+(`ExitPopUnloadApp`). If the shell then relaunches it, the second copy
+crashes at once, in the freshly loaded App.so with a return address in the
+OLD, unloaded mapping — a listener or callback the first run registered
+with Brio and never took back, fired into memory that is no longer there.
+Whether a stock Didj title survives the same round trip has not been
+checked, and the compatibility library's touch queue is one candidate: its
+destructor, like the GS original's, does not unregister from the EventMPI.
+A device returning to the shell after a game would hit the same path.
 
 ## Trying the next title
 

@@ -617,6 +617,8 @@ static void fps_report(void)
 	t0 = now; frames = 0;
 }
 
+static void mem_report(void);      /* defined after the texture and buffer tables */
+
 /* TADPOLE_GL_HLE=1 selects host-GPU replay. If it is asked for and does not
  * happen, say so once and keep rasterising rather than silently doing nothing —
  * a toggle that appears to work but changes nothing is worse than one that
@@ -662,6 +664,7 @@ void tadpole_gl_present(void)
 		 * 60 Hz, so cap here regardless of what the host monitor does. */
 		pace_frame();
 		fps_report();
+		mem_report();
 		g_swaps++;
 		g_frame_no++;
 		g_draw_in_frame = 0;
@@ -741,6 +744,7 @@ void tadpole_gl_present(void)
 	/* Hold the guest to the panel's cadence — see pace_frame(). */
 	pace_frame();
 	fps_report();
+	mem_report();
 
 	/* TADPOLE_GL_CLEARSWAP=1: after a swap, GL says the back buffer contents
 	 * are UNDEFINED — an app is expected to clear or fully redraw. If the
@@ -1914,6 +1918,46 @@ extern int hle_want_resync(void);
 extern void hle_reset(void);
 
 
+
+/* WHAT THIS SHIM ITSELF HOLDS, once a second, under TADPOLE_GL_MEM=1.
+ *
+ * The question it answers is "how much RAM does this title need on the
+ * device", and the emulator cannot answer it directly: this library keeps a
+ * 32-bit ARGB copy of every texture the title uploads (the software
+ * rasteriser samples it, the host replayer is re-sent it after a reset) and a
+ * copy of every vertex buffer, none of which exists on hardware, where a
+ * texture goes to the 3D engine's memory in its own format and the title's
+ * copy is freed. On a Didj that memory is outside the kernel's 16 MB
+ * altogether. So a process footprint read off the emulator overstates the
+ * device's by exactly these bytes, and this line says how many, so they can
+ * be subtracted. Measured on Sonic: 13 MB of texture copies by its main
+ * menu, in a process that must fit a 16 MB kernel on the real thing. */
+static void mem_report(void)
+{
+	static int on = -1, frames;
+	unsigned long tbytes = 0, bbytes = 0;
+	int i, ntex = 0, nbuf = 0;
+	char b[200];
+	int n;
+
+	if (on < 0) on = getenv("TADPOLE_GL_MEM") ? 1 : 0;
+	if (!on || ++frames < 60) return;
+	frames = 0;
+	for (i = 0; i < MAX_TEXS; i++)
+		if (g_texs[i].name && g_texs[i].argb) {
+			ntex++;
+			tbytes += (unsigned long)g_texs[i].w * g_texs[i].h * 4u;
+		}
+	for (i = 0; i < MAX_BUFS; i++)
+		if (g_bufs[i].name && g_bufs[i].data) { nbuf++; bbytes += g_bufs[i].size; }
+	n = snprintf(b, sizeof(b),
+	             "[gl] mem held by the shim: %d textures %lu KB, %d buffers %lu KB,"
+	             " rasteriser %lu KB static\n",
+	             ntex, tbytes / 1024, nbuf, bbytes / 1024,
+	             (unsigned long)(sizeof(g_back) + sizeof(g_f_texused)
+	                             + sizeof(g_texs) + sizeof(g_bufs)) / 1024);
+	if (n > 0) write(2, b, (u32)n);
+}
 
 static int hle_ready(void)
 {
