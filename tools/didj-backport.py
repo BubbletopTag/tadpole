@@ -408,9 +408,9 @@ def cmd_install(args):
             say("  meta.inf already names PNG art")
         lib, fresh = install_lib(root)
         say("  %s %s" % (lib, "installed" if fresh else "already there"))
-        check_appso(os.path.join(dest, "App.so"),
-                    root if not out else emulator_root_or_none(),
-                    lib, "check")
+        audit_root = root if not out else emulator_root_or_none()
+        if audit_root:
+            check_appso(os.path.join(dest, "App.so"), audit_root, lib, "check")
     if out:
         say("")
         say("Copy %s/Didj onto the Didj's Didj partition, keeping the paths:" % out)
