@@ -11,9 +11,11 @@ does not work.
 Everything here was measured on the emulator with the stock Didj firmware
 (1.35.2.4222). Nothing in that firmware is changed by any step below;
 removing the title's directory and the library puts the device back to
-stock. **Hardware testing is the community's, not Tadpole's** — see "On a
-real Didj" for the one thing that was built specifically so it can be tried
-there, and for what nobody has verified yet.
+stock. **And it has now run on a real Didj**: an LFHacks member copied the
+two files over and Kai-lan launched on the hardware — as far as its engine's
+first big allocation, which is the memory story told under "On a real
+Didj". A second title, SpongeBob SquarePants: The Clam Prix, runs into a
+race on the emulator with thirteen more stubs; see "The second title".
 
 ## Why an Explorer title refuses, in two steps
 
@@ -48,6 +50,8 @@ is closer to the Didj than its name suggests.
 
 `libCartridgeMPI.so` — built from `tadpole/shim/tadpole_didj_backport.c`,
 shipped in `runtime/didj-backport/`, installed to `/Didj/Base/Brio/lib/`.
+Sixteen stubs for Kai-lan, described here; thirteen more for Clam Prix,
+described under "The second title".
 
 It is not a cartridge library. `App.so` names that file in its dependencies
 and takes no symbol from it, so the loader only needs a file by that name to
@@ -133,21 +137,77 @@ the emulator's other shims: `/Didj/Base/Brio/lib/` is on the device's own
 `LD_LIBRARY_PATH` (`/etc/profile` puts it there), and nothing else in this
 directory belongs on hardware.
 
-**What has NOT been verified on hardware, honestly:**
+**What the hardware said.** The rewritten `meta.inf` was accepted, the
+library loaded, the title launched — and then:
 
-- That the shell accepts the rewritten `meta.inf` the same way. It should:
-  the emulator runs the stock shell binary against the stock firmware.
-- That LeapFrog's own `libopengles_lite.so` renders the title. The emulator
-  replaces that one library with its own GLES implementation (the stock one
-  maps the LF1000's 3D registers and has no hardware to map here). Kai-lan
-  asks that library for 35 entry points, all of which the stock library
-  exports, but nobody has watched the LF1000's 3D engine draw it.
-- Speed and memory. The emulator does not model either.
+    [1041] Not enough mem to allocate master heap!BrioOpenGLConfig() caught signal 11
+
+Kai-lan's engine asks for its whole working heap as ONE block before it
+does anything else: `didj::App::Enter()` (its platform layer is literally
+named for this device's predecessor) calls `shark::Platform::Init(7340032,
+…)`, which is `malloc(7 MB)`. The Didj's kernel manages 16 MB, the shell is
+already resident, and 7 MB in one piece was not there. The allocator logs
+the failure and carries on with a null heap, and GL init is the first thing
+to dereference it.
+
+The emulator predicted the squeeze (see "How much RAM it needs") and also
+shows the fix: through the overworld, Kai-lan touches about 5 MB of heap in
+total, so the pool is oversized. The size is one instruction —
+
+    cbf94: e3a00607   mov r0, #0x700000     (7 MB)
+
+— at file offset 0xcbf94 of App.so, and changing the immediate to 4
+(`e3a00604`) or 5 (`e3a00605`) gives a 4 or 5 MB pool. The 4 MB build
+reaches the overworld in the emulator with nothing else changed. Both
+patched builds ship beside the hardware tree; which one the device can
+satisfy depends on its free memory at launch, which `/proc/meminfo` on the
+serial console will say.
+
+Still unverified on hardware: whether LeapFrog's own `libopengles_lite.so`
+draws the title once the heap is there (the emulator replaces that one
+library; the title asks it for 35 entry points, all of which the stock one
+exports), and how far play gets before a 4 MB pool runs out.
 
 If it bricks the shell, the way back is the way in: delete
 `/Didj/ProgramFiles/<3LD>/` (and, if you like, the library) and the device is
 stock. Keep a way to reach the filesystem that does not depend on the shell
 booting before you try.
+
+## The second title, and what it taught about the loader
+
+SpongeBob SquarePants: The Clam Prix (`LST3-0x00180025`, 3LD `SCP`). Its
+`meta.inf` already names PNG art, so `install` changes nothing in it. The
+audit said 414 imports, 383 resolved by the Didj, 11 by the library as it
+was, and **20 still missing** — and it was launched anyway, to see where it
+stopped. It did not stop where the audit said:
+
+    set current path to /Didj/ProgramFiles/SCP
+    [GLTextureManager] Load Texture SpongeboyTT1_30.udi, 262144 ...   (eighteen of these)
+    AppManager: can't resolve symbol 'CSystemData::GetCurrentPlayerID()'
+
+The Didj's shell dlopens lazily. An unresolved FUNCTION does not fail the
+load; it fails the first call, when uClibc's loader cannot bind it. So the
+loader's demand is exactly the set of functions a title calls, and a symbol
+it never calls costs nothing — which is how Clam Prix runs on the Leapster
+GS at all: eight of its imports (an NvTriStrip stripifier, `gCalculateDel`,
+a matrix inverse, one template instantiation, a touch-message accessor)
+exist in no GS library either. They are dead paths.
+
+The thirteen it does call are in the library now, each again built from the
+GS's implementation over the Didj's own code: `GetCurrentPlayerID` through
+`LTM::CSystem`, which the Didj has identically; `GetCurrentGamePackageID` as
+the Didj's `GetCurrentGameID`; `GetLocalDataPath(pid, game)` as the Didj's
+`GetDataProfileGamePath(pid)`; `fopenAtomic`/`fcloseAtomic` (libdftp's
+write-to-temp-and-rename) as plain `fopen`/`fclose`; badges, milestones and
+the five `CCyo` accessors as the nothing the GS itself returns for them in
+its own "Didj legacy" mode — the Explorer's path for running Didj titles,
+which the framework still carries.
+
+With those, Clam Prix reaches its main menu and, driven by hand, a race.
+The audit's "still missing" list for it is now exactly the eight dead
+paths. `check` cannot tell a dead path from a live one, so the rule is:
+zero missing means it loads and runs until it hits something real; a
+short list of odd names means try it and read the log.
 
 ## How much RAM it needs, and how that was measured
 

@@ -42,7 +42,8 @@
  *                                   title constructs this but does not need
  *                                   it to play.
  *
- * Freestanding C. The C++ names are attached with asm labels, which is what
+ * Freestanding C (sixteen stubs for Kai-lan, thirteen more for Clam Prix below).
+ * The C++ names are attached with asm labels, which is what
  * lets a C file define _ZN12tPackageTypeC1EPKc without a compiler that knows
  * what a tPackageType is. Sizes and slot offsets are the GS's, so a title
  * that allocated the Explorer's sizeof gets an object no larger than it made
@@ -151,3 +152,100 @@ void tq_dtor_pub(void *self) __asm__("_ZN8LeapFrog4Brio16CTouchEventQueueD1Ev");
 void tq_dtor_pub(void *self) { tq_dtor(self); }
 void *tq_getqueue(void *self) __asm__("_ZN8LeapFrog4Brio16CTouchEventQueue8GetQueueEv");
 void *tq_getqueue(void *self) { return (char *)self + TQ_VEC; }
+
+/* ======================================================================
+ * THE SECOND TITLE: SpongeBob SquarePants: The Clam Prix (LST3-0x00180025)
+ * ======================================================================
+ *
+ * Its App.so imports thirteen more names the Didj lacks, and seven that
+ * exist nowhere in the Leapster GS either — which is how it was learned
+ * that the Didj's shell dlopens lazily: Clam Prix LOADED with twenty
+ * symbols unresolved, ran its init, uploaded eighteen textures, and only
+ * died at the first CALL into one of them:
+ *
+ *     AppManager: can't resolve symbol 'CSystemData::GetCurrentPlayerID()'
+ *
+ * So a function the title never calls costs nothing, and the seven that
+ * are nowhere (an NvTriStrip stripifier, a matrix inverse, a template
+ * instantiation, a touch-message accessor) are exactly the ones the GS
+ * gets away with too. These thirteen are the ones it does call, each
+ * again read out of the GS's implementation and matched to the Didj's:
+ *
+ *   CSystemData::GetCurrentPlayerID   the GS asks LTM::CSystem; the Didj
+ *                                     has the same class and method. Same.
+ *   CSystemData::GetCurrentGamePackageID  a ustring member on the GS; the
+ *                                     Didj's GetCurrentGameID() is the
+ *                                     nearest thing with the same shape.
+ *   CSystemData::GetLocalDataPath(pid, game)  the Didj's
+ *                                     GetDataProfileGamePath(pid): the
+ *                                     per-player save directory.
+ *   CMilestones::Get                  an empty vector, like GetMatch.
+ *   CPlayerProfile::GetBadges         a bitmask on the GS; none here.
+ *   CCyo::Get{Audio,Value}(id)        ustrings by hidden pointer; empty.
+ *   CCyo::GetStatus/SetStatus/GetCompletionParameters  the GS itself
+ *                                     returns nothing for these when its
+ *                                     "Didj legacy" flag is set — the
+ *                                     Explorer's own path for running Didj
+ *                                     titles — so nothing is what they
+ *                                     get here as well.
+ *   fopenAtomic / fcloseAtomic        libdftp's write-to-temp-and-rename;
+ *                                     plain fopen and fclose do the job.
+ */
+extern void  ustring_ctor_empty(void *s)             __asm__("_ZN4Glib7ustringC1Ev");
+extern void  csystem_ctor(void *s)                   __asm__("_ZN3LTM7CSystemC1Ev");
+extern void  csystem_dtor(void *s)                   __asm__("_ZN3LTM7CSystemD1Ev");
+extern u32   csystem_player(void *s)                 __asm__("_ZN3LTM7CSystem18GetCurrentPlayerIDEv");
+extern void  sysdata_gameid(void *sret, void *self)  __asm__("_ZN11CSystemData16GetCurrentGameIDEv");
+extern void  sysdata_profilegame(void *sret, void *self, u32 pid)
+                                                     __asm__("_ZN11CSystemData22GetDataProfileGamePathE9tPlayerID");
+extern void *fopen(const char *, const char *);
+extern int   fclose(void *);
+
+u32 sd_current_player(void *self) __asm__("_ZN11CSystemData18GetCurrentPlayerIDEv");
+u32 sd_current_player(void *self)
+{
+	u32 sys[16], id;                 /* LTM::CSystem is small; leave room */
+	(void)self;
+	csystem_ctor(sys);
+	id = csystem_player(sys);
+	csystem_dtor(sys);
+	return id;
+}
+
+void *sd_game_package_id(void *sret, void *self) __asm__("_ZN11CSystemData23GetCurrentGamePackageIDEv");
+void *sd_game_package_id(void *sret, void *self) { sysdata_gameid(sret, self); return sret; }
+
+void *sd_local_data_path(void *sret, void *self, u32 pid, void *game_tmp)
+	__asm__("_ZN11CSystemData16GetLocalDataPathE9tPlayerIDN4Glib7ustringE");
+void *sd_local_data_path(void *sret, void *self, u32 pid, void *game_tmp)
+{ (void)game_tmp; sysdata_profilegame(sret, self, pid); return sret; }
+
+void *milestones_get(u32 *sret, void *self) __asm__("_ZN11CMilestones3GetEv");
+void *milestones_get(u32 *sret, void *self)
+{ (void)self; sret[0] = sret[1] = sret[2] = 0; return sret; }
+
+u32 profile_badges(void *self) __asm__("_ZN3LTM14CPlayerProfile9GetBadgesEv");
+u32 profile_badges(void *self) { (void)self; return 0; }
+
+void *cyo_completion(void *self) __asm__("_ZN3LTM4CCyo23GetCompletionParametersEv");
+void *cyo_completion(void *self) { (void)self; return 0; }
+
+void *cyo_audio(void *sret, void *self, u32 id) __asm__("_ZN3LTM4CCyo8GetAudioEm");
+void *cyo_audio(void *sret, void *self, u32 id)
+{ (void)self; (void)id; ustring_ctor_empty(sret); return sret; }
+
+void *cyo_value(void *sret, void *self, u32 id) __asm__("_ZN3LTM4CCyo8GetValueEm");
+void *cyo_value(void *sret, void *self, u32 id)
+{ (void)self; (void)id; ustring_ctor_empty(sret); return sret; }
+
+u32 cyo_status(void *self, u32 id) __asm__("_ZN3LTM4CCyo9GetStatusEm");
+u32 cyo_status(void *self, u32 id) { (void)self; (void)id; return 0; }
+
+u32 cyo_set_status(void *self, u32 id, u32 st) __asm__("_ZN3LTM4CCyo9SetStatusEmNS_10tCyoStatusE");
+u32 cyo_set_status(void *self, u32 id, u32 st) { (void)self; (void)id; (void)st; return 0; }
+
+void *fopen_atomic(const char *path, const char *mode) __asm__("_Z11fopenAtomicPKcS0_");
+void *fopen_atomic(const char *path, const char *mode) { return fopen(path, mode); }
+
+int fclose_atomic(void *f) __asm__("_Z12fcloseAtomicP19__STDIO_FILE_STRUCT");
+int fclose_atomic(void *f) { return f ? fclose(f) : -1; }
