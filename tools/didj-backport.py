@@ -3,6 +3,7 @@
 
     ./tools/didj-backport.py install TITLE.tar               # into the emulator's Didj
     ./tools/didj-backport.py install TITLE.tar --out DIR     # a tree to copy onto a real Didj
+    ./tools/didj-backport.py install TITLE.tar --as SCP      # the directory name, if meta.inf lacks 3LD=
     ./tools/didj-backport.py check TITLE.tar                 # what the title still lacks
     ./tools/didj-backport.py check --installed               # every title in ProgramFiles
     ./tools/didj-backport.py lib --out DIR                   # only the compatibility library
@@ -190,8 +191,12 @@ def pick_icon(title_dir, fields):
             sz = png_size(os.path.join(title_dir, f))
             if sz:
                 pngs[f] = sz
-    if cur in pngs and pngs[cur] == (64, 64):
-        return cur, "kept"
+    # A PNG THE PACKAGE ALREADY NAMES IS KEPT, whatever its size. The shell
+    # asserts on an icon that is not a PNG; a PNG of another size it simply
+    # draws (Clam Prix's 60x57 Game_Icon.png shows on the ring). Replacing
+    # it would make the hardware tree differ from what ran in the emulator.
+    if cur in pngs:
+        return cur, "kept, %dx%d" % pngs[cur]
     sixty_four = [f for f, sz in pngs.items() if sz == (64, 64)]
     iconish = [f for f in sixty_four if "icon" in f.lower()]
     if iconish:
@@ -378,11 +383,14 @@ def install_lib(root):
 
 def cmd_install(args):
     out = None
+    as_id = None
     paths = []
     i = 0
     while i < len(args):
         if args[i] == "--out":
             out = args[i + 1]; i += 2
+        elif args[i] == "--as":
+            as_id = args[i + 1]; i += 2
         else:
             paths.append(args[i]); i += 1
     if not paths:
@@ -391,12 +399,25 @@ def cmd_install(args):
     for p in paths:
         t = Title(p)
         fields = parse_meta(t.read("meta.inf").decode("latin-1"))
-        tld = fields.get("3LD") or fields.get("ShortName", "").upper()[:3]
+        # THE DIRECTORY NAME. The Didj's own titles carry 3LD= in meta.inf and
+        # live under it; not every Explorer package has the line (Clam Prix
+        # has neither 3LD nor ShortName). The shell does not care what the
+        # directory is called — it scans ProgramFiles for meta.inf — so take
+        # --as, else the directory's own name when installing from one, else
+        # the initials of Name=, and say which.
+        tld = fields.get("3LD") or as_id
+        why = "from meta.inf" if fields.get("3LD") else "from --as"
+        if not tld and os.path.isdir(p.rstrip("/")):
+            tld = os.path.basename(p.rstrip("/")); why = "the source directory's name"
         if not tld:
-            die("%s: meta.inf has no 3LD" % p)
+            words = [w for w in fields.get("Name", "").replace(":", " ").split() if w[0].isalnum()]
+            tld = "".join(w[0] for w in words)[:3].upper(); why = "the initials of Name="
+        if not tld:
+            die("%s: meta.inf has no 3LD and no Name; pass --as XYZ" % p)
         dest = os.path.join(root, "Didj", "ProgramFiles", tld)
         say("%s" % fields.get("Name", tld))
-        say("  Device=%s  PackageID=%s" % (fields.get("Device"), fields.get("PackageID")))
+        say("  Device=%s  PackageID=%s  directory %s (%s)"
+            % (fields.get("Device"), fields.get("PackageID"), tld, why))
         if os.path.isdir(dest):
             shutil.rmtree(dest)
         n = t.extract_all(dest)
